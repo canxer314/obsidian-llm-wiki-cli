@@ -70,7 +70,7 @@ const samples = [
   {
     name: "Block fragment remains renderable",
     profileId: "wikilink",
-    rawToken: "[[资料/唯一目标#^稳定块]]",
+    rawToken: "[[资料/唯一目标#^stable-block]]",
     candidates: ["资料/唯一目标.md"],
     hostDestination: "资料/唯一目标.md",
     runtimeObserved: true,

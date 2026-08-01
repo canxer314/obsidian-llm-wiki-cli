@@ -39,7 +39,7 @@ For every detected reference:
 3. Enumerate canonical candidates under the profile's installed-runtime fixture results. Do not use normalization or basename preference as identity.
 4. Require exactly one candidate. A zero/many set returns deterministic evidence and rejects preflight.
 5. Call `getFirstLinkpathDest` with only the decoded file linkpath and source path. Require the same canonical `TFile.path`; host disagreement rejects.
-6. Validate the fragment against the frozen target. One matching heading or block ID passes. Duplicate headings reject. A bridge section-read `occurrence` is never renderable link syntax.
+6. Validate the fragment against the frozen target. One matching heading or an installed-runtime-observed ASCII block ID passes. Duplicate headings reject. Unicode block IDs remain unregistered until independently observed. A bridge section-read `occurrence` is never renderable link syntax.
 7. Render only the destination component. Apply independently verified UTF-8 byte spans in descending order and host-validate every replacement before admitting the Change Set.
 
 ## Style contract
