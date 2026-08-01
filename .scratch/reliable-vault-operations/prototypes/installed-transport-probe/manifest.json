@@ -1,0 +1,9 @@
+{
+  "id": "vault-transport-probe",
+  "name": "Vault Transport Probe (PROTOTYPE)",
+  "version": "0.0.1",
+  "minAppVersion": "1.10.0",
+  "description": "Throwaway loopback Streamable HTTP MCP transport probe.",
+  "author": "Wayfinder prototype",
+  "isDesktopOnly": true
+}
