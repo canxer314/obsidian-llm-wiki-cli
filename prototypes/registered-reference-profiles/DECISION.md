@@ -35,7 +35,7 @@ The installed fixture also proves that a filename containing a literal `#` is no
 For every detected reference:
 
 1. Freeze the source note's exact UTF-8 bytes and Content Version.
-2. Parse one registered token into a `ReferenceIntent`, separating file linkpath, fragment, alias/display/title, wrapper, raw spelling, host `Pos`, and independently verified byte span.
+2. Parse one registered token into a `ReferenceIntent`, separating raw file linkpath, decoded lookup linkpath, fragment, alias/display/title, wrapper, raw spelling, host `Pos`, and independently verified byte span.
 3. Enumerate canonical candidates under the profile's installed-runtime fixture results. Do not use normalization or basename preference as identity.
 4. Require exactly one candidate. A zero/many set returns deterministic evidence and rejects preflight.
 5. Call `getFirstLinkpathDest` with only the decoded file linkpath and source path. Require the same canonical `TFile.path`; host disagreement rejects.
@@ -49,6 +49,7 @@ A profile's style template captures raw prefix and suffix bytes around the desti
 - link versus embed syntax;
 - label, alias, dimensions and title, including title quote style;
 - angle brackets, extension elision, percent escaping, and valid relative/Vault-relative form;
+- profile-specific space spelling: wikilinks and angle-wrapped Markdown destinations retain literal spaces, while unwrapped Markdown destinations encode spaces as `%20`; unwrapped destinations containing literal spaces reject rather than being normalized or guessed;
 - heading/block fragment spelling;
 - all surrounding Markdown/YAML bytes, BOM, Unicode spelling, and newline form.
 

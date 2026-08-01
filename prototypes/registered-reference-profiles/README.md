@@ -26,7 +26,7 @@ The probe writes `runtime-observation.json`, including the installed Obsidian ve
 
 - A profile identity is `{profileId, profileVersion, runtimeVersion, fixtureCorpusHash}`. A runtime upgrade or fixture change requires revalidation.
 - Registration is category-specific. The MVP registers only forms proven visible in the installed runtime's `links`, `embeds`, `frontmatterLinks`, or `referenceLinks` cache categories.
-- A `ReferenceIntent` separates wrapper/style bytes from the destination component and fragment. Rendering replaces only the destination component.
+- A `ReferenceIntent` separates wrapper/style bytes from the destination component and fragment. Rendering replaces only the destination component. It does not normalize existing references before a move: wikilinks and angle-wrapped Markdown retain literal spaces, unwrapped Markdown renders spaces as `%20`, and an unwrapped destination containing literal spaces rejects rather than guessing the user's intent.
 - Resolution succeeds only when bridge candidate enumeration yields exactly one canonical path and that path agrees with `getFirstLinkpathDest(fileLinkpath, sourcePath)`.
 - Zero candidates, multiple candidates, host disagreement, duplicate heading fragments, unknown Frontmatter scalar shapes, and unobserved reference-definition behavior reject preflight.
 - File moves preserve valid heading/block fragments but never invent an `occurrence` fragment. Attachment moves use the same reference profiles; attachment identity is path plus SHA-256 rather than Content Version.

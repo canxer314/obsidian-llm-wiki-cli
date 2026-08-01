@@ -125,6 +125,9 @@ export function parseReference(sample) {
     const rawDestination = rawToken.slice(open + 2, -1);
     const parsed = parseMarkdownDestination(rawDestination);
     if (!parsed) return { status: "unsupported_rejected", reason: "malformed_angle_destination" };
+    if (!parsed.angleWrapped && parsed.destination.includes(" ")) {
+      return { status: "unsupported_rejected", reason: "unwrapped_markdown_destination_contains_space" };
+    }
     destination = parsed.destination;
     destinationStart = open + 2 + parsed.destinationStart;
     destinationEnd = open + 2 + parsed.destinationEnd;
@@ -144,6 +147,14 @@ export function parseReference(sample) {
   }
 
   const link = splitFragment(destination);
+  let decodedFileLinkpath = link.fileLinkpath;
+  if (profileId === "markdownInline" || profileId === "markdownEmbed") {
+    try {
+      decodedFileLinkpath = decodeURI(link.fileLinkpath);
+    } catch {
+      return { status: "unsupported_rejected", reason: "malformed_percent_encoding" };
+    }
+  }
   return {
     status: "registered",
     profileId,
@@ -153,6 +164,7 @@ export function parseReference(sample) {
     destinationEnd,
     rawDestination: destination,
     ...link,
+    decodedFileLinkpath,
     style,
   };
 }
@@ -189,11 +201,8 @@ export function decideResolution(intent, sample) {
   };
 }
 
-function encodeLike(source, destination) {
-  if (/%[0-9A-Fa-f]{2}/u.test(source)) {
-    return encodeURI(destination).replace(/#/gu, "%23");
-  }
-  return destination;
+function encodeMarkdownDestination(destination, angleWrapped) {
+  return angleWrapped ? destination : destination.replace(/ /gu, "%20");
 }
 
 export function renderMove(intent, newTargetPath) {
@@ -205,7 +214,11 @@ export function renderMove(intent, newTargetPath) {
   const nextFile = hadMarkdownExtension
     ? newTargetPath
     : newTargetPath.replace(/\.md$/iu, "");
-  const renderedDestination = encodeLike(intent.fileLinkpath, nextFile) + intent.fragment;
+  const isMarkdown = intent.profileId === "markdownInline" || intent.profileId === "markdownEmbed";
+  const renderedFile = isMarkdown
+    ? encodeMarkdownDestination(nextFile, intent.style.angleWrapped)
+    : nextFile;
+  const renderedDestination = renderedFile + intent.fragment;
 
   return {
     ...intent,
