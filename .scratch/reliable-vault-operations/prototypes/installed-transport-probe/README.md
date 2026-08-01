@@ -70,4 +70,4 @@ No response-size trial proves a universal client hard ceiling. The selected prod
 ./.scratch/reliable-vault-operations/prototypes/installed-transport-probe/uninstall.ps1
 ```
 
-The cleanup script disables the probe, removes only the installed `vault-transport-probe` directory after verifying its manifest ID, and leaves this branch copy as the primary-source artifact.
+The cleanup script unloads the current-process probe and verifies that it is not persistently enabled. It intentionally does not delete the Vault-external static plugin directory; after reviewing `probe-observations.jsonl`, remove the manifest-verified `C:\Obsidian\ThinkFlywheelVault\.obsidian\plugins\vault-transport-probe` directory manually.
