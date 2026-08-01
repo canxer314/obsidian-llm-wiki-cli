@@ -1,0 +1,1055 @@
+{
+  "generatedAt": "2026-08-01T14:22:25.331Z",
+  "question": "Which Recovery Journal and cache-readiness evidence can gate acknowledgment on the installed Obsidian/Electron/Node runtime, and which durability claims remain unproved?",
+  "environment": {
+    "vaultPath": "C:\\Obsidian\\ThinkFlywheelVault",
+    "vaultIdentity": "10b890323bfae891c18361d5b131f6a1e365f2e47b8e6f3efa5498b54eae12c9",
+    "obsidianVersion": "1.13.4 (installer 1.12.4)",
+    "node": "v24.14.0",
+    "electron": "39.6.0",
+    "chrome": "142.0.7444.265",
+    "volume": "NTFS"
+  },
+  "checks": [
+    {
+      "id": "process-kill:create-markdown:before-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "create-markdown",
+        "point": "before-prepared",
+        "exit": 1,
+        "journalPhase": "EMPTY",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:create-markdown:after-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "create-markdown",
+        "point": "after-prepared",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:create-markdown:after-mutation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "create-markdown",
+        "point": "after-mutation",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:create-markdown:after-raw-verify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "create-markdown",
+        "point": "after-raw-verify",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:create-markdown:after-committed",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "create-markdown",
+        "point": "after-committed",
+        "exit": 1,
+        "journalPhase": "COMMITTED",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:modify-markdown:before-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "modify-markdown",
+        "point": "before-prepared",
+        "exit": 1,
+        "journalPhase": "EMPTY",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:modify-markdown:after-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "modify-markdown",
+        "point": "after-prepared",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:modify-markdown:after-mutation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "modify-markdown",
+        "point": "after-mutation",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:modify-markdown:after-raw-verify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "modify-markdown",
+        "point": "after-raw-verify",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:modify-markdown:after-committed",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "modify-markdown",
+        "point": "after-committed",
+        "exit": 1,
+        "journalPhase": "COMMITTED",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:frontmatter-rewrite:before-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "frontmatter-rewrite",
+        "point": "before-prepared",
+        "exit": 1,
+        "journalPhase": "EMPTY",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:frontmatter-rewrite:after-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "frontmatter-rewrite",
+        "point": "after-prepared",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:frontmatter-rewrite:after-mutation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "frontmatter-rewrite",
+        "point": "after-mutation",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:frontmatter-rewrite:after-raw-verify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "frontmatter-rewrite",
+        "point": "after-raw-verify",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:frontmatter-rewrite:after-committed",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "frontmatter-rewrite",
+        "point": "after-committed",
+        "exit": 1,
+        "journalPhase": "COMMITTED",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:derived-link-rewrite:before-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "derived-link-rewrite",
+        "point": "before-prepared",
+        "exit": 1,
+        "journalPhase": "EMPTY",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:derived-link-rewrite:after-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "derived-link-rewrite",
+        "point": "after-prepared",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:derived-link-rewrite:after-mutation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "derived-link-rewrite",
+        "point": "after-mutation",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:derived-link-rewrite:after-raw-verify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "derived-link-rewrite",
+        "point": "after-raw-verify",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:derived-link-rewrite:after-committed",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "derived-link-rewrite",
+        "point": "after-committed",
+        "exit": 1,
+        "journalPhase": "COMMITTED",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:attachment-write:before-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "attachment-write",
+        "point": "before-prepared",
+        "exit": 1,
+        "journalPhase": "EMPTY",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:attachment-write:after-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "attachment-write",
+        "point": "after-prepared",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:attachment-write:after-mutation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "attachment-write",
+        "point": "after-mutation",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:attachment-write:after-raw-verify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "attachment-write",
+        "point": "after-raw-verify",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:attachment-write:after-committed",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "attachment-write",
+        "point": "after-committed",
+        "exit": 1,
+        "journalPhase": "COMMITTED",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:same-volume-move:before-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "same-volume-move",
+        "point": "before-prepared",
+        "exit": 1,
+        "journalPhase": "EMPTY",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:same-volume-move:after-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "same-volume-move",
+        "point": "after-prepared",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:same-volume-move:after-mutation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "same-volume-move",
+        "point": "after-mutation",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:same-volume-move:after-raw-verify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "same-volume-move",
+        "point": "after-raw-verify",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:same-volume-move:after-committed",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "same-volume-move",
+        "point": "after-committed",
+        "exit": 1,
+        "journalPhase": "COMMITTED",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:managed-trash:before-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "managed-trash",
+        "point": "before-prepared",
+        "exit": 1,
+        "journalPhase": "EMPTY",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:managed-trash:after-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "managed-trash",
+        "point": "after-prepared",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:managed-trash:after-mutation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "managed-trash",
+        "point": "after-mutation",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:managed-trash:after-raw-verify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "managed-trash",
+        "point": "after-raw-verify",
+        "exit": 1,
+        "journalPhase": "PREPARED",
+        "stateAfterCrash": "expected",
+        "recoveryState": "before",
+        "stderr": ""
+      }
+    },
+    {
+      "id": "process-kill:managed-trash:after-committed",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "kind": "managed-trash",
+        "point": "after-committed",
+        "exit": 1,
+        "journalPhase": "COMMITTED",
+        "stateAfterCrash": "expected",
+        "recoveryState": null,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "journal:directory-sync",
+      "evidence": "unsupported",
+      "verdict": "native-seam-required",
+      "detail": {
+        "directorySync": "unsupported",
+        "error": "EPERM"
+      }
+    },
+    {
+      "id": "journal:truncation",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": [
+        {
+          "slot": 0,
+          "error": "journal_magic_invalid"
+        },
+        {
+          "slot": 1,
+          "error": "journal_slot_truncated"
+        }
+      ]
+    },
+    {
+      "id": "journal:wrong-vault",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": "journal_wrong_vault_identity"
+    },
+    {
+      "id": "journal:disk-full",
+      "evidence": "injected",
+      "verdict": "pass",
+      "detail": {
+        "errorCode": "ENOSPC",
+        "note": "Failure path only; the physical volume was not filled."
+      }
+    },
+    {
+      "id": "plugin:reload-active-prepared",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "status": "PREPARED",
+        "frame": {
+          "vaultIdentity": "10b890323bfae891c18361d5b131f6a1e365f2e47b8e6f3efa5498b54eae12c9",
+          "changeSetId": "prototype-modify-markdown",
+          "mutationKind": "modify-markdown",
+          "mutations": [
+            {
+              "path": "C:\\Obsidian\\ThinkFlywheelVault\\__llm_cli_runtime_probe__\\run-80912-1785594144144\\plugin-lifecycle\\modify-markdown.md",
+              "before": {
+                "exists": true,
+                "bytes": "YmVmb3JlDQpbW+WOn+mTvuaOpV1dDQo=",
+                "sha256": "7ec5c9f7f28fb3e98bc583be2f3c6aea5b839bd973327112a21122b6bb3d03c1"
+              },
+              "after": {
+                "exists": true,
+                "bytes": "YWZ0ZXINCltb55uu5qCH6ZO+5o6lXV0NCg==",
+                "sha256": "3457946b697074b3b98373024ea4d54af7f30f6c0d6cb842a47bda7d5f69af3b"
+              }
+            }
+          ],
+          "phase": "PREPARED",
+          "sequence": 1
+        },
+        "errors": []
+      }
+    },
+    {
+      "id": "events:create-modify",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "events": [
+          {
+            "seq": 1,
+            "at": 1785594154659,
+            "source": "vault",
+            "kind": "create",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events"
+          },
+          {
+            "seq": 2,
+            "at": 1785594154665,
+            "source": "vault",
+            "kind": "create",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 3,
+            "at": 1785594154665,
+            "source": "harness",
+            "kind": "before-create-cjk",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 4,
+            "at": 1785594154667,
+            "source": "metadataCache",
+            "kind": "changed",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 5,
+            "at": 1785594154667,
+            "source": "metadataCache",
+            "kind": "resolve",
+            "path": null
+          },
+          {
+            "seq": 6,
+            "at": 1785594154668,
+            "source": "metadataCache",
+            "kind": "resolved",
+            "path": null
+          },
+          {
+            "seq": 7,
+            "at": 1785594154677,
+            "source": "vault",
+            "kind": "create",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 8,
+            "at": 1785594154677,
+            "source": "harness",
+            "kind": "after-create-cjk",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 9,
+            "at": 1785594154677,
+            "source": "harness",
+            "kind": "probe-start",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "create-cache-and-link",
+            "timeout": 5000
+          },
+          {
+            "seq": 10,
+            "at": 1785594154682,
+            "source": "metadataCache",
+            "kind": "changed",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 11,
+            "at": 1785594154683,
+            "source": "metadataCache",
+            "kind": "resolve",
+            "path": null
+          },
+          {
+            "seq": 12,
+            "at": 1785594154683,
+            "source": "metadataCache",
+            "kind": "resolved",
+            "path": null
+          },
+          {
+            "seq": 13,
+            "at": 1785594155188,
+            "source": "harness",
+            "kind": "probe-ready",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "create-cache-and-link",
+            "elapsed": 511
+          },
+          {
+            "seq": 14,
+            "at": 1785594155188,
+            "source": "harness",
+            "kind": "before-modify",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 15,
+            "at": 1785594155190,
+            "source": "vault",
+            "kind": "modify",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 16,
+            "at": 1785594155191,
+            "source": "harness",
+            "kind": "after-modify",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 17,
+            "at": 1785594155191,
+            "source": "harness",
+            "kind": "probe-start",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "modify-changed-event",
+            "timeout": 5000
+          },
+          {
+            "seq": 18,
+            "at": 1785594155201,
+            "source": "metadataCache",
+            "kind": "changed",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 19,
+            "at": 1785594155201,
+            "source": "metadataCache",
+            "kind": "resolve",
+            "path": null
+          },
+          {
+            "seq": 20,
+            "at": 1785594155201,
+            "source": "metadataCache",
+            "kind": "resolved",
+            "path": null
+          },
+          {
+            "seq": 21,
+            "at": 1785594156189,
+            "source": "harness",
+            "kind": "probe-ready",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "modify-changed-event",
+            "elapsed": 998
+          },
+          {
+            "seq": 22,
+            "at": 1785594156189,
+            "source": "harness",
+            "kind": "before-rename",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 23,
+            "at": 1785594156193,
+            "source": "vault",
+            "kind": "rename",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文改名.md",
+            "oldPath": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文原始.md"
+          },
+          {
+            "seq": 24,
+            "at": 1785594156194,
+            "source": "harness",
+            "kind": "after-rename",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/中文改名.md"
+          },
+          {
+            "seq": 25,
+            "at": 1785594156194,
+            "source": "harness",
+            "kind": "probe-start",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "rename-raw-and-cache",
+            "timeout": 5000
+          },
+          {
+            "seq": 26,
+            "at": 1785594156194,
+            "source": "metadataCache",
+            "kind": "resolved",
+            "path": null
+          },
+          {
+            "seq": 27,
+            "at": 1785594156198,
+            "source": "harness",
+            "kind": "probe-ready",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "rename-raw-and-cache",
+            "elapsed": 4
+          },
+          {
+            "seq": 28,
+            "at": 1785594156201,
+            "source": "harness",
+            "kind": "before-managed-trash",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 29,
+            "at": 1785594156206,
+            "source": "vault",
+            "kind": "rename",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/.managed-trash/链接目标-run-80912-1785594144144.md",
+            "oldPath": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 30,
+            "at": 1785594156207,
+            "source": "harness",
+            "kind": "after-managed-trash",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/.managed-trash/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 31,
+            "at": 1785594156207,
+            "source": "harness",
+            "kind": "probe-start",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "trash-raw-and-unresolved",
+            "timeout": 5000
+          },
+          {
+            "seq": 32,
+            "at": 1785594156207,
+            "source": "metadataCache",
+            "kind": "resolve",
+            "path": null
+          },
+          {
+            "seq": 33,
+            "at": 1785594156207,
+            "source": "metadataCache",
+            "kind": "resolved",
+            "path": null
+          },
+          {
+            "seq": 34,
+            "at": 1785594157193,
+            "source": "metadataCache",
+            "kind": "deleted",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/.managed-trash/链接目标-run-80912-1785594144144.md",
+            "hadCache": true
+          },
+          {
+            "seq": 35,
+            "at": 1785594157195,
+            "source": "vault",
+            "kind": "delete",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/.managed-trash/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 36,
+            "at": 1785594157196,
+            "source": "metadataCache",
+            "kind": "resolve",
+            "path": null
+          },
+          {
+            "seq": 37,
+            "at": 1785594157196,
+            "source": "metadataCache",
+            "kind": "resolved",
+            "path": null
+          },
+          {
+            "seq": 38,
+            "at": 1785594157198,
+            "source": "harness",
+            "kind": "probe-ready",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "trash-raw-and-unresolved",
+            "elapsed": 991
+          },
+          {
+            "seq": 39,
+            "at": 1785594157199,
+            "source": "harness",
+            "kind": "before-trash-restore",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/.managed-trash/链接目标-run-80912-1785594144144.md",
+            "hiddenTrashIndexed": false
+          },
+          {
+            "seq": 40,
+            "at": 1785594157200,
+            "source": "harness",
+            "kind": "after-trash-restore",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/.managed-trash/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 41,
+            "at": 1785594157200,
+            "source": "harness",
+            "kind": "probe-start",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "restore-raw-and-resolved",
+            "timeout": 5000
+          },
+          {
+            "seq": 42,
+            "at": 1785594157203,
+            "source": "vault",
+            "kind": "create",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md"
+          },
+          {
+            "seq": 43,
+            "at": 1785594157203,
+            "source": "metadataCache",
+            "kind": "resolve",
+            "path": null
+          },
+          {
+            "seq": 44,
+            "at": 1785594157204,
+            "source": "harness",
+            "kind": "probe-ready",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events",
+            "label": "restore-raw-and-resolved",
+            "elapsed": 4
+          },
+          {
+            "seq": 45,
+            "at": 1785594157205,
+            "source": "metadataCache",
+            "kind": "changed",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md"
+          }
+        ],
+        "probes": [
+          {
+            "label": "create-cache-and-link",
+            "elapsed": 511
+          },
+          {
+            "label": "modify-changed-event",
+            "elapsed": 998
+          },
+          {
+            "label": "rename-raw-and-cache",
+            "elapsed": 4
+          },
+          {
+            "label": "trash-raw-and-unresolved",
+            "elapsed": 991
+          },
+          {
+            "label": "restore-raw-and-resolved",
+            "elapsed": 4
+          }
+        ]
+      }
+    },
+    {
+      "id": "events:rename-cache",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "renameObserved": true,
+        "metadataChangedAfterRename": false,
+        "probes": [
+          {
+            "label": "rename-raw-and-cache",
+            "elapsed": 4
+          }
+        ],
+        "note": "metadataCache.changed did not follow rename; vault.rename plus raw/cache probes must gate it."
+      }
+    },
+    {
+      "id": "events:managed-trash-rename",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "hiddenTrashIndexed": false,
+        "restoreRenameObserved": false,
+        "recoveryConstraint": "Hidden trash was not indexed and restore emitted no vault.rename in this run. Retain the TFile reference across the hidden-directory rename or restore through the adapter, then gate rollback acknowledgment on raw hash plus targeted cache probes rather than an event count.",
+        "renames": [
+          {
+            "seq": 29,
+            "at": 1785594156206,
+            "source": "vault",
+            "kind": "rename",
+            "path": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/.managed-trash/链接目标-run-80912-1785594144144.md",
+            "oldPath": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md"
+          }
+        ],
+        "probes": [
+          {
+            "label": "trash-raw-and-unresolved",
+            "elapsed": 991
+          },
+          {
+            "label": "restore-raw-and-resolved",
+            "elapsed": 4
+          }
+        ],
+        "trashHash": "510a09bdee844c4ca7df6f93ae15be063840a6ba0acc84aa7e560a998ce8aa45",
+        "restoredHash": "510a09bdee844c4ca7df6f93ae15be063840a6ba0acc84aa7e560a998ce8aa45"
+      }
+    },
+    {
+      "id": "content:cjk-newlines",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "utf8": "第二行\r\n[[链接目标-run-80912-1785594144144]]\r\n",
+        "sha256": "c5892fc675c4233ae06a8e9c19e8074a741db91620bc82ce9a932404f23448dc"
+      }
+    },
+    {
+      "id": "cache:targeted-link-probe",
+      "evidence": "observed",
+      "verdict": "pass",
+      "detail": {
+        "linkName": "链接目标-run-80912-1785594144144",
+        "links": [
+          "链接目标-run-80912-1785594144144"
+        ],
+        "resolvedBeforeTrash": "__llm_cli_runtime_probe__/run-80912-1785594144144/obsidian-events/链接目标-run-80912-1785594144144.md",
+        "probes": [
+          {
+            "label": "create-cache-and-link",
+            "elapsed": 511
+          },
+          {
+            "label": "modify-changed-event",
+            "elapsed": 998
+          },
+          {
+            "label": "rename-raw-and-cache",
+            "elapsed": 4
+          },
+          {
+            "label": "trash-raw-and-unresolved",
+            "elapsed": 991
+          },
+          {
+            "label": "restore-raw-and-resolved",
+            "elapsed": 4
+          }
+        ]
+      }
+    },
+    {
+      "id": "durability:hard-power-loss",
+      "evidence": "manual",
+      "verdict": "not-run",
+      "detail": {
+        "reason": "A host run cannot produce trustworthy hard-power-loss evidence.",
+        "required": "Run the generated VM matrix and inspect the NTFS volume after forced VM power-off at every PREPARED, mutation, raw-verify, and COMMITTED boundary."
+      }
+    },
+    {
+      "id": "durability:native-write-through",
+      "evidence": "unsupported",
+      "verdict": "required-for-strong-claim",
+      "detail": {
+        "node": "v24.14.0",
+        "finding": "The JavaScript fs API exposes FileHandle.sync() but no MoveFileExW(MOVEFILE_WRITE_THROUGH) control or volume flush primitive.",
+        "decision": "Keep the MVP claim at bounded process-crash all-or-restore unless VM hard-power-loss trials pass on the target stack; retain a native FlushFileBuffers/MoveFileExW seam for any stronger claim."
+      }
+    }
+  ]
+}

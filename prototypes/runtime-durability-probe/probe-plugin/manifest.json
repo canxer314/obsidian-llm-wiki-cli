@@ -1,0 +1,9 @@
+{
+  "id": "llm-cli-runtime-durability-probe",
+  "name": "LLM CLI Runtime Durability Probe (Throwaway)",
+  "version": "0.0.0",
+  "minAppVersion": "1.13.0",
+  "description": "Throwaway Wayfinder probe for runtime event and cache ordering.",
+  "author": "Wayfinder prototype",
+  "isDesktopOnly": true
+}

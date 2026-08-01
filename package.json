@@ -1,0 +1,8 @@
+{
+  "name": "obsidian-llm-wiki-cli-wayfinding",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prototype:runtime": "node prototypes/runtime-durability-probe/cli.mjs"
+  }
+}
