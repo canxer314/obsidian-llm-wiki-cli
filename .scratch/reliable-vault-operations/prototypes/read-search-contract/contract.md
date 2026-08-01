@@ -177,6 +177,19 @@ A section is addressed by the complete heading hierarchy, not by a slug. `occurr
         "encoding": "utf-8",
         "newline": "crlf",
         "complete": true
+      },
+      {
+        "index": 2,
+        "path": "Sources/Large.md",
+        "mode": "exact",
+        "content_version": "sha256:…",
+        "size_bytes": 163904,
+        "start_offset": 0,
+        "end_offset": 99821,
+        "content": "…",
+        "encoding": "utf-8",
+        "newline": "mixed",
+        "complete": false
       }
     ],
     "complete": false,
@@ -201,7 +214,7 @@ The implementation publishes two installed-runtime limits through diagnostics:
 
 If the logical Exact Read limit is exceeded, the whole call fails with `exact_read_batch_too_large`. The error includes every requested path, Content Version, size, the active limit, and deterministic contiguous `suggested_groups` that preserve input order. No content is returned.
 
-If only the transport limit is exceeded, the call succeeds and returns a continuation. That is not partial logical success: the complete ordered result has already been fixed under the returned Content Versions and is merely being carried over multiple MCP responses.
+If only the transport limit is exceeded, the call succeeds and returns a continuation. That is not partial logical success: the complete ordered result has already been fixed under the returned Content Versions and is merely being carried over multiple MCP responses. Every transported content chunk identifies the originating request `index` (so duplicate paths remain distinct), `path`, `content_version`, zero-based UTF-8 byte `start_offset` and exclusive `end_offset`, exact `content`, and whether that request item is complete. Chunk boundaries are valid UTF-8 boundaries, and every response—including every continuation response—fits the active transport ceiling. Items remain in request order, but a page does not stop merely because earlier items already produced chunks: if the next item cannot fit whole, the transport adds the longest legal UTF-8 prefix whose complete compact JSON envelope still fits. A nonempty page ends only when its remaining capacity cannot carry one character of the next item plus metadata; `response_item_too_large` is reserved for an otherwise empty page that cannot carry even that minimum chunk.
 
 ## `vault_continue`
 
@@ -209,9 +222,9 @@ If only the transport limit is exceeded, the call succeeds and returns a continu
 {"continuation": "opaque:…"}
 ```
 
-This tool accepts no query, path, limit, or projection changes. Its token is opaque, single-use, bound to the authenticated client, originating tool, exact validated request, result ordering, and Content Versions. Each use returns the next chunk and either another continuation or `null`.
+This tool accepts no query, path, limit, or projection changes. Its token is opaque, single-use, bound to the authenticated client, originating tool, exact validated request, result ordering, Content Versions, frozen content bytes, and the active transport ceiling. Each use returns the next real content chunk within that same ceiling and either another continuation or `null`; a continuation response uses the same request indices and byte ranges as the originating result, so concatenating each index's contiguous ranges reconstructs its exact bytes.
 
-Continuation lifetime is an operational limit published through diagnostics and must be long enough for normal Claude reasoning between calls. Expiry returns `continuation_expired`; reuse returns `continuation_consumed`; any state that can no longer preserve the original bytes returns `continuation_snapshot_unavailable`. None are silently restarted from current Vault state.
+Continuation lifetime is an operational limit published through diagnostics and must be long enough for normal Claude reasoning between calls. The production error taxonomy distinguishes a token that was never issued (`invalid_continuation`), reuse of a single-use token (`continuation_consumed`), deterministic runtime expiry (`continuation_expired`), and any state that can no longer preserve the original bytes (`continuation_snapshot_unavailable`). None are silently restarted from current Vault state. This round-three in-memory prototype directly demonstrates unknown, consumed, and snapshot-unavailable states. It intentionally has no clock or expiry transition, so `continuation_expired` remains a required installed-runtime capability rather than a behavior claimed as prototype evidence.
 
 ## Error envelope
 
