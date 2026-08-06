@@ -1,7 +1,9 @@
 # Issue #16 运行时验证：Obsidian 引用状态、probe 与决议边界
 
-**研究日期：** 2026-08-06  
-**对应票：** [Issue #16 — Specify registered reference grammar and renderer profiles](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/16)  
+**研究日期：** 2026-08-06
+
+**对应票：** [Issue #16 — Specify registered reference grammar and renderer profiles](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/16)
+
 **审阅对象：** [PR #19](https://github.com/canxer314/obsidian-llm-wiki-cli/pull/19)（提交 `0f7ea77c516bb4fd10dea73513c20e07b1914dfc`）及其 `DECISION.md`、`runtime-observation.json`、`probe-obsidian.ps1`、`profiles.mjs`、`tui.mjs`；[Issue #12](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/12)；分支 `prototype/raw-byte-source-span`。
 
 ## 结论

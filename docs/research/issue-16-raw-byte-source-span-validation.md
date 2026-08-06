@@ -1,6 +1,7 @@
 # Issue #16：raw-byte source-span 对 frontmatter/reference-style 推论的核验
 
-**核验对象：** `prototype/raw-byte-source-span`（`11e1ffb`）与已存在的 registered-reference prototype 的决议/运行时 artifact。  
+**核验对象：** `prototype/raw-byte-source-span`（`11e1ffb`）与已存在的 registered-reference prototype 的决议/运行时 artifact。
+
 **范围限制：** 未重新查询 Obsidian 官方 API，也未重新读取或修改 GitHub Issue/PR；未修改产品代码或 GitHub。
 
 ## 结论
