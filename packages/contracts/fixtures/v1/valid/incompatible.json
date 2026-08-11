@@ -1,0 +1,14 @@
+{
+  "outcome": "incompatible",
+  "gate": { "code": "incompatible_protocol" },
+  "compatibility": {
+    "local": {
+      "protocol": "1.0",
+      "supported": { "major": 1, "minimumMinor": 0, "maximumMinor": 1 }
+    },
+    "peer": {
+      "protocol": "2.0",
+      "supported": { "major": 2, "minimumMinor": 0, "maximumMinor": 0 }
+    }
+  }
+}

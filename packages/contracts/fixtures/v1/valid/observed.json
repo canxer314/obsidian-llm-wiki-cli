@@ -1,0 +1,45 @@
+{
+  "outcome": "observed",
+  "vault": {
+    "id": "vault-2f36a4d0",
+    "name": "Research",
+    "path": "D:/Vaults/Research"
+  },
+  "versions": {
+    "bridge": "0.1.0",
+    "plugin": "0.1.0",
+    "protocol": "1.0",
+    "persistentStateSchema": 1,
+    "recoveryJournalSchema": 1
+  },
+  "listener": {
+    "address": "127.0.0.1",
+    "port": 27123
+  },
+  "readiness": {
+    "searchSnapshot": "ready",
+    "cache": "ready",
+    "index": "ready"
+  },
+  "recovery": { "state": "none" },
+  "write": {
+    "gate": "open",
+    "state": "writable",
+    "pauseSource": null
+  },
+  "queue": {
+    "currentExecutionId": null,
+    "length": 0,
+    "headChangeSetId": null
+  },
+  "lifecycle": {
+    "startup": "ready",
+    "upgrade": "not_run",
+    "migration": "not_run",
+    "recovery": "not_run"
+  },
+  "effectiveGate": null,
+  "overall": "healthy",
+  "reasonCodes": [],
+  "operatorAction": "none"
+}

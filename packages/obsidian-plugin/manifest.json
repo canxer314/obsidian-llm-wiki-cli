@@ -1,0 +1,9 @@
+{
+  "id": "llm-wiki-vault-bridge",
+  "name": "LLM Wiki Vault Bridge",
+  "version": "0.1.0",
+  "minAppVersion": "1.13.4",
+  "description": "Hosts one trusted loopback Vault Operation Bridge for this Managed Vault.",
+  "author": "canxer314",
+  "isDesktopOnly": true
+}

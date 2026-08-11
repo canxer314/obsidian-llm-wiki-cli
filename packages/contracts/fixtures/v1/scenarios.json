@@ -1,0 +1,35 @@
+{
+  "contractVersion": "1.0.0",
+  "scenarios": [
+    {
+      "id": "matching-identity-observed-health",
+      "authority": "runtime",
+      "expectation": "A matching connection header can initialize and observe this endpoint's health."
+    },
+    {
+      "id": "missing-identity-rejected",
+      "authority": "runtime",
+      "expectation": "Initialization and every tool entry reject a missing expected Vault ID before dispatch."
+    },
+    {
+      "id": "mismatched-identity-rejected",
+      "authority": "runtime",
+      "expectation": "Initialization and every tool entry reject a mismatched expected Vault ID without read-only degradation."
+    },
+    {
+      "id": "schema-compatible-incompatible-health",
+      "authority": "contract-and-runtime",
+      "expectation": "Only the minimal incompatible health projection remains available and uses isError false."
+    },
+    {
+      "id": "two-vault-coexistence",
+      "authority": "installed-runtime",
+      "expectation": "Two open Managed Vaults keep identity, endpoint, state, and health evidence isolated."
+    },
+    {
+      "id": "structured-compatibility-identity",
+      "authority": "contract-and-runtime",
+      "expectation": "Compatibility text parses to the exact authoritative structuredContent value."
+    }
+  ]
+}
