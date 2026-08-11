@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PROTOTYPE — Public wire contract decision lab</title>
+<style>
+:root{color-scheme:light;--ink:#172026;--muted:#627079;--line:#d7dfe3;--paper:#f7f8f6;--panel:#fff;--accent:#176b5b;--accent-soft:#e5f2ee;--warn:#93570e;--warn-soft:#fff3df;--bad:#a13a3a;--bad-soft:#fbe9e9;--code:#122126}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}main{width:min(1180px,calc(100% - 32px));margin:32px auto 64px}.eyebrow{color:var(--bad);font-weight:750;letter-spacing:.08em;font-size:12px}h1{font-size:clamp(29px,4vw,46px);line-height:1.08;margin:.3rem 0 1rem}h2{font-size:21px;margin:0 0 13px}h3{font-size:16px;margin:0 0 7px}.lead{max-width:930px;font-size:17px;color:#3d4a52}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px;margin-top:20px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 1px 2px #1720260a}.wide{grid-column:1/-1}.verdict{border-left:5px solid var(--accent)}.verdict strong,.ok{color:var(--accent)}.warn{color:var(--warn)}.bad{color:var(--bad)}.note{padding:11px;border-radius:8px;background:var(--warn-soft);color:#684214}.state-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.field{background:#f3f6f5;border-radius:8px;padding:10px}.field small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em}.field b{overflow-wrap:anywhere}.actions{display:flex;flex-wrap:wrap;gap:8px}.action-group{margin-top:13px}.action-group h3{font-size:12px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}button{border:1px solid #b9c6ca;background:#fff;color:var(--ink);border-radius:8px;padding:8px 11px;font:inherit;cursor:pointer}button:hover{border-color:var(--accent);background:var(--accent-soft)}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:var(--accent);border-color:var(--accent);color:#fff}.tabs{display:flex;gap:6px;overflow:auto;padding-bottom:8px;border-bottom:1px solid var(--line)}.tab[aria-selected="true"]{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);font-weight:700}.scenario{padding-top:14px}.steps{display:grid;gap:8px;margin-top:12px}.step{display:grid;grid-template-columns:32px 1fr auto;gap:9px;align-items:center;border:1px solid var(--line);border-radius:9px;padding:9px}.step .n{display:grid;place-items:center;width:26px;height:26px;border-radius:50%;background:#eef1f1;font-weight:700}.step.current{border-color:var(--accent)}.step.done{background:var(--accent-soft);border-color:#afd4ca}.result-head{display:flex;justify-content:space-between;gap:10px}.pill{border-radius:999px;padding:3px 9px;font-size:12px;font-weight:700;background:#eef1f1}.pill.true{background:var(--bad-soft);color:var(--bad)}.pill.false{background:var(--accent-soft);color:var(--accent)}.pill.pending{background:var(--warn-soft);color:var(--warn)}pre{margin:12px 0 0;background:var(--code);color:#dce9e5;padding:14px;border-radius:9px;overflow:auto;max-height:420px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}.trace{list-style:none;padding:0;margin:0;display:grid;gap:7px}.trace li{border-left:3px solid var(--line);padding-left:10px}.trace time{color:var(--muted);font:11px ui-monospace,monospace}.matrix{width:100%;border-collapse:collapse}.matrix th,.matrix td{border-bottom:1px solid var(--line);padding:9px;text-align:left;vertical-align:top}.matrix th{font-size:12px;color:var(--muted)}.inventory{columns:2;padding-left:20px}.decision{border:1px solid var(--line);border-radius:10px;padding:14px;margin:11px 0}.decision.resolved{border-color:#9dcabc;background:#f8fcfa}.decision p{margin:5px 0 10px;color:#43515a}.options{display:grid;gap:7px}.options label{display:flex;align-items:flex-start;gap:8px;border:1px solid var(--line);border-radius:8px;padding:8px}.options input{margin-top:4px}.decision textarea{width:100%;min-height:64px;margin-top:9px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;resize:vertical}.decision-state{font-size:12px;color:var(--muted);margin-top:8px}.decision-state b{color:var(--accent)}details{border-top:1px solid var(--line);padding:10px 0}summary{cursor:pointer;font-weight:700}@media(max-width:800px){.grid{grid-template-columns:1fr}.state-grid{grid-template-columns:1fr 1fr}.inventory{columns:1}}@media(max-width:520px){.state-grid{grid-template-columns:1fr}.step{grid-template-columns:30px 1fr}.step button{grid-column:2}}
+</style>
+</head>
+<body><main>
+<div class="eyebrow">THROWAWAY PROTOTYPE · 不进入生产</div>
+<h1>public wire contract 决策实验台</h1>
+<p class="lead">问题不是“能否写出一大份 JSON”，而是：一个版本化 contract source 能否同时约束六个已确认 MCP 工具、候选 diagnostics、兼容规则和跨调用测试，又不让 JSON Schema 冒充它证明不了的时间、身份、恢复和字节语义。</p>
+
+<section class="card verdict wide">
+<h2>当前假设，不是最终答案</h2>
+<p><strong>一个 source of truth 可行，但它应是版本化 contract package：</strong>每个工具有独立 strict input/output root，共享已决 <code>$defs</code>；同一 package 还命名 fixtures 与跨调用 contract scenarios。若“一个 JSON Schema”被理解成“Schema 关键字单独证明全部行为”，答案是否定的。</p>
+</section>
+
+<div class="grid">
+<section class="card"><h2>当前实验状态</h2><div id="state" class="state-grid"></div></section>
+<section class="card"><div class="result-head"><h2>最近一次观察</h2><span id="isError" class="pill false">isError: false</span></div><p id="trust" class="ok"><b>可信度：</b>等待操作</p><pre id="result">尚未执行。</pre></section>
+
+<section class="card wide"><h2>自由操作</h2>
+<div class="action-group"><h3>运行条件</h3><div class="actions" id="gateActions"></div></div>
+<div class="action-group"><h3>读取与 continuation</h3><div class="actions" id="readActions"></div></div>
+<div class="action-group"><h3>Submission Key 与证明状态</h3><div class="actions" id="writeActions"></div></div>
+<div class="action-group"><h3>恢复、诊断与 transport</h3><div class="actions" id="recoveryActions"></div></div>
+</section>
+
+<section class="card wide"><h2>引导场景</h2><div class="tabs" id="tabs"></div><div id="scenario" class="scenario"></div></section>
+
+<section class="card"><h2>最近事件</h2><ol id="trace" class="trace"></ol></section>
+<section class="card"><h2>六个已确认 MCP 工具</h2><ul class="inventory"><li><code>vault_health</code></li><li><code>vault_discover</code></li><li><code>vault_read</code></li><li><code>vault_continue</code></li><li><code>vault_change_set_submit</code></li><li><code>vault_change_set_status</code></li></ul><p class="note">diagnostics 是公开能力但工具名未定。Primary Operator 的恢复命令是管理入口，不得假装成 Agent 可调用的正式 MCP 工具。Search Snapshot 是成功证明步骤，是否为 public capability 尚未裁决。</p></section>
+
+<section class="card wide"><h2>Schema 能验证什么，契约场景证明什么</h2><table class="matrix"><thead><tr><th>约束</th><th>权威</th><th>本原型覆盖</th></tr></thead><tbody>
+<tr><td>closed union、必填字段、格式、未知字段拒绝</td><td>strict JSON Schema</td><td>已决 fragments + valid/invalid fixtures</td></tr>
+<tr><td>Section 歧义必须返回候选；status selector 恰好一个标识</td><td>strict fragment</td><td>可运行形状检查</td></tr>
+<tr><td>Continuation 冻结、client binding、单次 token、替换 token、滑动过期</td><td>状态机契约测试</td><td>Exact 与 discovery 两种冻结页</td></tr>
+<tr><td>先查已绑定 Key，再对新 Key 应用 gate；不兼容协议是例外</td><td>跨调用契约测试</td><td>重放、冲突、暂停、恢复、协议门控</td></tr>
+<tr><td>Exact Read 的 BOM、CRLF、Unicode 与 UTF-8 字节重建</td><td>raw-byte corpus</td><td>列为 release-blocking，页面不伪造字节证明</td></tr>
+<tr><td>WAL、compare-before-restore、cache/graph proof、COMMITTED 顺序</td><td>runtime/integration corpus</td><td>只模拟公开证明后果</td></tr>
+<tr><td><code>structuredContent</code> 与兼容 text JSON 是同一对象</td><td>MCP transport test</td><td>可破坏镜像并观察“无可信产品结果”</td></tr>
+</tbody></table></section>
+
+<section class="card wide"><h2>已决 strict fragments</h2><p>下载内容故意不是“完整 public schema”。它只包含不会替你做决定的严格片段和待决清单；所有对象逐层关闭。</p><div class="actions"><button id="showKernel">显示 resolved kernel</button><button id="downloadPacket">下载 prototype decision packet</button><button id="runFixtures">运行全部形状 fixture</button></div><pre id="kernel" hidden></pre><div id="fixtureSummary"></div></section>
+
+<section class="card wide"><h2>Primary Operator 必须裁决</h2><p>每项是互斥选择，选择仅存在内存中。原型不会把它自动写成规格，也不会关闭票据。</p><div id="decisions"></div></section>
+</div>
+</main>
+<script>
+const ContractLab=(()=>{
+  const obj=(properties,required=Object.keys(properties))=>({type:"object",properties,required,additionalProperties:false});
+  const enumOf=(...v)=>({type:"string",enum:v});
+  const defs={
+    markdownTargetVersion:{type:"string",pattern:"^sha256:[0-9a-f]{64}$"},
+    gate:obj({code:enumOf("writes_paused","upgrade_in_progress","recovery_in_progress","recovery_blocked","incompatible_protocol")}),
+    sectionSelector:obj({kind:{const:"section"},path:{type:"string"},hierarchy:{type:"array",minItems:1,items:{type:"string"}},occurrence:{type:"integer",minimum:1}}),
+    ambiguousSection:obj({index:{type:"integer",minimum:0},outcome:{const:"not_satisfied"},reason:{const:"section_ambiguous"},candidates:{type:"array",minItems:1,items:{type:"integer",minimum:1}}}),
+    exactReplace:obj({kind:{const:"replace_exact"},old:{type:"string"},replacement:{type:"string"},expectedOccurrences:{const:1}}),
+    statusSelector:{oneOf:[obj({submissionKey:{type:"string",minLength:1}}),obj({changeSetId:{type:"string",minLength:1}})]},
+    operationallyBlocked:obj({outcome:{const:"operationally_blocked"},gate:{$ref:"#/$defs/gate"}}),
+    continuationUnavailable:obj({outcome:{const:"continuation_unavailable"}}),
+    incompatibleHealth:obj({outcome:{const:"incompatible"},gate:obj({code:{const:"incompatible_protocol"}})})
+  };
+  const pending=[
+    "complete member spelling and envelope composition for every tool",
+    "discovery predicate vocabulary, result projection, and deterministic sort key",
+    "Content Version type family outside Markdown mutation targetVersion",
+    "Change Set public state projection versus implementation lifecycle",
+    "wide versus narrow public failure envelope",
+    "status unknown/expired result and MCP isError mapping",
+    "normal health fields and compatibility summary wire shape",
+    "preview, requested/derived effects, final paths, and suggested groups shape",
+    "diagnostics tool name, disclosure fields, and operator command boundary",
+    "Search Snapshot public versus internal boundary"
+  ];
+  const packet={$schema:"https://json-schema.org/draft/2020-12/schema",title:"PROTOTYPE decision packet — not a complete public schema",status:"pending_primary_operator_review",$defs:defs,pendingDecisions:pending,contractScenarios:["gate-precedence","continuation-freeze-and-lifetime","submission-key-ordering","recovery-authority","mcp-dual-representation","raw-byte-corpus","wal-and-cache-proof"]};
+  const fixtures=[
+    ["section valid",defs.sectionSelector,{kind:"section",path:"Notes/A.md",hierarchy:["Plan"],occurrence:1},true],
+    ["section occurrence required",defs.sectionSelector,{kind:"section",path:"Notes/A.md",hierarchy:["Plan"]},false],
+    ["ambiguous candidates required",defs.ambiguousSection,{index:1,outcome:"not_satisfied",reason:"section_ambiguous"},false],
+    ["ambiguous candidates valid",defs.ambiguousSection,{index:1,outcome:"not_satisfied",reason:"section_ambiguous",candidates:[1,2]},true],
+    ["targetVersion lowercase prefixed",defs.markdownTargetVersion,"sha256:"+"0".repeat(64),true],
+    ["targetVersion rejects uppercase",defs.markdownTargetVersion,"sha256:"+"A".repeat(64),false],
+    ["status exactly one id",defs.statusSelector,{submissionKey:"s",changeSetId:"c"},false],
+    ["unknown field rejected",defs.exactReplace,{kind:"replace_exact",old:"a",replacement:"b",expectedOccurrences:1,surprise:true},false],
+    ["incompatible health fixed gate",defs.incompatibleHealth,{outcome:"incompatible",gate:{code:"recovery_blocked"}},false]
+  ];
+  function deref(s){return s&&s.$ref?s.$ref.split("/").slice(1).reduce((v,k)=>v[k],packet):s}
+  function validate(v,s,path="$",errors=[]){s=deref(s);if(s.oneOf){const branch=s.oneOf.map(x=>{const e=[];validate(v,x,path,e);return e});const ok=branch.filter(e=>!e.length);if(ok.length!==1)errors.push(`${path}: expected exactly one branch`);if(!ok.length)errors.push(...branch.sort((a,b)=>a.length-b.length)[0]);return errors}if("const" in s&&v!==s.const)errors.push(`${path}: expected ${JSON.stringify(s.const)}`);if(s.enum&&!s.enum.includes(v))errors.push(`${path}: invalid enum`);if(s.type){const a=Array.isArray(v)?"array":v===null?"null":Number.isInteger(v)?"integer":typeof v;if(a!==s.type)errors.push(`${path}: expected ${s.type}`)}if(typeof v==="string"){if(s.pattern&&!new RegExp(s.pattern).test(v))errors.push(`${path}: pattern mismatch`);if(s.minLength!==undefined&&v.length<s.minLength)errors.push(`${path}: too short`)}if(typeof v==="number"&&s.minimum!==undefined&&v<s.minimum)errors.push(`${path}: below minimum`);if(Array.isArray(v)){if(s.minItems!==undefined&&v.length<s.minItems)errors.push(`${path}: too few items`);if(s.items)v.forEach((x,i)=>validate(x,s.items,`${path}[${i}]`,errors))}if(v&&typeof v==="object"&&!Array.isArray(v)&&s.properties){(s.required||[]).forEach(k=>{if(!(k in v))errors.push(`${path}.${k}: missing`)});if(s.additionalProperties===false)Object.keys(v).forEach(k=>{if(!(k in s.properties))errors.push(`${path}.${k}: unknown field`)});Object.entries(s.properties).forEach(([k,x])=>{if(k in v)validate(v[k],x,`${path}.${k}`,errors)})}return errors}
+  const gatePriority=["incompatible_protocol","recovery_blocked","recovery_in_progress","upgrade_in_progress","writes_paused"];
+  const selectGate=activeGates=>gatePriority.find(g=>activeGates.includes(g))||null;
+  const initial=(decisions={})=>({client:"client-A",actor:"agent-session",entry:"mcp",clock:0,activeGates:[],gate:null,health:"healthy",writeGate:"open",tokens:{},nextToken:1,lastConsumedToken:null,keyRecord:null,keyTombstone:false,executions:0,proof:"none",operatorAccepted:false,last:null,isError:false,isErrorPending:false,trusted:true,trace:[],decisions:{...decisions}});
+  const log=(s,text)=>({...s,clock:s.clock+1,trace:[{at:`T+${s.clock+1}`,text},...s.trace].slice(0,11)});
+  const finish=(s,result,isError=false,trusted=true,isErrorPending=false)=>log({...s,last:result,isError,isErrorPending,trusted},trusted?`观察到 ${result.semantic||result.outcome||result.lookup}`:"transport 不可信；丢弃产品结果");
+  const blocked=s=>({outcome:"operationally_blocked",gate:{code:s.gate}});
+  const contentBlocked=s=>["recovery_in_progress","recovery_blocked","incompatible_protocol"].includes(s.gate);
+  function issue(s,source,pages){const token=`t${s.nextToken++}`;s.tokens[token]={source,pages:[...pages],client:s.client,expires:s.clock+15,used:false,frozen:`${source}:snapshot-v1`};return token}
+  function submitResult(record){return {semantic:record.semantic,changeSetId:record.id,proof:record.proof,note:"wire member spelling pending"}}
+  function dispatch(old,type){let s=structuredClone(old),r;switch(type){
+    case"reset":return log(initial(s.decisions),"重置实验；保留本页中的 Operator 候选选择");
+    case"pause":s.activeGates=["writes_paused"];s.gate=selectGate(s.activeGates);s.health="degraded";s.writeGate="blocked";return log(s,"写暂停；读取仍可用");
+    case"upgrade":s.activeGates=["upgrade_in_progress"];s.gate=selectGate(s.activeGates);s.health="degraded";s.writeGate="blocked";return log(s,"升级中；读取仍可用，新写不接受");
+    case"recovering":s.activeGates=["recovery_in_progress"];s.gate=selectGate(s.activeGates);s.health="blocked";s.writeGate="blocked";return log(s,"自动恢复中；内容工具关闭");
+    case"recoveryBlocked":s.activeGates=["recovery_blocked"];s.gate=selectGate(s.activeGates);s.health="blocked";s.writeGate="blocked";return log(s,"恢复无法证明安全；等待 Primary Operator");
+    case"incompatible":s.activeGates=["incompatible_protocol"];s.gate=selectGate(s.activeGates);s.health="blocked";s.writeGate="blocked";return log(s,"协议不兼容；仅最小 health 可用");
+    case"overlap":s.activeGates=["writes_paused","upgrade_in_progress","recovery_in_progress","recovery_blocked","incompatible_protocol"];s.gate=selectGate(s.activeGates);s.health="blocked";s.writeGate="blocked";return log(s,`五个条件重叠；按 closed precedence 只投影 ${s.gate}`);
+    case"health":r=s.gate==="incompatible_protocol"?{outcome:"incompatible",gate:{code:"incompatible_protocol"},note:"compatibility summary shape pending"}:{outcome:"observed",semanticHealth:s.health,effectiveGate:s.gate,note:"normal health member spelling pending"};return finish(s,r,false);
+    case"discover":if(contentBlocked(s))return finish(s,blocked(s),true);{const token=issue(s,"discover",[["identity-3","identity-4"],["identity-5"]]);return finish(s,{semantic:"discovery_page",identities:["identity-1","identity-2"],continuationToken:token,note:"predicate, item members, and ordering key pending"},false)}
+    case"exact":if(contentBlocked(s))return finish(s,blocked(s),true);{const token=issue(s,"exact",[["frozen-byte-range-2"],["frozen-byte-range-3"]]);return finish(s,{semantic:"exact_read_page",frozenRange:"frozen-byte-range-1",continuationToken:token,note:"public Content Version and chunk member spelling pending"},false)}
+    case"continue":if(contentBlocked(s))return finish(s,blocked(s),true);{const live=Object.entries(s.tokens).find(([,t])=>!t.used);if(!live)return finish(s,{outcome:"continuation_unavailable"},true);const [oldToken,t]=live;if(t.client!==s.client||s.clock>=t.expires||!t.pages.length){t.used=true;s.lastConsumedToken=oldToken;return finish(s,{outcome:"continuation_unavailable"},true)}t.used=true;s.lastConsumedToken=oldToken;const page=t.pages.shift();let replacement=null;if(t.pages.length){replacement=issue(s,t.source,t.pages);s.tokens[replacement].expires=s.clock+15}r={semantic:`${t.source}_continuation_page`,frozenSnapshot:t.frozen,page,replacementToken:replacement};return finish(s,r,false)}
+    case"replayConsumed":{const t=s.tokens[s.lastConsumedToken];if(!t||!t.used)return finish(s,{outcome:"continuation_unavailable"},true);return finish(s,{outcome:"continuation_unavailable"},true)}
+    case"switchClient":s.client=s.client==="client-A"?"client-B":"client-A";return log(s,`切换到 ${s.client}`);
+    case"advanceTime":s.clock+=16;return log(s,"时间推进超过 15 分钟滑动窗口");
+    case"submit":if(s.gate==="incompatible_protocol")return finish(s,blocked(s),true);if(s.keyRecord)return finish(s,submitResult(s.keyRecord),s.keyRecord.semantic!=="intent_applied");if(["writes_paused","upgrade_in_progress","recovery_in_progress"].includes(s.gate))return finish(s,blocked(s),true);if(s.gate==="recovery_blocked"){s.keyRecord={id:"cs-1",semantic:"intent_not_applied",proof:"proved_no_effects",historicalGate:"recovery_blocked"};return finish(s,blocked(s),true)}s.executions++;s.keyRecord={id:"cs-1",semantic:"in_progress",proof:"pending"};return finish(s,submitResult(s.keyRecord),false);
+    case"apply":if(!s.keyRecord)return finish(s,{semantic:"transition_rejected",reason:"no accepted Change Set"},true);s.keyRecord.semantic="intent_applied";s.keyRecord.proof="proved_all_effects";return finish(s,submitResult(s.keyRecord),false);
+    case"reject":if(!s.keyRecord)return finish(s,{semantic:"transition_rejected",reason:"no accepted Change Set"},true);s.keyRecord.semantic="intent_not_applied";s.keyRecord.proof="proved_no_effects";return finish(s,submitResult(s.keyRecord),true);
+    case"unproven":if(!s.keyRecord)return finish(s,{semantic:"transition_rejected",reason:"no accepted Change Set"},true);s.keyRecord.semantic="result_unproven";s.keyRecord.proof="cannot_prove";s.writeGate="blocked";s.activeGates=["recovery_blocked"];s.gate=selectGate(s.activeGates);return finish(s,submitResult(s.keyRecord),true);
+    case"replay":return dispatch(s,"submit");
+    case"conflict":if(!s.keyRecord)return finish(s,{semantic:"submission_key_conflict",note:"bind a record first"},true);return finish(s,{semantic:"submission_key_conflict",existingChangeSetId:s.keyRecord.id},true);
+    case"expireRecord":if(s.keyRecord){s.keyTombstone=true;s.keyRecord=null}return log(s,"完整记录过期，只保留曾存在的 tombstone");
+    case"status":if(s.gate==="incompatible_protocol")return finish(s,blocked(s),true);if(s.keyRecord)return finish(s,{lookup:"found",changeSet:submitResult(s.keyRecord),note:"lookup wire mapping pending"},false);if(s.keyTombstone)return finish(s,{lookup:"expired",note:"isError mapping pending"},false,true,true);return finish(s,{lookup:"unknown",note:"isError mapping pending"},false,true,true);
+    case"diagnose":return finish(s,{semantic:"diagnostic_summary_candidate",anonymousVault:"vault-demo",reasonCodes:s.gate?[s.gate]:[],discloses:["gate","proof-state","suggested local action"],redacts:["note content","frontmatter values","submission key","real path","real Vault ID"],note:"tool name, fields, and operator command boundary pending"},false);
+    case"agentAuthorize":if(s.actor!=="agent-session"||s.entry!=="mcp")return finish(s,{semantic:"transition_rejected",reason:"not at Agent MCP entry"},true);return finish(s,{semantic:"authorization_denied",reason:"Agent Session cannot accept a trusted baseline"},true);
+    case"enterOperatorLocal":s.actor="primary-operator";s.entry="local-interactive";return log(s,"切换到 Primary Operator 本机交互入口");
+    case"operatorAccept":if(s.actor!=="primary-operator"||s.entry!=="local-interactive")return finish(s,{semantic:"authorization_denied",reason:"primary-operator local-interactive entry required"},true);if(s.gate!=="recovery_blocked")return finish(s,{semantic:"transition_rejected",reason:"trusted baseline acceptance only exists during recovery_blocked"},true);s.operatorAccepted=true;return log(s,"Primary Operator 在本机交互入口接受可信基线；原 Change Set 仍不改写为成功");
+    case"resumeWrites":if(s.actor!=="primary-operator"||s.entry!=="local-interactive"||!s.operatorAccepted)return finish(s,{semantic:"resume_denied",reason:"local Primary Operator authorization required"},true);s.activeGates=[];s.gate=selectGate(s.activeGates);s.health="healthy";s.writeGate="open";return log(s,"Primary Operator 另行恢复写入");
+    case"breakMirror":return finish(s,{semantic:"discarded"},true,false)
+  }return s}
+  return {packet,fixtures,validate,initial,dispatch};
+})();
+
+const ACTIONS={gateActions:[["正常","reset"],["暂停写入","pause"],["升级中","upgrade"],["自动恢复中","recovering"],["恢复受阻","recoveryBlocked"],["协议不兼容","incompatible"],["五种条件重叠","overlap"]],readActions:[["发现首页","discover"],["Exact Read 首页","exact"],["续页","continue"],["重放已消费 token","replayConsumed"],["切换 client","switchClient"],["推进 16 分钟","advanceTime"]],writeActions:[["新提交","submit"],["证明完成","apply"],["证明未应用","reject"],["结果无法证明","unproven"],["同 Key 重放","replay"],["同 Key 改请求","conflict"],["记录过期","expireRecord"],["查询 status","status"]],recoveryActions:[["最小 health","health"],["查看脱敏诊断候选","diagnose"],["Agent 尝试授权","agentAuthorize"],["进入 Operator 本机入口","enterOperatorLocal"],["Operator 接受基线","operatorAccept"],["Operator 恢复写入","resumeWrites"],["破坏 text 镜像","breakMirror"]]};
+const SCENARIOS=[
+{name:"兼容与门控",desc:"比较 paused、upgrade、recovery 和 protocol incompatible 对内容、提交、status 与 health 的不同边界，并实际观察重叠条件的 closed precedence。",steps:[["暂停写入","pause"],["发现仍可用","discover"],["新提交不绑定","submit"],["升级中同样允许读","upgrade"],["五种条件重叠，只投影最高优先级","overlap"],["status 被 incompatible_protocol 阻断","status"],["最小 health 仍可用","health"]]},
+{name:"Continuation",desc:"同一状态机演示 Exact 和 discovery 冻结页；token 绑定 client、单次使用，替换 token 重新开始 15 分钟滑动窗口，所有内部失败统一投影。",steps:[["Exact 首页签发 token","exact"],["消费第一页并签发 replacement token","continue"],["显式重放已消费旧 token，统一不可用","replayConsumed"],["使用 replacement token 读取下一页","continue"],["重置","reset"],["发现首页签发 token","discover"],["切换 client","switchClient"],["跨 client 消费统一不可用","continue"],["重置后再次发现","reset"],["签发新的 discovery token","discover"],["推进超过窗口","advanceTime"],["过期统一不可用","continue"]]},
+{name:"幂等与 gate 顺序",desc:"除协议不兼容外，已绑定 Key 的查询与重放先于当前 gate；gate 只处置新 Key，不能篡改旧记录。",steps:[["健康提交得到 in-progress 语义","submit"],["证明 intent applied","apply"],["暂停写入","pause"],["同 Key 仍重放成功记录","replay"],["同 Key 不同请求冲突","conflict"],["status 保留完整语义记录","status"]]},
+{name:"证明状态",desc:"比较进行中、已证明全部效果、已证明无效果、目前无法证明四种语义后果；具体 public state 名称与 lifecycle 映射留给下方裁决。",steps:[["开始提交","submit"],["制造 result-unproven 语义","unproven"],["观察 Vault-wide 写门关闭","status"],["重置","reset"],["开始另一个提交","submit"],["普通 preflight 拒绝并证明无效果","reject"],["查询已证明未应用","status"]]},
+{name:"Status 保留期",desc:"展示 found、expired tombstone、unknown 三种语义；它们的公开 envelope 和 isError 映射不是本场景替你决定的。",steps:[["先查询 unknown","status"],["提交并证明完成","submit"],["完成证明","apply"],["查询 found","status"],["使完整记录过期","expireRecord"],["查询 expired","status"]]},
+{name:"恢复权限与诊断",desc:"Agent 可看脱敏诊断候选，但不能接受可信基线。状态机要求接受基线与恢复写入都发生在 Primary Operator 本机交互入口，且二者是两个动作。",steps:[["进入 recovery blocked","recoveryBlocked"],["查看脱敏诊断候选","diagnose"],["Agent 尝试授权被拒","agentAuthorize"],["进入 Primary Operator 本机入口","enterOperatorLocal"],["Operator 接受基线","operatorAccept"],["Operator 另行恢复写入","resumeWrites"]]},
+{name:"MCP 双表示",desc:"消息形状通过仍不够；structuredContent 与兼容 text JSON 不一致时，不能推断任何产品结果或 Submission Key 状态。",steps:[["取得可信 health","health"],["破坏兼容 text 镜像并观察整体丢弃","breakMirror"]]}
+];
+const DECISIONS=[
+{id:"package",title:"Source of truth 的物理形态",question:"怎样既保持一个权威来源，又不让 Schema 冒充运行时证明？",options:[["package","一个版本化 contract package：每工具独立 strict roots + shared defs + fixtures + scenario manifest（推荐）"],["single","一个 JSON Schema 文件，使用明确的 extension keywords 命名 contract tests"],["split","Schema 与 contract-test manifest 分开版本化，但必须以同一 contract version 发布"]]},
+{id:"state",title:"Change Set public 状态投影",question:"调用者应直接看内部阶段，还是只看当前可证明性？",options:[["proof","公开只表达 in-progress / intent-applied / intent-not-applied / result-unproven；内部 lifecycle 仅诊断（推荐）"],["lifecycle","公开 preflight / queue / execution / recovery 等完整生命周期"],["both","公开 proof state，并另有可选 implementation phase；必须定义精确映射"]]},
+{id:"failure",title:"Change Set failure 信息层级",question:"失败对象应该最小且封闭，还是携带阶段与纠正信息？",options:[["narrow","位置受限的窄 closed union；诊断信息走 diagnostics（推荐）"],["wide","同一 public failure 携带 phase / retryable / details / conflicts"],["layers","窄 machine failure + 单独可选 diagnostic reference；两层均封闭"]]},
+{id:"lookup",title:"Status 的 unknown / expired",question:"查询完成但没有完整记录时，调用方看到正常查询结果还是工具错误？",options:[["result","found / unknown / expired 都是可信查询结果，MCP isError=false（后续决议候选）"],["error","unknown / expired 是 status 工具错误"],["mixed","unknown 是不确定结果，expired 是可信 tombstone；分别映射"]]},
+{id:"version",title:"Content Version type family",question:"读取证据、Exact Read、最终路径和 mutation precondition 是否共用一种 wire 编码？",options:[["one","全部共用 sha256:<64 lowercase hex>（推荐候选）"],["roles","mutation targetVersion 固定 SHA-256；其他角色使用不同命名但同编码"],["separate","只固定 mutation targetVersion；其余编码独立设计"]]},
+{id:"health",title:"Health 与内容工具门控",question:"普通 degraded / blocked health 是否直接决定 discover/read，还是只有 effective gate 决定？",options:[["gate","只有 closed effective gate 决定工具行为；health 是观察摘要（推荐）"],["health","health=blocked 一律阻断内容工具"],["matrix","每个 health reason 独立映射到能力矩阵"]]},
+{id:"diagnostics",title:"Diagnostics 与恢复入口",question:"Agent Session 应获得什么，Primary Operator 本机入口保留什么？",options:[["summary","MCP 提供脱敏摘要与建议动作；授权只在本机交互入口（推荐）"],["local","diagnostics 全部只在本机，MCP health 只给 reason code"],["named","新增正式 MCP diagnostics 工具，但仍禁止任何恢复授权"]]},
+{id:"snapshot",title:"Search Snapshot 边界",question:"后继 Search Snapshot 是内部成功证明步骤，还是 public capability？",options:[["internal","内部 proof barrier；不增加 public tool（推荐）"],["readable","允许读取 snapshot identity，但不允许调用方发布"],["public","成为可调用 public operation，需独立 schema"]]}
+];
+let state=ContractLab.initial(),active=0,step=0;
+const $=id=>document.getElementById(id);
+function act(type,walk=false){state=ContractLab.dispatch(state,type);if(walk)step++;render()}
+function buttons(id,items){items.forEach(([label,type])=>{const b=document.createElement("button");b.textContent=label;b.onclick=()=>act(type);$(id).append(b)})}
+Object.entries(ACTIONS).forEach(([id,items])=>buttons(id,items));
+function renderState(){$("state").innerHTML=[["client",state.client,""],["actor / entry",`${state.actor} / ${state.entry}`,""],["health",state.health,state.health==="healthy"?"ok":state.health==="degraded"?"warn":"bad"],["effective gate",state.gate||"none",state.gate?"bad":"ok"],["write proof gate",state.writeGate,state.writeGate==="open"?"ok":"bad"],["Submission Key",state.keyRecord?"bound":state.keyTombstone?"tombstone":"unbound",""],["proof semantic",state.keyRecord?.semantic||"none",""],["executions",state.executions,state.executions<=1?"ok":"bad"],["live tokens",Object.values(state.tokens).filter(t=>!t.used).length,""],["operator accepted",state.operatorAccepted?"yes":"no",state.operatorAccepted?"ok":""]].map(([k,v,c])=>`<div class="field"><small>${k}</small><b class="${c}">${v}</b></div>`).join("")}
+function renderResult(){const errorText=state.isErrorPending?"isError: 待裁决":`isError: ${state.isError}`;$("isError").textContent=errorText;$("isError").className=`pill ${state.isErrorPending?"pending":state.isError}`;$("trust").className=state.trusted?"ok":"bad";$("trust").innerHTML=`<b>可信度：</b>${state.trusted?state.isErrorPending?"查询语义可信；MCP isError 映射待 Primary Operator 裁决":"这是候选语义观察；wire spelling 可能待决":"没有可信产品结果；不得推断产品状态"}`;$("result").textContent=state.last?JSON.stringify(state.last,null,2):"尚未执行。";$("trace").innerHTML=state.trace.map(e=>`<li><time>${e.at}</time><br>${e.text}</li>`).join("")||"<li>尚无事件</li>"}
+function renderTabs(){if(!$("tabs").children.length)SCENARIOS.forEach((s,i)=>{const b=document.createElement("button");b.className="tab";b.textContent=s.name;b.onclick=()=>{active=i;step=0;state=ContractLab.initial();render()};$("tabs").append(b)});[...$("tabs").children].forEach((b,i)=>b.setAttribute("aria-selected",i===active))}
+function renderScenario(){const s=SCENARIOS[active];$("scenario").innerHTML=`<h3>${s.name}</h3><p>${s.desc}</p><button class="primary" id="restart">从头开始</button><div class="steps">${s.steps.map(([label,type],i)=>`<div class="step ${i<step?"done":i===step?"current":""}"><span class="n">${i+1}</span><span>${label}</span><button data-type="${type}" ${i!==step?"disabled":""}>执行</button></div>`).join("")}</div>`;$("restart").onclick=()=>{state=ContractLab.initial();step=0;render()};$("scenario").querySelectorAll("[data-type]").forEach(b=>b.onclick=()=>act(b.dataset.type,true))}
+function renderDecisions(){if($("decisions").children.length)return;DECISIONS.forEach(d=>{const el=document.createElement("section");el.className="decision";el.innerHTML=`<h3>${d.title}</h3><p>${d.question}</p><div class="options">${d.options.map(([v,l])=>`<label><input type="radio" name="${d.id}" value="${v}"><span>${l}</span></label>`).join("")}<label><input type="radio" name="${d.id}" value="other"><span>其他：在下方说明另拟方案</span></label></div><textarea aria-label="${d.title} 的理由或其他方案" placeholder="可选：记录理由、边界或另拟方案；仅保存在本页内存"></textarea><div class="decision-state">当前：<b>未裁决</b></div>`;const update=()=>{const choice=el.querySelector("input:checked");const rationale=el.querySelector("textarea").value.trim();if(!choice)return;state.decisions[d.id]={choice:choice.value,rationale};el.classList.add("resolved");el.querySelector(".decision-state").innerHTML=`当前原型选择：<b>${choice.parentElement.innerText}</b>${rationale?`；理由：${rationale}`:""}（尚未写回规格）`};el.querySelectorAll("input").forEach(input=>input.onchange=update);el.querySelector("textarea").oninput=update;$("decisions").append(el)})}
+function render(){renderState();renderResult();renderTabs();renderScenario();renderDecisions()}
+$("showKernel").onclick=()=>{$("kernel").hidden=!$("kernel").hidden;$("kernel").textContent=JSON.stringify(ContractLab.packet,null,2)};
+$("downloadPacket").onclick=()=>{const body={...ContractLab.packet,prototypeSelections:state.decisions};const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(body,null,2)],{type:"application/json"}));a.download="PROTOTYPE-public-wire-decision-packet.json";a.click();URL.revokeObjectURL(a.href)};
+$("runFixtures").onclick=()=>{const rows=ContractLab.fixtures.map(([name,schema,value,expected])=>{const errors=ContractLab.validate(value,schema);return{name,expectedValid:expected,actualValid:!errors.length,errors}});const passed=rows.filter(x=>x.expectedValid===x.actualValid).length;$("fixtureSummary").innerHTML=`<p class="${passed===rows.length?"ok":"bad"}"><b>${passed}/${rows.length}</b> fixtures 符合预期。</p><pre>${JSON.stringify(rows,null,2)}</pre>`};
+render();
+</script></body></html>
