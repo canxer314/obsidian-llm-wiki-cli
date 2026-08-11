@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PROTOTYPE decision packet — not a complete public schema",
+  "status": "pending_primary_operator_review",
+  "$defs": {
+    "markdownTargetVersion": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gate": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "writes_paused",
+            "upgrade_in_progress",
+            "recovery_in_progress",
+            "recovery_blocked",
+            "incompatible_protocol"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "sectionSelector": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "section"
+        },
+        "path": {
+          "type": "string"
+        },
+        "hierarchy": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "occurrence": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "kind",
+        "path",
+        "hierarchy",
+        "occurrence"
+      ],
+      "additionalProperties": false
+    },
+    "ambiguousSection": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcome": {
+          "const": "not_satisfied"
+        },
+        "reason": {
+          "const": "section_ambiguous"
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "required": [
+        "index",
+        "outcome",
+        "reason",
+        "candidates"
+      ],
+      "additionalProperties": false
+    },
+    "exactReplace": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "replace_exact"
+        },
+        "old": {
+          "type": "string"
+        },
+        "replacement": {
+          "type": "string"
+        },
+        "expectedOccurrences": {
+          "const": 1
+        }
+      },
+      "required": [
+        "kind",
+        "old",
+        "replacement",
+        "expectedOccurrences"
+      ],
+      "additionalProperties": false
+    },
+    "statusSelector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "submissionKey": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "submissionKey"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "changeSetId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "changeSetId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operationallyBlocked": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "operationally_blocked"
+        },
+        "gate": {
+          "$ref": "#/$defs/gate"
+        }
+      },
+      "required": [
+        "outcome",
+        "gate"
+      ],
+      "additionalProperties": false
+    },
+    "continuationUnavailable": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "continuation_unavailable"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    "incompatibleHealth": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "incompatible"
+        },
+        "gate": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "const": "incompatible_protocol"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outcome",
+        "gate"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pendingDecisions": [
+    "complete member spelling and envelope composition for every tool",
+    "discovery predicate vocabulary, result projection, and deterministic sort key",
+    "Content Version type family outside Markdown mutation targetVersion",
+    "Change Set public state projection versus implementation lifecycle",
+    "wide versus narrow public failure envelope",
+    "status unknown/expired result and MCP isError mapping",
+    "normal health fields and compatibility summary wire shape",
+    "preview, requested/derived effects, final paths, and suggested groups shape",
+    "diagnostics tool name, disclosure fields, and operator command boundary",
+    "Search Snapshot public versus internal boundary"
+  ],
+  "contractScenarios": [
+    "gate-precedence",
+    "continuation-freeze-and-lifetime",
+    "submission-key-ordering",
+    "recovery-authority",
+    "mcp-dual-representation",
+    "raw-byte-corpus",
+    "wal-and-cache-proof"
+  ],
+  "prototypeSelections": {
+    "package": {
+      "choice": "package",
+      "rationale": ""
+    },
+    "state": {
+      "choice": "proof",
+      "rationale": ""
+    },
+    "failure": {
+      "choice": "narrow",
+      "rationale": ""
+    },
+    "lookup": {
+      "choice": "result",
+      "rationale": ""
+    },
+    "version": {
+      "choice": "one",
+      "rationale": ""
+    },
+    "health": {
+      "choice": "gate",
+      "rationale": ""
+    },
+    "diagnostics": {
+      "choice": "summary",
+      "rationale": ""
+    },
+    "snapshot": {
+      "choice": "internal",
+      "rationale": ""
+    }
+  }
+}
