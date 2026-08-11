@@ -9,6 +9,19 @@ function healthState(vaultId: string, name: string): BridgeHealthState {
   return {
     vault: { id: vaultId, name, path: `D:/Vaults/${name}` },
     readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" },
+    recovery: { state: "none" },
+    write: { gate: "open", state: "writable", pauseSource: null },
+    queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
+    lifecycle: {
+      startup: "ready",
+      upgrade: "not_run",
+      migration: "not_run",
+      recovery: "not_run",
+    },
+    effectiveGate: null,
+    overall: "healthy",
+    reasonCodes: [],
+    operatorAction: "none",
   };
 }
 
@@ -95,25 +108,14 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
     }
   });
 
-  it("returns only the minimal incompatible health projection with isError false", async () => {
-    const incompatibleHealth = {
-      outcome: "incompatible" as const,
-      gate: { code: "incompatible_protocol" as const },
-      compatibility: {
-        local: {
-          protocol: "1.0",
-          supported: { major: 1, minimumMinor: 0, maximumMinor: 0 },
-        },
-        peer: {
-          protocol: "2.0",
-          supported: { major: 2, minimumMinor: 0, maximumMinor: 0 },
-        },
-      },
-    };
+  it("derives the minimal incompatible health projection from protocol participants", async () => {
     const bridge = createBridgeInstance({
       port: 0,
       health: healthState("vault-a", "Alpha"),
-      incompatibleHealth,
+      peerProtocol: {
+        protocol: "2.0",
+        supported: { major: 2, minimumMinor: 0, maximumMinor: 0 },
+      },
     });
     await bridge.start();
 
@@ -121,9 +123,47 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
       const client = await connect(bridge.endpoint, "vault-a");
       const result = await client.callTool({ name: "vault_health", arguments: {} });
       expect(result.isError).toBe(false);
-      expect(result.structuredContent).toEqual(incompatibleHealth);
+      expect(result.structuredContent).toEqual({
+        outcome: "incompatible",
+        gate: { code: "incompatible_protocol" },
+        compatibility: {
+          local: {
+            protocol: "1.0",
+            supported: { major: 1, minimumMinor: 0, maximumMinor: 0 },
+          },
+          peer: {
+            protocol: "2.0",
+            supported: { major: 2, minimumMinor: 0, maximumMinor: 0 },
+          },
+        },
+      });
       expect(result.structuredContent).not.toHaveProperty("vault");
       expect(result.structuredContent).not.toHaveProperty("queue");
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("runs the authentication seam before initialization and every tool entry", async () => {
+    let authenticated = false;
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      authenticator: {
+        authenticate: async () => authenticated,
+      },
+    });
+    await bridge.start();
+
+    try {
+      await expect(connect(bridge.endpoint, "vault-a")).rejects.toThrow();
+      authenticated = true;
+      const client = await connect(bridge.endpoint, "vault-a");
+      authenticated = false;
+      await expect(
+        client.callTool({ name: "vault_health", arguments: {} }),
+      ).rejects.toThrow();
       await client.close();
     } finally {
       await bridge.stop();
@@ -134,12 +174,15 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
     const bridge = createBridgeInstance({
       port: 0,
       health: {
-        vault: { id: "vault-a", name: "Alpha", path: "D:/Vaults/Alpha" },
+        ...healthState("vault-a", "Alpha"),
         readiness: {
           searchSnapshot: "unavailable",
           cache: "unavailable",
           index: "unavailable",
         },
+        overall: "degraded",
+        reasonCodes: ["content_tools_not_ready"],
+        operatorAction: "wait_for_readiness",
       },
     });
     await bridge.start();

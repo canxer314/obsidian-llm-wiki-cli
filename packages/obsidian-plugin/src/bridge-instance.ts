@@ -12,9 +12,28 @@ import { z } from "zod";
 
 import { rejectRequest, verifyRequestPolicy } from "./request-policy.js";
 import { createRegistrationCommand } from "./registration-command.js";
+import {
+  BRIDGE_VERSION,
+  PLUGIN_VERSION,
+  PROTOCOL_VERSION,
+} from "./version.js";
 
 const LOOPBACK_ADDRESS = "127.0.0.1";
 const MCP_PATH = "/mcp";
+
+export type ProtocolParticipant = Extract<
+  HealthResult,
+  { outcome: "incompatible" }
+>["compatibility"]["local"];
+
+const LOCAL_PROTOCOL: ProtocolParticipant = {
+  protocol: PROTOCOL_VERSION,
+  supported: { major: 1, minimumMinor: 0, maximumMinor: 0 },
+};
+
+export interface BridgeRequestAuthenticator {
+  authenticate(request: IncomingMessage): boolean | Promise<boolean>;
+}
 
 export interface BridgeHealthState {
   vault: { id: string; name: string; path: string };
@@ -23,12 +42,21 @@ export interface BridgeHealthState {
     cache: "ready" | "building" | "unavailable";
     index: "ready" | "building" | "unavailable";
   };
+  recovery: Extract<HealthResult, { outcome: "observed" }>["recovery"];
+  write: Extract<HealthResult, { outcome: "observed" }>["write"];
+  queue: Extract<HealthResult, { outcome: "observed" }>["queue"];
+  lifecycle: Extract<HealthResult, { outcome: "observed" }>["lifecycle"];
+  effectiveGate: Extract<HealthResult, { outcome: "observed" }>["effectiveGate"];
+  overall: Extract<HealthResult, { outcome: "observed" }>["overall"];
+  reasonCodes: string[];
+  operatorAction: Extract<HealthResult, { outcome: "observed" }>["operatorAction"];
 }
 
 export interface BridgeInstanceOptions {
   port: number;
   health: BridgeHealthState;
-  incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
+  peerProtocol?: ProtocolParticipant;
+  authenticator?: BridgeRequestAuthenticator;
 }
 
 export interface BridgeInstance {
@@ -43,33 +71,45 @@ function projectObservedHealth(
   state: BridgeHealthState,
   port: number,
 ): HealthResult {
-  const ready = Object.values(state.readiness).every((value) => value === "ready");
   return parseHealthResult({
     outcome: "observed",
     vault: state.vault,
     versions: {
-      bridge: "0.1.0",
-      plugin: "0.1.0",
-      protocol: "1.0",
+      bridge: BRIDGE_VERSION,
+      plugin: PLUGIN_VERSION,
+      protocol: PROTOCOL_VERSION,
       persistentStateSchema: 1,
       recoveryJournalSchema: 1,
     },
     listener: { address: LOOPBACK_ADDRESS, port },
     readiness: state.readiness,
-    recovery: { state: "none" },
-    write: { gate: "open", state: "writable", pauseSource: null },
-    queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
-    lifecycle: {
-      startup: "ready",
-      upgrade: "not_run",
-      migration: "not_run",
-      recovery: "not_run",
-    },
-    effectiveGate: null,
-    overall: ready ? "healthy" : "degraded",
-    reasonCodes: ready ? [] : ["content_tools_not_ready"],
-    operatorAction: ready ? "none" : "wait_for_readiness",
+    recovery: state.recovery,
+    write: state.write,
+    queue: state.queue,
+    lifecycle: state.lifecycle,
+    effectiveGate: state.effectiveGate,
+    overall: state.overall,
+    reasonCodes: state.reasonCodes,
+    operatorAction: state.operatorAction,
   });
+}
+
+function projectIncompatibleHealth(
+  peer: ProtocolParticipant,
+): Extract<HealthResult, { outcome: "incompatible" }> {
+  return parseHealthResult({
+    outcome: "incompatible",
+    gate: { code: "incompatible_protocol" },
+    compatibility: { local: LOCAL_PROTOCOL, peer },
+  }) as Extract<HealthResult, { outcome: "incompatible" }>;
+}
+
+function protocolsOverlap(peer: ProtocolParticipant): boolean {
+  return (
+    peer.supported.major === LOCAL_PROTOCOL.supported.major &&
+    peer.supported.maximumMinor >= LOCAL_PROTOCOL.supported.minimumMinor &&
+    peer.supported.minimumMinor <= LOCAL_PROTOCOL.supported.maximumMinor
+  );
 }
 
 export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInstance {
@@ -77,7 +117,11 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
   let httpServer: HttpServer | undefined;
   const sessions = new Map<
     string,
-    { server: McpServer; transport: StreamableHTTPServerTransport }
+    {
+      server: McpServer;
+      transport: StreamableHTTPServerTransport;
+      incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
+    }
   >();
 
   async function readBody(request: IncomingMessage): Promise<unknown> {
@@ -89,10 +133,12 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   }
 
-  function createMcpServer(): McpServer {
+  function createMcpServer(sessionState: {
+    incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
+  }): McpServer {
     const server = new McpServer({
       name: "obsidian-vault-operation-bridge",
-      version: "0.1.0",
+      version: PLUGIN_VERSION,
     });
 
     server.registerTool(
@@ -102,7 +148,8 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         inputSchema: z.object({}).strict(),
       },
       () => {
-        const health = options.incompatibleHealth ?? projectObservedHealth(options.health, port);
+        const health =
+          sessionState.incompatibleHealth ?? projectObservedHealth(options.health, port);
         return {
           content: [{ type: "text", text: serializeCompatibilityText(health) }],
           structuredContent: health,
@@ -129,6 +176,13 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       rejectRequest(response, policyFailure);
       return;
     }
+    if (
+      options.authenticator !== undefined &&
+      !(await options.authenticator.authenticate(request))
+    ) {
+      rejectRequest(response, "authentication_failed");
+      return;
+    }
 
     const sessionHeader = request.headers["mcp-session-id"];
     const sessionId = typeof sessionHeader === "string" ? sessionHeader : undefined;
@@ -149,14 +203,20 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
       });
-      const server = createMcpServer();
+      const sessionState: {
+        incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
+      } = {};
+      if (options.peerProtocol !== undefined && !protocolsOverlap(options.peerProtocol)) {
+        sessionState.incompatibleHealth = projectIncompatibleHealth(options.peerProtocol);
+      }
+      const server = createMcpServer(sessionState);
       transport.onclose = () => {
         if (transport.sessionId !== undefined) sessions.delete(transport.sessionId);
       };
       await server.connect(transport);
       await transport.handleRequest(request, response, body);
       if (transport.sessionId !== undefined) {
-        sessions.set(transport.sessionId, { server, transport });
+        sessions.set(transport.sessionId, { server, transport, ...sessionState });
       }
       return;
     }

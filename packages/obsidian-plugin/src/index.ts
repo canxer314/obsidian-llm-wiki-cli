@@ -3,14 +3,19 @@ export {
   type BridgeHealthState,
   type BridgeInstance,
   type BridgeInstanceOptions,
+  type BridgeRequestAuthenticator,
+  type ProtocolParticipant,
 } from "./bridge-instance.js";
 export { createRegistrationCommand } from "./registration-command.js";
 export {
   ManagedVaultBridgeRuntime,
   PERSISTENT_STATE_SCHEMA_VERSION,
+  VaultPathChangeRequiredError,
   type BridgeSettingsStore,
   type ManagedVaultBridgeRuntimeOptions,
   type ManagedVaultDescriptor,
+  type PathChangeClassification,
+  type PathChangeEvidence,
   type PersistedBridgeSettings,
 } from "./managed-vault-runtime.js";
 export {
@@ -18,3 +23,9 @@ export {
   type RequestPolicyFailure,
   verifyRequestPolicy,
 } from "./request-policy.js";
+export {
+  BRIDGE_VERSION,
+  PLUGIN_VERSION,
+  PROTOCOL_VERSION,
+  SUPPORTED_OBSIDIAN_VERSION,
+} from "./version.js";

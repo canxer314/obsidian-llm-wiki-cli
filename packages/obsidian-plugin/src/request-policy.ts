@@ -5,6 +5,7 @@ export const EXPECTED_VAULT_ID_HEADER = "x-expected-vault-id";
 export type RequestPolicyFailure =
   | "invalid_host"
   | "invalid_origin"
+  | "authentication_failed"
   | "missing_expected_vault_id"
   | "mismatched_expected_vault_id";
 

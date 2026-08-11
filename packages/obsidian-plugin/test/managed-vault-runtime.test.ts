@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BridgeInstance } from "../src/bridge-instance.js";
 import {
   ManagedVaultBridgeRuntime,
+  type ManagedVaultBridgeRuntimeOptions,
   type PersistedBridgeSettings,
 } from "../src/managed-vault-runtime.js";
 
@@ -23,11 +24,20 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
   it("persists first-run identity and port, then reuses both on reload", async () => {
     let stored: PersistedBridgeSettings | undefined;
     const bridges: BridgeInstance[] = [];
-    const createBridge = vi.fn(({ port }: { port: number }) => {
-      const bridge = fakeBridge(port);
-      bridges.push(bridge);
-      return bridge;
-    });
+    const createBridge = vi.fn(
+      ({ port, health }: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0]) => {
+        expect(health).toMatchObject({
+          write: { gate: "blocked", state: "paused" },
+          effectiveGate: { code: "writes_paused" },
+          overall: "blocked",
+          reasonCodes: ["content_tools_not_ready"],
+          operatorAction: "finish_initialization",
+        });
+        const bridge = fakeBridge(port);
+        bridges.push(bridge);
+        return bridge;
+      },
+    );
     const store = {
       load: vi.fn(async () => stored),
       save: vi.fn(async (settings: PersistedBridgeSettings) => {
@@ -108,6 +118,111 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await expect(runtime.load()).rejects.toThrow("incompatible or invalid");
     expect(save).not.toHaveBeenCalled();
     expect(createBridge).not.toHaveBeenCalled();
+  });
+
+  it("pauses startup when the persisted diagnostic path no longer matches", async () => {
+    const settings: PersistedBridgeSettings = {
+      schemaVersion: 1,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+    };
+    const createBridge = vi.fn(() => fakeBridge(settings.port));
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "E:/Moved/Alpha" },
+      settings: { load: async () => settings, save: async () => undefined },
+      createBridge,
+    });
+
+    await expect(runtime.load()).rejects.toThrow("classification required");
+    expect(createBridge).not.toHaveBeenCalled();
+    expect(runtime.pendingPathChange).toEqual({
+      previousPath: "D:/Vaults/Alpha",
+      currentPath: "E:/Moved/Alpha",
+    });
+  });
+
+  it("classifies a moved Vault by retaining identity and updating its path", async () => {
+    let stored: PersistedBridgeSettings = {
+      schemaVersion: 1,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+    };
+    const save = vi.fn(async (settings: PersistedBridgeSettings) => {
+      stored = settings;
+    });
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "E:/Moved/Alpha" },
+      settings: { load: async () => stored, save },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+
+    await expect(runtime.load()).rejects.toThrow("classification required");
+    await runtime.classifyPathChange("move");
+    await runtime.load();
+
+    expect(stored).toEqual({
+      schemaVersion: 1,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "E:/Moved/Alpha",
+    });
+    await runtime.unload();
+  });
+
+  it("classifies a copied Vault by generating a new identity and port", async () => {
+    let stored: PersistedBridgeSettings = {
+      schemaVersion: 1,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+    };
+    const save = vi.fn(async (settings: PersistedBridgeSettings) => {
+      stored = settings;
+    });
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha Copy", path: "E:/Copies/Alpha" },
+      settings: { load: async () => stored, save },
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-copy",
+      selectInitialPort: () => 29999,
+    });
+
+    await expect(runtime.load()).rejects.toThrow("classification required");
+    await runtime.classifyPathChange("copy");
+    await runtime.load();
+
+    expect(stored).toEqual({
+      schemaVersion: 1,
+      vaultId: "vault-copy",
+      port: 29999,
+      diagnosticPath: "E:/Copies/Alpha",
+    });
+    await runtime.unload();
+  });
+
+  it("rejects copy classification when generators do not produce a new identity and port", async () => {
+    const stored: PersistedBridgeSettings = {
+      schemaVersion: 1,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+    };
+    const save = vi.fn(async () => undefined);
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha Copy", path: "E:/Copies/Alpha" },
+      settings: { load: async () => stored, save },
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+
+    await expect(runtime.load()).rejects.toThrow("classification required");
+    await expect(runtime.classifyPathChange("copy")).rejects.toThrow(
+      "new Vault identity and port",
+    );
+    expect(save).not.toHaveBeenCalled();
   });
 
   it("returns the local Claude Code registration command without executing it", async () => {
