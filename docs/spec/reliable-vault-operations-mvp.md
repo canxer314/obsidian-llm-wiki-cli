@@ -1,6 +1,6 @@
-# Reliable Claude Code Vault Operations — MVP specification assembly
+# Reliable Claude Code Vault Operations — development-ready MVP specification
 
-> **Status:** Wayfinder assembly draft. All normative decisions already made by the map are consolidated here. The document is **not yet development-ready** because the contract and performance questions in [Remaining decisions](#remaining-decisions) still require explicit resolution. Implementers must not invent answers for them.
+> **Status:** Development-ready. This specification incorporates every product and technical decision resolved by the Wayfinder map through [Finalize the development-ready MVP specification](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/27). Development planning may decompose and sequence the implementation, but it must not reopen or silently weaken the public contract, safety invariants, acceptance matrix, benchmark corpus, exclusions, or release gates fixed here.
 
 ## 1. Destination and precedence
 
@@ -10,7 +10,11 @@ This document uses the following precedence rules when an earlier decision was e
 
 1. [Define installation, trust, and operations](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/9) replaces the earlier single-Vault, single-endpoint, and mandatory-bearer requirements with per-Managed-Vault Bridge Instances and a no-credential single-user loopback default.
 2. [Define the cross-tool error and retry taxonomy](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/12) replaces earlier public Change Set lifecycle and generic error envelopes with four proof states and narrow closed failures. Internal executor and journal phases remain implementation state and are not public Change Set states.
-3. Later installed-runtime validation fixes operating constants and supported runtime profiles without broadening the product boundary.
+3. [Define operational gate result semantics](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/23) keeps operational gates separate from request and Change Set failures and fixes their per-tool projections, Submission Key consequences, precedence, and MCP `isError` mappings.
+4. [Specify Change Set success reporting and single-file policy](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/24) requires every Bridge mutation to use a Change Set and fixes canonical Content Versions, immutable previews, requested and derived effect evidence, and authoritative final-path evidence.
+5. [Prototype the complete public wire schema](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/25) fixes a versioned contract package as the single source of truth, the six-tool inventory, strict closed structural validation, the diagnostics/recovery authority boundary, and the internal Search Snapshot boundary.
+6. [Fix measurable MVP performance release gates](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/26) fixes deterministic fixtures, timing boundaries, the `MVP-PERF-REF-1` environment, the 3 × 30 nearest-rank p95 procedure, thresholds, evidence manifests, and rebaseline policy.
+7. Installed-runtime validation fixes operating constants and supported runtime profiles without broadening the product boundary.
 
 ## 2. Domain language
 
@@ -22,7 +26,7 @@ This document uses the following precedence rules when an earlier decision was e
 - **Multi-Vault Coexistence:** multiple Managed Vaults may be independently operable at once. It never permits one operation to span Vaults.
 - **Change Set:** related mutations within one Managed Vault, validated and previewed as one unit, which either satisfy the complete intent or restore the pre-execution state.
 - **Exact Read:** a single-note or ordered multi-note read returning complete, untrimmed content without silent excerpting or normalization. Transport pages do not alter this semantic.
-- **Content Version:** a SHA-256-compatible identity over one exact raw-byte note state.
+- **Content Version:** the identity of one Markdown note's exact raw bytes, encoded on the wire only as `sha256:<64 lowercase hexadecimal digits>`. Bare digests, uppercase hexadecimal, whitespace, wrong lengths, and non-hexadecimal characters are rejected rather than normalized. Binary attachments use their separate SHA-256 evidence and never a Content Version.
 - **Agent Session:** one Claude Code session bound to one Bridge Instance for its lifetime.
 - **Submission Key:** an Agent Session-generated idempotency identity for one canonical Change Set request.
 - **Read Dependency:** an observed note and Content Version that informed a Change Set without being directly modified.
@@ -52,6 +56,9 @@ This document uses the following precedence rules when an earlier decision was e
 - Editing or semantically parsing non-Markdown attachment contents.
 - Dedicated block-ID reads.
 - Silent truncation, lossy Unicode/newline normalization, or fallback to shell/direct-filesystem mutation.
+- Any seventh public MCP tool, public recovery-mutation endpoint, public Search Snapshot handle, or independently callable Search Snapshot capability.
+- Agent Session authority to accept a recovery baseline, clear or release recovery state, or resume writes.
+- Treating JSON Schema validation as proof of raw-byte fidelity, continuation ownership/lifetime, Submission Key persistence, recovery ordering, semantic cache/graph convergence, diagnostic privacy, or performance.
 - A claim of Obsidian-native multi-file transactions, globally atomic metadata/link graphs, external-writer exclusion, unconditional ACID, or hard-power-loss durability.
 - Automatic diagnostics upload, telemetry, or content-inclusive diagnostics initiated by an Agent Session.
 
@@ -106,7 +113,7 @@ The following invariants are release-blocking:
 
 ## 6. MCP and operator surface
 
-The fixed semantic surface consists of:
+The complete public MCP inventory contains exactly six tools:
 
 - `vault_health`
 - `vault_discover`
@@ -114,15 +121,24 @@ The fixed semantic surface consists of:
 - `vault_continue`
 - `vault_change_set_submit`
 - `vault_change_set_status`
-- privacy-preserving diagnostics and Primary Operator recovery operations
 
-The exact unresolved wire schemas are listed in [Remaining decisions](#remaining-decisions); the behavior below is already fixed.
+The authoritative public contract is one versioned package containing strict per-tool input/output roots, shared `$defs`, valid and invalid fixtures, and a cross-call scenario manifest. Every object root rejects unknown fields. JSON Schema owns closed structural validation and examples; the contract/runtime corpora own continuation identity and lifetime, Submission Key ordering and persistence, raw-byte fidelity, WAL/recovery ordering, cache/graph proof, MCP dual-representation identity, privacy, and performance gates.
+
+Privacy-preserving diagnostic summaries are carried through this six-tool boundary; they do not create a seventh diagnostics tool. Accepting a trusted recovery baseline and resuming writes are separate Primary Operator actions available only through a local interactive management entry point, never public MCP mutations. Search Snapshot is an internal success-proof barrier, not a public MCP operation.
 
 ### 6.1 `vault_health`
 
-Every Agent Session calls health after connection/reconnection and before content tools. It calls health again after plugin upgrade, Vault move/copy handling, endpoint change, recovery, or maintenance resume. The server independently rechecks identity and gates at every tool entry; health is not a client-side security boundary.
+Every Agent Session calls health after connection/reconnection and before content tools, and again after plugin upgrade, Vault move/copy handling, endpoint change, recovery, or maintenance resume. The server independently rechecks identity and gates at every tool entry; health is observational, not a client-side security boundary or an implicit second gate.
 
-Health reports at least:
+Health has two trusted branches:
+
+```text
+HealthResult =
+  | { outcome: "observed"; effectiveGate: OperationalGateWithoutIncompatible | null; ...normalHealthState }
+  | { outcome: "incompatible"; gate: { code: "incompatible_protocol" }; compatibility: ClosedCompatibilitySummary }
+```
+
+Both use `isError: false`. The observed branch reports at least:
 
 - actual Vault ID plus diagnostic name/path;
 - Bridge, plugin, protocol, persistent-state, and Recovery Journal schema versions;
@@ -136,7 +152,12 @@ Health reports at least:
 
 Endpoint connection failure means `offline`; it is distinct from a connected Bridge reporting `blocked`.
 
-Protocol compatibility uses an explicit supported major/minor range rather than exact plugin-version equality. Compatible plugin versions may operate while health reports an upgrade notice. An incompatible protocol major, unknown persistent-state schema, or unreadable Recovery Journal schema returns `incompatible_protocol` and rejects the entire connection without read-only degradation.
+Protocol compatibility uses an explicit supported major/minor range rather than exact plugin-version equality. Compatible plugin versions may operate while health reports an upgrade notice. Compatibility has two boundaries:
+
+1. If caller and Bridge cannot safely share the MCP tool schema, initialization fails and no product tool result or product-level `isError` mapping exists.
+2. If the MCP tool schema is shared but the connected plugin, protocol participant, persistent-state schema, or Recovery Journal is incompatible, the restricted connection retains only the minimal incompatible health branch. Every other public tool returns `OperationallyBlocked` with `incompatible_protocol`; this is not read-only content degradation.
+
+The incompatible health branch contains only closed local/peer version and supported-range facts. It must not read incompatible persistent/Journal state or claim recovery, queue, or Change Set knowledge.
 
 ### 6.2 `vault_discover`
 
@@ -186,7 +207,8 @@ Rules:
 - Each response is no larger than 256 KiB compact JSON and fills the next legal UTF-8 prefix as fully as possible.
 - Consumption, expiry, client/session teardown, or snapshot loss immediately releases retained bytes.
 - Each client is limited to 8 active continuation chains and 8 MiB retained frozen bytes. Quota exhaustion rejects new issuance and never silently evicts a live token.
-- The only trusted continuation failure is `{ code: "continuation_unavailable" }` with `isError: true`. The client discards all pages from the old chain and repeats the original `vault_read`.
+- When no effective operational gate blocks content, the only trusted request-level continuation failure is `{ code: "continuation_unavailable" }` with `isError: true`. The client discards all pages from the old chain and repeats the original `vault_read`.
+- When an effective gate blocks content, continuation returns `OperationallyBlocked` with `isError: true`; it never masquerades as `continuation_unavailable`.
 - If a continuation call produces no trustworthy result, retry once with the same token because consumption is unknown.
 
 ### 6.5 `vault_change_set_submit`
@@ -227,16 +249,19 @@ Fixed preconditions:
 
 Preflight runs before queue admission and again under the serial lease immediately before the first mutation. It validates every version, dependency, path, containment rule, protected location, collision, anchor cardinality, Frontmatter representation, parent-directory effect, derived reference closure, and absence precondition.
 
-The later cross-tool taxonomy fixes the public proof record:
+The public proof record is:
 
 ```text
 ChangeSetRecord =
-  | { changeSetId; state: "in_progress" }
-  | { changeSetId; state: "intent_applied" }
-  | { changeSetId; state: "intent_not_applied"; failure?: ChangeSetFailure }
-  | { changeSetId; state: "result_unproven" }
+  | { changeSetId; state: "in_progress"; preview?: ImmutablePreview }
+  | { changeSetId; state: "intent_applied"; preview: ImmutablePreview; requestedEffects; derivedEffects; paths }
+  | { changeSetId; state: "intent_not_applied"; preview?: ImmutablePreview; failure?: ChangeSetFailure }
+  | { changeSetId; state: "result_unproven"; preview?: ImmutablePreview }
 
-VaultState = { writeGate: "open" | "blocked" }
+VaultState = {
+  writeGate: "open" | "blocked"
+  writeState: "writable" | "pausing" | "paused"
+}
 ```
 
 Allowed stable failures are:
@@ -250,18 +275,24 @@ ChangeSetFailure =
 SubmitFailure = { code: "submission_key_conflict" }
 ```
 
-The closed core result fixed by the error-taxonomy decision is:
+The submit result is a closed union of structural invalidity, Submission Key conflict, an operationally blocked unbound request, and a registered Change Set result. Operational gates are not `ChangeSetFailure` or `SubmitFailure` values. `in_progress` and `intent_applied` use `isError: false`; `intent_not_applied`, `result_unproven`, `request_invalid`, `submission_key_conflict`, every submit `operationally_blocked` branch, and a newly registered recovery-blocked `intent_not_applied` result use `isError: true`. Same-key replay uses the replayed proof state's mapping.
 
-```text
-SubmitResult =
-  | { outcome: "request_invalid" }
-  | { failure: { code: "submission_key_conflict" } }
-  | { changeSet: ChangeSetRecord; vault: VaultState }
-```
+Every Bridge mutation uses this tool, including a Change Set with one requested operation affecting one file. There is no direct or lightweight single-file mutation exception.
 
-`in_progress` and `intent_applied` use `isError: false`; `intent_not_applied`, `result_unproven`, `request_invalid`, and `submission_key_conflict` use `isError: true`.
+The first complete successful preflight freezes and persists one immutable automatic preview; it is not an approval token. Lease-time revalidation validates exactly that plan and may not expand or replace it. If closure, target state, or another premise changed, no mutation occurs and the caller must re-read and submit a corrected plan with a new Submission Key. A record before complete preflight and an initial rejection that could not establish a safe complete plan have no fabricated preview. Once frozen, the preview is identical in subsequent submit/status/replay views for at least the complete-record retention period.
 
-The unresolved interaction between this closed union and operational gates is recorded in [Remaining decisions](#remaining-decisions).
+The preview and an `intent_applied` result use the same deterministic effect IDs, causation, ordering, and path keys:
+
+- requested effects contain exactly one entry per caller operation in request order, retaining `operationId` and `kind`;
+- derived effects contain exactly one entry per frozen derived effect in deterministic Bridge order, with stable `operationId` and `causedByOperationId`;
+- each successful effect outcome is only `changed` or `already_satisfied`; process labels such as written, skipped, recovered, or replayed are not public outcomes;
+- the preview supplies projected outcomes plus one deduplicated pre-state/projected-final-state path table; the final result supplies proven outcomes and final states;
+- an `intent_applied` result has one authoritative, deterministically ordered path table covering every public path relevant to requested and derived effects, including no-op targets, but excluding Read Dependencies and merely read/locked paths;
+- each path is `changed` or `unchanged` and ends in exactly one typed state: Markdown with canonical Content Version, attachment with SHA-256 evidence, directory, or absent;
+- move reports the old path absent and the destination's typed state; trash reports only the original public path absent; managed-trash internal paths are private; derived Markdown rewrites carry final Content Versions; directories appear only when actually created; intermediate versions never appear as final;
+- “changed paths” is only the projection of path entries marked `changed`, never a second authority.
+
+A non-successful proof branch reports no partial-success effect algebra. Typed preview warnings may advise but cannot permit an unlisted mutation or substitute for rejection.
 
 ### 6.6 `vault_change_set_status`
 
@@ -355,15 +386,53 @@ Compare-before-restore rules:
 
 The MVP guarantee is bounded process-crash all-or-restore on the validated Windows/NTFS runtime. Hard-power-loss durability and native Windows write-through are expressly outside the claim.
 
-### 7.5 Gate semantics
+### 7.5 Operational gates
 
-- Any unresolved `result_unproven` requires `writeGate: "blocked"` for the entire Vault.
-- Reads, status, health, and recovery diagnosis remain available for an ordinary unproven gate.
-- During active automatic recovery, only health, status, and diagnostics are available; content discovery/read/write reports the recovery gate.
-- If recovery itself is untrusted (`restoration_incomplete`, bad journal/identity, or failed verification), all content tools remain blocked until Primary Operator action.
-- A queued item not yet executed when an earlier item becomes unproven ends as `intent_not_applied` and never wakes automatically.
-- A submit received while the unproven gate is blocked is validated, bound, registered, never reads mutation targets, and ends as `intent_not_applied` without `failure`.
-- Only an explicitly authorized Primary Operator recovery flow may accept a verified new baseline. The original failed record remains failed/unproven history; queue processing remains paused until separately resumed.
+Operational gates form a separate closed algebra rather than extending any request or Change Set failure taxonomy:
+
+```text
+OperationalGate =
+  | { code: "writes_paused" }
+  | { code: "upgrade_in_progress" }
+  | { code: "recovery_in_progress" }
+  | { code: "recovery_blocked" }
+  | { code: "incompatible_protocol" }
+
+OperationallyBlocked = {
+  outcome: "operationally_blocked"
+  gate: OperationalGate
+}
+```
+
+An ordinary result exposes at most one effective gate, selected in this precedence order:
+
+```text
+incompatible_protocol
+> recovery_blocked
+> recovery_in_progress
+> upgrade_in_progress
+> writes_paused
+```
+
+Manual `pausing` and `paused` project to `writes_paused`. `maintenance_pending`, upgrade draining, migration, and upgrade execution project to `upgrade_in_progress`; a trustworthy `maintenance_paused` projects to `writes_paused`, with health retaining its post-upgrade pause source. An unresolved `result_unproven` safety block projects to `recovery_blocked`, not a new code.
+
+The per-tool behavior is fixed:
+
+| Effective gate | `vault_health` | discovery / read / continue | submit with unbound key | status |
+|---|---|---|---|---|
+| `writes_paused` | observe, `isError: false` | execute | blocked; do not bind/register; `isError: true` | query, `isError: false` |
+| `upgrade_in_progress` | observe, `isError: false` | execute | blocked; do not bind/register; `isError: true` | query, `isError: false` |
+| `recovery_in_progress` | observe, `isError: false` | blocked, `isError: true` | blocked; do not bind/register; `isError: true` | query, `isError: false` |
+| `recovery_blocked` | observe, `isError: false` | blocked, `isError: true` | bind/register `intent_not_applied` without `failure`, return current Vault state plus historical gate; `isError: true` | query, `isError: false` |
+| connected `incompatible_protocol` | minimal incompatible branch, `isError: false` | blocked, `isError: true` | neither inspect nor bind; `isError: true` | blocked, `isError: true` |
+
+Health has a normal `observed` branch with `effectiveGate` (excluding incompatible) and an `incompatible` branch containing only closed local/peer version and supported-range facts. The latter must not read incompatible persistent/Journal state or claim queue, recovery, or Change Set knowledge. If caller and Bridge cannot safely share the MCP tool schema, initialization itself fails and no product result or product-level `isError` mapping exists.
+
+Except under `incompatible_protocol`, submission processing is ordered: validate structure and fingerprint without target reads; look up the Submission Key; replay an identical binding or reject a conflicting binding; apply the current gate only to an unbound key; then, only if permitted, inspect targets, preflight, and enqueue. The incompatible branch cannot safely inspect the registry and skips lookup.
+
+A `recovery_blocked` submission uniquely binds the key and persists an `intent_not_applied` record without `failure`; its gate is historical submission provenance and replays even after recovery, while `vault` always reports current state. Status omits that historical disposition. Renewing the write after recovery requires a new key. Other gate-blocked submissions create no Change Set or proof state and may retry the unchanged key after the gate clears. After compatibility is fixed and the client reconnects, the original uninspected key may retry.
+
+`writeGate`, `writeState`, and `effectiveGate` remain distinct. Every unresolved `result_unproven` and `recovery_blocked` condition requires `writeGate: "blocked"`; pause/upgrade may reject new writes while that safety gate remains open. No result adds `retryable`, `retryAfter`, generic guidance, or gate arrays. A blocked content call never masquerades as `continuation_unavailable` or another request failure.
 
 ## 8. Raw bytes, references, and Search Snapshot consistency
 
@@ -434,7 +503,7 @@ Standard diagnostics contain versions, health, listener and queue timelines, opa
 
 They exclude note bodies, Frontmatter values, attachments, complete Change Set requests, before images, raw Submission Keys, credentials, environment variables, usernames, absolute paths, real Vault-relative paths, and real Vault IDs. Stable aliases permit within-bundle correlation.
 
-Only the Primary Operator can request selected content-inclusive data, accept a recovery baseline, clear a journal, or release a recovery gate. Agent Sessions can request machine summaries and suggest commands but cannot authorize these actions.
+Only the Primary Operator, through the local interactive management entry point, may request selected content-inclusive diagnostic data, accept a trusted recovery baseline, or separately resume writes. Agent Sessions can receive redacted diagnostic summaries and suggest local actions but cannot authorize those actions. Clearing a Journal or releasing a recovery gate is not an independent authorization path.
 
 ## 10. Operating constants and performance objectives
 
@@ -449,10 +518,12 @@ Only the Primary Operator can request selected content-inclusive data, accept a 
 | Cache/graph barrier deadline on validated runtime | 5,000 ms |
 | Barrier quiet window | 250 ms |
 | Accepted Submission Key/full-record retention | at least 7 days |
-| Warm common discovery/read objective | under 200 ms |
-| Approximately 20 ordinary Markdown files validation/execution objective | under 1,000 ms; exact measured boundary remains unresolved |
+| Warm common discovery release gate | each batch nearest-rank p95 < 200 ms |
+| Warm common Exact Read release gate | each batch nearest-rank p95 < 200 ms |
+| Ordinary 20-note Work Clock release gate | each batch nearest-rank p95 < 1,000 ms |
+| Ordinary 20-note Proof Clock release gate | each batch nearest-rank p95 < 4,000 ms; every sample < 5,000 ms |
 
-Constants are published by diagnostics and re-baselined after Claude Code, Obsidian/Electron, MCP SDK/protocol, or materially relevant Vault-corpus changes.
+Constants and profile identifiers are published by health/diagnostics. Benchmark evidence is re-run and registered after any materially relevant change to Bridge/plugin or protocol behavior, MCP SDK/transport, Obsidian/Electron/Node, fixture version/hash, relevant settings, or Vault-corpus assumptions. A Claude Code version change refreshes the installed-client compatibility observation and manifest but never moves Claude inference time into the Bridge latency gate.
 
 ## 11. Acceptance matrix
 
@@ -471,7 +542,7 @@ All scenarios are release-blocking unless marked as an objective or installed-ru
 | A-09 | **Given** one note over 1 MiB, **when** Exact Read is requested, **then** it returns `note_exceeds_exact_read_limit`; grouping/continuation cannot bypass it. |
 | A-10 | **Given** a multi-note logical Exact Read over 1 MiB, **when** read runs, **then** it returns no content and deterministic complete contiguous groups preserving indices, duplicates, and order. |
 | A-11 | **Given** a transport response over 256 KiB but an accepted logical read, **when** continuation runs, **then** each compact page is within limit and all byte ranges reconstruct the frozen result. |
-| A-12 | **Given** a consumed/expired/lost/client-mismatched continuation, **when** continuation returns a trusted result, **then** it returns only `continuation_unavailable`; the client discards the whole chain. |
+| A-12 | **Given** a consumed, expired, lost, or client-mismatched continuation and no content-blocking effective gate, **when** continuation returns a trusted result, **then** it returns only `continuation_unavailable`; **given** a content-blocking effective gate, **then** it returns `OperationallyBlocked` and never masquerades as `continuation_unavailable`. |
 | A-13 | **Given** 8 live chains or 8 MiB retained bytes, **when** another token is requested, **then** new issuance rejects without evicting live state. |
 | A-14 | **Given** a valid Change Set, **when** submit is called once, **then** validation, preflight, registration, queueing, execution/recovery, and current proof result require no validate/apply handshake. |
 | A-15 | **Given** any stale direct target, dependency, attachment, derived target, or absence condition, **when** lease-time preflight runs, **then** no mutation occurs and the complete intent is not applied. |
@@ -482,7 +553,7 @@ All scenarios are release-blocking unless marked as an objective or installed-ru
 | A-20 | **Given** concurrent submissions in one Vault, **when** they execute, **then** persisted FIFO order is respected and full preflight repeats immediately before each first mutation. |
 | A-21 | **Given** `PREPARED` is durable and process termination occurs at any mutation/verification/cache/commit injection point, **when** the plugin loads, **then** whole before state is restored before new writes unless `COMMITTED` is durable. |
 | A-22 | **Given** recovery sees third-party bytes, **when** compare-before-restore runs, **then** it never overwrites them, reports unproven state, and blocks the Vault-wide write gate. |
-| A-23 | **Given** an unresolved unproven result, **when** another session/path/key submits, **then** ordinary writing cannot bypass the gate; reads/status/diagnosis remain available outside active recovery. |
+| A-23 | **Given** an unresolved unproven result projecting as `recovery_blocked`, **when** discovery, read, continue, or an unbound valid submission is received, **then** content tools return `OperationallyBlocked`; the submission atomically binds key/fingerprint, registers `intent_not_applied` without `changeSet.failure`, returns the historical gate with `isError: true`, and replays that disposition after recovery; health and normal status remain successful, and renewed intent requires a new key. |
 | A-24 | **Given** a move with supported references, **when** preflight derives closure, **then** each destination-only rewrite is explicit, version-guarded, and style-preserving. |
 | A-25 | **Given** duplicate target/heading, unknown grammar, invalid fragment, literal-`#` attachment, or non-unique byte span, **when** a derived rewrite is considered, **then** the complete Change Set rejects without guessing. |
 | A-26 | **Given** BOM/CRLF/CJK/emoji and two equal link spellings, **when** only the second verified span is rewritten, **then** the first spelling and all untouched bytes remain exact. |
@@ -495,15 +566,31 @@ All scenarios are release-blocking unless marked as an objective or installed-ru
 | A-33 | **Given** a standard diagnostics request, **when** the bundle is generated, **then** no Vault content, before images, raw keys/IDs, usernames, environment, or real paths appear. |
 | A-34 | **Given** protocol failure/truncation/schema mismatch after submit may have started, **when** the client recovers, **then** it queries or checks the original key/request and never changes keys based on the failed call. |
 | A-35 | **Given** accepted key/record state less than seven days old, **when** Bridge state is lost/corrupt, **then** ordinary `unknown` is forbidden; recovery or unproven blocked state is required. |
-| A-36 | **Given** compatible minor protocol/plugin versions, **when** a session connects, **then** operation is allowed with an upgrade notice; **given** an incompatible protocol major or unknown/unreadable persistent or Journal schema, **then** the whole connection returns `incompatible_protocol` without read-only degradation. |
+| A-36 | **Given** caller and Bridge cannot safely share the MCP tool schema, **when** MCP initializes, **then** initialization fails and no product result exists; **given** a schema-compatible connection whose plugin, protocol participant, persistent-state schema, or Recovery Journal is incompatible, **when** health is called, **then** only the minimal incompatible branch returns with `isError: false`; every other tool returns `incompatible_protocol` with `isError: true` and submit neither inspects nor binds a key. |
 | A-37 | **Given** another enabled plugin observes Vault events/indexing, **when** a Change Set stages or writes content, **then** no half-written Markdown or staging path is ever visible inside the Vault. |
 | A-38 | **Given** Bridge-managed hidden trash and restore, **when** success/recovery evidence is gathered, **then** raw path state plus targeted cache/reference probes prove the result without requiring `getAbstractFileByPath` visibility or a second `vault.rename`. |
+| A-39 | **Given** every strict root, shared definition, valid/invalid fixture, and cross-call scenario in the versioned contract package, **when** it runs on a supported profile, **then** only schema-valid closed results are accepted, unknown fields reject, and authoritative `structuredContent` equals its compatibility-text serialization. |
+| A-40 | **Given** one or more internal gates, **when** an ordinary tool projects a gate, **then** it exposes exactly one in the fixed precedence order and follows the per-tool binding and `isError` rules in §7.5; health remains observational. |
+| A-41 | **Given** any Bridge-originated mutation, including one operation affecting one file, **when** it is requested, **then** it uses `vault_change_set_submit` and no direct or lightweight mutation surface exists. |
+| A-42 | **Given** any Markdown Content Version input or output, **when** it is validated or emitted, **then** it is exactly `sha256:<64 lowercase hexadecimal digits>` over exact bytes; bare, uppercase, spaced, wrong-length, and non-hex values reject, and attachment evidence is not a Content Version. |
+| A-43 | **Given** complete preflight, **when** preview, final result, status, or replay is observed, **then** the immutable preview retains effect IDs, causation, order, projected outcomes, and one deduplicated projected path table; `intent_applied` retains those identities with only `changed | already_satisfied` and one authoritative final-path table. |
+| A-44 | **Given** a Search Snapshot is published, **when** public results and schemas are inspected, **then** it remains an internal success-proof barrier with no extra operation, handle, or independently callable capability. |
 
 ## 12. Benchmark and fault-injection corpus
 
-### 12.1 Reproducible environment manifest
+### 12.1 Registered reference environment and manifest
 
-Every run records Windows build, filesystem/volume, Obsidian/installer/Electron/Node versions, plugin and protocol versions, Claude Code version, MCP SDK version, CPU/memory, Vault note/file counts and byte percentiles, enabled-plugin inventory, relevant Obsidian settings, and fixture seed/hash. Results without this manifest cannot register a runtime profile.
+The initial release-binding profile is exactly `MVP-PERF-REF-1`:
+
+- Windows 11 Pro for Workstations build 26200;
+- Intel Core Ultra X7 358H, 16 cores / 16 logical processors;
+- 31.5 GiB RAM;
+- UMIS UPJYJ1TBMNV1QWY 1 TB NVMe SSD, with fixtures on NTFS;
+- Obsidian 1.13.4, Electron 39.6.0, and Node 24.14.0;
+- a fresh Obsidian profile with only the candidate Vault Operation Bridge enabled;
+- AC power, Windows Best performance mode, no other Vault writer, 60-second pre-run average CPU below 10%, and at least 8 GiB available memory; normal system security, including Defender, remains enabled.
+
+Every run records the profile name; Bridge/plugin, protocol, MCP SDK, Claude Code, Windows, filesystem, hardware, and Obsidian/Electron/Node versions; enabled-plugin inventory; relevant Obsidian settings; fixture seed and hashes; Vault note/file count and byte percentiles; canonical fixture-manifest SHA-256; before/after inventory; residual-cleanup report; all samples and computed p95 values; and the installed-client compatibility observation/version. A missing or mismatched manifest cannot register evidence. Another machine becomes release-binding only through a separately named, explicitly registered runtime profile.
 
 ### 12.2 Deterministic content corpus
 
@@ -515,20 +602,38 @@ The corpus contains isolated generated paths and refuses to overwrite pre-existi
 - wikilink/embed/Markdown inline/embed variants, literal spaces/`%20`, aliases/titles, duplicate spellings, duplicate basename/heading, ASCII and Unicode block IDs, malformed destinations, and literal-`#` attachment targets;
 - Frontmatter scalar/list/quote/flow/block variants and lookalike non-reference text;
 - reference-style shared usage/definition, duplicate/shadow definitions, and cache-to-Exact-Read Content Version races;
-- binary attachments with exact SHA-256;
-- a generated ordinary-work corpus suitable for calibrating the approximately 20-note objective; its exact files, sizes, reference closure, and fixture hash are outputs of D-2 and are not fixed by this draft.
+- binary attachments with exact SHA-256.
 
-### 12.3 Read/transport benchmarks
+The release performance fixtures are separately fixed:
 
-- warm common discovery/read objective under 200 ms;
+- **`read-v1`:** root `.mvp-perf-fixture/read-v1/`, seed `mvp-perf-read-v1`, exactly 1,000 Markdown notes and 7,531,464 content bytes: 500 × 2,608 B, 449 × 10,240 B, 50 × 29,316 B, and 1 × 163,904 B, with a fixed deterministic text/tag/link graph. Its discovery case combines path-prefix, body-token, tag, and outgoing-link criteria and returns exactly 20 ordered evidence notes. Its read case is one ordered full Exact Read of those 20 fixed 2,608-B notes, below 256 KiB without continuation.
+- **`change-v1`:** root `.mvp-perf-fixture/change-v1/`, seed `mvp-perf-change-v1`, exactly 20 existing 4,096-B Markdown notes, UTF-8 without BOM and LF, with fixed Frontmatter and already-parsed links. One Change Set performs one plain-body `replace_exact` per note; every old string occurs exactly once and the affected source-note closure is exactly those 20 notes.
+
+Attachments, create/delete, rename, derived-reference rewrites, continuation, recovery, and injected faults are excluded only from the ordinary-work fixture; they remain independently release-blocking correctness corpora. Generated roots refuse to overwrite existing paths and record seed, canonical manifest SHA-256, before/after inventory, and residual cleanup. Fixture restore and exact inventory/hash verification occur outside each timed sample, and the per-Vault FIFO is empty before every sample.
+
+### 12.3 Benchmark timing, transport, and sampling
+
+All benchmark timing uses monotonic clocks and a fixed benchmark MCP client over real loopback Streamable HTTP transport.
+
+- The discovery/read client clock starts immediately before sending the complete request and stops after the complete MCP result is received, decoded, and schema-validated. It includes loopback HTTP, MCP framing, Bridge work, serialization, and decoding.
+- The Bridge server span is recorded separately from complete request decode/tool-handler entry through compact-result encoding and handoff to the HTTP writer. It is diagnostic and never substitutes for the client-observed release gate.
+- One non-gating installed Claude Code compatibility spot check and its client version are recorded. Claude inference, tool selection, Claude API network latency, and result rendering are excluded from Bridge percentiles.
+- Work Clock starts when the Change Set is FIFO head in an otherwise empty queue and lease-time preflight begins; it stops after mutation and exact final-path, existence, and raw-byte hash verification. Passing it never authorizes success.
+- Proof Clock has the same start and stops only after final Content-Version callback evidence, required Vault/path evidence, exact affected-closure cache/graph predicates, an uninterrupted 250 ms quiet window, successor immutable Search Snapshot publication, and synced durable `COMMITTED`.
+
+Status-poll cadence and Claude Code's next reasoning turn affect neither Change Set clock; Bridge lifecycle timestamps are authoritative.
+
+For each benchmark case, run three independent batches. Each batch restarts Obsidian, waits for Bridge/runtime `ready` and stable fixture inventory, performs one unmeasured Search Snapshot materialization, runs five unmeasured executions of that exact case, then records 30 measured executions. Compute nearest-rank p95 independently per batch as `sorted[ceil(0.95 × 30) - 1]`, the 29th ordered sample. All batches pass independently. Do not pool batches, remove outliers, substitute an average, or rerun only a failed sample. An environment-precondition failure invalidates the entire batch; a tool, schema, content, or correctness failure fails release rather than becoming a discarded timing sample.
+
+The release measurements include:
+
+- the fixed `read-v1` common warm discovery and Exact Read cases;
 - 256 KiB compact response integrity;
-- accepted 1 MiB logical Exact Read reconstructed exactly across as many compact-JSON pages as the 256 KiB response ceiling requires, including an escape-heavy payload;
-- over-1 MiB deterministic grouping;
-- token single-use, 15-minute sliding lifetime, session teardown, and snapshot-loss behavior;
-- 8-chain and 8-MiB quota boundaries;
-- 5000 ms MCP timeout cancellation probe separated from the normal configured 600000 ms hard timeout.
-
-Warm-up count, measured repetitions, percentile, and exact timing boundary for release gating are part of the unresolved performance ticket rather than invented here.
+- exact reconstruction of accepted 1 MiB and escape-heavy reads;
+- over-1-MiB deterministic grouping;
+- continuation single-use, lifetime, teardown/loss, and quota boundaries;
+- a 5,000 ms cancellation probe distinct from the 600,000 ms configured hard timeout;
+- the fixed `change-v1` Work and Proof clocks.
 
 ### 12.4 Cache/graph scenarios
 
@@ -558,44 +663,31 @@ Also inject truncated/wrong-Vault/checksum-invalid journal, journal capacity/dis
 
 Every fixture runner uses a dedicated generated root, refuses overwrite, records before/after inventory, attempts cleanup in `finally`, and reports residual paths. A timeout or killed outer process cannot be treated as proof of cleanup. Structured report, monotonic event log, checksums, and a concise verdict are retained as release evidence; note content is not included in standard diagnostics.
 
+### 12.7 Public wire-contract corpus
+
+The release corpus consumes the versioned contract package as its authority. Across all six tools it runs strict input/output valid and invalid fixtures, rejects unknown fields except explicit extension points, and verifies authoritative `structuredContent` equals compatibility-text serialization.
+
+Its cross-call scenario manifest release-blockingly covers continuation identity/lifetime, Submission Key ordering/persistence/replay, public proof states, operational-gate projection, diagnostic redaction, local-only recovery authority, and Search Snapshot internality. A JSON Schema pass alone does not satisfy raw-byte, WAL/recovery, cache/graph, privacy, MCP transport, or performance evidence.
+
 ## 13. Release gates
 
 A release is eligible only when:
 
-1. All accepted wire schemas are generated from one source of truth and reject unknown fields.
-2. The full acceptance matrix passes on every supported runtime profile.
-3. Raw-byte, registered-reference, transport, cache/graph, and crash corpora pass with a recorded environment manifest.
-4. No failed probe leaves residual fixture content or an unreported blocked gate.
-5. Release artifacts and migrations pass install/repair/upgrade/rollback tests.
-6. Privacy tests prove standard diagnostics exclusions.
-7. Operating constants are published in health/diagnostics.
-8. The remaining protocol and benchmark decisions below are closed and incorporated.
+1. The versioned contract package is present as the authoritative public-contract source, with strict per-tool input/output roots, shared `$defs`, valid/invalid fixtures, and a cross-call scenario manifest; schemas reject unknown fields except explicit extension points.
+2. Contract-package fixtures and scenarios pass on every supported runtime profile.
+3. The full acceptance matrix passes on every supported runtime profile.
+4. Raw-byte, registered-reference, real-loopback transport, cache/graph, crash/recovery, and public-wire corpora pass with recorded manifests.
+5. No failed probe leaves residual fixture content or an unreported blocked gate.
+6. Release artifacts and migrations pass install, repair, upgrade, and rollback tests.
+7. Privacy tests prove standard diagnostics exclusions.
+8. Operating constants are published in health/diagnostics.
+9. In each of three independent batches, common warm discovery p95 is strictly below 200 ms, common warm Exact Read p95 below 200 ms, ordinary 20-note Work Clock p95 below 1,000 ms, and ordinary 20-note Proof Clock p95 below 4,000 ms.
+10. Every Proof Clock sample is strictly below the installed 5,000 ms deadline.
+11. The unchanged correctness barriers pass: stale or contrary evidence, missing events/postconditions, timeout, rollback, schema/content error, or unproven result fails release regardless of percentile.
 
-## 14. Remaining decisions
+The 4,000 ms Proof Clock p95 is a performance gate inside—not a replacement for—the 5,000 ms hard correctness deadline. A passing Work Clock can never authorize `intent_applied` or any success acknowledgement.
 
-These are not implementation details; they change the public contract or release verdict and therefore block development-ready status.
-
-### D-1: Complete coherent public wire schemas
-
-The resolved decisions leave these incompatible or unspecified edges:
-
-- The closed `SubmitResult` from [Define the cross-tool error and retry taxonomy](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/12) has no branch for the machine-actionable `writes_paused` and `upgrade_in_progress` non-binding outcomes required by [Define installation, trust, and operations](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/9).
-- Active `recovery_in_progress` and recovery-blocked content-tool outcomes likewise need a trustworthy schema without becoming generic enterprise errors or being confused with protocol failure.
-- Normal `intent_applied` reporting still needs a fixed success payload for preview, requested/derived effects, changed paths, and final Content Versions; the error-taxonomy decision explicitly left it unspecified.
-- Full request/result JSON Schemas for discovery projections, typed read variants, groups/pages, health compatibility/reason fields, diagnostics, and Primary Operator recovery authorization remain unstated.
-- The final textual encoding and validation rules for Content Version values remain unstated.
-- The policy for whether a single-file mutation must still be submitted as a Change Set, and any permitted exception, remains unstated.
-- The public four-state proof model must be mapped normatively to internal executor/health diagnostics without exposing two contradictory lifecycle APIs.
-
-A single schema decision must resolve these together and provide examples plus `isError` mappings.
-
-### D-2: Fix measurable performance release gates
-
-The product boundary targets validation/execution across roughly 20 ordinary Markdown files under 1 second. Installed cache/graph validation observed single scenarios around 0.97–1.99 seconds and requires a 5-second fail-closed barrier before success. The route has not fixed whether the 1-second objective ends before semantic confirmation, is an aspirational non-gate, or must be revised, nor has it fixed percentile, warm-up, repetition count, reference hardware, or the exact 20-note fixture.
-
-A benchmark-backed decision must define the timing boundaries and release verdict without weakening the correctness barrier.
-
-## 15. Decision sources
+## 14. Decision sources
 
 - [Find the way to reliable Claude Code Vault operations](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/2)
 - [Define the MVP product boundary and operating model](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/3)
@@ -611,3 +703,7 @@ A benchmark-backed decision must define the timing boundaries and release verdic
 - [Validate installed cache and graph causality](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/15)
 - [Specify registered reference grammar and renderer profiles](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/16)
 - [Validate the raw-byte source-span adapter](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/17)
+- [Define operational gate result semantics](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/23)
+- [Specify Change Set success reporting and single-file policy](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/24)
+- [Prototype the complete public wire schema](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/25)
+- [Fix measurable MVP performance release gates](https://github.com/canxer314/obsidian-llm-wiki-cli/issues/26)
