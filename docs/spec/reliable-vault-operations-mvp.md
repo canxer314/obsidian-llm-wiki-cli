@@ -124,7 +124,7 @@ The complete public MCP inventory contains exactly six tools:
 
 The authoritative public contract is one versioned package containing strict per-tool input/output roots, shared `$defs`, valid and invalid fixtures, and a cross-call scenario manifest. Every object root rejects unknown fields. JSON Schema owns closed structural validation and examples; the contract/runtime corpora own continuation identity and lifetime, Submission Key ordering and persistence, raw-byte fidelity, WAL/recovery ordering, cache/graph proof, MCP dual-representation identity, privacy, and performance gates.
 
-Privacy-preserving diagnostic summaries are carried through this six-tool boundary; they do not create a seventh diagnostics tool. Accepting a trusted recovery baseline and resuming writes are separate Primary Operator actions available only through a local interactive management entry point, never public MCP mutations. Search Snapshot is an internal success-proof barrier, not a public MCP operation.
+Within public MCP, the privacy-preserving diagnostic summary is exactly the `vault_health` observed branch's `overall`, closed machine `reasonCodes`, and prescribed `operatorAction`; it does not add a health input mode, result branch, free-form text, stack, timeline, path, or identifier field. The richer standard diagnostic bundle is generated only through the local interactive management entry point described in §9.4 and is not an Agent Session request or a seventh MCP tool. Accepting a trusted recovery baseline and resuming writes are also separate Primary Operator actions at that local entry point, never public MCP mutations. Search Snapshot is an internal success-proof barrier, not a public MCP operation.
 
 ### 6.1 `vault_health`
 
@@ -138,7 +138,7 @@ HealthResult =
   | { outcome: "incompatible"; gate: { code: "incompatible_protocol" }; compatibility: ClosedCompatibilitySummary }
 ```
 
-Both use `isError: false`. The observed branch reports at least:
+Both use `isError: false`. On the observed branch, `overall`, machine-readable `reasonCodes`, and `operatorAction` are the complete privacy-preserving diagnostic summary available to an Agent Session; they contain no free-form detail and prescribe, but never authorize, a local action. The observed branch reports at least:
 
 - actual Vault ID plus diagnostic name/path;
 - Bridge, plugin, protocol, persistent-state, and Recovery Journal schema versions;
@@ -499,11 +499,11 @@ Purging Vault identity, endpoint, journal, queue, and settings is separate, back
 
 ### 9.4 Diagnostics and recovery authority
 
-Standard diagnostics contain versions, health, listener and queue timelines, opaque identifiers or irreversible Submission Key digests, lifecycle/reason codes, journal frame/checksum state without before images, filtered logs/stacks, and bundle checksums.
+The local interactive management entry point can generate a standard diagnostic bundle containing versions, health, listener and queue timelines, opaque identifiers or irreversible Submission Key digests, lifecycle/reason codes, journal frame/checksum state without before images, filtered logs/stacks, and bundle checksums. It is not an MCP tool result and is never generated or downloaded by an Agent Session.
 
-They exclude note bodies, Frontmatter values, attachments, complete Change Set requests, before images, raw Submission Keys, credentials, environment variables, usernames, absolute paths, real Vault-relative paths, and real Vault IDs. Stable aliases permit within-bundle correlation.
+The local bundle excludes note bodies, Frontmatter values, attachments, complete Change Set requests, before images, raw Submission Keys, credentials, environment variables, usernames, absolute paths, real Vault-relative paths, and real Vault IDs. Stable aliases permit within-bundle correlation.
 
-Only the Primary Operator, through the local interactive management entry point, may request selected content-inclusive diagnostic data, accept a trusted recovery baseline, or separately resume writes. Agent Sessions can receive redacted diagnostic summaries and suggest local actions but cannot authorize those actions. Clearing a Journal or releasing a recovery gate is not an independent authorization path.
+Only the Primary Operator, through the local interactive management entry point, may generate that bundle, request selected content-inclusive diagnostic data, accept a trusted recovery baseline, or separately resume writes. For diagnostic information, Agent Sessions receive only the closed `vault_health` summary and may suggest its prescribed local action but cannot authorize that action; this does not remove the other observed health fields required by §6.1. Clearing a Journal or releasing a recovery gate is not an independent authorization path.
 
 ## 10. Operating constants and performance objectives
 
@@ -538,7 +538,7 @@ All scenarios are release-blocking unless marked as an objective or installed-ru
 | A-05 | **Given** a combined path/text/typed-Frontmatter/tag/reference/graph query, **when** discovery completes, **then** order is deterministic and each evidence note carries path, exact Content Version, and byte size from one Search Snapshot. |
 | A-06 | **Given** duplicate paths in an ordered heterogeneous read, **when** read completes, **then** every input index has exactly one result in order. |
 | A-07 | **Given** a repeated heading hierarchy, **when** section occurrence is absent or unsatisfied, **then** no alternate section or whole-note fallback is returned. |
-| A-08 | **Given** BOM, CRLF, CJK, and astral Unicode, **when** Exact Read pages are concatenated by byte ranges, **then** the result is byte-identical to disk. |
+| A-08 | **Given** BOM, LF, CRLF, mixed LF/CRLF, CJK, and astral Unicode, **when** Exact Read pages are concatenated by byte ranges, **then** the result is byte-identical to disk without newline rejection or normalization. |
 | A-09 | **Given** one note over 1 MiB, **when** Exact Read is requested, **then** it returns `note_exceeds_exact_read_limit`; grouping/continuation cannot bypass it. |
 | A-10 | **Given** a multi-note logical Exact Read over 1 MiB, **when** read runs, **then** it returns no content and deterministic complete contiguous groups preserving indices, duplicates, and order. |
 | A-11 | **Given** a transport response over 256 KiB but an accepted logical read, **when** continuation runs, **then** each compact page is within limit and all byte ranges reconstruct the frozen result. |
@@ -563,7 +563,7 @@ All scenarios are release-blocking unless marked as an objective or installed-ru
 | A-30 | **Given** a manual pause during execution, **when** the current item reaches a trustworthy end, **then** the Vault becomes paused, queued order is retained, and new submissions do not bind keys. |
 | A-31 | **Given** an upgrade with queued work, **when** maintenance begins, **then** the current item drains, dequeue stops, state/journal migrate fail-closed, and write resume remains explicit. |
 | A-32 | **Given** release artifacts, **when** install/upgrade runs, **then** attestation, checksums, compatibility, path, and capacity validate before per-Vault atomic replacement; no bypass exists. |
-| A-33 | **Given** a standard diagnostics request, **when** the bundle is generated, **then** no Vault content, before images, raw keys/IDs, usernames, environment, or real paths appear. |
+| A-33 | **Given** an Agent Session, **when** it calls `vault_health`, **then** only the closed `overall`, `reasonCodes`, and `operatorAction` diagnostic summary is exposed; **given** the Primary Operator generates a standard diagnostic bundle through the local interactive management entry point, **then** no Vault content, before images, raw keys/IDs, usernames, environment, or real paths appear. |
 | A-34 | **Given** protocol failure/truncation/schema mismatch after submit may have started, **when** the client recovers, **then** it queries or checks the original key/request and never changes keys based on the failed call. |
 | A-35 | **Given** accepted key/record state less than seven days old, **when** Bridge state is lost/corrupt, **then** ordinary `unknown` is forbidden; recovery or unproven blocked state is required. |
 | A-36 | **Given** caller and Bridge cannot safely share the MCP tool schema, **when** MCP initializes, **then** initialization fails and no product result exists; **given** a schema-compatible connection whose plugin, protocol participant, persistent-state schema, or Recovery Journal is incompatible, **when** health is called, **then** only the minimal incompatible branch returns with `isError: false`; every other tool returns `incompatible_protocol` with `isError: true` and submit neither inspects nor binds a key. |
@@ -597,7 +597,7 @@ Every run records the profile name; Bridge/plugin, protocol, MCP SDK, Claude Cod
 The corpus contains isolated generated paths and refuses to overwrite pre-existing fixtures. It includes:
 
 - empty, median-sized, p95-sized, 256 KiB boundary, 1 MiB boundary, and over-1 MiB Markdown notes;
-- UTF-8 BOM/no-BOM, LF/CRLF/mixed newline rejection cases, CJK source paths/content, astral emoji, combining characters, and invalid UTF-8;
+- UTF-8 BOM/no-BOM, LF/CRLF/mixed-newline preservation and rewrite-fidelity cases, CJK source paths/content, astral emoji, combining characters, and invalid UTF-8;
 - duplicate request paths and repeated heading hierarchies with explicit occurrences;
 - wikilink/embed/Markdown inline/embed variants, literal spaces/`%20`, aliases/titles, duplicate spellings, duplicate basename/heading, ASCII and Unicode block IDs, malformed destinations, and literal-`#` attachment targets;
 - Frontmatter scalar/list/quote/flow/block variants and lookalike non-reference text;
