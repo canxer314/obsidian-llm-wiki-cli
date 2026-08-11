@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PROTOTYPE — MVP 性能发布门槛</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f5f1;
+      --panel: #ffffff;
+      --ink: #20231f;
+      --muted: #666c65;
+      --line: #dcded8;
+      --accent: #1e6654;
+      --accent-soft: #e4f0eb;
+      --good: #176b43;
+      --bad: #a33a2b;
+      --warn: #8b6418;
+      --shadow: 0 14px 40px rgba(32, 35, 31, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 28px auto 64px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 8px; font-size: clamp(28px, 4vw, 44px); letter-spacing: -0.035em; }
+    h2 { margin-bottom: 14px; font-size: 21px; }
+    h3 { margin-bottom: 8px; font-size: 16px; }
+
+    .eyebrow {
+      display: inline-flex;
+      padding: 5px 9px;
+      margin-bottom: 12px;
+      border: 1px solid #d8b36d;
+      border-radius: 999px;
+      color: #76510f;
+      background: #fff6df;
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: 0.07em;
+    }
+
+    .lede { max-width: 900px; color: var(--muted); font-size: 17px; }
+
+    .question {
+      padding: 18px 20px;
+      margin: 22px 0;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      border-radius: 0 12px 12px 0;
+    }
+
+    .grid { display: grid; gap: 16px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .card.flat { box-shadow: none; }
+
+    .clock {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 13px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .clock:first-of-type { border-top: 0; }
+    .clock strong { color: var(--accent); }
+
+    .facts, .compact-list { margin: 0; padding-left: 20px; }
+    .facts li, .compact-list li { margin: 7px 0; }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #eef0eb;
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    .gates { display: grid; gap: 10px; }
+
+    .gate {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfcfa;
+    }
+
+    .gate small { display: block; color: var(--muted); }
+    .threshold { font-weight: 780; font-variant-numeric: tabular-nums; }
+
+    .state-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .state-chip {
+      min-height: 62px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #f5f6f3;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .state-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); }
+    .state-chip.done { border-color: #9dc9b6; background: #edf7f2; color: var(--good); }
+    .state-chip.failed { border-color: #ddb0a9; background: #fff0ed; color: var(--bad); }
+
+    .controls { display: flex; flex-wrap: wrap; gap: 9px; }
+
+    button {
+      min-height: 38px;
+      padding: 8px 13px;
+      border: 1px solid #b8beb7;
+      border-radius: 9px;
+      background: white;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+    button.danger { border-color: #d4a29a; color: var(--bad); }
+    button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .metric {
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fafbf9;
+    }
+
+    .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .metric strong { display: block; margin-top: 3px; font-size: 22px; font-variant-numeric: tabular-nums; }
+
+    .verdict {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin-top: 14px;
+      padding: 14px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+    }
+
+    .verdict.pass { background: #edf7f2; border-color: #9dc9b6; }
+    .verdict.fail { background: #fff0ed; border-color: #ddb0a9; }
+    .verdict.pending { background: #fff7e8; border-color: #dfc28c; }
+
+    .verdict-mark { font-size: 22px; line-height: 1; }
+    .verdict p { margin: 3px 0 0; color: var(--muted); }
+
+    .tabs { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 14px; }
+    .tabs button[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+
+    .walkthrough { min-height: 180px; }
+    .step-list { display: grid; gap: 8px; margin-top: 14px; }
+    .step-button { width: 100%; text-align: left; }
+    .step-button.done { border-color: #9dc9b6; background: #edf7f2; color: var(--good); }
+
+    .log {
+      max-height: 250px;
+      overflow: auto;
+      margin: 0;
+      padding: 14px 14px 14px 34px;
+      border-radius: 9px;
+      background: #20231f;
+      color: #e8ece6;
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .log li { margin: 5px 0; }
+
+    .manifest {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 7px 14px;
+      margin: 0;
+    }
+
+    .manifest dt { color: var(--muted); }
+    .manifest dd { margin: 0; font-weight: 620; }
+
+    .callout {
+      padding: 14px 16px;
+      border: 1px solid #d8b36d;
+      border-radius: 10px;
+      background: #fff8e8;
+      color: #644c20;
+    }
+
+    .decision-box {
+      width: 100%;
+      min-height: 300px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      resize: vertical;
+      background: #fafbf9;
+      color: var(--ink);
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .section { margin-top: 18px; }
+    .muted { color: var(--muted); }
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+
+    @media (max-width: 850px) {
+      .grid.two, .grid.three, .metric-grid { grid-template-columns: 1fr; }
+      .state-strip { grid-template-columns: 1fr; }
+      .manifest { grid-template-columns: 1fr; }
+      .manifest dd { margin-bottom: 7px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <span class="eyebrow">THROWAWAY LOGIC PROTOTYPE — 不合入产品</span>
+  <h1>MVP 性能发布门槛</h1>
+  <p class="lede">点击场景，感受“工作已经做完”与“Change Set 已被证明成功”的差别。本页不运行真实 Vault，也不是性能证据；它只让测量协议与发布判定变得可评判。</p>
+
+  <div class="question">
+    <strong>本原型回答的问题：</strong>
+    什么固定 fixture、计时边界、参考环境、预热与重复程序、分位数和阈值，能把 warm discovery/read 与约 20-note validation/execution 目标变成发布门槛，同时绝不削弱 Content-Version-bound cache/graph success barrier？
+  </div>
+
+  <section class="grid two">
+    <article class="card">
+      <h2>推荐：双时钟，而不是二选一</h2>
+      <div class="clock">
+        <strong>Work Clock</strong>
+        <div>从空队列中的 Change Set 成为 FIFO 队首、executor 开始 lease-time preflight，到 mutation 后的 exact raw-byte verification 完成。目标：每批 p95 < 1,000 ms。</div>
+      </div>
+      <div class="clock">
+        <strong>Proof Clock</strong>
+        <div>与 Work Clock 同一起点，到最终 Content Version 证据、图谱后置条件、250 ms quiet window、successor Search Snapshot 和 synced <code>COMMITTED</code> 全部完成。目标：每批 p95 < 4,000 ms；每次必须 < 5,000 ms。</div>
+      </div>
+      <div class="callout section"><strong>关键：</strong>Work Clock 通过，只代表工作预算达标，不代表 Change Set 可以返回 <code>intent_applied</code>。只有 Proof Clock 完成，才能承认成功。</div>
+    </article>
+
+    <article class="card">
+      <h2>客户端与 Bridge 的边界</h2>
+      <ul class="facts">
+        <li><strong>Discovery/read 发布门槛</strong>使用固定 benchmark MCP client 的 loopback round-trip：发送完整 Streamable HTTP 请求前开始，完整 MCP result 解码后停止。</li>
+        <li><strong>Bridge server span</strong>同时记录：完整请求已解码并进入 tool handler，到 compact result 编码并交给 HTTP writer；它用于定位回归，不替代 client-observed gate。</li>
+        <li><strong>Claude Code spot check</strong>单独记录工具调用往返兼容性，但不混入 p95；Claude 推理、工具选择、Claude API 网络、文本渲染均不属于 Vault Operation Bridge 的处理预算。</li>
+        <li><strong>Change Set clocks</strong>取 Bridge monotonic lifecycle timestamps；status polling 的间隔和 Claude Code 是否立即继续推理不影响判定。</li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="card section">
+    <h2>候选 release contract</h2>
+    <div class="gates" id="gate-list"></div>
+  </section>
+
+  <section class="grid two section">
+    <article class="card">
+      <h2>固定 warm discovery/read fixture</h2>
+      <ul class="compact-list">
+        <li>生成根：<code>.mvp-perf-fixture/read-v1/</code>；seed：<code>mvp-perf-read-v1</code>；每次注册 canonical manifest SHA-256。</li>
+        <li>1,000 个 Markdown notes：500 × 2,608 B；449 × 10,240 B；50 × 29,316 B；1 × 163,904 B，总计 7,531,464 B。</li>
+        <li>固定 tag/link/text graph；common discovery 组合 path prefix、正文 token、tag 与 outgoing-link 条件，确定性返回 20 条 path + Content Version + byte size。</li>
+        <li>common read 对这 20 个 median notes 执行有序完整 Exact Read；总结果低于 256 KiB，不创建 continuation，不允许截断或换行/Unicode 归一化。</li>
+        <li>每批 Obsidian 重启后等待 <code>ready</code>，执行一次不计时的 snapshot materialization，再做 5 次不计时 warm-up，随后 30 次测量。</li>
+      </ul>
+    </article>
+
+    <article class="card">
+      <h2>固定 20-note Change Set fixture</h2>
+      <ul class="compact-list">
+        <li>生成根：<code>.mvp-perf-fixture/change-v1/</code>；seed：<code>mvp-perf-change-v1</code>；固定 manifest SHA-256。</li>
+        <li>恰好 20 个既有 ordinary Markdown notes；每个 4,096 B、UTF-8 no-BOM、LF、固定 Frontmatter 与已解析 links。</li>
+        <li>一个 Change Set 对每个 note 执行一次 plain-body <code>replace_exact</code>；每个 old text 唯一，closure 固定为这 20 个 notes，不含 attachment、rename、create/delete 或 derived rewrite。</li>
+        <li>fixture reset 与 inventory/hash verification 在每次样本之外完成；每次测量前 FIFO 必须为空，不能把排队时间偷算成 executor 性能。</li>
+        <li>rename、rapid overwrite、closure growth、link repair 与 timeout 仍由独立 correctness corpus release-blocking；不拿这些较重场景冒充“ordinary 20-note”基线。</li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="card section">
+    <h2>Reference profile：MVP-PERF-REF-1（候选）</h2>
+    <dl class="manifest" id="manifest"></dl>
+    <div class="callout section">每批开始前：接通 AC、Windows “最佳性能”、Bridge-only Obsidian profile、无其他 Vault writer；连续 60 秒 CPU 平均低于 10%，可用内存至少 8 GiB。不得关闭 Defender 或其他正常系统安全措施。环境不满足时整批作废，不删除慢样本。</div>
+  </section>
+
+  <section class="grid two section">
+    <article class="card">
+      <h2>当前 benchmark 状态</h2>
+      <div id="state-strip" class="state-strip"></div>
+      <div id="metrics" class="metric-grid"></div>
+      <div id="verdict"></div>
+    </article>
+
+    <article class="card">
+      <h2>自由操作</h2>
+      <p class="muted">按钮可乱序点击；状态机将拒绝不合法的成功路径。</p>
+      <div class="controls" id="free-controls"></div>
+      <h3 class="section">事件记录</h3>
+      <ol class="log" id="event-log"></ol>
+    </article>
+  </section>
+
+  <section class="card section">
+    <h2>引导场景</h2>
+    <div class="tabs" id="scenario-tabs" role="tablist"></div>
+    <div class="walkthrough" id="walkthrough"></div>
+  </section>
+
+  <section class="card section">
+    <h2>你实际需要判断的四件事</h2>
+    <ol class="facts">
+      <li><strong>固定 workload 是否代表“common / ordinary”？</strong> 推荐把复杂 rename、derived rewrite 与故障注入留给 correctness corpus，不让基准定义被最坏情况劫持。</li>
+      <li><strong>三批 × 30、每批 p95 是否足够稳定？</strong> 推荐所有三批分别过门，不把 90 次混成一个分位数，也不删除 outlier。</li>
+      <li><strong>完整成功 p95 < 4,000 ms 是否合适？</strong> 它给已观测约 0.97–1.99 秒的 barrier 留出环境余量，同时仍明显早于 5 秒 fail-closed deadline。</li>
+      <li><strong>当前工作站是否应成为唯一 reference machine？</strong> 推荐先注册它为 MVP-PERF-REF-1；更慢硬件只有在另行注册 runtime profile 后才形成额外发布义务。</li>
+    </ol>
+  </section>
+
+  <section class="card section">
+    <h2>候选 resolution text</h2>
+    <p class="muted">这是原型当前表达的决定摘要。只有人工评判后，才应贴到 Wayfinder 票据并关闭。</p>
+    <textarea class="decision-box" id="decision-text" readonly></textarea>
+    <div class="controls section">
+      <button id="copy-decision" class="primary">复制候选决议</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const BenchmarkModel = (() => {
+  const policy = Object.freeze({
+    warmupsPerBatch: 5,
+    measuredRunsPerBatch: 30,
+    batchCount: 3,
+    percentile: 95,
+    discoveryP95Ms: 200,
+    readP95Ms: 200,
+    workP95Ms: 1000,
+    proofP95Ms: 4000,
+    proofHardDeadlineMs: 5000,
+    quietWindowMs: 250
+  });
+
+  const phases = [
+    ["fixture", "Fixture ready"],
+    ["warm", "Warm-up complete"],
+    ["work", "Raw verified"],
+    ["proof", "Version-bound proof"],
+    ["committed", "COMMITTED synced"]
+  ];
+
+  const scenarios = {
+    happy: {
+      title: "正常通过",
+      description: "所有延迟门槛通过，且每次写操作都有最终 Content Version 证据。观察 Work Clock 先结束，但 verdict 仍等待 Proof Clock。",
+      steps: [
+        ["prepare", "准备并校验固定 fixture"],
+        ["warm", "完成 5 次 warm-up"],
+        ["recordReads", "记录三批 discovery/read"],
+        ["recordWork", "完成 20-note work clock"],
+        ["prove", "满足版本证据与 quiet window"],
+        ["commit", "发布 snapshot 并 sync COMMITTED"],
+        ["evaluate", "计算 release verdict"]
+      ]
+    },
+    tail: {
+      title: "尾延迟回归",
+      description: "平均值看似很好，但第二批 read 的 p95 超过 200 ms。观察每批分别判定为何不能被另外两批稀释。",
+      steps: [
+        ["prepare", "准备固定 fixture"],
+        ["warm", "完成 warm-up"],
+        ["recordTail", "注入 read 尾延迟样本"],
+        ["evaluate", "按每批 p95 判失败"]
+      ]
+    },
+    stale: {
+      title: "迟到的旧版本 callback",
+      description: "Work Clock 很快，但 v1 callback 在 raw bytes 已是 v2 时迟到。观察它只能进入诊断，不能让 v2 成功。",
+      steps: [
+        ["prepare", "准备固定 fixture"],
+        ["warm", "完成 warm-up"],
+        ["recordReads", "读取性能通过"],
+        ["recordWork", "20-note raw verification 通过"],
+        ["staleEvidence", "收到 stale v1 callback"],
+        ["evaluate", "确认仍不可成功"]
+      ]
+    },
+    boundary: {
+      title: "Claude 侧耗时很长",
+      description: "Bridge discovery 只有约 150 ms，但 Claude 推理和工具选择用了 8 秒。观察为何它应记录为端到端体验，却不能污染 Bridge p95。",
+      steps: [
+        ["prepare", "准备固定 fixture"],
+        ["warm", "完成 warm-up"],
+        ["recordClientBoundary", "记录 Bridge 与 Claude 两条观测"],
+        ["evaluate", "只对约定边界判 gate"]
+      ]
+    },
+    timeout: {
+      title: "屏障超时",
+      description: "Raw verification 与 work p95 都通过，但 proof 超过 5 秒。状态机必须 fail closed，不能把 raw-byte success 当成 intent_applied。",
+      steps: [
+        ["prepare", "准备固定 fixture"],
+        ["warm", "完成 warm-up"],
+        ["recordReads", "读取性能通过"],
+        ["recordWork", "Work Clock 通过"],
+        ["timeout", "触发 5 秒 fail-closed timeout"],
+        ["evaluate", "确认 rollback/unproven"]
+      ]
+    }
+  };
+
+  const baseBatch = (center, spread = 16) => Array.from({ length: policy.measuredRunsPerBatch }, (_, i) =>
+    center + ((i * 17) % (spread * 2 + 1)) - spread
+  ).sort((a, b) => a - b);
+
+  const goodSamples = () => ({
+    discovery: [baseBatch(142, 17), baseBatch(148, 18), baseBatch(145, 15)],
+    read: [baseBatch(158, 17), baseBatch(162, 19), baseBatch(155, 18)],
+    work: [baseBatch(790, 55), baseBatch(820, 58), baseBatch(805, 52)],
+    proof: [baseBatch(2180, 210), baseBatch(2360, 240), baseBatch(2250, 220)]
+  });
+
+  const initialState = (scenario = "happy") => ({
+    scenario,
+    phase: "idle",
+    fixtureReady: false,
+    warmed: false,
+    rawVerified: false,
+    finalVersionEvidence: false,
+    quietWindowHeld: false,
+    snapshotPublished: false,
+    committedSynced: false,
+    timedOut: false,
+    staleEvidenceSeen: false,
+    correctnessFailures: [],
+    samples: { discovery: [], read: [], work: [], proof: [] },
+    claudeObservedMs: null,
+    verdict: "pending",
+    reasons: ["尚未完成测量"],
+    stepIndex: 0,
+    log: ["原型已重置；尚未产生性能证据。"]
+  });
+
+  const nearestRank = (values, percentile) => {
+    if (!values.length) return null;
+    const ordered = [...values].sort((a, b) => a - b);
+    return ordered[Math.ceil(percentile / 100 * ordered.length) - 1];
+  };
+
+  const batchP95s = batches => batches.map(batch => nearestRank(batch, policy.percentile));
+  const allBatchesUnder = (batches, threshold) =>
+    batches.length === policy.batchCount && batchP95s(batches).every(value => value < threshold);
+
+  const evaluate = state => {
+    const reasons = [];
+    const completeMetrics = ["discovery", "read", "work", "proof"].every(key => state.samples[key].length === policy.batchCount);
+
+    if (!allBatchesUnder(state.samples.discovery, policy.discoveryP95Ms)) reasons.push("至少一批 discovery p95 未低于 200 ms");
+    if (!allBatchesUnder(state.samples.read, policy.readP95Ms)) reasons.push("至少一批 Exact Read p95 未低于 200 ms");
+    if (!allBatchesUnder(state.samples.work, policy.workP95Ms)) reasons.push("至少一批 Work Clock p95 未低于 1,000 ms");
+    if (!allBatchesUnder(state.samples.proof, policy.proofP95Ms)) reasons.push("至少一批 Proof Clock p95 未低于 4,000 ms");
+
+    const proofValues = state.samples.proof.flat();
+    if (proofValues.some(value => value >= policy.proofHardDeadlineMs)) reasons.push("至少一个 Proof Clock 样本触及 5,000 ms fail-closed deadline");
+    if (state.correctnessFailures.length) reasons.push(...state.correctnessFailures);
+    if (state.timedOut) reasons.push("success barrier 超时，必须进入 rollback/unproven handling");
+    if (!state.finalVersionEvidence) reasons.push("缺少最终 Content Version callback 证据");
+    if (!state.quietWindowHeld) reasons.push("全部谓词未连续保持 250 ms quiet window");
+    if (!state.snapshotPublished) reasons.push("successor Search Snapshot 尚未发布");
+    if (!state.committedSynced) reasons.push("durable COMMITTED 尚未 sync");
+
+    if (!completeMetrics && !state.correctnessFailures.length && !state.timedOut) {
+      return { ...state, verdict: "pending", reasons: ["四组指标尚未各完成三批测量"], log: [...state.log, "判定：等待完整三批性能数据与成功证明。"] };
+    }
+
+    return reasons.length
+      ? { ...state, verdict: "fail", reasons, log: [...state.log, `判定：FAIL — ${reasons[0]}`] }
+      : { ...state, verdict: "pass", reasons: ["三批 p95 全部过门，且每个样本都保持版本绑定成功语义"], log: [...state.log, "判定：PASS — 性能与正确性两道门均通过。"] };
+  };
+
+  const reducer = (state, action) => {
+    if (action.type === "reset") return initialState(action.scenario ?? state.scenario);
+    if (action.type === "selectScenario") return initialState(action.scenario);
+
+    const next = { ...state, log: [...state.log] };
+    const reject = message => ({ ...next, log: [...next.log, `拒绝：${message}`] });
+
+    switch (action.type) {
+      case "prepare":
+        next.fixtureReady = true;
+        next.phase = "fixture";
+        next.log.push("fixture seed、inventory 与 canonical manifest hash 已校验。计时尚未开始。");
+        break;
+      case "warm":
+        if (!next.fixtureReady) return reject("必须先准备 fixture。");
+        next.warmed = true;
+        next.phase = "warm";
+        next.log.push("Obsidian ready；snapshot materialized；5 次 warm-up 已完成且未计入样本。");
+        break;
+      case "recordReads": {
+        if (!next.warmed) return reject("未完成 warm-up，不能登记 warm measurement。");
+        const samples = goodSamples();
+        next.samples = { ...next.samples, discovery: samples.discovery, read: samples.read };
+        next.log.push("已登记 discovery/read：3 个独立批次 × 30 次，无 outlier 删除。");
+        break;
+      }
+      case "recordTail": {
+        if (!next.warmed) return reject("未完成 warm-up。");
+        const samples = goodSamples();
+        const slow = baseBatch(170, 22);
+        slow.splice(26, 4, 201, 208, 221, 247);
+        slow.sort((a, b) => a - b);
+        next.samples = { ...next.samples, discovery: samples.discovery, read: [samples.read[0], slow, samples.read[2]] };
+        next.log.push("已登记尾延迟回归：第二批 read 的慢尾不会被平均值隐藏。");
+        break;
+      }
+      case "recordClientBoundary": {
+        if (!next.warmed) return reject("未完成 warm-up。");
+        const samples = goodSamples();
+        next.samples = { ...next.samples, discovery: samples.discovery, read: samples.read };
+        next.claudeObservedMs = 8150;
+        next.log.push("direct MCP client p95 约 150–180 ms；Claude 推理/选择/渲染另行观测为 8,150 ms。");
+        break;
+      }
+      case "recordWork": {
+        if (!next.warmed) return reject("必须先完成 fixture warm-up。");
+        const samples = goodSamples();
+        next.samples = { ...next.samples, work: samples.work };
+        next.rawVerified = true;
+        next.phase = "work";
+        next.log.push("20-note Change Set 的 lease-time preflight、mutation 与 raw-byte verification 完成；尚不可报告成功。");
+        break;
+      }
+      case "staleEvidence":
+        if (!next.rawVerified) return reject("尚未到 raw verification 阶段。");
+        next.staleEvidenceSeen = true;
+        next.finalVersionEvidence = false;
+        next.correctnessFailures = [...next.correctnessFailures, "只观察到 stale v1 callback；它不能证明最终 v2 Content Version"];
+        next.log.push("观察到 stale v1 metadataCache.changed callback；记录诊断并继续等待 v2，不启动 quiet window。");
+        break;
+      case "resetQuiet":
+        if (!next.finalVersionEvidence) return reject("尚无最终版本证据，quiet window 未开始。");
+        next.quietWindowHeld = false;
+        next.log.push("收到反证据；250 ms quiet window 重置为 0。");
+        break;
+      case "prove": {
+        if (!next.rawVerified) return reject("raw verification 尚未完成。");
+        if (next.timedOut) return reject("已经 fail closed，不能从 timeout 转回 success。");
+        const samples = goodSamples();
+        next.samples = { ...next.samples, proof: samples.proof };
+        next.finalVersionEvidence = true;
+        next.quietWindowHeld = true;
+        next.phase = "proof";
+        next.log.push("最终 Content Version callbacks、Vault events、cache/graph closure predicates 已连续满足 250 ms。");
+        break;
+      }
+      case "commit":
+        if (!next.finalVersionEvidence || !next.quietWindowHeld) return reject("版本绑定证据与 quiet window 尚未完成。");
+        if (next.timedOut) return reject("timeout 后不得提交成功。");
+        next.snapshotPublished = true;
+        next.committedSynced = true;
+        next.phase = "committed";
+        next.log.push("successor immutable Search Snapshot 已发布；COMMITTED 已 sync；现在才可 acknowledge intent_applied。");
+        break;
+      case "timeout": {
+        if (!next.rawVerified) return reject("尚未进入 success barrier。");
+        const samples = goodSamples();
+        const timedOutBatch = [...samples.proof[0]];
+        timedOutBatch[29] = policy.proofHardDeadlineMs;
+        next.samples = { ...next.samples, proof: [timedOutBatch, samples.proof[1], samples.proof[2]] };
+        next.timedOut = true;
+        next.phase = "failed";
+        next.correctnessFailures = [...next.correctnessFailures, "5,000 ms 内语义证据未收敛，success forbidden"];
+        next.log.push("5,000 ms deadline 到达：fail closed；开始 rollback/unproven handling，raw bytes 不构成 success。");
+        break;
+      }
+      case "evaluate":
+        return evaluate(next);
+      default:
+        return reject(`未知动作 ${action.type}`);
+    }
+
+    if (action.guided) next.stepIndex += 1;
+    return next;
+  };
+
+  return { policy, phases, scenarios, initialState, reducer, nearestRank, batchP95s };
+})();
+
+const manifestEntries = [
+  ["Reference machine", "MVP-PERF-REF-1（固定机器，不用抽象“同等级”替代）"],
+  ["CPU", "Intel Core Ultra X7 358H · 16 cores / 16 logical processors"],
+  ["Memory", "31.5 GiB"],
+  ["Storage", "UMIS UPJYJ1TBMNV1QWY · 1 TB NVMe SSD · NTFS fixture volume"],
+  ["Windows", "Windows 11 Pro for Workstations · build 26200"],
+  ["Validated host", "Obsidian 1.13.4 · Electron 39.6.0 · Node 24.14.0"],
+  ["Claude Code", "2.1.220（manifest + compatibility spot check；不进入 Bridge p95）"],
+  ["Plugin inventory", "全新 Obsidian profile，仅启用待发布 Vault Operation Bridge"],
+  ["Run structure", "3 batches；每批重启 Obsidian，1 次 materialization + 5 warm-ups + 30 measured runs"],
+  ["Statistic", "nearest-rank p95；每批分别过门；不删 outlier，不用跨批平均掩盖回归"],
+  ["Versioning", "plugin / protocol / MCP SDK / fixture hash 任一变化都生成新 manifest 并重新基线"]
+];
+
+const gateEntries = [
+  ["Warm common discovery", "direct loopback MCP client round-trip", "每批 p95 < 200 ms"],
+  ["Warm common Exact Read", "20 × median note，完整结果，无 continuation", "每批 p95 < 200 ms"],
+  ["20-note Work Clock", "FIFO head / lease preflight → exact raw verification", "每批 p95 < 1,000 ms"],
+  ["20-note Proof Clock", "同一起点 → snapshot published + COMMITTED synced", "每批 p95 < 4,000 ms"],
+  ["Barrier hard deadline", "任何一次最终版本证据未收敛", "每次 < 5,000 ms"],
+  ["Correctness corpus", "stale callback、rename/link repair、closure growth、quiet reset、timeout", "全部通过；零容忍"]
+];
+
+const freeActions = [
+  ["prepare", "准备 fixture", ""],
+  ["warm", "执行 warm-up", ""],
+  ["recordReads", "记录读取批次", ""],
+  ["recordWork", "结束 Work Clock", ""],
+  ["staleEvidence", "注入 stale callback", "danger"],
+  ["prove", "满足 success barrier", ""],
+  ["resetQuiet", "用反证据重置 quiet window", "danger"],
+  ["commit", "发布 snapshot + COMMITTED", "primary"],
+  ["timeout", "触发 5 秒 timeout", "danger"],
+  ["evaluate", "计算 verdict", "primary"],
+  ["reset", "重置", ""]
+];
+
+let state = BenchmarkModel.initialState();
+
+const el = id => document.getElementById(id);
+
+function dispatch(type, guided = false) {
+  state = BenchmarkModel.reducer(state, { type, guided });
+  render();
+}
+
+function selectScenario(scenario) {
+  state = BenchmarkModel.reducer(state, { type: "selectScenario", scenario });
+  render();
+}
+
+function metricValue(key) {
+  const p95s = BenchmarkModel.batchP95s(state.samples[key]);
+  return p95s.length ? p95s.map(value => `${value} ms`).join(" · ") : "—";
+}
+
+function renderGateList() {
+  el("gate-list").innerHTML = gateEntries.map(([title, scope, threshold]) => `
+    <div class="gate">
+      <div><strong>${title}</strong><small>${scope}</small></div>
+      <div class="threshold">${threshold}</div>
+    </div>`).join("");
+}
+
+function renderManifest() {
+  el("manifest").innerHTML = manifestEntries.map(([term, value]) => `<dt>${term}</dt><dd>${value}</dd>`).join("");
+}
+
+function renderState() {
+  const failed = state.timedOut || state.correctnessFailures.length > 0;
+  el("state-strip").innerHTML = BenchmarkModel.phases.map(([key, label]) => {
+    const order = BenchmarkModel.phases.findIndex(([phase]) => phase === key);
+    const current = BenchmarkModel.phases.findIndex(([phase]) => phase === state.phase);
+    const css = failed && key === "committed" ? "failed" : current > order ? "done" : current === order ? "active" : "";
+    const mark = css === "done" ? "✓" : css === "failed" ? "×" : css === "active" ? "●" : "○";
+    return `<div class="state-chip ${css}"><strong>${mark} ${label}</strong></div>`;
+  }).join("");
+}
+
+function renderMetrics() {
+  const metrics = [
+    ["Discovery p95 by batch", metricValue("discovery")],
+    ["Exact Read p95 by batch", metricValue("read")],
+    ["Work p95 by batch", metricValue("work")],
+    ["Proof p95 by batch", metricValue("proof")]
+  ];
+  if (state.claudeObservedMs !== null) metrics.push(["Claude-side observed", `${state.claudeObservedMs} ms · informational`]);
+  el("metrics").innerHTML = metrics.map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join("");
+}
+
+function renderVerdict() {
+  const mark = state.verdict === "pass" ? "✓" : state.verdict === "fail" ? "×" : "…";
+  const title = state.verdict === "pass" ? "Release gate PASS" : state.verdict === "fail" ? "Release gate FAIL" : "Release verdict pending";
+  el("verdict").innerHTML = `<div class="verdict ${state.verdict}"><div class="verdict-mark">${mark}</div><div><strong>${title}</strong><p>${state.reasons.join("；")}</p></div></div>`;
+}
+
+function renderFreeControls() {
+  el("free-controls").innerHTML = freeActions.map(([type, label, css]) => `<button class="${css}" data-free-action="${type}">${label}</button>`).join("");
+  document.querySelectorAll("[data-free-action]").forEach(button => button.addEventListener("click", () => dispatch(button.dataset.freeAction)));
+}
+
+function renderLog() {
+  el("event-log").innerHTML = state.log.map(item => `<li>${item}</li>`).join("");
+  el("event-log").scrollTop = el("event-log").scrollHeight;
+}
+
+function renderScenarios() {
+  el("scenario-tabs").innerHTML = Object.entries(BenchmarkModel.scenarios).map(([key, scenario]) => `
+    <button role="tab" aria-selected="${state.scenario === key}" data-scenario="${key}">${scenario.title}</button>`).join("");
+  document.querySelectorAll("[data-scenario]").forEach(button => button.addEventListener("click", () => selectScenario(button.dataset.scenario)));
+
+  const scenario = BenchmarkModel.scenarios[state.scenario];
+  el("walkthrough").innerHTML = `
+    <h3>${scenario.title}</h3>
+    <p class="muted">${scenario.description}</p>
+    <div class="step-list">
+      ${scenario.steps.map(([type, label], index) => {
+        const done = index < state.stepIndex;
+        const disabled = index > state.stepIndex;
+        return `<button class="step-button ${done ? "done" : ""}" data-step-action="${type}" ${disabled || done ? "disabled" : ""}>${done ? "✓" : `${index + 1}.`} ${label}</button>`;
+      }).join("")}
+    </div>`;
+  const current = document.querySelector("[data-step-action]:not(:disabled)");
+  if (current) current.addEventListener("click", () => dispatch(current.dataset.stepAction, true));
+}
+
+function renderDecisionText() {
+  el("decision-text").value = `## Resolution candidate\n\nAdopt a two-clock performance contract without changing Change Set success semantics.\n\n- Register the deterministic read-v1 fixture: 1,000 Markdown notes, 7,531,464 total bytes, fixed seed and canonical manifest hash. Gate the fixed composable discovery request and ordered Exact Read of 20 median notes separately.\n- Measure warm discovery/read with a fixed direct Streamable HTTP MCP benchmark client, from immediately before loopback send until the complete MCP result is decoded. Record the Bridge handler span and a Claude Code compatibility spot check separately; Claude inference/tool-choice/rendering time is not part of the Bridge percentile.\n- Register the deterministic change-v1 fixture: exactly 20 existing 4,096-byte ordinary Markdown notes, each receiving one unique plain-body replace_exact operation; the affected closure is exactly those 20 notes.\n- Work Clock starts when the empty-queue Change Set becomes FIFO head and lease-time preflight starts, ending after mutation and exact raw-byte verification. It does not authorize success. Gate every batch at nearest-rank p95 < 1,000 ms.\n- Proof Clock has the same start and ends only after final Content-Version callback evidence, required Vault/path evidence, exact cache/graph closure predicates, a 250 ms quiet window, successor Search Snapshot publication, and synced COMMITTED. Gate every batch at nearest-rank p95 < 4,000 ms and every sample at < 5,000 ms. Any timeout or semantic mismatch fails closed and blocks release regardless of percentiles.\n- Run three independent batches. Each batch restarts Obsidian, waits for ready, materializes the Search Snapshot once, performs five unmeasured warm-ups, then records 30 samples. Reset and hash-verify mutation fixtures outside timed spans. Never delete outliers or pool batches to hide a failing batch.\n- Register MVP-PERF-REF-1 as the initial exact reference machine/profile: Windows 11 build 26200, Intel Core Ultra X7 358H, 31.5 GiB RAM, 1 TB NVMe/NTFS, Obsidian 1.13.4 / Electron 39.6.0 / Node 24.14.0, and a clean profile with only the Bridge enabled. Record Claude Code, MCP SDK, plugin/protocol, corpus and settings versions in every manifest.\n- Keep cache/graph causality scenarios and the full acceptance matrix independently release-blocking; the ordinary performance fixture does not replace them.\n\nRelease passes only when all three batches satisfy discovery p95 < 200 ms, Exact Read p95 < 200 ms, Work Clock p95 < 1,000 ms, Proof Clock p95 < 4,000 ms, every proof completes before 5,000 ms, and every correctness scenario passes.`;
+}
+
+function render() {
+  renderState();
+  renderMetrics();
+  renderVerdict();
+  renderFreeControls();
+  renderLog();
+  renderScenarios();
+}
+
+renderGateList();
+renderManifest();
+renderDecisionText();
+render();
+
+el("copy-decision").addEventListener("click", async () => {
+  await navigator.clipboard.writeText(el("decision-text").value);
+  el("copy-decision").textContent = "已复制";
+  setTimeout(() => { el("copy-decision").textContent = "复制候选决议"; }, 1200);
+});
+</script>
+</body>
+</html>
