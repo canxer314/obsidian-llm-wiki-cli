@@ -1,0 +1,428 @@
+{
+  "$id": "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-health.output.schema.json",
+  "title": "vault_health v1 output",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "observed"
+        },
+        "vault": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "versions": {
+          "type": "object",
+          "properties": {
+            "bridge": {
+              "type": "string",
+              "minLength": 1
+            },
+            "plugin": {
+              "type": "string",
+              "minLength": 1
+            },
+            "protocol": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+$"
+            },
+            "persistentStateSchema": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "recoveryJournalSchema": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "bridge",
+            "plugin",
+            "protocol",
+            "persistentStateSchema",
+            "recoveryJournalSchema"
+          ],
+          "additionalProperties": false
+        },
+        "listener": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "type": "string",
+              "const": "127.0.0.1"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          },
+          "required": [
+            "address",
+            "port"
+          ],
+          "additionalProperties": false
+        },
+        "readiness": {
+          "type": "object",
+          "properties": {
+            "searchSnapshot": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "building",
+                "unavailable"
+              ]
+            },
+            "cache": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "building",
+                "unavailable"
+              ]
+            },
+            "index": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "building",
+                "unavailable"
+              ]
+            }
+          },
+          "required": [
+            "searchSnapshot",
+            "cache",
+            "index"
+          ],
+          "additionalProperties": false
+        },
+        "recovery": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "none",
+                "in_progress",
+                "blocked"
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        "write": {
+          "type": "object",
+          "properties": {
+            "gate": {
+              "type": "string",
+              "enum": [
+                "open",
+                "blocked"
+              ]
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "writable",
+                "pausing",
+                "paused"
+              ]
+            },
+            "pauseSource": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "manual",
+                    "maintenance"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "gate",
+            "state",
+            "pauseSource"
+          ],
+          "additionalProperties": false
+        },
+        "queue": {
+          "type": "object",
+          "properties": {
+            "currentExecutionId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "headChangeSetId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "currentExecutionId",
+            "length",
+            "headChangeSetId"
+          ],
+          "additionalProperties": false
+        },
+        "lifecycle": {
+          "type": "object",
+          "properties": {
+            "startup": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "failed"
+              ]
+            },
+            "upgrade": {
+              "type": "string",
+              "enum": [
+                "not_run",
+                "succeeded",
+                "failed"
+              ]
+            },
+            "migration": {
+              "type": "string",
+              "enum": [
+                "not_run",
+                "succeeded",
+                "failed"
+              ]
+            },
+            "recovery": {
+              "type": "string",
+              "enum": [
+                "not_run",
+                "succeeded",
+                "failed"
+              ]
+            }
+          },
+          "required": [
+            "startup",
+            "upgrade",
+            "migration",
+            "recovery"
+          ],
+          "additionalProperties": false
+        },
+        "effectiveGate": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "writes_paused",
+                    "upgrade_in_progress",
+                    "recovery_in_progress",
+                    "recovery_blocked"
+                  ]
+                }
+              },
+              "required": [
+                "code"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overall": {
+          "type": "string",
+          "enum": [
+            "healthy",
+            "degraded",
+            "blocked"
+          ]
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "operatorAction": {
+          "type": "string",
+          "enum": [
+            "none",
+            "finish_initialization",
+            "wait_for_readiness",
+            "wait_for_recovery",
+            "review_recovery",
+            "resume_writes",
+            "finish_upgrade"
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "vault",
+        "versions",
+        "listener",
+        "readiness",
+        "recovery",
+        "write",
+        "queue",
+        "lifecycle",
+        "effectiveGate",
+        "overall",
+        "reasonCodes",
+        "operatorAction"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "incompatible"
+        },
+        "gate": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "incompatible_protocol"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "additionalProperties": false
+        },
+        "compatibility": {
+          "type": "object",
+          "properties": {
+            "local": {
+              "$ref": "#/$defs/__schema0"
+            },
+            "peer": {
+              "$ref": "#/$defs/__schema0"
+            }
+          },
+          "required": [
+            "local",
+            "peer"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outcome",
+        "gate",
+        "compatibility"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "__schema0": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+$"
+        },
+        "supported": {
+          "type": "object",
+          "properties": {
+            "major": {
+              "$ref": "#/$defs/__schema1"
+            },
+            "minimumMinor": {
+              "$ref": "#/$defs/__schema2"
+            },
+            "maximumMinor": {
+              "$ref": "#/$defs/__schema3"
+            }
+          },
+          "required": [
+            "major",
+            "minimumMinor",
+            "maximumMinor"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "protocol",
+        "supported"
+      ],
+      "additionalProperties": false
+    },
+    "__schema1": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema2": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema3": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  }
+}

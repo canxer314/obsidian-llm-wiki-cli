@@ -1,0 +1,21 @@
+{
+  "name": "@llm-wiki/obsidian-vault-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run test"
+  },
+  "dependencies": {
+    "@llm-wiki/vault-contracts": "1.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12",
+    "obsidian": "^1.13.1"
+  }
+}
