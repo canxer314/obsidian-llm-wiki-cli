@@ -15,6 +15,12 @@ export {
   type FrontmatterChange,
   type MoveDerivedProjection,
   type MoveProjection,
+  type ChangeSetExecutionAdapter,
+  type ChangeSetExecutionState,
+  type ChangeSetRuntimeStatePort,
+  type RecoveryJournalFrame,
+  type RecoveryJournalPhase,
+  InjectedChangeSetCrash,
   type ChangeSetGate,
   type ChangeSetPathKind,
   type ChangeSetPreflightDataSource,
@@ -25,6 +31,12 @@ export {
   type ChangeSetRequestState,
   type ChangeSetServiceOptions,
 } from "./change-set.js";
+export {
+  DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
+  createFileSystemChangeSetExecutionAdapter,
+  type DirectoryExecutionHost,
+  type FileSystemChangeSetExecutionOptions,
+} from "./file-system-change-set-execution.js";
 export { createRegistrationCommand } from "./registration-command.js";
 export {
   ManagedVaultBridgeRuntime,

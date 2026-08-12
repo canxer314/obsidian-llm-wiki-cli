@@ -638,7 +638,30 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     async start() {
       if (httpServer !== undefined) throw new Error("Bridge Instance already started");
       if (options.changeSets !== undefined) {
-        changeSetService = await ChangeSetService.open(options.changeSets);
+        const runtimeState = options.changeSets.runtimeState ?? {
+          setQueue: (queue: BridgeHealthState["queue"]) => {
+            options.health.queue = queue;
+          },
+          blockWritesForUnproven: () => {
+            options.health.recovery = { state: "blocked" };
+            options.health.write = {
+              gate: "blocked",
+              state: "paused",
+              pauseSource: null,
+            };
+            options.health.effectiveGate = { code: "recovery_blocked" };
+            options.health.overall = "blocked";
+            options.health.reasonCodes = [
+              ...new Set([...options.health.reasonCodes, "recovery_blocked"]),
+            ];
+            options.health.operatorAction = "review_recovery";
+          },
+        };
+        changeSetService = await ChangeSetService.open({
+          ...options.changeSets,
+          vaultId: options.changeSets.vaultId ?? options.health.vault.id,
+          runtimeState,
+        });
       }
       const server = createServer((request, response) => {
         void handleRequest(request, response).catch(() => {

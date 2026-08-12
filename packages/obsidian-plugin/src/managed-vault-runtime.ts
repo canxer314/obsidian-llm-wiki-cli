@@ -3,6 +3,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import {
   CHANGE_SET_REGISTRY_SCHEMA_VERSION,
   parseChangeSetRegistryState,
+  type ChangeSetExecutionAdapter,
   type ChangeSetPreflightDataSource,
   type ChangeSetRegistryState,
 } from "./change-set.js";
@@ -68,11 +69,14 @@ export interface ManagedVaultBridgeRuntimeOptions {
         save(state: ChangeSetRegistryState): Promise<void>;
       };
       dataSource: ChangeSetPreflightDataSource;
+      execution?: ChangeSetExecutionAdapter;
+      vaultId?: string;
     };
   }): BridgeInstance;
   readDataSource?: VaultReadDataSource;
   searchDataSource?: SearchSnapshotDataSource;
   changeSetDataSource?: ChangeSetPreflightDataSource;
+  changeSetExecution?: ChangeSetExecutionAdapter;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
 }
@@ -165,6 +169,19 @@ export class ManagedVaultBridgeRuntime {
     const snapshots = this.#snapshots;
     if (snapshots === undefined) return;
     await snapshots.rebuild();
+  }
+
+  async publishSuccessorSearchSnapshot(): Promise<void> {
+    const snapshots = this.#snapshots;
+    const refresh = this.#snapshotRefresh;
+    if (snapshots === undefined || refresh === undefined) {
+      throw new Error("Search Snapshot publisher is unavailable");
+    }
+    refresh.schedule();
+    await refresh.whenIdle();
+    if (snapshots.readiness !== "ready") {
+      throw new Error("Successor Search Snapshot publication failed");
+    }
   }
 
   scheduleSearchSnapshotRefresh(): void {
@@ -311,19 +328,28 @@ export class ManagedVaultBridgeRuntime {
             ? { code: "writes_paused" }
             : null,
         overall:
-          this.#options.changeSetDataSource === undefined ? "blocked" : "degraded",
+          this.#options.changeSetDataSource === undefined
+            ? "blocked"
+            : snapshots?.readiness === "ready" &&
+                this.#options.changeSetExecution !== undefined
+              ? "healthy"
+              : "degraded",
         reasonCodes:
           snapshots?.readiness !== "ready"
             ? ["content_tools_not_ready"]
             : this.#options.changeSetDataSource === undefined
               ? ["writes_paused"]
-              : ["mutation_executor_not_ready"],
+              : this.#options.changeSetExecution === undefined
+                ? ["mutation_executor_not_ready"]
+                : [],
         operatorAction:
           snapshots?.readiness !== "ready"
             ? "finish_initialization"
             : this.#options.changeSetDataSource === undefined
               ? "resume_writes"
-              : "wait_for_readiness",
+              : this.#options.changeSetExecution === undefined
+                ? "wait_for_readiness"
+                : "none",
       },
       readDataSource: this.#options.readDataSource,
       discoverService: snapshots === undefined ? undefined : new VaultDiscoverService(snapshots),
@@ -332,7 +358,12 @@ export class ManagedVaultBridgeRuntime {
       changeSets:
         this.#options.changeSetDataSource === undefined
           ? undefined
-          : { store: changeSetStore, dataSource: this.#options.changeSetDataSource },
+          : {
+              store: changeSetStore,
+              dataSource: this.#options.changeSetDataSource,
+              execution: this.#options.changeSetExecution,
+              vaultId: settings.vaultId,
+            },
     });
 
     await bridge.start();
@@ -350,6 +381,7 @@ export class ManagedVaultBridgeRuntime {
     this.#snapshotRefresh?.dispose();
     this.#snapshotRefresh = undefined;
     if (bridge !== undefined) await bridge.stop();
+    await this.#options.changeSetExecution?.close?.();
   }
 
   registrationCommand(serverName?: string): string {
