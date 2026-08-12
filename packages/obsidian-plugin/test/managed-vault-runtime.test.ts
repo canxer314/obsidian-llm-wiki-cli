@@ -514,6 +514,106 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  it("builds and injects one ready Search Snapshot before starting the Bridge", async () => {
+    const bridge = fakeBridge(27123);
+    let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["note.md"],
+        readBinary: async () => new TextEncoder().encode("needle"),
+      },
+      createBridge: (options) => {
+        captured = options;
+        return bridge;
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+
+    await runtime.load();
+
+    expect(captured?.searchSnapshotReadiness?.()).toBe("ready");
+    expect(captured?.health).toMatchObject({
+      readiness: { searchSnapshot: "ready", index: "ready" },
+      effectiveGate: { code: "writes_paused" },
+      overall: "blocked",
+      reasonCodes: ["writes_paused"],
+      operatorAction: "resume_writes",
+    });
+    await expect(
+      captured?.discoverService?.execute({
+        query: { text: { literal: "needle", caseSensitive: true } },
+        projection: { matches: true },
+        order: { by: "path", direction: "asc" },
+        page: { maxItems: 10, continuation: null },
+      }),
+    ).resolves.toMatchObject({ outcome: "results", items: [{ path: "note.md" }] });
+    expect(bridge.start).toHaveBeenCalledOnce();
+    await runtime.unload();
+  });
+
+  it("starts health reporting when the initial Search Snapshot build fails closed", async () => {
+    const bridge = fakeBridge(27123);
+    let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["missing.md"],
+        readBinary: async () => null,
+      },
+      createBridge: (options) => {
+        captured = options;
+        return bridge;
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+
+    await runtime.load();
+
+    expect(captured?.searchSnapshotReadiness?.()).toBe("unavailable");
+    expect(bridge.start).toHaveBeenCalledOnce();
+    await runtime.unload();
+  });
+
+  it("publishes a successor Search Snapshot on refresh", async () => {
+    let content = "old";
+    let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["note.md"],
+        readBinary: async () => new TextEncoder().encode(content),
+      },
+      createBridge: (options) => {
+        captured = options;
+        return fakeBridge(27123);
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    content = "new needle";
+    await runtime.refreshSearchSnapshot();
+    const result = await captured?.discoverService?.execute({
+      query: { text: { literal: "needle", caseSensitive: true } },
+      projection: { matches: true },
+      order: { by: "path", direction: "asc" },
+      page: { maxItems: 10, continuation: null },
+    });
+
+    expect(result).toMatchObject({
+      outcome: "results",
+      items: [{ path: "note.md", sizeBytes: 10, matches: [{ text: "needle" }] }],
+    });
+    await runtime.unload();
+  });
+
   it("returns the local Claude Code registration command without executing it", async () => {
     const bridge = fakeBridge(27123);
     const runtime = new ManagedVaultBridgeRuntime({

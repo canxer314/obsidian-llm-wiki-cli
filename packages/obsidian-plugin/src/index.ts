@@ -1,5 +1,6 @@
 export {
   createBridgeInstance,
+  type BridgeDiscoverService,
   type BridgeHealthState,
   type BridgeInstance,
   type BridgeInstanceOptions,
@@ -42,6 +43,17 @@ export {
   type VaultReadDataSource,
   type VaultReadHeading,
 } from "./vault-read.js";
+export {
+  VaultDiscoverService,
+  type VaultDiscoverServiceOptions,
+} from "./vault-discover.js";
+export {
+  SearchSnapshotManager,
+  type SearchSnapshot,
+  type SearchSnapshotDataSource,
+  type SearchSnapshotNote,
+  type SearchSnapshotReadiness,
+} from "./search-snapshot.js";
 export {
   CONTINUATION_LIFETIME_MILLISECONDS,
   MAXIMUM_ACTIVE_CHAINS_PER_CLIENT,

@@ -1,0 +1,203 @@
+{
+  "$id": "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-discover.output.schema.json",
+  "title": "vault_discover v1 output",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "ordering": {
+          "$ref": "#/$defs/__schema1"
+        },
+        "items": {
+          "$ref": "#/$defs/__schema2"
+        },
+        "complete": {
+          "$ref": "#/$defs/__schema7"
+        },
+        "continuation": {
+          "$ref": "#/$defs/__schema8"
+        }
+      },
+      "required": [
+        "outcome",
+        "ordering",
+        "items",
+        "complete",
+        "continuation"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "snapshot_unavailable"
+        },
+        "code": {
+          "type": "string",
+          "const": "search_snapshot_unavailable"
+        }
+      },
+      "required": [
+        "outcome",
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "operationally_blocked"
+        },
+        "gate": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "enum": [
+                "recovery_in_progress",
+                "recovery_blocked",
+                "incompatible_protocol"
+              ]
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outcome",
+        "gate"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "__schema0": {
+      "type": "string",
+      "const": "results"
+    },
+    "__schema1": {
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string",
+          "const": "path"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "tieBreaker": {
+          "type": "string",
+          "const": "path_utf8_bytes"
+        }
+      },
+      "required": [
+        "by",
+        "direction",
+        "tieBreaker"
+      ],
+      "additionalProperties": false
+    },
+    "__schema2": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/).+\\.md$"
+          },
+          "contentVersion": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "line": {
+                  "$ref": "#/$defs/__schema3"
+                },
+                "startByte": {
+                  "$ref": "#/$defs/__schema4"
+                },
+                "endByteExclusive": {
+                  "$ref": "#/$defs/__schema5"
+                },
+                "text": {
+                  "$ref": "#/$defs/__schema6"
+                }
+              },
+              "required": [
+                "line",
+                "startByte",
+                "endByteExclusive",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "path",
+          "contentVersion",
+          "sizeBytes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "__schema3": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema4": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema5": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema6": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema7": {
+      "type": "boolean"
+    },
+    "__schema8": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

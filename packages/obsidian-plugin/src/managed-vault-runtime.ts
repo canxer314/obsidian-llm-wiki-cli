@@ -7,9 +7,12 @@ import {
   type ChangeSetRegistryState,
 } from "./change-set.js";
 import type {
+  BridgeDiscoverService,
   BridgeHealthState,
   BridgeInstance,
 } from "./bridge-instance.js";
+import { SearchSnapshotManager, type SearchSnapshotDataSource } from "./search-snapshot.js";
+import { VaultDiscoverService } from "./vault-discover.js";
 import type { VaultReadDataSource } from "./vault-read.js";
 
 export const PERSISTENT_STATE_SCHEMA_VERSION = 2;
@@ -53,6 +56,8 @@ export interface ManagedVaultBridgeRuntimeOptions {
     port: number;
     health: BridgeHealthState;
     readDataSource?: VaultReadDataSource;
+    discoverService?: BridgeDiscoverService;
+    searchSnapshotReadiness?: () => "ready" | "building" | "unavailable";
     changeSets?: {
       store: {
         load(): Promise<unknown>;
@@ -62,6 +67,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
     };
   }): BridgeInstance;
   readDataSource?: VaultReadDataSource;
+  searchDataSource?: SearchSnapshotDataSource;
   changeSetDataSource?: ChangeSetPreflightDataSource;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
@@ -132,6 +138,7 @@ export class ManagedVaultBridgeRuntime {
   #bridge: BridgeInstance | undefined;
   #settings: PersistedBridgeSettings | undefined;
   #pendingPathChange: PathChangeEvidence | undefined;
+  #snapshots: SearchSnapshotManager | undefined;
 
   constructor(options: ManagedVaultBridgeRuntimeOptions) {
     this.#options = options;
@@ -147,6 +154,12 @@ export class ManagedVaultBridgeRuntime {
 
   get pendingPathChange(): PathChangeEvidence | undefined {
     return this.#pendingPathChange;
+  }
+
+  async refreshSearchSnapshot(): Promise<void> {
+    const snapshots = this.#snapshots;
+    if (snapshots === undefined) return;
+    await snapshots.rebuild();
   }
 
   async #saveSettings(settings: PersistedBridgeSettings): Promise<void> {
@@ -235,6 +248,18 @@ export class ManagedVaultBridgeRuntime {
       await this.#options.settings.saveRecovery?.(settings);
     }
 
+    const snapshots =
+      this.#options.searchDataSource === undefined
+        ? undefined
+        : new SearchSnapshotManager(this.#options.searchDataSource);
+    this.#snapshots = snapshots;
+    if (snapshots !== undefined) {
+      try {
+        await snapshots.rebuild();
+      } catch {
+        // The Bridge still starts so vault_health can report fail-closed readiness.
+      }
+    }
     const changeSetStore = {
       load: async () => settings.changeSets,
       save: async (changeSets: ChangeSetRegistryState) => {
@@ -253,9 +278,9 @@ export class ManagedVaultBridgeRuntime {
           path: settings.diagnosticPath,
         },
         readiness: {
-          searchSnapshot: "unavailable",
+          searchSnapshot: snapshots?.readiness ?? "unavailable",
           cache: "unavailable",
-          index: "unavailable",
+          index: snapshots?.readiness === "ready" ? "ready" : "unavailable",
         },
         recovery: { state: "none" },
         write:
@@ -276,15 +301,22 @@ export class ManagedVaultBridgeRuntime {
         overall:
           this.#options.changeSetDataSource === undefined ? "blocked" : "degraded",
         reasonCodes:
-          this.#options.changeSetDataSource === undefined
+          snapshots?.readiness !== "ready"
             ? ["content_tools_not_ready"]
-            : ["mutation_executor_not_ready"],
+            : this.#options.changeSetDataSource === undefined
+              ? ["writes_paused"]
+              : ["mutation_executor_not_ready"],
         operatorAction:
-          this.#options.changeSetDataSource === undefined
+          snapshots?.readiness !== "ready"
             ? "finish_initialization"
-            : "wait_for_readiness",
+            : this.#options.changeSetDataSource === undefined
+              ? "resume_writes"
+              : "wait_for_readiness",
       },
       readDataSource: this.#options.readDataSource,
+      discoverService: snapshots === undefined ? undefined : new VaultDiscoverService(snapshots),
+      searchSnapshotReadiness:
+        snapshots === undefined ? undefined : () => snapshots.readiness,
       changeSets:
         this.#options.changeSetDataSource === undefined
           ? undefined
@@ -302,6 +334,7 @@ export class ManagedVaultBridgeRuntime {
   async unload(): Promise<void> {
     const bridge = this.#bridge;
     this.#bridge = undefined;
+    this.#snapshots = undefined;
     if (bridge !== undefined) await bridge.stop();
   }
 

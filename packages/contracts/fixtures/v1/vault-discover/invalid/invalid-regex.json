@@ -1,0 +1,8 @@
+{
+  "input": {
+    "query": { "text": { "regex": "[", "caseSensitive": true } },
+    "projection": { "matches": true },
+    "order": { "by": "path", "direction": "asc" },
+    "page": { "maxItems": 10, "continuation": null }
+  }
+}

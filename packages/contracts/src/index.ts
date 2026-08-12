@@ -46,6 +46,189 @@ const jsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
   ]),
 );
 
+const discoverPathSchema = z.string().regex(
+  /^(?!\/)(?!.*\\)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/).+$/u,
+  "path must be canonical and Vault-relative",
+);
+
+function hasValidRegularExpression(pattern: string): boolean {
+  try {
+    return !new RegExp(pattern, "u").test("");
+  } catch {
+    return false;
+  }
+}
+
+const pathDiscoverQuerySchema = z
+  .object({
+    path: z.union([
+      z.object({ exact: canonicalMarkdownPathSchema }).strict(),
+      z.object({ prefix: discoverPathSchema }).strict(),
+      z.object({ glob: discoverPathSchema }).strict(),
+    ]),
+  })
+  .strict();
+const filenameDiscoverQuerySchema = z
+  .object({
+    filename: z.union([
+      z.object({ exact: z.string().min(1), caseSensitive: z.boolean() }).strict(),
+      z.object({ substring: z.string().min(1), caseSensitive: z.boolean() }).strict(),
+    ]),
+  })
+  .strict();
+const textDiscoverQuerySchema = z
+  .object({
+    text: z.union([
+      z.object({ literal: z.string().min(1), caseSensitive: z.boolean() }).strict(),
+      z
+        .object({ regex: z.string().min(1), caseSensitive: z.boolean() })
+        .strict()
+        .refine(({ regex }) => hasValidRegularExpression(regex), {
+          message: "regex must be valid and must not match empty text",
+        }),
+    ]),
+  })
+  .strict();
+
+type DiscoverQueryNode =
+  | z.infer<typeof pathDiscoverQuerySchema>
+  | z.infer<typeof filenameDiscoverQuerySchema>
+  | z.infer<typeof textDiscoverQuerySchema>
+  | { all: DiscoverQueryNode[] }
+  | { any: DiscoverQueryNode[] }
+  | { not: DiscoverQueryNode };
+
+const discoverQuerySchema: z.ZodType<DiscoverQueryNode> = z.lazy(() =>
+  z.union([
+    pathDiscoverQuerySchema,
+    filenameDiscoverQuerySchema,
+    textDiscoverQuerySchema,
+    z.object({ all: z.array(discoverQuerySchema).min(1) }).strict(),
+    z.object({ any: z.array(discoverQuerySchema).min(1) }).strict(),
+    z.object({ not: discoverQuerySchema }).strict(),
+  ]),
+);
+
+function containsPositiveTextQuery(query: DiscoverQueryNode): boolean {
+  if ("all" in query) return query.all.some(containsPositiveTextQuery);
+  if ("any" in query) return query.any.some(containsPositiveTextQuery);
+  if ("not" in query) return false;
+  return "text" in query;
+}
+
+const discoverOrderingSchema = z
+  .object({ by: z.literal("path"), direction: z.enum(["asc", "desc"]) })
+  .strict();
+
+export const discoverInputSchema = z
+  .object({
+    query: discoverQuerySchema,
+    projection: z.object({ matches: z.boolean() }).strict(),
+    order: discoverOrderingSchema,
+    page: z
+      .object({
+        maxItems: z.number().int().min(1).max(1_000),
+        continuation: z.string().min(1).nullable(),
+      })
+      .strict(),
+  })
+  .strict()
+  .refine(
+    ({ query, projection }) =>
+      !projection.matches || containsPositiveTextQuery(query),
+    { message: "matches projection requires a positive text query" },
+  );
+
+const discoverMatchSchema = z
+  .object({
+    line: z.number().int().positive(),
+    startByte: z.number().int().nonnegative(),
+    endByteExclusive: z.number().int().positive(),
+    text: z.string().min(1),
+  })
+  .strict()
+  .refine(({ startByte, endByteExclusive }) => startByte < endByteExclusive, {
+    message: "match byte range must be non-empty",
+  });
+const discoverItemSchema = z
+  .object({
+    path: canonicalMarkdownPathSchema,
+    contentVersion: contentVersionSchema,
+    sizeBytes: z.number().int().nonnegative(),
+    matches: z.array(discoverMatchSchema).optional(),
+  })
+  .strict();
+const discoverResultsSchema = z
+  .object({
+    outcome: z.literal("results"),
+    ordering: discoverOrderingSchema.extend({ tieBreaker: z.literal("path_utf8_bytes") }).strict(),
+    items: z.array(discoverItemSchema),
+    complete: z.boolean(),
+    continuation: z.string().min(1).nullable(),
+  })
+  .strict()
+  .refine(({ complete, continuation }) => complete === (continuation === null), {
+    message: "complete results must not expose a continuation",
+  });
+const discoverSnapshotUnavailableSchema = z
+  .object({
+    outcome: z.literal("snapshot_unavailable"),
+    code: z.literal("search_snapshot_unavailable"),
+  })
+  .strict();
+
+export const discoverResultSchema = z.union([
+  discoverResultsSchema,
+  discoverSnapshotUnavailableSchema,
+  z
+    .object({
+      outcome: z.literal("operationally_blocked"),
+      gate: z
+        .object({
+          code: z.enum([
+            "recovery_in_progress",
+            "recovery_blocked",
+            "incompatible_protocol",
+          ]),
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
+export type DiscoverInput = z.infer<typeof discoverInputSchema>;
+export type DiscoverQuery = z.infer<typeof discoverQuerySchema>;
+export type DiscoverResult = z.infer<typeof discoverResultSchema>;
+export type DiscoverItem = z.infer<typeof discoverItemSchema>;
+
+export function parseDiscoverInput(value: unknown): DiscoverInput {
+  return discoverInputSchema.parse(value);
+}
+
+export function parseDiscoverResult(value: unknown): DiscoverResult {
+  return discoverResultSchema.parse(value);
+}
+
+export function serializeDiscoverCompatibilityText(value: DiscoverResult): string {
+  return JSON.stringify(parseDiscoverResult(value));
+}
+
+export function createDiscoverInputJsonSchema(): Record<string, unknown> {
+  return {
+    $id: "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-discover.input.schema.json",
+    title: "vault_discover v1 input",
+    ...z.toJSONSchema(discoverInputSchema, { target: "draft-2020-12", reused: "ref" }),
+  };
+}
+
+export function createDiscoverResultJsonSchema(): Record<string, unknown> {
+  return {
+    $id: "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-discover.output.schema.json",
+    title: "vault_discover v1 output",
+    ...z.toJSONSchema(discoverResultSchema, { target: "draft-2020-12", reused: "ref" }),
+  };
+}
+
 const readEvidenceSchema = z.object({
   index: z.number().int().nonnegative(),
   path: canonicalMarkdownPathSchema,

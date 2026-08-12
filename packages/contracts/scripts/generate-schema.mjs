@@ -7,6 +7,8 @@ import {
   createChangeSetStatusResultJsonSchema,
   createChangeSetSubmitInputJsonSchema,
   createChangeSetSubmitResultJsonSchema,
+  createDiscoverInputJsonSchema,
+  createDiscoverResultJsonSchema,
   createContinueInputJsonSchema,
   createContinueResultJsonSchema,
   createHealthInputJsonSchema,
@@ -37,6 +39,16 @@ await Promise.all([
   writeFile(
     resolve(schemaRoot, "vault-change-set-status.output.schema.json"),
     `${JSON.stringify(createChangeSetStatusResultJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(
+    resolve(schemaRoot, "vault-discover.input.schema.json"),
+    `${JSON.stringify(createDiscoverInputJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(
+    resolve(schemaRoot, "vault-discover.output.schema.json"),
+    `${JSON.stringify(createDiscoverResultJsonSchema(), null, 2)}\n`,
     "utf8",
   ),
   writeFile(

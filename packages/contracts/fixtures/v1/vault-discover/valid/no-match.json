@@ -1,0 +1,19 @@
+{
+  "input": {
+    "query": { "filename": { "exact": "missing.md", "caseSensitive": true } },
+    "projection": { "matches": false },
+    "order": { "by": "path", "direction": "asc" },
+    "page": { "maxItems": 10, "continuation": null }
+  },
+  "result": {
+    "outcome": "results",
+    "ordering": {
+      "by": "path",
+      "direction": "asc",
+      "tieBreaker": "path_utf8_bytes"
+    },
+    "items": [],
+    "complete": true,
+    "continuation": null
+  }
+}

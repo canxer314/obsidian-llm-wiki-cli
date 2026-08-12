@@ -1,0 +1,19 @@
+{
+  "result": {
+    "outcome": "results",
+    "ordering": {
+      "by": "path",
+      "direction": "asc",
+      "tieBreaker": "path_utf8_bytes"
+    },
+    "items": [
+      {
+        "path": "note.md",
+        "contentVersion": "sha256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+        "sizeBytes": 1
+      }
+    ],
+    "complete": true,
+    "continuation": null
+  }
+}

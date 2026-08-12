@@ -14,11 +14,14 @@ import {
   changeSetSubmitInputSchema,
   continueInputSchema,
   createChangeSetStatusInputJsonSchema,
+  discoverInputSchema,
   parseChangeSetStatusInput,
   parseChangeSetStatusResult,
   parseChangeSetSubmitResult,
   parseContinueInput,
   parseContinueResult,
+  parseDiscoverInput,
+  parseDiscoverResult,
   parseHealthResult,
   parseReadInput,
   parseReadResult,
@@ -27,9 +30,11 @@ import {
   serializeChangeSetSubmitCompatibilityText,
   serializeCompatibilityText,
   serializeContinueCompatibilityText,
+  serializeDiscoverCompatibilityText,
   serializeReadCompatibilityText,
   serializeReadToolCompatibilityText,
   type ContinueResult,
+  type DiscoverResult,
   type HealthResult,
 } from "@llm-wiki/vault-contracts";
 import { z } from "zod";
@@ -85,12 +90,19 @@ export interface BridgeHealthState {
   operatorAction: Extract<HealthResult, { outcome: "observed" }>["operatorAction"];
 }
 
+export interface BridgeDiscoverService {
+  execute(input: unknown, clientId: string): Promise<DiscoverResult>;
+  releaseClient(clientId: string): void;
+}
+
 export interface BridgeInstanceOptions {
   port: number;
   health: BridgeHealthState;
   peerProtocol?: ProtocolParticipant;
   authenticator?: BridgeRequestAuthenticator;
   readDataSource?: VaultReadDataSource;
+  discoverService?: BridgeDiscoverService;
+  searchSnapshotReadiness?: () => "ready" | "building" | "unavailable";
   changeSets?: ChangeSetServiceOptions;
   continuationNow?: () => number;
   continuationToken?: () => string;
@@ -107,7 +119,30 @@ export interface BridgeInstance {
 function projectObservedHealth(
   state: BridgeHealthState,
   port: number,
+  searchSnapshotReadiness?: () => "ready" | "building" | "unavailable",
 ): HealthResult {
+  const snapshotReadiness = searchSnapshotReadiness?.() ?? state.readiness.searchSnapshot;
+  const dynamicSnapshotState = searchSnapshotReadiness !== undefined;
+  const snapshotNotReady = dynamicSnapshotState && snapshotReadiness !== "ready";
+  const initialSnapshotReasonCodes = new Set([
+    "content_tools_not_ready",
+    "search_snapshot_building",
+    "search_snapshot_unavailable",
+  ]);
+  const stableReasonCodes = dynamicSnapshotState
+    ? state.reasonCodes.filter((code) => !initialSnapshotReasonCodes.has(code))
+    : state.reasonCodes;
+  if (
+    dynamicSnapshotState &&
+    state.effectiveGate !== null &&
+    !stableReasonCodes.includes(state.effectiveGate.code)
+  ) {
+    stableReasonCodes.push(state.effectiveGate.code);
+  }
+  const reasonCode =
+    snapshotReadiness === "building"
+      ? "search_snapshot_building"
+      : "search_snapshot_unavailable";
   return parseHealthResult({
     outcome: "observed",
     vault: state.vault,
@@ -119,15 +154,35 @@ function projectObservedHealth(
       recoveryJournalSchema: 1,
     },
     listener: { address: LOOPBACK_ADDRESS, port },
-    readiness: state.readiness,
+    readiness: {
+      ...state.readiness,
+      searchSnapshot: snapshotReadiness,
+      index:
+        searchSnapshotReadiness === undefined
+          ? state.readiness.index
+          : snapshotReadiness,
+    },
     recovery: state.recovery,
     write: state.write,
     queue: state.queue,
     lifecycle: state.lifecycle,
     effectiveGate: state.effectiveGate,
-    overall: state.overall,
-    reasonCodes: state.reasonCodes,
-    operatorAction: state.operatorAction,
+    overall:
+      snapshotNotReady && state.overall === "healthy" ? "degraded" : state.overall,
+    reasonCodes: snapshotNotReady
+      ? [...new Set([...stableReasonCodes, reasonCode])]
+      : stableReasonCodes,
+    operatorAction:
+      snapshotNotReady &&
+      (state.operatorAction === "none" ||
+        state.operatorAction === "finish_initialization")
+        ? "wait_for_readiness"
+        : dynamicSnapshotState &&
+            snapshotReadiness === "ready" &&
+            state.effectiveGate?.code === "writes_paused" &&
+            state.operatorAction === "finish_initialization"
+          ? "resume_writes"
+          : state.operatorAction,
   });
 }
 
@@ -156,10 +211,10 @@ function projectEffectiveGate(state: BridgeHealthState): NonNullable<BridgeHealt
 }
 
 function blocksVaultContent(
-  gate:
-    | BridgeHealthState["effectiveGate"]
-    | Extract<HealthResult, { outcome: "incompatible" }>["gate"],
-): boolean {
+  gate: { code: string } | null | undefined,
+): gate is {
+  code: "incompatible_protocol" | "recovery_in_progress" | "recovery_blocked";
+} {
   return (
     gate?.code === "incompatible_protocol" ||
     gate?.code === "recovery_in_progress" ||
@@ -196,6 +251,12 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     }
   >();
 
+  function releaseSession(sessionId: string): void {
+    if (!sessions.delete(sessionId)) return;
+    continuationStore.releaseClient(sessionId);
+    options.discoverService?.releaseClient(sessionId);
+  }
+
   async function readBody(request: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = [];
     for await (const chunk of request) {
@@ -226,6 +287,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       properties: {},
       additionalProperties: false,
     };
+    const discoverToolInputSchema = z.toJSONSchema(discoverInputSchema, {
+      target: "draft-2020-12",
+    });
     const readToolInputSchema = z.toJSONSchema(readInputSchema, {
       target: "draft-2020-12",
     });
@@ -245,6 +309,16 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
           description: "Observe this Managed Vault's Bridge health evidence.",
           inputSchema: healthInputSchema,
         },
+        ...(options.discoverService === undefined
+          ? []
+          : [
+              {
+                name: "vault_discover",
+                description:
+                  "Discover canonical Markdown paths and text evidence from one immutable Search Snapshot.",
+                inputSchema: discoverToolInputSchema,
+              },
+            ]),
         ...(options.readDataSource === undefined
           ? []
           : [
@@ -283,7 +357,8 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         if (request.params.name === "vault_health") {
         z.object({}).strict().parse(request.params.arguments ?? {});
         const health =
-          sessionState.incompatibleHealth ?? projectObservedHealth(options.health, port);
+          sessionState.incompatibleHealth ??
+          projectObservedHealth(options.health, port, options.searchSnapshotReadiness);
         return {
           content: [{ type: "text" as const, text: serializeCompatibilityText(health) }],
           structuredContent: health,
@@ -325,6 +400,30 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
             isError: true,
           };
         }
+      }
+
+      if (request.params.name === "vault_discover" && options.discoverService !== undefined) {
+        const input = parseDiscoverInput(request.params.arguments);
+        const effectiveGate =
+          sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health);
+        let result: DiscoverResult;
+        if (blocksVaultContent(effectiveGate)) {
+          result = parseDiscoverResult({ outcome: "operationally_blocked", gate: effectiveGate });
+        } else if (sessionState.clientId === undefined) {
+          result = parseDiscoverResult({
+            outcome: "snapshot_unavailable",
+            code: "search_snapshot_unavailable",
+          });
+        } else {
+          result = await options.discoverService.execute(input, sessionState.clientId);
+        }
+        return {
+          content: [
+            { type: "text" as const, text: serializeDiscoverCompatibilityText(result) },
+          ],
+          structuredContent: result,
+          isError: result.outcome !== "results",
+        };
       }
 
       if (request.params.name === "vault_read" && options.readDataSource !== undefined) {
@@ -500,10 +599,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       }
       const server = createMcpServer(sessionState);
       transport.onclose = () => {
-        if (transport.sessionId !== undefined) {
-          continuationStore.releaseClient(transport.sessionId);
-          sessions.delete(transport.sessionId);
-        }
+        if (transport.sessionId !== undefined) releaseSession(transport.sessionId);
       };
       await server.connect(transport);
       await transport.handleRequest(request, response, body);
@@ -575,11 +671,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       const server = httpServer;
       if (server === undefined) return;
       httpServer = undefined;
-      for (const sessionId of sessions.keys()) {
-        continuationStore.releaseClient(sessionId);
-      }
-      await Promise.all([...sessions.values()].map(({ server: mcp }) => mcp.close()));
-      sessions.clear();
+      const activeSessions = [...sessions.entries()];
+      for (const [sessionId] of activeSessions) releaseSession(sessionId);
+      await Promise.all(activeSessions.map(([, { server: mcp }]) => mcp.close()));
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
