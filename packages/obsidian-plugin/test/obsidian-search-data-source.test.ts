@@ -228,7 +228,7 @@ describe("installed Obsidian reference profiles", () => {
     }).rebuild()).rejects.toThrow("invalid reference fragment");
   });
 
-  it("keeps zero-candidate links only as unresolved graph evidence", async () => {
+  it("keeps zero-candidate links as reference and unresolved graph evidence", async () => {
     const original = "[[Missing]]";
     const snapshots = new SearchSnapshotManager(createObsidianSearchDataSource({
       markdownFiles: () => [{ path: "Source.md" }],
@@ -252,7 +252,14 @@ describe("installed Obsidian reference profiles", () => {
     await snapshots.rebuild();
 
     expect(snapshots.current()?.notes[0]).toMatchObject({
-      references: [],
+      references: [{
+        profile: "wikilink",
+        target: "Missing",
+        resolvedPath: null,
+        original,
+        startByte: 0,
+        endByteExclusive: original.length,
+      }],
       unresolvedLinks: { Missing: 1 },
     });
   });

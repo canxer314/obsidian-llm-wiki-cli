@@ -1,3 +1,4 @@
+import { isCanonicalVaultPath } from "./canonical-vault-path.js";
 import type {
   HostReferenceEvidence,
   RegisteredReferenceProfile,
@@ -124,16 +125,6 @@ function classifyReference(reference: CacheReference): {
   return { profile: parsed.profile, target: reference.link };
 }
 
-function canonicalVaultPath(path: string): boolean {
-  return (
-    path.length > 0 &&
-    !path.startsWith("/") &&
-    !path.includes("\\") &&
-    !path.includes("//") &&
-    !path.split("/").some((part) => part === "." || part === "..")
-  );
-}
-
 export interface CanonicalReferenceCandidate {
   path: string;
   basename: string;
@@ -147,7 +138,7 @@ export function enumerateCanonicalReferenceTargets(
 ): string[] {
   if (rawPath === "") {
     return sourcePath !== undefined &&
-      canonicalVaultPath(sourcePath) &&
+      isCanonicalVaultPath(sourcePath) &&
       files.some((file) => file.path === sourcePath)
       ? [sourcePath]
       : [];
@@ -158,12 +149,12 @@ export function enumerateCanonicalReferenceTargets(
   } catch {
     throw new Error("Registered reference has an invalid encoded target");
   }
-  if (!canonicalVaultPath(path)) {
+  if (!isCanonicalVaultPath(path)) {
     throw new Error("Registered reference target is not canonical");
   }
   const explicitPath = path.includes("/");
   const candidates = files.filter((file) => {
-    if (!canonicalVaultPath(file.path)) return false;
+    if (!isCanonicalVaultPath(file.path)) return false;
     if (explicitPath) {
       return file.path === path ||
         (file.path.endsWith(".md") && file.path.slice(0, -3) === path);
@@ -205,7 +196,7 @@ function verifyResolvedTarget(
   if (installed === null && candidates.length === 0) return null;
   if (
     candidates.length !== 1 ||
-    !canonicalVaultPath(candidates[0]!) ||
+    !isCanonicalVaultPath(candidates[0]!) ||
     installed !== candidates[0]
   ) {
     throw new Error("Registered reference must have one unique canonical target");
@@ -220,10 +211,9 @@ function referenceEvidence(
   reference: CacheReference,
   sourcePath: string,
   adapter: ObsidianSearchAdapter,
-): HostReferenceEvidence | null {
+): HostReferenceEvidence {
   const classified = classifyReference(reference);
   const resolvedPath = verifyResolvedTarget(reference.link, sourcePath, adapter);
-  if (resolvedPath === null) return null;
   return {
     ...classified,
     resolvedPath,
@@ -247,8 +237,7 @@ export function createObsidianSearchDataSource(
       const references = [
         ...(cache.links ?? []),
         ...(cache.embeds ?? []),
-      ].map((reference) => referenceEvidence(reference, path, adapter))
-        .filter((reference): reference is HostReferenceEvidence => reference !== null);
+      ].map((reference) => referenceEvidence(reference, path, adapter));
       return {
         frontmatter: cache.frontmatter === undefined
           ? null

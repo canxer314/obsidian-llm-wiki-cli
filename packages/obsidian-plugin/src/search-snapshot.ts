@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 
+import { isCanonicalVaultPath } from "./canonical-vault-path.js";
+
 export const REGISTERED_REFERENCE_PROFILES = [
   "wikilink",
   "embed",
@@ -90,16 +92,6 @@ function compareCanonicalPaths(left: string, right: string): number {
     right.toLocaleLowerCase("en"),
   );
   return folded || compareUtf8(left, right);
-}
-
-function isCanonicalVaultPath(path: string): boolean {
-  return (
-    path.length > 0 &&
-    !path.startsWith("/") &&
-    !path.includes("\\") &&
-    !path.includes("//") &&
-    !path.split("/").some((part) => part === "." || part === "..")
-  );
 }
 
 function isCanonicalMarkdownPath(path: string): boolean {
