@@ -16,10 +16,10 @@
           "$ref": "#/$defs/__schema2"
         },
         "complete": {
-          "$ref": "#/$defs/__schema7"
+          "$ref": "#/$defs/__schema14"
         },
         "continuation": {
-          "$ref": "#/$defs/__schema8"
+          "$ref": "#/$defs/__schema15"
         }
       },
       "required": [
@@ -156,6 +156,78 @@
               ],
               "additionalProperties": false
             }
+          },
+          "outline": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "heading": {
+                  "type": "string"
+                },
+                "level": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 6
+                }
+              },
+              "required": [
+                "heading",
+                "level"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "frontmatter": {
+            "anyOf": [
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/__schema7"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "profile": {
+                  "$ref": "#/$defs/__schema8"
+                },
+                "target": {
+                  "$ref": "#/$defs/__schema9"
+                },
+                "resolvedPath": {
+                  "$ref": "#/$defs/__schema10"
+                },
+                "original": {
+                  "$ref": "#/$defs/__schema11"
+                },
+                "startByte": {
+                  "$ref": "#/$defs/__schema12"
+                },
+                "endByteExclusive": {
+                  "$ref": "#/$defs/__schema13"
+                }
+              },
+              "required": [
+                "profile",
+                "target",
+                "resolvedPath",
+                "original",
+                "startByte",
+                "endByteExclusive"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -186,9 +258,78 @@
       "minLength": 1
     },
     "__schema7": {
-      "type": "boolean"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema7"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema7"
+          }
+        }
+      ]
     },
     "__schema8": {
+      "type": "string",
+      "enum": [
+        "wikilink",
+        "embed",
+        "markdown_inline_link",
+        "markdown_embed"
+      ]
+    },
+    "__schema9": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema10": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/).+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "__schema11": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema12": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema13": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema14": {
+      "type": "boolean"
+    },
+    "__schema15": {
       "anyOf": [
         {
           "type": "string",

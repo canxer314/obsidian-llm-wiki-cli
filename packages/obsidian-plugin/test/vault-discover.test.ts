@@ -141,6 +141,162 @@ describe("vault_discover over a real Vault source", () => {
     });
   });
 
+  it("composes typed Frontmatter, tag, registered-reference, backlink, unresolved, and graph predicates", async () => {
+    const vault = mutableVault({
+      "Root.md": "[[Projects/Bridge]]",
+      "Projects/Bridge.md": "# Design\n[[Target]] and [[Missing]]",
+      "Target.md": "target",
+      "Other.md": "other",
+    });
+    const semantics = new Map<string, Awaited<ReturnType<NonNullable<SearchSnapshotDataSource["semanticEvidence"]>>>>([
+      ["Root.md", {
+        frontmatter: null,
+        tags: [],
+        headings: [],
+        references: [],
+        resolvedLinks: { "Projects/Bridge.md": 1 },
+        unresolvedLinks: {},
+      }],
+      ["Projects/Bridge.md", {
+        frontmatter: { status: "active", aliases: ["Bridge", "Runtime"] },
+        tags: ["#architecture"],
+        headings: [{ heading: "Design", level: 1 }],
+        references: [{
+          profile: "wikilink",
+          target: "Target",
+          resolvedPath: "Target.md",
+          original: "[[Target]]",
+          position: {
+            start: { line: 1, col: 0, offset: 9 },
+            end: { line: 1, col: 10, offset: 19 },
+          },
+        }],
+        resolvedLinks: { "Target.md": 1 },
+        unresolvedLinks: { Missing: 1 },
+      }],
+      ["Target.md", {
+        frontmatter: null,
+        tags: [],
+        headings: [],
+        references: [],
+        resolvedLinks: {},
+        unresolvedLinks: {},
+      }],
+      ["Other.md", {
+        frontmatter: null,
+        tags: [],
+        headings: [],
+        references: [],
+        resolvedLinks: {},
+        unresolvedLinks: {},
+      }],
+    ]);
+    const snapshots = new SearchSnapshotManager({
+      ...vault.source,
+      semanticEvidence: async (path) => semantics.get(path) ?? null,
+    });
+    await snapshots.rebuild();
+    const discover = new VaultDiscoverService(snapshots);
+
+    const result = await discover.execute({
+      query: {
+        all: [
+          { path: { prefix: "Projects/" } },
+          { text: { literal: "Design", caseSensitive: true } },
+          { frontmatter: { key: "status", equals: "active" } },
+          { frontmatter: { key: "aliases", contains: "Bridge" } },
+          { tag: { exact: "#architecture" } },
+          { reference: { profile: "wikilink", target: "Target" } },
+          { backlink: { from: "Root.md" } },
+          { unresolvedLink: { target: "Missing" } },
+          { graph: { relation: "links_to", path: "Target.md", maxDepth: 1 } },
+          { graph: { relation: "linked_from", path: "Root.md", maxDepth: 1 } },
+        ],
+      },
+      projection: {
+        matches: true,
+        outline: true,
+        frontmatter: true,
+        references: true,
+      },
+      order: { by: "path", direction: "asc" },
+      page: { maxItems: 100, continuation: null },
+    });
+
+    expect(result).toMatchObject({
+      outcome: "results",
+      items: [{
+        path: "Projects/Bridge.md",
+        matches: [{ text: "Design" }],
+        outline: [{ heading: "Design", level: 1 }],
+        frontmatter: { status: "active", aliases: ["Bridge", "Runtime"] },
+        references: [{
+          profile: "wikilink",
+          target: "Target",
+          resolvedPath: "Target.md",
+          original: "[[Target]]",
+        }],
+      }],
+    });
+  });
+
+  it("publishes coherent successor graph evidence while continuations retain the old graph", async () => {
+    const vault = mutableVault({
+      "a.md": "[[target]]",
+      "b.md": "[[target]]",
+      "target.md": "target",
+    });
+    const links = new Map([
+      ["a.md", { "target.md": 1 }],
+      ["b.md", { "target.md": 1 }],
+      ["target.md", {}],
+    ]);
+    const snapshots = new SearchSnapshotManager({
+      ...vault.source,
+      semanticEvidence: async (path) => ({
+        frontmatter: null,
+        tags: [],
+        headings: [],
+        references: [],
+        resolvedLinks: links.get(path) ?? {},
+        unresolvedLinks: {},
+      }),
+    });
+    await snapshots.rebuild();
+    const discover = new VaultDiscoverService(snapshots, { createToken: () => "graph" });
+    const graphQuery = {
+      query: { graph: { relation: "links_to" as const, path: "target.md", maxDepth: 1 } },
+      projection: { matches: false, outline: false, frontmatter: false, references: false },
+      order: { by: "path" as const, direction: "asc" as const },
+      page: { maxItems: 1, continuation: null },
+    };
+
+    const first = await discover.execute(graphQuery);
+    expect(first).toMatchObject({ items: [{ path: "a.md" }], continuation: "graph:1" });
+
+    vault.files.delete("a.md");
+    vault.files.set("renamed.md", new TextEncoder().encode("[[created]]"));
+    vault.files.set("created.md", new TextEncoder().encode("created"));
+    links.delete("a.md");
+    links.set("b.md", {});
+    links.set("renamed.md", { "created.md": 1 });
+    links.set("created.md", {});
+    await snapshots.rebuild();
+
+    const oldContinuation = await discover.execute({
+      ...graphQuery,
+      page: { maxItems: 10, continuation: "graph:1" },
+    });
+    expect(oldContinuation).toMatchObject({ items: [{ path: "b.md" }], complete: true });
+
+    const successor = await discover.execute({
+      ...graphQuery,
+      query: { graph: { relation: "links_to", path: "created.md", maxDepth: 1 } },
+      page: { maxItems: 10, continuation: null },
+    });
+    expect(successor).toMatchObject({ items: [{ path: "renamed.md" }], complete: true });
+  });
+
   it("returns literal and regex evidence with UTF-8 byte offsets and line numbers", async () => {
     const vault = mutableVault({
       "中文.md": "标题\r\nSearch 快照\r\nRecovery   Journal",

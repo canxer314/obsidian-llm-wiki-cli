@@ -1,0 +1,69 @@
+{
+  "input": {
+    "query": {
+      "all": [
+        { "path": { "prefix": "Projects/" } },
+        { "text": { "literal": "Design", "caseSensitive": true } },
+        { "frontmatter": { "key": "status", "equals": "active" } },
+        { "tag": { "exact": "#architecture" } },
+        { "reference": { "profile": "wikilink", "target": "Target Note" } },
+        { "backlink": { "from": "Root.md" } },
+        { "unresolvedLink": { "target": "Missing Note" } },
+        { "graph": { "relation": "links_to", "path": "Target Note.md", "maxDepth": 2 } }
+      ]
+    },
+    "projection": {
+      "matches": true,
+      "outline": true,
+      "frontmatter": true,
+      "references": true
+    },
+    "order": { "by": "path", "direction": "asc" },
+    "page": { "maxItems": 100, "continuation": null }
+  },
+  "result": {
+    "outcome": "results",
+    "ordering": {
+      "by": "path",
+      "direction": "asc",
+      "tieBreaker": "path_utf8_bytes"
+    },
+    "items": [
+      {
+        "path": "Projects/Bridge.md",
+        "contentVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 128,
+        "matches": [
+          {
+            "line": 6,
+            "startByte": 64,
+            "endByteExclusive": 70,
+            "text": "Design"
+          }
+        ],
+        "outline": [{ "heading": "Design", "level": 1 }],
+        "frontmatter": { "status": "active", "aliases": ["Bridge"] },
+        "references": [
+          {
+            "profile": "wikilink",
+            "target": "Target Note",
+            "resolvedPath": "Target Note.md",
+            "original": "[[Target Note|target]]",
+            "startByte": 71,
+            "endByteExclusive": 93
+          },
+          {
+            "profile": "markdown_embed",
+            "target": "Assets/my image.png",
+            "resolvedPath": "Assets/my image.png",
+            "original": "![alt](<Assets/my image.png>)",
+            "startByte": 94,
+            "endByteExclusive": 127
+          }
+        ]
+      }
+    ],
+    "complete": true,
+    "continuation": null
+  }
+}

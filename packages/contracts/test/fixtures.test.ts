@@ -78,6 +78,9 @@ describe("versioned vault_health fixture corpus", () => {
       "single-use-client-bound-sliding-continuation",
       "continuation-quota-and-lifecycle-cleanup",
       "continuation-operational-gate-precedence",
+      "structured-graph-discovery-composition",
+      "registered-reference-byte-verification",
+      "successor-search-snapshot-graph-evidence",
     ]);
   });
 });

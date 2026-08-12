@@ -39,4 +39,39 @@ describe("versioned vault_discover fixture corpus", () => {
       expect(() => parseFixture(fixture)).toThrow();
     }
   });
+
+  it("preserves registered reference syntax in combined fixture evidence", () => {
+    const fixture = JSON.parse(
+      readFileSync(`${fixturesRoot}/valid/structured-graph-projection.json`, "utf8"),
+    ) as {
+      result: {
+        items: Array<{
+          references: Array<{
+            profile: string;
+            target: string;
+            original: string;
+          }>;
+        }>;
+      };
+    };
+
+    expect(fixture.result.items[0]?.references).toEqual([
+      {
+        profile: "wikilink",
+        target: "Target Note",
+        resolvedPath: "Target Note.md",
+        original: "[[Target Note|target]]",
+        startByte: 71,
+        endByteExclusive: 93,
+      },
+      {
+        profile: "markdown_embed",
+        target: "Assets/my image.png",
+        resolvedPath: "Assets/my image.png",
+        original: "![alt](<Assets/my image.png>)",
+        startByte: 94,
+        endByteExclusive: 127,
+      },
+    ]);
+  });
 });
