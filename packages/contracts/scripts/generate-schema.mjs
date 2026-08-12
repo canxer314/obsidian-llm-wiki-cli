@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import {
   createHealthInputJsonSchema,
   createHealthResultJsonSchema,
+  createReadInputJsonSchema,
+  createReadResultJsonSchema,
 } from "../dist/index.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,6 +21,16 @@ await Promise.all([
   writeFile(
     resolve(schemaRoot, "vault-health.output.schema.json"),
     `${JSON.stringify(createHealthResultJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(
+    resolve(schemaRoot, "vault-read.input.schema.json"),
+    `${JSON.stringify(createReadInputJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(
+    resolve(schemaRoot, "vault-read.output.schema.json"),
+    `${JSON.stringify(createReadResultJsonSchema(), null, 2)}\n`,
     "utf8",
   ),
 ]);

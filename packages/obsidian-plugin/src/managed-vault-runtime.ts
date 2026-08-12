@@ -1,6 +1,10 @@
 import { randomInt, randomUUID } from "node:crypto";
 
-import type { BridgeHealthState, BridgeInstance } from "./bridge-instance.js";
+import type {
+  BridgeHealthState,
+  BridgeInstance,
+} from "./bridge-instance.js";
+import type { VaultReadDataSource } from "./vault-read.js";
 
 export const PERSISTENT_STATE_SCHEMA_VERSION = 1;
 const MINIMUM_DYNAMIC_PORT = 20_000;
@@ -36,7 +40,9 @@ export interface ManagedVaultBridgeRuntimeOptions {
   createBridge(options: {
     port: number;
     health: BridgeHealthState;
+    readDataSource?: VaultReadDataSource;
   }): BridgeInstance;
+  readDataSource?: VaultReadDataSource;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
 }
@@ -174,6 +180,7 @@ export class ManagedVaultBridgeRuntime {
         reasonCodes: ["content_tools_not_ready"],
         operatorAction: "finish_initialization",
       },
+      readDataSource: this.#options.readDataSource,
     });
 
     await bridge.start();

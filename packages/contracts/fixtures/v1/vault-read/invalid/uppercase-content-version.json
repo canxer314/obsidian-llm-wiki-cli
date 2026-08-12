@@ -1,0 +1,18 @@
+{
+  "result": {
+    "outcome": "items",
+    "items": [
+      {
+        "outcome": "satisfied",
+        "result": {
+          "kind": "exact",
+          "index": 0,
+          "path": "note.md",
+          "contentVersion": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "sizeBytes": 1,
+          "content": "x"
+        }
+      }
+    ]
+  }
+}

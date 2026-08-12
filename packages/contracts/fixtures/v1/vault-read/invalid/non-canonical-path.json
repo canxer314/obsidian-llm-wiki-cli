@@ -1,0 +1,7 @@
+{
+  "input": {
+    "items": [
+      { "kind": "exact", "path": "../escape.md" }
+    ]
+  }
+}

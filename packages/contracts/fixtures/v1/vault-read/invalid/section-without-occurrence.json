@@ -1,0 +1,11 @@
+{
+  "input": {
+    "items": [
+      {
+        "kind": "section",
+        "path": "note.md",
+        "hierarchy": ["Heading"]
+      }
+    ]
+  }
+}

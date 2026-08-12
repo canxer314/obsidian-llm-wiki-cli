@@ -19,6 +19,12 @@ export {
   type PersistedBridgeSettings,
 } from "./managed-vault-runtime.js";
 export {
+  MAXIMUM_LOGICAL_EXACT_READ_BYTES,
+  performVaultRead,
+  type VaultReadDataSource,
+  type VaultReadHeading,
+} from "./vault-read.js";
+export {
   EXPECTED_VAULT_ID_HEADER,
   type RequestPolicyFailure,
   verifyRequestPolicy,

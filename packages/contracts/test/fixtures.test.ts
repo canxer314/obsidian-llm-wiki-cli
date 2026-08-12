@@ -43,6 +43,11 @@ describe("versioned vault_health fixture corpus", () => {
       "schema-compatible-incompatible-health",
       "two-vault-coexistence",
       "structured-compatibility-identity",
+      "byte-exact-ordered-mixed-read",
+      "section-occurrence-no-fallback",
+      "exact-read-limit-and-grouping",
+      "content-read-operational-block",
+      "invalid-utf8-no-trusted-result",
     ]);
   });
 });

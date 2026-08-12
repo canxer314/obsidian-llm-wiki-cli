@@ -5,13 +5,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   parseHealthResult,
+  parseReadInput,
+  parseReadResult,
+  readInputSchema,
   serializeCompatibilityText,
+  serializeReadCompatibilityText,
   type HealthResult,
 } from "@llm-wiki/vault-contracts";
 import { z } from "zod";
 
 import { rejectRequest, verifyRequestPolicy } from "./request-policy.js";
 import { createRegistrationCommand } from "./registration-command.js";
+import { performVaultRead, type VaultReadDataSource } from "./vault-read.js";
 import {
   BRIDGE_VERSION,
   PLUGIN_VERSION,
@@ -57,6 +62,7 @@ export interface BridgeInstanceOptions {
   health: BridgeHealthState;
   peerProtocol?: ProtocolParticipant;
   authenticator?: BridgeRequestAuthenticator;
+  readDataSource?: VaultReadDataSource;
 }
 
 export interface BridgeInstance {
@@ -157,6 +163,35 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         };
       },
     );
+
+    if (options.readDataSource !== undefined) {
+      server.registerTool(
+        "vault_read",
+        {
+          description:
+            "Read ordered metadata, outline, heading section, and exact Markdown observations.",
+          inputSchema: readInputSchema,
+        },
+        async (arguments_) => {
+          const input = parseReadInput(arguments_);
+          const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
+          const blocksContent =
+            effectiveGate?.code === "incompatible_protocol" ||
+            effectiveGate?.code === "recovery_in_progress" ||
+            effectiveGate?.code === "recovery_blocked";
+          const result = blocksContent
+            ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
+            : await performVaultRead(options.readDataSource!, input);
+          return {
+            content: [{ type: "text", text: serializeReadCompatibilityText(result) }],
+            structuredContent: result,
+            isError:
+              result.outcome === "grouping_required" ||
+              result.outcome === "operationally_blocked",
+          };
+        },
+      );
+    }
 
     return server;
   }

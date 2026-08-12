@@ -30,6 +30,31 @@
       "id": "structured-compatibility-identity",
       "authority": "contract-and-runtime",
       "expectation": "Compatibility text parses to the exact authoritative structuredContent value."
+    },
+    {
+      "id": "byte-exact-ordered-mixed-read",
+      "authority": "contract-and-runtime",
+      "expectation": "One heterogeneous read preserves duplicate request indices, exact UTF-8 bytes, BOM, newline spelling, CJK, astral Unicode, and canonical Content Versions."
+    },
+    {
+      "id": "section-occurrence-no-fallback",
+      "authority": "contract-and-runtime",
+      "expectation": "A complete heading hierarchy with an unsatisfied one-based occurrence returns not_satisfied without alternate content."
+    },
+    {
+      "id": "exact-read-limit-and-grouping",
+      "authority": "contract-and-runtime",
+      "expectation": "A note over 1 MiB returns the typed limit result; aggregate Exact Reads over 1 MiB return only deterministic ordered contiguous groups."
+    },
+    {
+      "id": "content-read-operational-block",
+      "authority": "runtime",
+      "expectation": "A content-blocking operational gate returns operationally_blocked before any raw byte access."
+    },
+    {
+      "id": "invalid-utf8-no-trusted-result",
+      "authority": "runtime",
+      "expectation": "Invalid UTF-8 produces no trustworthy vault_read product result and never becomes not_satisfied."
     }
   ]
 }
