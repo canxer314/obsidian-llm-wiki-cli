@@ -338,6 +338,455 @@ export function createContinueResultJsonSchema(): Record<string, unknown> {
   };
 }
 
+const canonicalVaultPathSchema = z.string().min(1).regex(
+  /^(?!\/)(?!.*\\)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/)(?!.*\/$).+$/u,
+  "path must be canonical and Vault-relative",
+);
+const attachmentSha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
+const operationIdSchema = z.string().min(1);
+const operationKinds = [
+  "create_directory",
+  "create_note",
+  "edit_body",
+  "edit_frontmatter",
+  "move",
+  "copy_attachment",
+  "move_attachment",
+  "trash",
+] as const;
+const operationKindSchema = z.enum(operationKinds);
+const operationIdentitySchema = {
+  operationId: operationIdSchema,
+  afterOperationId: operationIdSchema.optional(),
+};
+
+const createDirectoryOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("create_directory"),
+    path: canonicalVaultPathSchema,
+    ifExists: z.literal("reject"),
+  })
+  .strict();
+const createNoteOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("create_note"),
+    path: canonicalMarkdownPathSchema,
+    content: z.string(),
+    ifExists: z.literal("reject"),
+  })
+  .strict();
+const bodyEditSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("replace_exact"),
+      old: z.string(),
+      replacement: z.string(),
+      expectedOccurrences: z.literal(1),
+    })
+    .strict(),
+  z.object({ kind: z.literal("replace_whole"), replacement: z.string() }).strict(),
+]);
+const editBodyOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("edit_body"),
+    path: canonicalMarkdownPathSchema,
+    targetVersion: contentVersionSchema,
+    edit: bodyEditSchema,
+  })
+  .strict();
+const frontmatterChangeSchema = z.discriminatedUnion("kind", [
+  z
+    .object({ kind: z.literal("set"), key: z.string().min(1), value: jsonValueSchema })
+    .strict(),
+  z.object({ kind: z.literal("remove"), key: z.string().min(1) }).strict(),
+]);
+const editFrontmatterOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("edit_frontmatter"),
+    path: canonicalMarkdownPathSchema,
+    targetVersion: contentVersionSchema,
+    changes: z.array(frontmatterChangeSchema).min(1),
+  })
+  .strict();
+const moveOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("move"),
+    sourcePath: canonicalMarkdownPathSchema,
+    destinationPath: canonicalMarkdownPathSchema,
+    targetVersion: contentVersionSchema,
+    linkEffect: z.literal("update_resolved_references"),
+  })
+  .strict();
+const copyAttachmentOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("copy_attachment"),
+    sourcePath: canonicalVaultPathSchema,
+    destinationPath: canonicalVaultPathSchema,
+    expectedSha256: attachmentSha256Schema,
+  })
+  .strict();
+const moveAttachmentOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("move_attachment"),
+    sourcePath: canonicalVaultPathSchema,
+    destinationPath: canonicalVaultPathSchema,
+    expectedSha256: attachmentSha256Schema,
+  })
+  .strict();
+const trashOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("trash"),
+    path: canonicalMarkdownPathSchema,
+    targetVersion: contentVersionSchema,
+  })
+  .strict();
+
+const changeSetOperationSchema = z.discriminatedUnion("kind", [
+  createDirectoryOperationSchema,
+  createNoteOperationSchema,
+  editBodyOperationSchema,
+  editFrontmatterOperationSchema,
+  moveOperationSchema,
+  copyAttachmentOperationSchema,
+  moveAttachmentOperationSchema,
+  trashOperationSchema,
+]);
+const readDependencySchema = z
+  .object({ path: canonicalMarkdownPathSchema, contentVersion: contentVersionSchema })
+  .strict();
+
+function directPaths(operation: z.infer<typeof changeSetOperationSchema>): string[] {
+  if ("sourcePath" in operation) return [operation.sourcePath, operation.destinationPath];
+  return [operation.path];
+}
+
+export const changeSetSubmitInputSchema = z
+  .object({
+    submissionKey: z.string().min(1),
+    operations: z.array(changeSetOperationSchema).min(1),
+    readDependencies: z.array(readDependencySchema).optional(),
+  })
+  .strict()
+  .superRefine(({ operations, readDependencies = [] }, context) => {
+    const operationIndexes = new Map<string, number>();
+    const lastOperationByPath = new Map<string, string>();
+    operations.forEach((operation, index) => {
+      if (operationIndexes.has(operation.operationId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["operations", index, "operationId"],
+          message: "operationId must be unique within the request",
+        });
+      }
+      operationIndexes.set(operation.operationId, index);
+      if (operation.afterOperationId !== undefined) {
+        const priorIndex = operationIndexes.get(operation.afterOperationId);
+        if (priorIndex === undefined || priorIndex >= index) {
+          context.addIssue({
+            code: "custom",
+            path: ["operations", index, "afterOperationId"],
+            message: "afterOperationId must reference an earlier operation",
+          });
+        }
+      }
+      for (const path of directPaths(operation)) {
+        const priorOperationId = lastOperationByPath.get(path);
+        if (
+          priorOperationId !== undefined &&
+          operation.afterOperationId !== priorOperationId
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["operations", index, "afterOperationId"],
+            message: "a repeated path must reference its immediately prior operation",
+          });
+        }
+        lastOperationByPath.set(path, operation.operationId);
+      }
+    });
+    const touched = new Set(operations.flatMap(directPaths));
+    const dependencies = new Set<string>();
+    readDependencies.forEach((dependency, index) => {
+      if (dependencies.has(dependency.path)) {
+        context.addIssue({
+          code: "custom",
+          path: ["readDependencies", index, "path"],
+          message: "readDependencies must be deduplicated by path",
+        });
+      }
+      if (touched.has(dependency.path)) {
+        context.addIssue({
+          code: "custom",
+          path: ["readDependencies", index, "path"],
+          message: "a direct target cannot also be a Read Dependency",
+        });
+      }
+      dependencies.add(dependency.path);
+    });
+  });
+
+const vaultStateSchema = z
+  .object({
+    writeGate: z.enum(["open", "blocked"]),
+    writeState: z.enum(["writable", "pausing", "paused"]),
+  })
+  .strict();
+const effectOutcomeSchema = z.enum(["changed", "already_satisfied"]);
+const requestedPreviewEffectSchema = z
+  .object({
+    operationId: operationIdSchema,
+    kind: operationKindSchema,
+    projectedOutcome: effectOutcomeSchema,
+  })
+  .strict();
+const derivedPreviewEffectSchema = requestedPreviewEffectSchema
+  .extend({ causedByOperationId: operationIdSchema })
+  .strict();
+const publicPathStateSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("markdown"), contentVersion: contentVersionSchema }).strict(),
+  z.object({ kind: z.literal("attachment"), sha256: attachmentSha256Schema }).strict(),
+  z.object({ kind: z.literal("directory") }).strict(),
+  z.object({ kind: z.literal("absent") }).strict(),
+]);
+const previewPathSchema = z
+  .object({
+    path: canonicalVaultPathSchema,
+    preState: publicPathStateSchema,
+    projectedFinalState: publicPathStateSchema,
+    projectedOutcome: z.enum(["changed", "unchanged"]),
+  })
+  .strict();
+const immutablePreviewSchema = z
+  .object({
+    requestedEffects: z.array(requestedPreviewEffectSchema),
+    derivedEffects: z.array(derivedPreviewEffectSchema),
+    paths: z.array(previewPathSchema),
+  })
+  .strict();
+const changeSetFailureSchema = z.discriminatedUnion("code", [
+  z.object({ code: z.literal("stale_observation") }).strict(),
+  z
+    .object({
+      code: z.literal("exact_match_count_mismatch"),
+      operationId: operationIdSchema,
+      actualOccurrences: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z
+    .object({
+      code: z.literal("path_conflict"),
+      operationId: operationIdSchema,
+      path: canonicalVaultPathSchema,
+    })
+    .strict(),
+]);
+const inProgressChangeSetSchema = z
+  .object({
+    changeSetId: z.string().min(1),
+    state: z.literal("in_progress"),
+    preview: immutablePreviewSchema.optional(),
+  })
+  .strict();
+const finalEffectSchema = z
+  .object({
+    operationId: operationIdSchema,
+    kind: operationKindSchema,
+    outcome: effectOutcomeSchema,
+  })
+  .strict();
+const finalDerivedEffectSchema = finalEffectSchema
+  .extend({ causedByOperationId: operationIdSchema })
+  .strict();
+const finalPathSchema = z
+  .object({
+    path: canonicalVaultPathSchema,
+    outcome: z.enum(["changed", "unchanged"]),
+    finalState: publicPathStateSchema,
+  })
+  .strict();
+const intentAppliedChangeSetSchema = z
+  .object({
+    changeSetId: z.string().min(1),
+    state: z.literal("intent_applied"),
+    preview: immutablePreviewSchema,
+    requestedEffects: z.array(finalEffectSchema),
+    derivedEffects: z.array(finalDerivedEffectSchema),
+    paths: z.array(finalPathSchema),
+  })
+  .strict();
+const intentNotAppliedChangeSetSchema = z
+  .object({
+    changeSetId: z.string().min(1),
+    state: z.literal("intent_not_applied"),
+    preview: immutablePreviewSchema.optional(),
+    failure: changeSetFailureSchema.optional(),
+  })
+  .strict();
+const resultUnprovenChangeSetSchema = z
+  .object({
+    changeSetId: z.string().min(1),
+    state: z.literal("result_unproven"),
+    preview: immutablePreviewSchema.optional(),
+  })
+  .strict();
+export const changeSetRecordSchema = z.discriminatedUnion("state", [
+  inProgressChangeSetSchema,
+  intentAppliedChangeSetSchema,
+  intentNotAppliedChangeSetSchema,
+  resultUnprovenChangeSetSchema,
+]);
+const anyOperationalGateSchema = z
+  .object({
+    code: z.enum([
+      "writes_paused",
+      "upgrade_in_progress",
+      "recovery_in_progress",
+      "recovery_blocked",
+      "incompatible_protocol",
+    ]),
+  })
+  .strict();
+
+export const changeSetSubmitResultSchema = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("request_invalid") }).strict(),
+  z.object({ outcome: z.literal("submission_key_conflict") }).strict(),
+  z
+    .object({ outcome: z.literal("operationally_blocked"), gate: anyOperationalGateSchema })
+    .strict(),
+  z
+    .object({
+      outcome: z.literal("registered"),
+      changeSet: changeSetRecordSchema,
+      vault: vaultStateSchema,
+      gate: anyOperationalGateSchema.optional(),
+    })
+    .strict(),
+]);
+
+export const changeSetStatusInputSchema = z
+  .object({
+    submissionKey: z.string().min(1).optional(),
+    changeSetId: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine(
+    ({ submissionKey, changeSetId }) =>
+      (submissionKey === undefined) !== (changeSetId === undefined),
+    { message: "exactly one lookup identity is required" },
+  );
+export const changeSetStatusResultSchema = z.discriminatedUnion("lookup", [
+  z
+    .object({
+      lookup: z.literal("found"),
+      changeSet: changeSetRecordSchema,
+      vault: vaultStateSchema,
+    })
+    .strict(),
+  z.object({ lookup: z.literal("unknown"), vault: vaultStateSchema }).strict(),
+  z.object({ lookup: z.literal("expired"), vault: vaultStateSchema }).strict(),
+  z
+    .object({ lookup: z.literal("operationally_blocked"), gate: anyOperationalGateSchema })
+    .strict(),
+]);
+
+export type ChangeSetSubmitInput = z.infer<typeof changeSetSubmitInputSchema>;
+export type ChangeSetOperation = z.infer<typeof changeSetOperationSchema>;
+export type ChangeSetRecord = z.infer<typeof changeSetRecordSchema>;
+export type ChangeSetSubmitResult = z.infer<typeof changeSetSubmitResultSchema>;
+export type ChangeSetStatusInput =
+  | { submissionKey: string; changeSetId?: never }
+  | { submissionKey?: never; changeSetId: string };
+export type ChangeSetStatusResult = z.infer<typeof changeSetStatusResultSchema>;
+export type VaultState = z.infer<typeof vaultStateSchema>;
+
+export function parseChangeSetSubmitInput(value: unknown): ChangeSetSubmitInput {
+  return changeSetSubmitInputSchema.parse(value);
+}
+
+export function parseChangeSetSubmitResult(value: unknown): ChangeSetSubmitResult {
+  return changeSetSubmitResultSchema.parse(value);
+}
+
+export function parseChangeSetStatusInput(value: unknown): ChangeSetStatusInput {
+  return changeSetStatusInputSchema.parse(value) as ChangeSetStatusInput;
+}
+
+export function parseChangeSetStatusResult(value: unknown): ChangeSetStatusResult {
+  return changeSetStatusResultSchema.parse(value);
+}
+
+export function serializeChangeSetSubmitCompatibilityText(
+  value: ChangeSetSubmitResult,
+): string {
+  return JSON.stringify(parseChangeSetSubmitResult(value));
+}
+
+export function serializeChangeSetStatusCompatibilityText(
+  value: ChangeSetStatusResult,
+): string {
+  return JSON.stringify(parseChangeSetStatusResult(value));
+}
+
+function contractJsonSchema(
+  name: string,
+  direction: "input" | "output",
+  schema: z.ZodType,
+): Record<string, unknown> {
+  return {
+    $id: `https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/${name}.${direction}.schema.json`,
+    title: `${name.replaceAll("-", "_")} v1 ${direction}`,
+    ...z.toJSONSchema(schema, { target: "draft-2020-12", reused: "ref" }),
+  };
+}
+
+export function createChangeSetSubmitInputJsonSchema(): Record<string, unknown> {
+  return contractJsonSchema("vault-change-set-submit", "input", changeSetSubmitInputSchema);
+}
+
+export function createChangeSetSubmitResultJsonSchema(): Record<string, unknown> {
+  return contractJsonSchema("vault-change-set-submit", "output", changeSetSubmitResultSchema);
+}
+
+export function createChangeSetStatusInputJsonSchema(): Record<string, unknown> {
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-change-set-status.input.schema.json",
+    title: "vault_change_set_status v1 input",
+    type: "object",
+    properties: {
+      submissionKey: { type: "string", minLength: 1 },
+      changeSetId: { type: "string", minLength: 1 },
+    },
+    additionalProperties: false,
+    oneOf: [
+      {
+        type: "object",
+        properties: { submissionKey: { type: "string", minLength: 1 } },
+        required: ["submissionKey"],
+        additionalProperties: false,
+      },
+      {
+        type: "object",
+        properties: { changeSetId: { type: "string", minLength: 1 } },
+        required: ["changeSetId"],
+        additionalProperties: false,
+      },
+    ],
+  };
+}
+
+export function createChangeSetStatusResultJsonSchema(): Record<string, unknown> {
+  return contractJsonSchema("vault-change-set-status", "output", changeSetStatusResultSchema);
+}
+
 export const CONTRACT_VERSION = "1.0.0";
 
 const supportedProtocolRangeSchema = z

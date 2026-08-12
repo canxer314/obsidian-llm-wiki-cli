@@ -1,0 +1,25 @@
+{
+  "submitInput": {
+    "submissionKey": "fixture-invalid-1",
+    "operations": [
+      {
+        "operationId": "edit-1",
+        "kind": "edit_body",
+        "path": "Notes/A.md",
+        "targetVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "edit": {
+          "kind": "replace_exact",
+          "old": "before",
+          "replacement": "after",
+          "expectedOccurrences": 1
+        }
+      }
+    ],
+    "readDependencies": [
+      {
+        "path": "Notes/A.md",
+        "contentVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  }
+}

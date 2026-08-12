@@ -1,3 +1,6 @@
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import {
   FileSystemAdapter,
   Plugin,
@@ -6,6 +9,7 @@ import {
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
+import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -19,11 +23,39 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const adapter = this.app.vault.adapter;
     const basePath =
       adapter instanceof FileSystemAdapter ? adapter.getBasePath() : this.app.vault.getName();
+    const changeSetDataSource =
+      adapter instanceof FileSystemAdapter
+        ? createFileSystemChangeSetDataSource(basePath, adapter)
+        : undefined;
+    const stateDirectory = join(basePath, ".llm-wiki");
+    const recoveryStatePath = join(stateDirectory, "bridge-state.json");
+    const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const runtime = new ManagedVaultBridgeRuntime({
       vault: { name: this.app.vault.getName(), path: basePath },
       settings: {
         load: () => this.loadData() as Promise<unknown>,
         save: (settings) => this.saveData(settings),
+        ...(adapter instanceof FileSystemAdapter
+          ? {
+              loadRecovery: async () => {
+                try {
+                  return JSON.parse(await readFile(recoveryStatePath, "utf8")) as unknown;
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+                  throw error;
+                }
+              },
+              saveRecovery: async (settings: unknown) => {
+                await mkdir(stateDirectory, { recursive: true });
+                await writeFile(
+                  recoveryStateTemporaryPath,
+                  `${JSON.stringify(settings)}\n`,
+                  "utf8",
+                );
+                await rename(recoveryStateTemporaryPath, recoveryStatePath);
+              },
+            }
+          : {}),
       },
       readDataSource: {
         readBinary: async (path) =>
@@ -47,6 +79,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
           })) ?? null;
         },
       },
+      changeSetDataSource,
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;

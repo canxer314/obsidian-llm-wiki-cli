@@ -1,0 +1,21 @@
+{
+  "statusInput": {
+    "submissionKey": "fixture-submit-1"
+  },
+  "statusResult": {
+    "lookup": "found",
+    "changeSet": {
+      "changeSetId": "change-set-1",
+      "state": "intent_not_applied",
+      "failure": {
+        "code": "path_conflict",
+        "operationId": "create-1",
+        "path": "Notes/Existing.md"
+      }
+    },
+    "vault": {
+      "writeGate": "open",
+      "writeState": "writable"
+    }
+  }
+}

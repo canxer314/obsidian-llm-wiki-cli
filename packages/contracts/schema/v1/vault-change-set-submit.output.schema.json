@@ -1,0 +1,531 @@
+{
+  "$id": "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-change-set-submit.output.schema.json",
+  "title": "vault_change_set_submit v1 output",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "request_invalid"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "submission_key_conflict"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "operationally_blocked"
+        },
+        "gate": {
+          "$ref": "#/$defs/__schema0"
+        }
+      },
+      "required": [
+        "outcome",
+        "gate"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "registered"
+        },
+        "changeSet": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "changeSetId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "state": {
+                  "type": "string",
+                  "const": "in_progress"
+                },
+                "preview": {
+                  "$ref": "#/$defs/__schema1"
+                }
+              },
+              "required": [
+                "changeSetId",
+                "state"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "changeSetId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "state": {
+                  "type": "string",
+                  "const": "intent_applied"
+                },
+                "preview": {
+                  "$ref": "#/$defs/__schema1"
+                },
+                "requestedEffects": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "operationId": {
+                        "$ref": "#/$defs/__schema2"
+                      },
+                      "kind": {
+                        "$ref": "#/$defs/__schema3"
+                      },
+                      "outcome": {
+                        "$ref": "#/$defs/__schema4"
+                      }
+                    },
+                    "required": [
+                      "operationId",
+                      "kind",
+                      "outcome"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "derivedEffects": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "operationId": {
+                        "$ref": "#/$defs/__schema2"
+                      },
+                      "kind": {
+                        "$ref": "#/$defs/__schema3"
+                      },
+                      "outcome": {
+                        "$ref": "#/$defs/__schema4"
+                      },
+                      "causedByOperationId": {
+                        "$ref": "#/$defs/__schema2"
+                      }
+                    },
+                    "required": [
+                      "operationId",
+                      "kind",
+                      "outcome",
+                      "causedByOperationId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "$ref": "#/$defs/__schema5"
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "changed",
+                          "unchanged"
+                        ]
+                      },
+                      "finalState": {
+                        "$ref": "#/$defs/__schema6"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "outcome",
+                      "finalState"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "changeSetId",
+                "state",
+                "preview",
+                "requestedEffects",
+                "derivedEffects",
+                "paths"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "changeSetId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "state": {
+                  "type": "string",
+                  "const": "intent_not_applied"
+                },
+                "preview": {
+                  "$ref": "#/$defs/__schema1"
+                },
+                "failure": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "stale_observation"
+                        }
+                      },
+                      "required": [
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "exact_match_count_mismatch"
+                        },
+                        "operationId": {
+                          "$ref": "#/$defs/__schema2"
+                        },
+                        "actualOccurrences": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "operationId",
+                        "actualOccurrences"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "path_conflict"
+                        },
+                        "operationId": {
+                          "$ref": "#/$defs/__schema2"
+                        },
+                        "path": {
+                          "$ref": "#/$defs/__schema5"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "operationId",
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "changeSetId",
+                "state"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "changeSetId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "state": {
+                  "type": "string",
+                  "const": "result_unproven"
+                },
+                "preview": {
+                  "$ref": "#/$defs/__schema1"
+                }
+              },
+              "required": [
+                "changeSetId",
+                "state"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "vault": {
+          "type": "object",
+          "properties": {
+            "writeGate": {
+              "type": "string",
+              "enum": [
+                "open",
+                "blocked"
+              ]
+            },
+            "writeState": {
+              "type": "string",
+              "enum": [
+                "writable",
+                "pausing",
+                "paused"
+              ]
+            }
+          },
+          "required": [
+            "writeGate",
+            "writeState"
+          ],
+          "additionalProperties": false
+        },
+        "gate": {
+          "$ref": "#/$defs/__schema0"
+        }
+      },
+      "required": [
+        "outcome",
+        "changeSet",
+        "vault"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "__schema0": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "writes_paused",
+            "upgrade_in_progress",
+            "recovery_in_progress",
+            "recovery_blocked",
+            "incompatible_protocol"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "__schema1": {
+      "type": "object",
+      "properties": {
+        "requestedEffects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "$ref": "#/$defs/__schema2"
+              },
+              "kind": {
+                "$ref": "#/$defs/__schema3"
+              },
+              "projectedOutcome": {
+                "$ref": "#/$defs/__schema4"
+              }
+            },
+            "required": [
+              "operationId",
+              "kind",
+              "projectedOutcome"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "derivedEffects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "$ref": "#/$defs/__schema2"
+              },
+              "kind": {
+                "$ref": "#/$defs/__schema3"
+              },
+              "projectedOutcome": {
+                "$ref": "#/$defs/__schema4"
+              },
+              "causedByOperationId": {
+                "$ref": "#/$defs/__schema2"
+              }
+            },
+            "required": [
+              "operationId",
+              "kind",
+              "projectedOutcome",
+              "causedByOperationId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/__schema5"
+              },
+              "preState": {
+                "$ref": "#/$defs/__schema6"
+              },
+              "projectedFinalState": {
+                "$ref": "#/$defs/__schema6"
+              },
+              "projectedOutcome": {
+                "type": "string",
+                "enum": [
+                  "changed",
+                  "unchanged"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "preState",
+              "projectedFinalState",
+              "projectedOutcome"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "requestedEffects",
+        "derivedEffects",
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "__schema2": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema3": {
+      "type": "string",
+      "enum": [
+        "create_directory",
+        "create_note",
+        "edit_body",
+        "edit_frontmatter",
+        "move",
+        "copy_attachment",
+        "move_attachment",
+        "trash"
+      ]
+    },
+    "__schema4": {
+      "type": "string",
+      "enum": [
+        "changed",
+        "already_satisfied"
+      ]
+    },
+    "__schema5": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/)(?!.*\\/$).+$"
+    },
+    "__schema6": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "markdown"
+            },
+            "contentVersion": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "contentVersion"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "attachment"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "directory"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "absent"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

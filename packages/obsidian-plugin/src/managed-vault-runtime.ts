@@ -1,25 +1,37 @@
 import { randomInt, randomUUID } from "node:crypto";
 
+import {
+  CHANGE_SET_REGISTRY_SCHEMA_VERSION,
+  parseChangeSetRegistryState,
+  type ChangeSetPreflightDataSource,
+  type ChangeSetRegistryState,
+} from "./change-set.js";
 import type {
   BridgeHealthState,
   BridgeInstance,
 } from "./bridge-instance.js";
 import type { VaultReadDataSource } from "./vault-read.js";
 
-export const PERSISTENT_STATE_SCHEMA_VERSION = 1;
+export const PERSISTENT_STATE_SCHEMA_VERSION = 2;
+const LEGACY_PERSISTENT_STATE_SCHEMA_VERSION = 1;
 const MINIMUM_DYNAMIC_PORT = 20_000;
 const MAXIMUM_DYNAMIC_PORT = 49_151;
 
 export interface PersistedBridgeSettings {
-  schemaVersion: typeof PERSISTENT_STATE_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof LEGACY_PERSISTENT_STATE_SCHEMA_VERSION
+    | typeof PERSISTENT_STATE_SCHEMA_VERSION;
   vaultId: string;
   port: number;
   diagnosticPath: string;
+  changeSets?: ChangeSetRegistryState;
 }
 
 export interface BridgeSettingsStore {
   load(): Promise<unknown>;
   save(settings: PersistedBridgeSettings): Promise<void>;
+  loadRecovery?(): Promise<unknown>;
+  saveRecovery?(settings: PersistedBridgeSettings): Promise<void>;
 }
 
 export interface ManagedVaultDescriptor {
@@ -41,19 +53,42 @@ export interface ManagedVaultBridgeRuntimeOptions {
     port: number;
     health: BridgeHealthState;
     readDataSource?: VaultReadDataSource;
+    changeSets?: {
+      store: {
+        load(): Promise<unknown>;
+        save(state: ChangeSetRegistryState): Promise<void>;
+      };
+      dataSource: ChangeSetPreflightDataSource;
+    };
   }): BridgeInstance;
   readDataSource?: VaultReadDataSource;
+  changeSetDataSource?: ChangeSetPreflightDataSource;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
 }
 
-function parsePersistedSettings(value: unknown): PersistedBridgeSettings | null {
+function emptyChangeSetState(): ChangeSetRegistryState {
+  return {
+    schemaVersion: CHANGE_SET_REGISTRY_SCHEMA_VERSION,
+    nextEnqueueSeq: 1,
+    entries: [],
+    tombstones: [],
+  };
+}
+
+function parsePersistedSettings(value: unknown): {
+  settings: PersistedBridgeSettings;
+  migrated: boolean;
+} | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const settings = value as Record<string, unknown>;
-  const keys = Object.keys(settings).sort();
+  const isLegacy = settings.schemaVersion === LEGACY_PERSISTENT_STATE_SCHEMA_VERSION;
+  const expectedKeys = isLegacy
+    ? "diagnosticPath,port,schemaVersion,vaultId"
+    : "changeSets,diagnosticPath,port,schemaVersion,vaultId";
   if (
-    keys.join(",") !== "diagnosticPath,port,schemaVersion,vaultId" ||
-    settings.schemaVersion !== PERSISTENT_STATE_SCHEMA_VERSION ||
+    Object.keys(settings).sort().join(",") !== expectedKeys ||
+    (!isLegacy && settings.schemaVersion !== PERSISTENT_STATE_SCHEMA_VERSION) ||
     typeof settings.vaultId !== "string" ||
     settings.vaultId.length === 0 ||
     typeof settings.port !== "number" ||
@@ -65,7 +100,24 @@ function parsePersistedSettings(value: unknown): PersistedBridgeSettings | null 
   ) {
     return null;
   }
-  return settings as unknown as PersistedBridgeSettings;
+  let changeSets: ChangeSetRegistryState;
+  try {
+    changeSets = isLegacy
+      ? emptyChangeSetState()
+      : parseChangeSetRegistryState(settings.changeSets);
+  } catch {
+    return null;
+  }
+  return {
+    settings: {
+      schemaVersion: PERSISTENT_STATE_SCHEMA_VERSION,
+      vaultId: settings.vaultId,
+      port: settings.port,
+      diagnosticPath: settings.diagnosticPath,
+      changeSets,
+    },
+    migrated: isLegacy,
+  };
 }
 
 export class VaultPathChangeRequiredError extends Error {
@@ -97,6 +149,20 @@ export class ManagedVaultBridgeRuntime {
     return this.#pendingPathChange;
   }
 
+  async #saveSettings(settings: PersistedBridgeSettings): Promise<void> {
+    const saveRecovery = this.#options.settings.saveRecovery;
+    if (saveRecovery === undefined) {
+      await this.#options.settings.save(settings);
+      return;
+    }
+    await saveRecovery(settings);
+    try {
+      await this.#options.settings.save(settings);
+    } catch {
+      // The recovery copy is authoritative and is loaded before this best-effort mirror.
+    }
+  }
+
   async classifyPathChange(classification: PathChangeClassification): Promise<void> {
     const pathChange = this.#pendingPathChange;
     const previous = this.#settings;
@@ -114,6 +180,7 @@ export class ManagedVaultBridgeRuntime {
               this.#options.selectInitialPort?.() ??
               randomInt(MINIMUM_DYNAMIC_PORT, MAXIMUM_DYNAMIC_PORT + 1),
             diagnosticPath: pathChange.currentPath,
+            changeSets: emptyChangeSetState(),
           };
     if (
       classification === "copy" &&
@@ -121,7 +188,7 @@ export class ManagedVaultBridgeRuntime {
     ) {
       throw new Error("Copy classification must generate a new Vault identity and port");
     }
-    await this.#options.settings.save(settings);
+    await this.#saveSettings(settings);
     this.#settings = settings;
     this.#pendingPathChange = undefined;
   }
@@ -129,11 +196,15 @@ export class ManagedVaultBridgeRuntime {
   async load(): Promise<void> {
     if (this.#bridge !== undefined) throw new Error("Managed Vault Bridge is already loaded");
 
-    const rawSettings = await this.#options.settings.load();
-    const loaded = parsePersistedSettings(rawSettings);
-    if (rawSettings !== undefined && rawSettings !== null && loaded === null) {
+    const primarySettings = await this.#options.settings.load();
+    const recoverySettings = await this.#options.settings.loadRecovery?.();
+    const recoveredPrimary = recoverySettings !== undefined && recoverySettings !== null;
+    const rawSettings = recoveredPrimary ? recoverySettings : primarySettings;
+    const parsed = parsePersistedSettings(rawSettings);
+    if (rawSettings !== undefined && rawSettings !== null && parsed === null) {
       throw new Error("Persisted Bridge settings are incompatible or invalid");
     }
+    const loaded = parsed?.settings ?? null;
     if (loaded !== null && loaded.diagnosticPath !== this.#options.vault.path) {
       this.#settings = loaded;
       this.#pendingPathChange = {
@@ -149,10 +220,30 @@ export class ManagedVaultBridgeRuntime {
         this.#options.selectInitialPort?.() ??
         randomInt(MINIMUM_DYNAMIC_PORT, MAXIMUM_DYNAMIC_PORT + 1),
       diagnosticPath: this.#options.vault.path,
+      changeSets: emptyChangeSetState(),
     };
 
-    if (loaded === null) await this.#options.settings.save(settings);
+    const hasRecoveryStore = this.#options.settings.saveRecovery !== undefined;
+    if (
+      loaded === null ||
+      recoveredPrimary ||
+      (parsed?.migrated === true && hasRecoveryStore)
+    ) {
+      await this.#saveSettings(settings);
+    }
+    if (hasRecoveryStore && !recoveredPrimary && loaded !== null) {
+      await this.#options.settings.saveRecovery?.(settings);
+    }
 
+    const changeSetStore = {
+      load: async () => settings.changeSets,
+      save: async (changeSets: ChangeSetRegistryState) => {
+        const nextSettings = { ...settings, changeSets };
+        await this.#saveSettings(nextSettings);
+        settings.changeSets = changeSets;
+        this.#settings = settings;
+      },
+    };
     const bridge = this.#options.createBridge({
       port: settings.port,
       health: {
@@ -167,7 +258,10 @@ export class ManagedVaultBridgeRuntime {
           index: "unavailable",
         },
         recovery: { state: "none" },
-        write: { gate: "blocked", state: "paused", pauseSource: "maintenance" },
+        write:
+          this.#options.changeSetDataSource === undefined
+            ? { gate: "blocked", state: "paused", pauseSource: "maintenance" }
+            : { gate: "open", state: "writable", pauseSource: null },
         queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
         lifecycle: {
           startup: "ready",
@@ -175,15 +269,32 @@ export class ManagedVaultBridgeRuntime {
           migration: "not_run",
           recovery: "not_run",
         },
-        effectiveGate: { code: "writes_paused" },
-        overall: "blocked",
-        reasonCodes: ["content_tools_not_ready"],
-        operatorAction: "finish_initialization",
+        effectiveGate:
+          this.#options.changeSetDataSource === undefined
+            ? { code: "writes_paused" }
+            : null,
+        overall:
+          this.#options.changeSetDataSource === undefined ? "blocked" : "degraded",
+        reasonCodes:
+          this.#options.changeSetDataSource === undefined
+            ? ["content_tools_not_ready"]
+            : ["mutation_executor_not_ready"],
+        operatorAction:
+          this.#options.changeSetDataSource === undefined
+            ? "finish_initialization"
+            : "wait_for_readiness",
       },
       readDataSource: this.#options.readDataSource,
+      changeSets:
+        this.#options.changeSetDataSource === undefined
+          ? undefined
+          : { store: changeSetStore, dataSource: this.#options.changeSetDataSource },
     });
 
     await bridge.start();
+    if (parsed?.migrated === true && !hasRecoveryStore) {
+      await this.#options.settings.save(settings);
+    }
     this.#settings = settings;
     this.#bridge = bridge;
   }
