@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { parseReadInput, parseReadResult } from "../src/index.js";
+import { parseReadInput, parseReadToolResult } from "../src/index.js";
 
 const fixturesRoot = fileURLToPath(new URL("../fixtures/v1/vault-read/", import.meta.url));
 
@@ -19,7 +19,7 @@ async function fixtures(kind: "valid" | "invalid"): Promise<ReadFixture[]> {
 
 function parseFixture(fixture: ReadFixture): void {
   if (fixture.input !== undefined) parseReadInput(fixture.input);
-  if (fixture.result !== undefined) parseReadResult(fixture.result);
+  if (fixture.result !== undefined) parseReadToolResult(fixture.result);
 }
 
 describe("versioned vault_read fixture corpus", () => {

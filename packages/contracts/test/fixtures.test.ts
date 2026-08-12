@@ -48,6 +48,10 @@ describe("versioned vault_health fixture corpus", () => {
       "exact-read-limit-and-grouping",
       "content-read-operational-block",
       "invalid-utf8-no-trusted-result",
+      "frozen-byte-exact-continuation",
+      "single-use-client-bound-sliding-continuation",
+      "continuation-quota-and-lifecycle-cleanup",
+      "continuation-operational-gate-precedence",
     ]);
   });
 });
