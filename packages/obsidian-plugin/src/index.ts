@@ -48,11 +48,23 @@ export {
   type VaultDiscoverServiceOptions,
 } from "./vault-discover.js";
 export {
+  createObsidianSearchDataSource,
+  renderRegisteredReference,
+  type ObsidianSearchAdapter,
+} from "./obsidian-search-data-source.js";
+export {
+  REGISTERED_REFERENCE_PROFILES,
   SearchSnapshotManager,
+  type HostLocation,
+  type HostPosition,
+  type HostReferenceEvidence,
+  type RegisteredReferenceProfile,
   type SearchSnapshot,
   type SearchSnapshotDataSource,
   type SearchSnapshotNote,
   type SearchSnapshotReadiness,
+  type SearchSnapshotReference,
+  type SearchSnapshotSemanticEvidence,
 } from "./search-snapshot.js";
 export {
   CONTINUATION_LIFETIME_MILLISECONDS,

@@ -59,6 +59,53 @@ function hasValidRegularExpression(pattern: string): boolean {
   }
 }
 
+const registeredReferenceProfileSchema = z.enum([
+  "wikilink",
+  "embed",
+  "markdown_inline_link",
+  "markdown_embed",
+]);
+const frontmatterScalarSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const frontmatterDiscoverQuerySchema = z
+  .object({
+    frontmatter: z.union([
+      z.object({ key: z.string().min(1), equals: jsonValueSchema }).strict(),
+      z.object({ key: z.string().min(1), contains: frontmatterScalarSchema }).strict(),
+      z.object({ key: z.string().min(1), exists: z.boolean() }).strict(),
+    ]),
+  })
+  .strict();
+const tagDiscoverQuerySchema = z
+  .object({ tag: z.object({ exact: z.string().regex(/^#[^\s#]+$/u) }).strict() })
+  .strict();
+const referenceDiscoverQuerySchema = z
+  .object({
+    reference: z
+      .object({
+        profile: registeredReferenceProfileSchema,
+        target: z.string().min(1),
+      })
+      .strict(),
+  })
+  .strict();
+const backlinkDiscoverQuerySchema = z
+  .object({ backlink: z.object({ from: canonicalMarkdownPathSchema }).strict() })
+  .strict();
+const unresolvedLinkDiscoverQuerySchema = z
+  .object({ unresolvedLink: z.object({ target: z.string().min(1) }).strict() })
+  .strict();
+const graphDiscoverQuerySchema = z
+  .object({
+    graph: z
+      .object({
+        relation: z.enum(["links_to", "linked_from"]),
+        path: canonicalMarkdownPathSchema,
+        maxDepth: z.number().int().min(1).max(32),
+      })
+      .strict(),
+  })
+  .strict();
+
 const pathDiscoverQuerySchema = z
   .object({
     path: z.union([
@@ -94,6 +141,12 @@ type DiscoverQueryNode =
   | z.infer<typeof pathDiscoverQuerySchema>
   | z.infer<typeof filenameDiscoverQuerySchema>
   | z.infer<typeof textDiscoverQuerySchema>
+  | z.infer<typeof frontmatterDiscoverQuerySchema>
+  | z.infer<typeof tagDiscoverQuerySchema>
+  | z.infer<typeof referenceDiscoverQuerySchema>
+  | z.infer<typeof backlinkDiscoverQuerySchema>
+  | z.infer<typeof unresolvedLinkDiscoverQuerySchema>
+  | z.infer<typeof graphDiscoverQuerySchema>
   | { all: DiscoverQueryNode[] }
   | { any: DiscoverQueryNode[] }
   | { not: DiscoverQueryNode };
@@ -103,6 +156,12 @@ const discoverQuerySchema: z.ZodType<DiscoverQueryNode> = z.lazy(() =>
     pathDiscoverQuerySchema,
     filenameDiscoverQuerySchema,
     textDiscoverQuerySchema,
+    frontmatterDiscoverQuerySchema,
+    tagDiscoverQuerySchema,
+    referenceDiscoverQuerySchema,
+    backlinkDiscoverQuerySchema,
+    unresolvedLinkDiscoverQuerySchema,
+    graphDiscoverQuerySchema,
     z.object({ all: z.array(discoverQuerySchema).min(1) }).strict(),
     z.object({ any: z.array(discoverQuerySchema).min(1) }).strict(),
     z.object({ not: discoverQuerySchema }).strict(),
@@ -123,7 +182,14 @@ const discoverOrderingSchema = z
 export const discoverInputSchema = z
   .object({
     query: discoverQuerySchema,
-    projection: z.object({ matches: z.boolean() }).strict(),
+    projection: z
+      .object({
+        matches: z.boolean(),
+        outline: z.boolean().optional(),
+        frontmatter: z.boolean().optional(),
+        references: z.boolean().optional(),
+      })
+      .strict(),
     order: discoverOrderingSchema,
     page: z
       .object({
@@ -150,12 +216,34 @@ const discoverMatchSchema = z
   .refine(({ startByte, endByteExclusive }) => startByte < endByteExclusive, {
     message: "match byte range must be non-empty",
   });
+const discoverReferenceEvidenceSchema = z
+  .object({
+    profile: registeredReferenceProfileSchema,
+    target: z.string().min(1),
+    resolvedPath: discoverPathSchema.nullable(),
+    original: z.string().min(1),
+    startByte: z.number().int().nonnegative(),
+    endByteExclusive: z.number().int().positive(),
+  })
+  .strict()
+  .refine(({ startByte, endByteExclusive }) => startByte < endByteExclusive, {
+    message: "reference byte range must be non-empty",
+  });
+const discoverOutlineHeadingSchema = z
+  .object({
+    heading: z.string(),
+    level: z.number().int().min(1).max(6),
+  })
+  .strict();
 const discoverItemSchema = z
   .object({
     path: canonicalMarkdownPathSchema,
     contentVersion: contentVersionSchema,
     sizeBytes: z.number().int().nonnegative(),
     matches: z.array(discoverMatchSchema).optional(),
+    outline: z.array(discoverOutlineHeadingSchema).optional(),
+    frontmatter: z.record(z.string(), jsonValueSchema).nullable().optional(),
+    references: z.array(discoverReferenceEvidenceSchema).optional(),
   })
   .strict();
 const discoverResultsSchema = z

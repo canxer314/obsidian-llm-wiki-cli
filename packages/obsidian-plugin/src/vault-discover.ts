@@ -57,10 +57,61 @@ function pathGlobMatches(path: string, glob: string): boolean {
   return new RegExp(`^${expression}$`, "u").test(path);
 }
 
-function queryMatches(note: SearchSnapshotNote, query: DiscoverQuery): boolean {
-  if ("all" in query) return query.all.every((child) => queryMatches(note, child));
-  if ("any" in query) return query.any.some((child) => queryMatches(note, child));
-  if ("not" in query) return !queryMatches(note, query.not);
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((value, index) =>
+      jsonValuesEqual(value, right[index]));
+  }
+  if (
+    typeof left !== "object" || left === null ||
+    typeof right !== "object" || right === null ||
+    Array.isArray(left) || Array.isArray(right)
+  ) return false;
+  const leftEntries = Object.entries(left as Record<string, unknown>);
+  const rightObject = right as Record<string, unknown>;
+  return leftEntries.length === Object.keys(rightObject).length &&
+    leftEntries.every(([key, value]) =>
+      Object.hasOwn(rightObject, key) && jsonValuesEqual(value, rightObject[key]));
+}
+
+function graphReaches(
+  notesByPath: ReadonlyMap<string, SearchSnapshotNote>,
+  from: string,
+  to: string,
+  maxDepth: number,
+): boolean {
+  let frontier = [from];
+  const visited = new Set(frontier);
+  for (let depth = 1; depth <= maxDepth; depth += 1) {
+    const next: string[] = [];
+    for (const path of frontier) {
+      const note = notesByPath.get(path);
+      if (note === undefined) continue;
+      for (const target of Object.keys(note.resolvedLinks)) {
+        if (target === to) return true;
+        if (!visited.has(target)) {
+          visited.add(target);
+          next.push(target);
+        }
+      }
+    }
+    frontier = next;
+    if (frontier.length === 0) return false;
+  }
+  return false;
+}
+
+function queryMatches(
+  note: SearchSnapshotNote,
+  query: DiscoverQuery,
+  notesByPath: ReadonlyMap<string, SearchSnapshotNote>,
+): boolean {
+  if ("all" in query) return query.all.every((child) =>
+    queryMatches(note, child, notesByPath));
+  if ("any" in query) return query.any.some((child) =>
+    queryMatches(note, child, notesByPath));
+  if ("not" in query) return !queryMatches(note, query.not, notesByPath);
   if ("path" in query) {
     if ("exact" in query.path) return note.path === query.path.exact;
     if ("prefix" in query.path) return note.path.startsWith(query.path.prefix);
@@ -76,12 +127,44 @@ function queryMatches(note: SearchSnapshotNote, query: DiscoverQuery): boolean {
       query.filename.caseSensitive,
     );
   }
-  if ("literal" in query.text) {
-    return containsText(note.content, query.text.literal, query.text.caseSensitive);
+  if ("text" in query) {
+    if ("literal" in query.text) {
+      return containsText(note.content, query.text.literal, query.text.caseSensitive);
+    }
+    return new RegExp(query.text.regex, query.text.caseSensitive ? "gu" : "giu").test(
+      note.content,
+    );
   }
-  return new RegExp(query.text.regex, query.text.caseSensitive ? "gu" : "giu").test(
-    note.content,
-  );
+  if ("frontmatter" in query) {
+    const frontmatter = note.frontmatter;
+    const hasKey = frontmatter !== null && Object.hasOwn(frontmatter, query.frontmatter.key);
+    if ("exists" in query.frontmatter) return hasKey === query.frontmatter.exists;
+    if (!hasKey) return false;
+    const value = frontmatter[query.frontmatter.key];
+    if ("equals" in query.frontmatter) {
+      return jsonValuesEqual(value, query.frontmatter.equals);
+    }
+    if ("contains" in query.frontmatter) {
+      const containedValue = query.frontmatter.contains;
+      return Array.isArray(value) && value.some((item) =>
+        jsonValuesEqual(item, containedValue));
+    }
+    return false;
+  }
+  if ("tag" in query) return note.tags.includes(query.tag.exact);
+  if ("reference" in query) {
+    return note.references.some(({ profile, target }) =>
+      profile === query.reference.profile && target === query.reference.target);
+  }
+  if ("backlink" in query) {
+    return Object.hasOwn(notesByPath.get(query.backlink.from)?.resolvedLinks ?? {}, note.path);
+  }
+  if ("unresolvedLink" in query) {
+    return Object.hasOwn(note.unresolvedLinks, query.unresolvedLink.target);
+  }
+  const from = query.graph.relation === "links_to" ? note.path : query.graph.path;
+  const to = query.graph.relation === "links_to" ? query.graph.path : note.path;
+  return graphReaches(notesByPath, from, to, query.graph.maxDepth);
 }
 
 function textQueries(query: DiscoverQuery): DiscoverQuery[] {
@@ -139,6 +222,15 @@ function freezeItem(note: SearchSnapshotNote, input: DiscoverInput): DiscoverIte
     sizeBytes: note.sizeBytes,
   };
   if (input.projection.matches) item.matches = collectMatches(note, input.query);
+  if (input.projection.outline) item.outline = note.headings.map((heading) => ({ ...heading }));
+  if (input.projection.frontmatter) {
+    item.frontmatter = note.frontmatter === null
+      ? null
+      : structuredClone(note.frontmatter);
+  }
+  if (input.projection.references) {
+    item.references = note.references.map((reference) => ({ ...reference }));
+  }
   return Object.freeze(item);
 }
 
@@ -200,8 +292,9 @@ export class VaultDiscoverService {
         code: "search_snapshot_unavailable",
       });
     }
+    const notesByPath = new Map(snapshot.notes.map((note) => [note.path, note]));
     const items = snapshot.notes
-      .filter((note) => queryMatches(note, input.query))
+      .filter((note) => queryMatches(note, input.query, notesByPath))
       .map((note) => freezeItem(note, input));
     items.sort((left, right) => {
       const compared = compareCanonicalPaths(left.path, right.path);

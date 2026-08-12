@@ -1,0 +1,18 @@
+{
+  "input": {
+    "query": {
+      "reference": {
+        "profile": "frontmatter",
+        "target": "Target Note"
+      }
+    },
+    "projection": {
+      "matches": false,
+      "outline": false,
+      "frontmatter": false,
+      "references": false
+    },
+    "order": { "by": "path", "direction": "asc" },
+    "page": { "maxItems": 100, "continuation": null }
+  }
+}

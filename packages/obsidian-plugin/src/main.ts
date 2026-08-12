@@ -5,12 +5,21 @@ import {
   FileSystemAdapter,
   Plugin,
   TFile,
+  getAllTags,
   getFrontMatterInfo,
+  parseFrontMatterAliases,
+  parseLinktext,
   parseYaml,
+  resolveSubpath,
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
+import {
+  createObsidianSearchDataSource,
+  enumerateCanonicalReferenceTargets,
+  isRegisteredSubpathResult,
+} from "./obsidian-search-data-source.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -58,14 +67,65 @@ export default class VaultOperationBridgePlugin extends Plugin {
             }
           : {}),
       },
-      searchDataSource: {
-        listMarkdownPaths: async () =>
-          this.app.vault.getMarkdownFiles().map(({ path }) => path),
+      searchDataSource: createObsidianSearchDataSource({
+        markdownFiles: () => this.app.vault.getMarkdownFiles(),
         readBinary: async (path) => {
           const file = this.app.vault.getFileByPath(path);
-          return file === null ? null : this.app.vault.readBinary(file);
+          if (file === null) throw new Error("Search Snapshot file disappeared");
+          return this.app.vault.readBinary(file);
         },
-      },
+        fileCache: (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          return file === null ? null : this.app.metadataCache.getFileCache(file);
+        },
+        resolveLink: (target, sourcePath) =>
+          this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path ?? null,
+        candidatePaths: (target, sourcePath) => {
+          const { path } = parseLinktext(target);
+          return enumerateCanonicalReferenceTargets(
+            path,
+            this.app.vault.getFiles().map((file) => ({
+              path: file.path,
+              basename: file.basename,
+              aliases: parseFrontMatterAliases(
+                this.app.metadataCache.getFileCache(file)?.frontmatter ?? null,
+              ) ?? [],
+            })),
+            sourcePath,
+          );
+        },
+        validSubpath: (target, resolvedPath) => {
+          const { subpath } = parseLinktext(target);
+          if (subpath === "") return true;
+          const file = this.app.vault.getFileByPath(resolvedPath);
+          const cache = file === null ? null : this.app.metadataCache.getFileCache(file);
+          if (cache === null) return false;
+          const resolved = resolveSubpath(cache, subpath);
+          if (resolved === null) return false;
+          const installed = resolved.type === "heading"
+            ? { type: "heading" as const, heading: resolved.current.heading }
+            : resolved.type === "block"
+              ? { type: "block" as const, id: resolved.block.id }
+              : { type: "footnote" as const };
+          return isRegisteredSubpathResult(
+            subpath,
+            installed,
+            cache.headings?.map(({ heading }) => heading) ?? [],
+          );
+        },
+        resolvedLinks: () => this.app.metadataCache.resolvedLinks,
+        unresolvedLinks: () => this.app.metadataCache.unresolvedLinks,
+        parseFrontmatter: (frontmatter) => {
+          const clone = structuredClone(frontmatter);
+          delete clone.position;
+          return clone;
+        },
+        allTags: (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          const cache = file === null ? null : this.app.metadataCache.getFileCache(file);
+          return cache === null ? null : getAllTags(cache);
+        },
+      }),
       readDataSource: {
         readBinary: async (path) =>
           (await adapter.exists(path)) ? adapter.readBinary(path) : null,
@@ -92,15 +152,15 @@ export default class VaultOperationBridgePlugin extends Plugin {
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;
-    let refreshQueue = Promise.resolve();
     const scheduleRefresh = (): void => {
-      refreshQueue = refreshQueue
-        .then(() => runtime.refreshSearchSnapshot())
-        .catch(() => undefined);
+      runtime.scheduleSearchSnapshotRefresh();
     };
     const scheduleMarkdownRefresh = (file: unknown): void => {
       if (file instanceof TFile && file.extension === "md") scheduleRefresh();
     };
+    this.registerEvent(this.app.metadataCache.on("changed", scheduleMarkdownRefresh));
+    this.registerEvent(this.app.metadataCache.on("resolve", scheduleMarkdownRefresh));
+    this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
     this.registerEvent(this.app.vault.on("create", scheduleMarkdownRefresh));
     this.registerEvent(this.app.vault.on("modify", scheduleMarkdownRefresh));
     this.registerEvent(this.app.vault.on("delete", scheduleMarkdownRefresh));

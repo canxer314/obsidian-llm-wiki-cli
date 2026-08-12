@@ -1,0 +1,19 @@
+{
+  "input": {
+    "query": {
+      "frontmatter": {
+        "key": "status",
+        "equals": "active",
+        "exists": true
+      }
+    },
+    "projection": {
+      "matches": false,
+      "outline": false,
+      "frontmatter": false,
+      "references": false
+    },
+    "order": { "by": "path", "direction": "asc" },
+    "page": { "maxItems": 100, "continuation": null }
+  }
+}

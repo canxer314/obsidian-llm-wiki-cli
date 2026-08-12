@@ -104,6 +104,22 @@
       "id": "continuation-operational-gate-precedence",
       "authority": "contract-and-runtime",
       "expectation": "A content-blocking effective gate returns operationally_blocked before inspecting or consuming a continuation token."
+    },
+    {
+      "id": "structured-graph-discovery-composition",
+      "authority": "contract-and-installed-runtime",
+      "fixture": "vault-discover/valid/structured-graph-projection.json",
+      "expectation": "Typed Frontmatter, tag, registered-reference, backlink, unresolved-link, graph, path, and text predicates compose over one immutable Search Snapshot with combined projections."
+    },
+    {
+      "id": "registered-reference-byte-verification",
+      "authority": "installed-runtime",
+      "expectation": "Only installed-runtime-proven reference profiles are accepted, and every UTF-16 cache locator maps uniquely to matching raw UTF-8 bytes while preserving original syntax."
+    },
+    {
+      "id": "successor-search-snapshot-graph-evidence",
+      "authority": "installed-runtime",
+      "expectation": "Rename, deletion, target creation, and unresolved-link changes publish coherent successor graph evidence while existing continuations retain their frozen predecessor result."
     }
   ]
 }

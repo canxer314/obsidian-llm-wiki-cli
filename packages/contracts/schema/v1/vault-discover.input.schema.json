@@ -8,13 +8,13 @@
       "$ref": "#/$defs/__schema0"
     },
     "projection": {
-      "$ref": "#/$defs/__schema4"
+      "$ref": "#/$defs/__schema6"
     },
     "order": {
-      "$ref": "#/$defs/__schema5"
+      "$ref": "#/$defs/__schema7"
     },
     "page": {
-      "$ref": "#/$defs/__schema6"
+      "$ref": "#/$defs/__schema8"
     }
   },
   "required": [
@@ -36,8 +36,7 @@
                   "type": "object",
                   "properties": {
                     "exact": {
-                      "type": "string",
-                      "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/).+\\.md$"
+                      "$ref": "#/$defs/__schema1"
                     }
                   },
                   "required": [
@@ -49,7 +48,7 @@
                   "type": "object",
                   "properties": {
                     "prefix": {
-                      "$ref": "#/$defs/__schema1"
+                      "$ref": "#/$defs/__schema2"
                     }
                   },
                   "required": [
@@ -61,7 +60,7 @@
                   "type": "object",
                   "properties": {
                     "glob": {
-                      "$ref": "#/$defs/__schema1"
+                      "$ref": "#/$defs/__schema2"
                     }
                   },
                   "required": [
@@ -150,10 +149,10 @@
                   "type": "object",
                   "properties": {
                     "regex": {
-                      "$ref": "#/$defs/__schema2"
+                      "$ref": "#/$defs/__schema3"
                     },
                     "caseSensitive": {
-                      "$ref": "#/$defs/__schema3"
+                      "$ref": "#/$defs/__schema4"
                     }
                   },
                   "required": [
@@ -167,6 +166,215 @@
           },
           "required": [
             "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "frontmatter": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "equals": {
+                      "$ref": "#/$defs/__schema5"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "equals"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "contains": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "contains"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "exists"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "frontmatter"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "type": "object",
+              "properties": {
+                "exact": {
+                  "type": "string",
+                  "pattern": "^#[^\\s#]+$"
+                }
+              },
+              "required": [
+                "exact"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "tag"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "object",
+              "properties": {
+                "profile": {
+                  "type": "string",
+                  "enum": [
+                    "wikilink",
+                    "embed",
+                    "markdown_inline_link",
+                    "markdown_embed"
+                  ]
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "profile",
+                "target"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "backlink": {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "$ref": "#/$defs/__schema1"
+                }
+              },
+              "required": [
+                "from"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "backlink"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "unresolvedLink": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "unresolvedLink"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "graph": {
+              "type": "object",
+              "properties": {
+                "relation": {
+                  "type": "string",
+                  "enum": [
+                    "links_to",
+                    "linked_from"
+                  ]
+                },
+                "path": {
+                  "$ref": "#/$defs/__schema1"
+                },
+                "maxDepth": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "relation",
+                "path",
+                "maxDepth"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "graph"
           ],
           "additionalProperties": false
         },
@@ -218,19 +426,63 @@
     },
     "__schema1": {
       "type": "string",
-      "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/).+$"
+      "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/).+\\.md$"
     },
     "__schema2": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/).+$"
     },
     "__schema3": {
-      "type": "boolean"
+      "type": "string",
+      "minLength": 1
     },
     "__schema4": {
+      "type": "boolean"
+    },
+    "__schema5": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema5"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema5"
+          }
+        }
+      ]
+    },
+    "__schema6": {
       "type": "object",
       "properties": {
         "matches": {
+          "type": "boolean"
+        },
+        "outline": {
+          "type": "boolean"
+        },
+        "frontmatter": {
+          "type": "boolean"
+        },
+        "references": {
           "type": "boolean"
         }
       },
@@ -239,7 +491,7 @@
       ],
       "additionalProperties": false
     },
-    "__schema5": {
+    "__schema7": {
       "type": "object",
       "properties": {
         "by": {
@@ -260,7 +512,7 @@
       ],
       "additionalProperties": false
     },
-    "__schema6": {
+    "__schema8": {
       "type": "object",
       "properties": {
         "maxItems": {

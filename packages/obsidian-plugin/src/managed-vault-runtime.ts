@@ -11,7 +11,11 @@ import type {
   BridgeHealthState,
   BridgeInstance,
 } from "./bridge-instance.js";
-import { SearchSnapshotManager, type SearchSnapshotDataSource } from "./search-snapshot.js";
+import {
+  SearchSnapshotManager,
+  SearchSnapshotRefreshCoordinator,
+  type SearchSnapshotDataSource,
+} from "./search-snapshot.js";
 import { VaultDiscoverService } from "./vault-discover.js";
 import type { VaultReadDataSource } from "./vault-read.js";
 
@@ -139,6 +143,7 @@ export class ManagedVaultBridgeRuntime {
   #settings: PersistedBridgeSettings | undefined;
   #pendingPathChange: PathChangeEvidence | undefined;
   #snapshots: SearchSnapshotManager | undefined;
+  #snapshotRefresh: SearchSnapshotRefreshCoordinator | undefined;
 
   constructor(options: ManagedVaultBridgeRuntimeOptions) {
     this.#options = options;
@@ -160,6 +165,10 @@ export class ManagedVaultBridgeRuntime {
     const snapshots = this.#snapshots;
     if (snapshots === undefined) return;
     await snapshots.rebuild();
+  }
+
+  scheduleSearchSnapshotRefresh(): void {
+    this.#snapshotRefresh?.schedule();
   }
 
   async #saveSettings(settings: PersistedBridgeSettings): Promise<void> {
@@ -253,6 +262,9 @@ export class ManagedVaultBridgeRuntime {
         ? undefined
         : new SearchSnapshotManager(this.#options.searchDataSource);
     this.#snapshots = snapshots;
+    this.#snapshotRefresh = snapshots === undefined
+      ? undefined
+      : new SearchSnapshotRefreshCoordinator(snapshots);
     if (snapshots !== undefined) {
       try {
         await snapshots.rebuild();
@@ -335,6 +347,8 @@ export class ManagedVaultBridgeRuntime {
     const bridge = this.#bridge;
     this.#bridge = undefined;
     this.#snapshots = undefined;
+    this.#snapshotRefresh?.dispose();
+    this.#snapshotRefresh = undefined;
     if (bridge !== undefined) await bridge.stop();
   }
 
