@@ -1,0 +1,9 @@
+{
+  "result": {
+    "outcome": "grouping_required",
+    "suggestedGroups": [
+      { "startIndex": 0, "endIndexExclusive": 2, "exactReadBytes": 1000000 },
+      { "startIndex": 2, "endIndexExclusive": 4, "exactReadBytes": 400000 }
+    ]
+  }
+}

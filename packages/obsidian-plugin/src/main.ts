@@ -1,4 +1,9 @@
-import { FileSystemAdapter, Plugin } from "obsidian";
+import {
+  FileSystemAdapter,
+  Plugin,
+  getFrontMatterInfo,
+  parseYaml,
+} from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
 import {
@@ -19,6 +24,28 @@ export default class VaultOperationBridgePlugin extends Plugin {
       settings: {
         load: () => this.loadData() as Promise<unknown>,
         save: (settings) => this.saveData(settings),
+      },
+      readDataSource: {
+        readBinary: async (path) =>
+          (await adapter.exists(path)) ? adapter.readBinary(path) : null,
+        parseFrontmatter: (content) => {
+          const { exists, frontmatter } = getFrontMatterInfo(content);
+          if (!exists) return null;
+          const parsed: unknown = parseYaml(frontmatter);
+          return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : null;
+        },
+        headings: (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          const headings = file === null ? null : this.app.metadataCache.getFileCache(file)?.headings;
+          return headings?.map(({ heading, level, position }) => ({
+            heading,
+            level,
+            startOffset: position.start.offset,
+            endOffset: position.end.offset,
+          })) ?? null;
+        },
       },
       createBridge: createBridgeInstance,
     });

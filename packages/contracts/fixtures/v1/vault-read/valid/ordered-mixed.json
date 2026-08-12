@@ -1,0 +1,57 @@
+{
+  "input": {
+    "items": [
+      { "kind": "metadata", "path": "资料/重复.md" },
+      { "kind": "outline", "path": "资料/重复.md" },
+      {
+        "kind": "section",
+        "path": "资料/重复.md",
+        "hierarchy": ["父级", "子级"],
+        "occurrence": 2
+      },
+      { "kind": "exact", "path": "资料/重复.md" }
+    ]
+  },
+  "result": {
+    "outcome": "items",
+    "items": [
+      {
+        "outcome": "satisfied",
+        "result": {
+          "kind": "metadata",
+          "index": 0,
+          "path": "资料/重复.md",
+          "contentVersion": "sha256:319219685dfd4d588f3f59c88ff89a6c8b5d24f66047383c5b6c987d132ac8aa",
+          "sizeBytes": 15,
+          "frontmatter": { "状态": "就绪" }
+        }
+      },
+      {
+        "outcome": "satisfied",
+        "result": {
+          "kind": "outline",
+          "index": 1,
+          "path": "资料/重复.md",
+          "contentVersion": "sha256:319219685dfd4d588f3f59c88ff89a6c8b5d24f66047383c5b6c987d132ac8aa",
+          "sizeBytes": 15,
+          "headings": [
+            { "heading": "父级", "level": 1 },
+            { "heading": "子级", "level": 2 }
+          ]
+        }
+      },
+      { "outcome": "not_satisfied" },
+      {
+        "outcome": "satisfied",
+        "result": {
+          "kind": "exact",
+          "index": 3,
+          "path": "资料/重复.md",
+          "contentVersion": "sha256:319219685dfd4d588f3f59c88ff89a6c8b5d24f66047383c5b6c987d132ac8aa",
+          "sizeBytes": 15,
+          "content": "﻿正文\r\n😀"
+        }
+      }
+    ]
+  }
+}

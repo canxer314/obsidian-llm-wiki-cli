@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import {
   createHealthInputJsonSchema,
   createHealthResultJsonSchema,
+  createReadInputJsonSchema,
+  createReadResultJsonSchema,
 } from "../src/index.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,6 +25,12 @@ describe("committed JSON Schema artifacts", () => {
     );
     expect(readSchema("vault-health.output.schema.json")).toEqual(
       createHealthResultJsonSchema(),
+    );
+    expect(readSchema("vault-read.input.schema.json")).toEqual(
+      createReadInputJsonSchema(),
+    );
+    expect(readSchema("vault-read.output.schema.json")).toEqual(
+      createReadResultJsonSchema(),
     );
   });
 });
