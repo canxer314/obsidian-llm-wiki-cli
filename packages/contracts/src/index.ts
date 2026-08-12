@@ -233,9 +233,32 @@ const continuedWholeItemSchema = z
   })
   .strict();
 
+const continuedItemChunkSchema = z
+  .object({
+    kind: z.literal("item"),
+    index: z.number().int().nonnegative(),
+    sizeBytes: z.number().int().positive(),
+    start: z.number().int().nonnegative(),
+    end: z.number().int().positive(),
+    content: z.string(),
+    complete: z.boolean(),
+  })
+  .strict()
+  .refine((item) => item.start < item.end && item.end <= item.sizeBytes, {
+    message: "continued item byte range must be non-empty and within its frozen size",
+  })
+  .refine(
+    (item) => new TextEncoder().encode(item.content).byteLength === item.end - item.start,
+    { message: "item content must exactly match the declared UTF-8 byte range" },
+  )
+  .refine((item) => item.complete === (item.end === item.sizeBytes), {
+    message: "only the final item chunk is complete",
+  });
+
 const continuePageItemSchema = z.union([
   continuedContentItemSchema,
   continuedWholeItemSchema,
+  continuedItemChunkSchema,
 ]);
 
 const continuePageResultSchema = z

@@ -449,6 +449,81 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
     }
   });
 
+  it("continues an oversized metadata item through bounded transport pages", async () => {
+    const frontmatter = { large: "界😀".repeat(60_000) };
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      readDataSource: {
+        readBinary: async () => Buffer.from("x", "utf8"),
+        parseFrontmatter: () => frontmatter,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const results = [
+        await client.callTool({
+          name: "vault_read",
+          arguments: { items: [{ kind: "metadata", path: "large.md" }] },
+        }),
+      ];
+      let continuation = (results[0]?.structuredContent as { continuation: string | null })
+        .continuation;
+      while (continuation !== null) {
+        const continued = await client.callTool({
+          name: "vault_continue",
+          arguments: { continuation },
+        });
+        results.push(continued);
+        continuation = (continued.structuredContent as { continuation: string | null })
+          .continuation;
+      }
+
+      const chunks = results.flatMap((result) =>
+        (result.structuredContent as {
+          items: Array<{
+            kind: string;
+            start: number;
+            end: number;
+            content: string;
+            complete: boolean;
+          }>;
+        }).items,
+      );
+      expect(results.every((result) => result.isError === false)).toBe(true);
+      expect(
+        results.every(
+          (result) =>
+            Buffer.byteLength(
+              JSON.stringify({
+                content: result.content,
+                structuredContent: result.structuredContent,
+                isError: result.isError,
+              }),
+              "utf8",
+            ) <= 262_144,
+        ),
+      ).toBe(true);
+      expect(chunks.every((chunk) => chunk.kind === "item")).toBe(true);
+      expect(
+        chunks.every(
+          (chunk, index) => index === 0 || chunks[index - 1]?.end === chunk.start,
+        ),
+      ).toBe(true);
+      expect(chunks.at(-1)?.complete).toBe(true);
+      expect(JSON.parse(chunks.map((chunk) => chunk.content).join(""))).toMatchObject({
+        outcome: "satisfied",
+        result: { kind: "metadata", frontmatter },
+      });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   it("continues an accepted Exact Read through frozen bounded transport pages", async () => {
     const original = `﻿${"正文😀\r\n".repeat(50_000)}`;
     let current = Buffer.from(original, "utf8");

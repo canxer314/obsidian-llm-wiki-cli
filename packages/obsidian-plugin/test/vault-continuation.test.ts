@@ -92,6 +92,49 @@ describe("vault continuation store", () => {
     expect(second.items.map((item) => item.content).join("")).not.toContain("mutated");
   });
 
+  it("transports an oversized metadata item as canonical JSON byte chunks", () => {
+    let next = 0;
+    const store = createVaultContinuationStore({ token: () => `token-${++next}` });
+    const item = {
+      outcome: "satisfied" as const,
+      result: {
+        kind: "metadata" as const,
+        index: 0,
+        path: "large.md",
+        contentVersion: version,
+        sizeBytes: 1,
+        frontmatter: { large: "界😀".repeat(60_000) },
+      },
+    };
+    const pages = [];
+    let page = store.issue("client-a", { outcome: "items", items: [item] });
+
+    while (page.outcome === "page") {
+      pages.push(page);
+      if (page.continuation === null) break;
+      page = store.continue("client-a", page.continuation);
+    }
+
+    const chunks = pages.flatMap((candidate) =>
+      candidate.items.filter(
+        (candidateItem) => "kind" in candidateItem && candidateItem.kind === "item",
+      ),
+    );
+    expect(chunks[0]?.start).toBe(0);
+    expect(chunks.at(-1)?.complete).toBe(true);
+    expect(
+      chunks.every(
+        (chunk, index) => index === 0 || chunks[index - 1]?.end === chunk.start,
+      ),
+    ).toBe(true);
+    expect(JSON.parse(chunks.map((chunk) => chunk.content).join(""))).toEqual(item);
+    for (const candidate of pages) {
+      expect(Buffer.byteLength(JSON.stringify(candidate), "utf8")).toBeLessThanOrEqual(
+        MAXIMUM_COMPACT_RESPONSE_BYTES,
+      );
+    }
+  });
+
   it("preserves complete non-content results in heterogeneous request order", () => {
     let next = 0;
     const store = createVaultContinuationStore({ token: () => `token-${++next}` });
@@ -262,6 +305,19 @@ describe("vault continuation store", () => {
     expect(
       store.issue("client-a", frozenRead(["x".repeat(300_000)])).outcome,
     ).toBe("page");
+  });
+
+  it("does not retain retired token metadata after completion", () => {
+    const store = createVaultContinuationStore({ token: () => "reusable-token" });
+
+    expect(store.issue("client-a", frozenRead(["first"]))).toMatchObject({
+      outcome: "page",
+      complete: true,
+    });
+    expect(store.issue("client-a", frozenRead(["second"]))).toMatchObject({
+      outcome: "page",
+      complete: true,
+    });
   });
 
   it("releases client capacity immediately on teardown", () => {

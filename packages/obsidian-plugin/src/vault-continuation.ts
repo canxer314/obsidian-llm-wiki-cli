@@ -31,6 +31,14 @@ interface FrozenWholeItem {
   item: NonContentReadItem;
 }
 
+interface FrozenItemChunk {
+  type: "item";
+  index: number;
+  start: number;
+  sizeBytes: number;
+  bytes: Uint8Array;
+}
+
 interface FrozenContentItem {
   type: "content";
   kind: ContentReadResult["kind"];
@@ -44,7 +52,7 @@ interface FrozenContentItem {
   bytes: Uint8Array;
 }
 
-type FrozenItem = FrozenWholeItem | FrozenContentItem;
+type FrozenItem = FrozenWholeItem | FrozenItemChunk | FrozenContentItem;
 
 interface ContinuationState {
   clientId: string;
@@ -119,7 +127,7 @@ function retainedBytes(items: FrozenItem[]): number {
   return items.reduce(
     (total, item) =>
       total +
-      (item.type === "content"
+      (item.type === "content" || item.type === "item"
         ? item.bytes.byteLength
         : Buffer.byteLength(JSON.stringify(item.item), "utf8")),
     0,
@@ -154,6 +162,32 @@ function wholeItem(item: FrozenWholeItem): ContinuePageResult["items"][number] {
   return { index: item.index, item: item.item };
 }
 
+function itemChunk(
+  item: FrozenItemChunk,
+  end: number,
+): ContinuePageResult["items"][number] {
+  return {
+    kind: "item",
+    index: item.index,
+    sizeBytes: item.sizeBytes,
+    start: item.start,
+    end: item.start + end,
+    content: Buffer.from(item.bytes.subarray(0, end)).toString("utf8"),
+    complete: item.start + end === item.sizeBytes,
+  };
+}
+
+function freezeWholeItem(item: FrozenWholeItem): FrozenItemChunk {
+  const bytes = Uint8Array.from(Buffer.from(JSON.stringify(item.item), "utf8"));
+  return {
+    type: "item",
+    index: item.index,
+    start: 0,
+    sizeBytes: bytes.byteLength,
+    bytes,
+  };
+}
+
 function page(
   items: ContinuePageResult["items"],
   continuation: string | null,
@@ -176,6 +210,32 @@ function trimContent(item: FrozenContentItem, deliveredBytes: number): FrozenCon
     start: item.start + deliveredBytes,
     bytes: Uint8Array.from(item.bytes.subarray(deliveredBytes)),
   };
+}
+
+function trimItem(item: FrozenItemChunk, deliveredBytes: number): FrozenItemChunk {
+  return {
+    ...item,
+    start: item.start + deliveredBytes,
+    bytes: Uint8Array.from(item.bytes.subarray(deliveredBytes)),
+  };
+}
+
+function frozenChunk(
+  item: FrozenItemChunk | FrozenContentItem,
+  end: number,
+): ContinuePageResult["items"][number] {
+  return item.type === "item"
+    ? itemChunk(item, end)
+    : contentChunk(item, end, end === item.bytes.byteLength);
+}
+
+function trimFrozenChunk(
+  item: FrozenItemChunk | FrozenContentItem,
+  deliveredBytes: number,
+): FrozenItemChunk | FrozenContentItem {
+  return item.type === "item"
+    ? trimItem(item, deliveredBytes)
+    : trimContent(item, deliveredBytes);
 }
 
 function nextState(state: ContinuationState, items: FrozenItem[]): ContinuationState {
@@ -210,11 +270,12 @@ function buildPage(
           next: nextState(state, remaining),
         };
       }
-      throw new Error("Compact response cannot carry one complete read result item");
+      remaining[0] = freezeWholeItem(item);
+      continue;
     }
 
     const hasLaterItem = remaining.length > 1;
-    const fullChunk = contentChunk(item, item.bytes.byteLength, true);
+    const fullChunk = frozenChunk(item, item.bytes.byteLength);
     const fullPage = page(
       [...transported, fullChunk],
       hasLaterItem ? replacementToken : null,
@@ -237,7 +298,7 @@ function buildPage(
         continue;
       }
       const candidate = page(
-        [...transported, contentChunk(item, end, false)],
+        [...transported, frozenChunk(item, end)],
         replacementToken,
       );
       if (measureResponse(candidate) <= MAXIMUM_COMPACT_RESPONSE_BYTES) {
@@ -250,10 +311,10 @@ function buildPage(
 
     if (bestEnd !== undefined) {
       const result = page(
-        [...transported, contentChunk(item, bestEnd, false)],
+        [...transported, frozenChunk(item, bestEnd)],
         replacementToken,
       );
-      remaining[0] = trimContent(item, bestEnd);
+      remaining[0] = trimFrozenChunk(item, bestEnd);
       return { result, next: nextState(state, remaining) };
     }
 
@@ -277,7 +338,6 @@ export function createVaultContinuationStore(
   const now = options.now ?? Date.now;
   const measureResponse = options.measureResponse ?? compactSize;
   const active = new Map<string, ContinuationState>();
-  const issued = new Set<string>();
 
   function removeExpired(): void {
     const current = now();
@@ -294,19 +354,18 @@ export function createVaultContinuationStore(
     };
   }
 
-  function nextToken(): string {
+  function nextToken(excludedToken?: string): string {
     for (let attempt = 0; attempt < 16; attempt += 1) {
       const token = createToken();
-      if (token.length > 0 && !issued.has(token)) {
-        issued.add(token);
+      if (token.length > 0 && token !== excludedToken && !active.has(token)) {
         return token;
       }
     }
-    throw new Error("Continuation token source did not produce a unique token");
+    throw new Error("Continuation token source did not produce an available token");
   }
 
-  function deliver(state: ContinuationState): ContinuePageResult {
-    const replacementToken = nextToken();
+  function deliver(state: ContinuationState, consumedToken: string): ContinuePageResult {
+    const replacementToken = nextToken(consumedToken);
     const { result, next } = buildPage(state, replacementToken, measureResponse);
     if (next !== null) {
       active.set(replacementToken, {
@@ -356,7 +415,7 @@ export function createVaultContinuationStore(
         return parseContinueResult({ code: "continuation_unavailable" });
       }
       active.delete(continuation);
-      return deliver(state);
+      return deliver(state, continuation);
     },
     releaseClient(clientId) {
       removeExpired();

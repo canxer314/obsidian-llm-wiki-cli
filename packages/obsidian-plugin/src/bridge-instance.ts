@@ -131,6 +131,18 @@ function protocolsOverlap(peer: ProtocolParticipant): boolean {
   );
 }
 
+function blocksVaultContent(
+  gate:
+    | BridgeHealthState["effectiveGate"]
+    | Extract<HealthResult, { outcome: "incompatible" }>["gate"],
+): boolean {
+  return (
+    gate?.code === "incompatible_protocol" ||
+    gate?.code === "recovery_in_progress" ||
+    gate?.code === "recovery_blocked"
+  );
+}
+
 export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInstance {
   let port = options.port;
   let httpServer: HttpServer | undefined;
@@ -204,11 +216,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         async (arguments_) => {
           const input = parseReadInput(arguments_);
           const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
-          const blocksContent =
-            effectiveGate?.code === "incompatible_protocol" ||
-            effectiveGate?.code === "recovery_in_progress" ||
-            effectiveGate?.code === "recovery_blocked";
-          const result = blocksContent
+          const result = blocksVaultContent(effectiveGate)
             ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
             : await performVaultRead(options.readDataSource!, input);
           const text = serializeReadCompatibilityText(result);
@@ -255,12 +263,8 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         (arguments_) => {
           const input = parseContinueInput(arguments_);
           const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
-          const blocksContent =
-            effectiveGate?.code === "incompatible_protocol" ||
-            effectiveGate?.code === "recovery_in_progress" ||
-            effectiveGate?.code === "recovery_blocked";
           let result: ContinueResult;
-          if (blocksContent) {
+          if (blocksVaultContent(effectiveGate)) {
             result = parseContinueResult({
               outcome: "operationally_blocked",
               gate: effectiveGate,

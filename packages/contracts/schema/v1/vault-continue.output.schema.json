@@ -13,10 +13,10 @@
           "$ref": "#/$defs/__schema1"
         },
         "continuation": {
-          "$ref": "#/$defs/__schema11"
+          "$ref": "#/$defs/__schema18"
         },
         "complete": {
-          "$ref": "#/$defs/__schema12"
+          "$ref": "#/$defs/__schema19"
         }
       },
       "required": [
@@ -255,6 +255,42 @@
             "item"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/__schema11"
+            },
+            "index": {
+              "$ref": "#/$defs/__schema12"
+            },
+            "sizeBytes": {
+              "$ref": "#/$defs/__schema13"
+            },
+            "start": {
+              "$ref": "#/$defs/__schema14"
+            },
+            "end": {
+              "$ref": "#/$defs/__schema15"
+            },
+            "content": {
+              "$ref": "#/$defs/__schema16"
+            },
+            "complete": {
+              "$ref": "#/$defs/__schema17"
+            }
+          },
+          "required": [
+            "kind",
+            "index",
+            "sizeBytes",
+            "start",
+            "end",
+            "content",
+            "complete"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -424,6 +460,36 @@
       ]
     },
     "__schema11": {
+      "type": "string",
+      "const": "item"
+    },
+    "__schema12": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema13": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema14": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema15": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "__schema16": {
+      "type": "string"
+    },
+    "__schema17": {
+      "type": "boolean"
+    },
+    "__schema18": {
       "anyOf": [
         {
           "type": "string",
@@ -434,7 +500,7 @@
         }
       ]
     },
-    "__schema12": {
+    "__schema19": {
       "type": "boolean"
     }
   }

@@ -1,0 +1,18 @@
+{
+  "result": {
+    "outcome": "page",
+    "items": [
+      {
+        "kind": "item",
+        "index": 0,
+        "sizeBytes": 4,
+        "start": 0,
+        "end": 3,
+        "content": "界",
+        "complete": false
+      }
+    ],
+    "continuation": "replacement-token",
+    "complete": false
+  }
+}

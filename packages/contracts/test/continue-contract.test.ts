@@ -58,6 +58,41 @@ describe("vault_continue contract", () => {
     });
   });
 
+  it("carries oversized non-content items as contiguous canonical JSON bytes", () => {
+    const item = {
+      outcome: "satisfied",
+      result: {
+        kind: "metadata",
+        index: 0,
+        path: "note.md",
+        contentVersion: version,
+        sizeBytes: 1,
+        frontmatter: { large: "界" },
+      },
+    };
+    const content = JSON.stringify(item);
+    const sizeBytes = new TextEncoder().encode(content).byteLength;
+    const result = {
+      outcome: "page",
+      items: [
+        {
+          kind: "item",
+          index: 0,
+          sizeBytes,
+          start: 0,
+          end: sizeBytes,
+          content,
+          complete: true,
+        },
+      ],
+      continuation: null,
+      complete: true,
+    };
+
+    expect(parseContinueResult(result)).toEqual(result);
+    expect(JSON.parse(result.items[0].content)).toEqual(item);
+  });
+
   it("carries exact contiguous UTF-8 byte ranges with replacement state", () => {
     const result = {
       outcome: "page",
