@@ -1,6 +1,7 @@
 import {
   FileSystemAdapter,
   Plugin,
+  TFile,
   getFrontMatterInfo,
   parseYaml,
 } from "obsidian";
@@ -24,6 +25,14 @@ export default class VaultOperationBridgePlugin extends Plugin {
       settings: {
         load: () => this.loadData() as Promise<unknown>,
         save: (settings) => this.saveData(settings),
+      },
+      searchDataSource: {
+        listMarkdownPaths: async () =>
+          this.app.vault.getMarkdownFiles().map(({ path }) => path),
+        readBinary: async (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          return file === null ? null : this.app.vault.readBinary(file);
+        },
       },
       readDataSource: {
         readBinary: async (path) =>
@@ -50,6 +59,28 @@ export default class VaultOperationBridgePlugin extends Plugin {
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;
+    let refreshQueue = Promise.resolve();
+    const scheduleRefresh = (): void => {
+      refreshQueue = refreshQueue
+        .then(() => runtime.refreshSearchSnapshot())
+        .catch(() => undefined);
+    };
+    const scheduleMarkdownRefresh = (file: unknown): void => {
+      if (file instanceof TFile && file.extension === "md") scheduleRefresh();
+    };
+    this.registerEvent(this.app.vault.on("create", scheduleMarkdownRefresh));
+    this.registerEvent(this.app.vault.on("modify", scheduleMarkdownRefresh));
+    this.registerEvent(this.app.vault.on("delete", scheduleMarkdownRefresh));
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        if (
+          (file instanceof TFile && file.extension === "md") ||
+          oldPath.endsWith(".md")
+        ) {
+          scheduleRefresh();
+        }
+      }),
+    );
 
     try {
       await runtime.load();

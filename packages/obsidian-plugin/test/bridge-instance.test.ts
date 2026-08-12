@@ -5,6 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 import {
   createBridgeInstance,
+  SearchSnapshotManager,
+  VaultDiscoverService,
   type BridgeHealthState,
   type VaultReadDataSource,
 } from "../src/index.js";
@@ -198,6 +200,137 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
         overall: "degraded",
         reasonCodes: ["content_tools_not_ready"],
         operatorAction: "wait_for_readiness",
+      });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("preserves unrelated degraded health when the Search Snapshot is ready", async () => {
+    const degraded = healthState("vault-a", "Alpha");
+    degraded.overall = "degraded";
+    degraded.reasonCodes = ["cache_rebuilding"];
+    degraded.operatorAction = "wait_for_readiness";
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: degraded,
+      searchSnapshotReadiness: () => "ready",
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const result = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(result.structuredContent).toMatchObject({
+        overall: "degraded",
+        reasonCodes: ["cache_rebuilding"],
+        operatorAction: "wait_for_readiness",
+      });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("serves vault_discover from one ready internal Search Snapshot", async () => {
+    const files = new Map([
+      ["Alpha.md", new TextEncoder().encode("Search Snapshot")],
+      ["Beta.md", new TextEncoder().encode("other")],
+    ]);
+    const snapshots = new SearchSnapshotManager({
+      listMarkdownPaths: async () => [...files.keys()],
+      readBinary: async (path) => files.get(path) ?? null,
+    });
+    await snapshots.rebuild();
+    const health = healthState("vault-a", "Alpha");
+    const bridge = createBridgeInstance({
+      port: 0,
+      health,
+      discoverService: new VaultDiscoverService(snapshots),
+      searchSnapshotReadiness: () => snapshots.readiness,
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const result = await client.callTool({
+        name: "vault_discover",
+        arguments: {
+          query: { text: { literal: "Search", caseSensitive: true } },
+          projection: { matches: true },
+          order: { by: "path", direction: "asc" },
+          page: { maxItems: 100, continuation: null },
+        },
+      });
+
+      expect(result.isError).toBe(false);
+      expect(result.structuredContent).toMatchObject({
+        outcome: "results",
+        items: [{ path: "Alpha.md", matches: [{ text: "Search" }] }],
+      });
+      expect(result.structuredContent).not.toHaveProperty("snapshot");
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("reports Search Snapshot inconsistency through health and discovery without another gate", async () => {
+    const health = healthState("vault-a", "Alpha");
+    let readiness: "ready" | "building" | "unavailable" = "unavailable";
+    const bridge = createBridgeInstance({
+      port: 0,
+      health,
+      searchSnapshotReadiness: () => readiness,
+      discoverService: {
+        execute: async () => ({
+          outcome: "snapshot_unavailable",
+          code: "search_snapshot_unavailable",
+        }),
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const observed = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(observed.structuredContent).toMatchObject({
+        outcome: "observed",
+        readiness: { searchSnapshot: "unavailable" },
+        overall: "degraded",
+        reasonCodes: ["search_snapshot_unavailable"],
+        operatorAction: "wait_for_readiness",
+        effectiveGate: null,
+      });
+
+      const discovery = await client.callTool({
+        name: "vault_discover",
+        arguments: {
+          query: { path: { exact: "Alpha.md" } },
+          projection: { matches: false },
+          order: { by: "path", direction: "asc" },
+          page: { maxItems: 10, continuation: null },
+        },
+      });
+      expect(discovery.isError).toBe(true);
+      expect(discovery.structuredContent).toEqual({
+        outcome: "snapshot_unavailable",
+        code: "search_snapshot_unavailable",
+      });
+      readiness = "building";
+      const building = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(building.structuredContent).toMatchObject({
+        readiness: { searchSnapshot: "building", index: "building" },
+        reasonCodes: ["search_snapshot_building"],
+      });
+      readiness = "ready";
+      const ready = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(ready.structuredContent).toMatchObject({
+        readiness: { searchSnapshot: "ready", index: "ready" },
+        overall: "healthy",
+        reasonCodes: [],
+        operatorAction: "none",
       });
       await client.close();
     } finally {

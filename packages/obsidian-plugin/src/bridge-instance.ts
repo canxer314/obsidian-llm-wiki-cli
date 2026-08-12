@@ -4,12 +4,17 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
+  discoverInputSchema,
+  parseDiscoverInput,
+  parseDiscoverResult,
   parseHealthResult,
   parseReadInput,
   parseReadResult,
   readInputSchema,
   serializeCompatibilityText,
+  serializeDiscoverCompatibilityText,
   serializeReadCompatibilityText,
+  type DiscoverResult,
   type HealthResult,
 } from "@llm-wiki/vault-contracts";
 import { z } from "zod";
@@ -57,12 +62,18 @@ export interface BridgeHealthState {
   operatorAction: Extract<HealthResult, { outcome: "observed" }>["operatorAction"];
 }
 
+export interface BridgeDiscoverService {
+  execute(input: unknown): Promise<DiscoverResult>;
+}
+
 export interface BridgeInstanceOptions {
   port: number;
   health: BridgeHealthState;
   peerProtocol?: ProtocolParticipant;
   authenticator?: BridgeRequestAuthenticator;
   readDataSource?: VaultReadDataSource;
+  discoverService?: BridgeDiscoverService;
+  searchSnapshotReadiness?: () => "ready" | "building" | "unavailable";
 }
 
 export interface BridgeInstance {
@@ -76,7 +87,30 @@ export interface BridgeInstance {
 function projectObservedHealth(
   state: BridgeHealthState,
   port: number,
+  searchSnapshotReadiness?: () => "ready" | "building" | "unavailable",
 ): HealthResult {
+  const snapshotReadiness = searchSnapshotReadiness?.() ?? state.readiness.searchSnapshot;
+  const dynamicSnapshotState = searchSnapshotReadiness !== undefined;
+  const snapshotNotReady = dynamicSnapshotState && snapshotReadiness !== "ready";
+  const initialSnapshotReasonCodes = new Set([
+    "content_tools_not_ready",
+    "search_snapshot_building",
+    "search_snapshot_unavailable",
+  ]);
+  const stableReasonCodes = dynamicSnapshotState
+    ? state.reasonCodes.filter((code) => !initialSnapshotReasonCodes.has(code))
+    : state.reasonCodes;
+  if (
+    dynamicSnapshotState &&
+    state.effectiveGate !== null &&
+    !stableReasonCodes.includes(state.effectiveGate.code)
+  ) {
+    stableReasonCodes.push(state.effectiveGate.code);
+  }
+  const reasonCode =
+    snapshotReadiness === "building"
+      ? "search_snapshot_building"
+      : "search_snapshot_unavailable";
   return parseHealthResult({
     outcome: "observed",
     vault: state.vault,
@@ -88,15 +122,35 @@ function projectObservedHealth(
       recoveryJournalSchema: 1,
     },
     listener: { address: LOOPBACK_ADDRESS, port },
-    readiness: state.readiness,
+    readiness: {
+      ...state.readiness,
+      searchSnapshot: snapshotReadiness,
+      index:
+        searchSnapshotReadiness === undefined
+          ? state.readiness.index
+          : snapshotReadiness,
+    },
     recovery: state.recovery,
     write: state.write,
     queue: state.queue,
     lifecycle: state.lifecycle,
     effectiveGate: state.effectiveGate,
-    overall: state.overall,
-    reasonCodes: state.reasonCodes,
-    operatorAction: state.operatorAction,
+    overall:
+      snapshotNotReady && state.overall === "healthy" ? "degraded" : state.overall,
+    reasonCodes: snapshotNotReady
+      ? [...new Set([...stableReasonCodes, reasonCode])]
+      : stableReasonCodes,
+    operatorAction:
+      snapshotNotReady &&
+      (state.operatorAction === "none" ||
+        state.operatorAction === "finish_initialization")
+        ? "wait_for_readiness"
+        : dynamicSnapshotState &&
+            snapshotReadiness === "ready" &&
+            state.effectiveGate?.code === "writes_paused" &&
+            state.operatorAction === "finish_initialization"
+          ? "resume_writes"
+          : state.operatorAction,
   });
 }
 
@@ -115,6 +169,18 @@ function protocolsOverlap(peer: ProtocolParticipant): boolean {
     peer.supported.major === LOCAL_PROTOCOL.supported.major &&
     peer.supported.maximumMinor >= LOCAL_PROTOCOL.supported.minimumMinor &&
     peer.supported.minimumMinor <= LOCAL_PROTOCOL.supported.maximumMinor
+  );
+}
+
+function blocksContentTools(
+  effectiveGate: { code: string } | null | undefined,
+): effectiveGate is {
+  code: "incompatible_protocol" | "recovery_in_progress" | "recovery_blocked";
+} {
+  return (
+    effectiveGate?.code === "incompatible_protocol" ||
+    effectiveGate?.code === "recovery_in_progress" ||
+    effectiveGate?.code === "recovery_blocked"
   );
 }
 
@@ -155,7 +221,8 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       },
       () => {
         const health =
-          sessionState.incompatibleHealth ?? projectObservedHealth(options.health, port);
+          sessionState.incompatibleHealth ??
+          projectObservedHealth(options.health, port, options.searchSnapshotReadiness);
         return {
           content: [{ type: "text", text: serializeCompatibilityText(health) }],
           structuredContent: health,
@@ -163,6 +230,29 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         };
       },
     );
+
+    if (options.discoverService !== undefined) {
+      server.registerTool(
+        "vault_discover",
+        {
+          description:
+            "Discover canonical Markdown paths and text evidence from one immutable Search Snapshot.",
+          inputSchema: discoverInputSchema,
+        },
+        async (arguments_) => {
+          const input = parseDiscoverInput(arguments_);
+          const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
+          const result = blocksContentTools(effectiveGate)
+            ? parseDiscoverResult({ outcome: "operationally_blocked", gate: effectiveGate })
+            : await options.discoverService!.execute(input);
+          return {
+            content: [{ type: "text", text: serializeDiscoverCompatibilityText(result) }],
+            structuredContent: result,
+            isError: result.outcome !== "results",
+          };
+        },
+      );
+    }
 
     if (options.readDataSource !== undefined) {
       server.registerTool(
@@ -175,11 +265,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         async (arguments_) => {
           const input = parseReadInput(arguments_);
           const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
-          const blocksContent =
-            effectiveGate?.code === "incompatible_protocol" ||
-            effectiveGate?.code === "recovery_in_progress" ||
-            effectiveGate?.code === "recovery_blocked";
-          const result = blocksContent
+          const result = blocksContentTools(effectiveGate)
             ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
             : await performVaultRead(options.readDataSource!, input);
           return {

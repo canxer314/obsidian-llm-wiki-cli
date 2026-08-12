@@ -1,0 +1,31 @@
+{
+  "input": {
+    "query": {
+      "any": [
+        { "path": { "glob": "Projects/*.md" } },
+        { "filename": { "exact": "Index.md", "caseSensitive": false } },
+        { "text": { "regex": "Recovery\\s+Journal", "caseSensitive": false } }
+      ]
+    },
+    "projection": { "matches": true },
+    "order": { "by": "path", "direction": "desc" },
+    "page": { "maxItems": 2, "continuation": null }
+  },
+  "result": {
+    "outcome": "results",
+    "ordering": {
+      "by": "path",
+      "direction": "desc",
+      "tieBreaker": "path_utf8_bytes"
+    },
+    "items": [
+      {
+        "path": "zeta/Index.md",
+        "contentVersion": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sizeBytes": 128
+      }
+    ],
+    "complete": false,
+    "continuation": "opaque-page-2"
+  }
+}

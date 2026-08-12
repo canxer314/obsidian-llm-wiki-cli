@@ -1,0 +1,10 @@
+{
+  "input": {
+    "query": {
+      "path": { "exact": "note.md", "prefix": "note" }
+    },
+    "projection": { "matches": false },
+    "order": { "by": "path", "direction": "asc" },
+    "page": { "maxItems": 10, "continuation": null }
+  }
+}

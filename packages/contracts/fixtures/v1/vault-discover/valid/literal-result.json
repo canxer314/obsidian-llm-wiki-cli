@@ -1,0 +1,39 @@
+{
+  "input": {
+    "query": {
+      "all": [
+        { "path": { "prefix": "Projects/" } },
+        { "filename": { "substring": "bridge", "caseSensitive": false } },
+        { "text": { "literal": "Search Snapshot", "caseSensitive": true } }
+      ]
+    },
+    "projection": { "matches": true },
+    "order": { "by": "path", "direction": "asc" },
+    "page": { "maxItems": 100, "continuation": null }
+  },
+  "result": {
+    "outcome": "results",
+    "ordering": {
+      "by": "path",
+      "direction": "asc",
+      "tieBreaker": "path_utf8_bytes"
+    },
+    "items": [
+      {
+        "path": "Projects/Bridge.md",
+        "contentVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 42,
+        "matches": [
+          {
+            "line": 2,
+            "startByte": 10,
+            "endByteExclusive": 25,
+            "text": "Search Snapshot"
+          }
+        ]
+      }
+    ],
+    "complete": true,
+    "continuation": null
+  }
+}

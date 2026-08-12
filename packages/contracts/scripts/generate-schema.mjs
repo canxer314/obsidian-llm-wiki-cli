@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  createDiscoverInputJsonSchema,
+  createDiscoverResultJsonSchema,
   createHealthInputJsonSchema,
   createHealthResultJsonSchema,
   createReadInputJsonSchema,
@@ -13,6 +15,16 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const schemaRoot = resolve(packageRoot, "schema/v1");
 
 await Promise.all([
+  writeFile(
+    resolve(schemaRoot, "vault-discover.input.schema.json"),
+    `${JSON.stringify(createDiscoverInputJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(
+    resolve(schemaRoot, "vault-discover.output.schema.json"),
+    `${JSON.stringify(createDiscoverResultJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
   writeFile(
     resolve(schemaRoot, "vault-health.input.schema.json"),
     `${JSON.stringify(createHealthInputJsonSchema(), null, 2)}\n`,

@@ -1,0 +1,14 @@
+{
+  "result": {
+    "outcome": "results",
+    "ordering": {
+      "by": "path",
+      "direction": "asc",
+      "tieBreaker": "path_utf8_bytes"
+    },
+    "items": [],
+    "complete": true,
+    "continuation": null,
+    "snapshot": "public-handle"
+  }
+}

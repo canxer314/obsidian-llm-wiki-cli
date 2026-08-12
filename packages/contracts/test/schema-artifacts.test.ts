@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  createDiscoverInputJsonSchema,
+  createDiscoverResultJsonSchema,
   createHealthInputJsonSchema,
   createHealthResultJsonSchema,
   createReadInputJsonSchema,
@@ -20,6 +22,12 @@ function readSchema(name: string): unknown {
 
 describe("committed JSON Schema artifacts", () => {
   it("stay identical to the authoritative generated contract", () => {
+    expect(readSchema("vault-discover.input.schema.json")).toEqual(
+      createDiscoverInputJsonSchema(),
+    );
+    expect(readSchema("vault-discover.output.schema.json")).toEqual(
+      createDiscoverResultJsonSchema(),
+    );
     expect(readSchema("vault-health.input.schema.json")).toEqual(
       createHealthInputJsonSchema(),
     );
