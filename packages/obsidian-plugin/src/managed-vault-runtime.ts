@@ -30,6 +30,8 @@ export interface PersistedBridgeSettings {
 export interface BridgeSettingsStore {
   load(): Promise<unknown>;
   save(settings: PersistedBridgeSettings): Promise<void>;
+  loadRecovery?(): Promise<unknown>;
+  saveRecovery?(settings: PersistedBridgeSettings): Promise<void>;
 }
 
 export interface ManagedVaultDescriptor {
@@ -147,6 +149,11 @@ export class ManagedVaultBridgeRuntime {
     return this.#pendingPathChange;
   }
 
+  async #saveSettings(settings: PersistedBridgeSettings): Promise<void> {
+    await this.#options.settings.saveRecovery?.(settings);
+    await this.#options.settings.save(settings);
+  }
+
   async classifyPathChange(classification: PathChangeClassification): Promise<void> {
     const pathChange = this.#pendingPathChange;
     const previous = this.#settings;
@@ -172,7 +179,7 @@ export class ManagedVaultBridgeRuntime {
     ) {
       throw new Error("Copy classification must generate a new Vault identity and port");
     }
-    await this.#options.settings.save(settings);
+    await this.#saveSettings(settings);
     this.#settings = settings;
     this.#pendingPathChange = undefined;
   }
@@ -180,7 +187,10 @@ export class ManagedVaultBridgeRuntime {
   async load(): Promise<void> {
     if (this.#bridge !== undefined) throw new Error("Managed Vault Bridge is already loaded");
 
-    const rawSettings = await this.#options.settings.load();
+    const primarySettings = await this.#options.settings.load();
+    const recoverySettings = await this.#options.settings.loadRecovery?.();
+    const recoveredPrimary = recoverySettings !== undefined && recoverySettings !== null;
+    const rawSettings = recoveredPrimary ? recoverySettings : primarySettings;
     const parsed = parsePersistedSettings(rawSettings);
     if (rawSettings !== undefined && rawSettings !== null && parsed === null) {
       throw new Error("Persisted Bridge settings are incompatible or invalid");
@@ -204,15 +214,24 @@ export class ManagedVaultBridgeRuntime {
       changeSets: emptyChangeSetState(),
     };
 
-    if (loaded === null) {
-      await this.#options.settings.save(settings);
+    const hasRecoveryStore = this.#options.settings.saveRecovery !== undefined;
+    if (
+      loaded === null ||
+      recoveredPrimary ||
+      (parsed?.migrated === true && hasRecoveryStore)
+    ) {
+      await this.#saveSettings(settings);
+    }
+    if (hasRecoveryStore && !recoveredPrimary && loaded !== null) {
+      await this.#options.settings.saveRecovery?.(settings);
     }
 
     const changeSetStore = {
       load: async () => settings.changeSets,
       save: async (changeSets: ChangeSetRegistryState) => {
+        const nextSettings = { ...settings, changeSets };
+        await this.#saveSettings(nextSettings);
         settings.changeSets = changeSets;
-        await this.#options.settings.save(settings);
         this.#settings = settings;
       },
     };
@@ -264,7 +283,7 @@ export class ManagedVaultBridgeRuntime {
     });
 
     await bridge.start();
-    if (parsed?.migrated === true) {
+    if (parsed?.migrated === true && !hasRecoveryStore) {
       await this.#options.settings.save(settings);
     }
     this.#settings = settings;

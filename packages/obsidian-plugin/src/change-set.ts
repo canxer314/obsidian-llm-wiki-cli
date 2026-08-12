@@ -207,9 +207,14 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function fingerprintChangeSetRequest(input: ChangeSetSubmitInput): string {
+  const readDependencies = [...(input.readDependencies ?? [])].sort(
+    (left, right) =>
+      compareCodeUnits(left.path, right.path) ||
+      compareCodeUnits(left.contentVersion, right.contentVersion),
+  );
   const canonical = canonicalize({
     operations: input.operations,
-    readDependencies: input.readDependencies ?? [],
+    readDependencies,
   });
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
 }

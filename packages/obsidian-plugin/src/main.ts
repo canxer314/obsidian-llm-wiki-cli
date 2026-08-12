@@ -1,5 +1,5 @@
-import { realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   FileSystemAdapter,
@@ -9,6 +9,7 @@ import {
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
+import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -24,39 +25,37 @@ export default class VaultOperationBridgePlugin extends Plugin {
       adapter instanceof FileSystemAdapter ? adapter.getBasePath() : this.app.vault.getName();
     const changeSetDataSource =
       adapter instanceof FileSystemAdapter
-        ? {
-            readBinary: async (path: string) =>
-              (await adapter.exists(path)) ? adapter.readBinary(path) : null,
-            pathKind: async (path: string) => {
-              const stat = await adapter.stat(path);
-              if (stat === null) return null;
-              return stat.type === "folder" ? ("directory" as const) : ("file" as const);
-            },
-            isContained: async (path: string) => {
-              if (isAbsolute(path)) return false;
-              const root = await realpath(basePath);
-              let candidate = resolve(basePath, path);
-              while (candidate !== basePath) {
-                try {
-                  candidate = await realpath(candidate);
-                  break;
-                } catch {
-                  candidate = dirname(candidate);
-                }
-              }
-              const relativePath = relative(root, candidate);
-              return (
-                relativePath === "" ||
-                (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-              );
-            },
-          }
+        ? createFileSystemChangeSetDataSource(basePath, adapter)
         : undefined;
+    const stateDirectory = join(basePath, ".llm-wiki");
+    const recoveryStatePath = join(stateDirectory, "bridge-state.json");
+    const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const runtime = new ManagedVaultBridgeRuntime({
       vault: { name: this.app.vault.getName(), path: basePath },
       settings: {
         load: () => this.loadData() as Promise<unknown>,
         save: (settings) => this.saveData(settings),
+        ...(adapter instanceof FileSystemAdapter
+          ? {
+              loadRecovery: async () => {
+                try {
+                  return JSON.parse(await readFile(recoveryStatePath, "utf8")) as unknown;
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+                  throw error;
+                }
+              },
+              saveRecovery: async (settings: unknown) => {
+                await mkdir(stateDirectory, { recursive: true });
+                await writeFile(
+                  recoveryStateTemporaryPath,
+                  `${JSON.stringify(settings)}\n`,
+                  "utf8",
+                );
+                await rename(recoveryStateTemporaryPath, recoveryStatePath);
+              },
+            }
+          : {}),
       },
       readDataSource: {
         readBinary: async (path) =>

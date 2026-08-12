@@ -143,6 +143,123 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     expect(runtime.bridge).toBeUndefined();
   });
 
+  it("recovers missing primary settings from the independent recovery copy", async () => {
+    const acceptedChangeSets: PersistedBridgeSettings["changeSets"] = {
+      schemaVersion: 1,
+      nextEnqueueSeq: 2,
+      entries: [
+        {
+          submissionKey: "submission-1",
+          fingerprint: `sha256:${"a".repeat(64)}`,
+          changeSetId: "change-set-1",
+          enqueueSeq: 1,
+          acceptedAt: 0,
+          expiresAt: 7 * 24 * 60 * 60 * 1_000,
+          changeSet: { changeSetId: "change-set-1", state: "in_progress" },
+        },
+      ],
+      tombstones: [],
+    };
+    const recovered: PersistedBridgeSettings = {
+      schemaVersion: 2,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+      changeSets: acceptedChangeSets,
+    };
+    let primary: PersistedBridgeSettings | undefined;
+    let recoveredStore: { load(): Promise<unknown> } | undefined;
+    const createBridge = vi.fn(
+      ({ port, changeSets }: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0]) => {
+        expect(port).toBe(27123);
+        recoveredStore = changeSets?.store;
+        return fakeBridge(port);
+      },
+    );
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => primary,
+        save: async (settings) => {
+          primary = structuredClone(settings);
+        },
+        loadRecovery: async () => structuredClone(recovered),
+        saveRecovery: vi.fn(async () => undefined),
+      },
+      createBridge,
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      createVaultId: () => "must-not-regenerate",
+      selectInitialPort: () => 29999,
+    });
+
+    await runtime.load();
+
+    expect(primary).toEqual(recovered);
+    expect(runtime.persistedSettings).toEqual(recovered);
+    await expect(recoveredStore?.load()).resolves.toEqual(acceptedChangeSets);
+    expect(createBridge).toHaveBeenCalledOnce();
+    await runtime.unload();
+  });
+
+  it("prefers the recovery copy when the primary write lagged", async () => {
+    const primary: PersistedBridgeSettings = {
+      schemaVersion: 2,
+      vaultId: "stale-primary",
+      port: 27124,
+      diagnosticPath: "D:/Vaults/Alpha",
+      changeSets: { schemaVersion: 1, nextEnqueueSeq: 1, entries: [], tombstones: [] },
+    };
+    const recovery: PersistedBridgeSettings = {
+      ...primary,
+      vaultId: "vault-a",
+      port: 27123,
+    };
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => primary,
+        save: async () => undefined,
+        loadRecovery: async () => recovery,
+        saveRecovery: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+
+    await runtime.load();
+
+    expect(runtime.persistedSettings).toMatchObject({ vaultId: "vault-a", port: 27123 });
+    await runtime.unload();
+  });
+
+  it("persists primary and recovery settings before first startup", async () => {
+    const calls: string[] = [];
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => undefined,
+        save: async () => {
+          calls.push("primary");
+        },
+        loadRecovery: async () => undefined,
+        saveRecovery: async () => {
+          calls.push("recovery");
+        },
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+
+    await runtime.load();
+
+    expect(calls).toEqual(["recovery", "primary"]);
+    await runtime.unload();
+  });
+
   it("rejects invalid persisted state instead of replacing Vault identity", async () => {
     const save = vi.fn(async () => undefined);
     const createBridge = vi.fn(() => fakeBridge(27123));

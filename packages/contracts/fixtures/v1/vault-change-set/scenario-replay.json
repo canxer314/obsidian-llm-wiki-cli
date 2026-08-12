@@ -1,0 +1,22 @@
+{
+  "id": "change-set-same-key-replay",
+  "steps": [
+    {
+      "call": "submit",
+      "arguments": {
+        "submissionKey": "scenario-replay",
+        "operations": [{ "operationId": "create-1", "kind": "create_note", "path": "Notes/Replay.md", "content": "replay", "ifExists": "reject" }]
+      },
+      "capture": "accepted",
+      "expect": { "outcome": "registered", "state": "in_progress" }
+    },
+    {
+      "call": "submit",
+      "arguments": {
+        "submissionKey": "scenario-replay",
+        "operations": [{ "operationId": "create-1", "kind": "create_note", "path": "Notes/Replay.md", "content": "replay", "ifExists": "reject" }]
+      },
+      "expect": { "outcome": "registered", "state": "in_progress", "sameChangeSetAs": "accepted" }
+    }
+  ]
+}

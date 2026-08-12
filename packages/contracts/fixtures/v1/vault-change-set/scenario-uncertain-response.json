@@ -1,0 +1,21 @@
+{
+  "id": "change-set-uncertain-response-recovery",
+  "steps": [
+    {
+      "call": "submit",
+      "arguments": {
+        "submissionKey": "scenario-uncertain",
+        "operations": [{ "operationId": "create-1", "kind": "create_note", "path": "Notes/Uncertain.md", "content": "uncertain", "ifExists": "reject" }]
+      },
+      "capture": "accepted",
+      "discardResponse": true,
+      "expect": { "outcome": "registered", "state": "in_progress" }
+    },
+    { "call": "restart" },
+    {
+      "call": "status",
+      "arguments": { "submissionKey": "scenario-uncertain" },
+      "expect": { "lookup": "found", "state": "in_progress", "sameChangeSetAs": "accepted" }
+    }
+  ]
+}

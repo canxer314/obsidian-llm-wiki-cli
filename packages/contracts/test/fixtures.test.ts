@@ -31,6 +31,27 @@ describe("versioned vault_health fixture corpus", () => {
     }
   });
 
+  it("publishes executable Change Set cross-call scenarios", () => {
+    const manifest = JSON.parse(
+      readFileSync(`${fixturesRoot}/scenarios.json`, "utf8"),
+    ) as { scenarios: Array<{ id: string; fixture?: string }> };
+    const ids = [
+      "change-set-same-key-replay",
+      "change-set-key-conflict",
+      "change-set-preflight-rejection",
+      "change-set-uncertain-response-recovery",
+    ];
+
+    for (const id of ids) {
+      const fixturePath = manifest.scenarios.find((scenario) => scenario.id === id)?.fixture;
+      expect(fixturePath).toBeTypeOf("string");
+      const scenario = JSON.parse(
+        readFileSync(`${fixturesRoot}/${fixturePath as string}`, "utf8"),
+      ) as { steps?: unknown[] };
+      expect(scenario.steps?.length).toBeGreaterThan(1);
+    }
+  });
+
   it("publishes the identity and compatibility scenarios owned beyond JSON Schema", () => {
     const manifest = JSON.parse(
       readFileSync(`${fixturesRoot}/scenarios.json`, "utf8"),

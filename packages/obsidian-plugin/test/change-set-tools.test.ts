@@ -174,6 +174,47 @@ describe("public Change Set MCP tools", () => {
     await restartedBridge.stop();
   });
 
+  it("replays a request when Read Dependencies use a different order", async () => {
+    const store = new MemoryChangeSetStore();
+    const files = new Map<string, Uint8Array>([
+      ["Notes/A.md", Buffer.from("alpha")],
+      ["Notes/B.md", Buffer.from("beta")],
+    ]);
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState(),
+      changeSets: {
+        store,
+        dataSource: {
+          readBinary: async (path: string) => files.get(path) ?? null,
+          pathKind: async (path: string) => (files.has(path) ? ("file" as const) : null),
+          isContained: async () => true,
+        },
+        createChangeSetId: () => "change-set-ordered-dependencies",
+      },
+    });
+    await bridge.start();
+    const client = await connect(bridge.endpoint);
+    const dependencies = [
+      { path: "Notes/A.md", contentVersion: VERSION("alpha") },
+      { path: "Notes/B.md", contentVersion: VERSION("beta") },
+    ];
+
+    const first = await client.callTool({
+      name: "vault_change_set_submit",
+      arguments: { ...createNote(), readDependencies: dependencies },
+    });
+    const replay = await client.callTool({
+      name: "vault_change_set_submit",
+      arguments: { ...createNote(), readDependencies: [...dependencies].reverse() },
+    });
+
+    expect(first.isError).toBe(false);
+    expect(replay.structuredContent).toEqual(first.structuredContent);
+    await client.close();
+    await bridge.stop();
+  });
+
   it("replays the historical recovery_blocked disposition but omits it from status", async () => {
     const health = healthState();
     health.recovery = { state: "blocked" };
