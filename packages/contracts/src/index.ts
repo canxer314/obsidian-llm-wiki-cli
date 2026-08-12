@@ -179,7 +179,139 @@ export function createReadResultJsonSchema(): Record<string, unknown> {
   return {
     $id: "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-read.output.schema.json",
     title: "vault_read v1 output",
-    ...z.toJSONSchema(readResultSchema, { target: "draft-2020-12", reused: "ref" }),
+    ...z.toJSONSchema(readToolResultSchema, { target: "draft-2020-12", reused: "ref" }),
+  };
+}
+
+const nonContentReadItemResultSchema = z.union([
+  z
+    .object({
+      outcome: z.literal("satisfied"),
+      result: z.union([metadataReadResultSchema, outlineReadResultSchema]),
+    })
+    .strict(),
+  z.object({ outcome: z.literal("not_satisfied") }).strict(),
+  z.object({ outcome: z.literal("note_exceeds_exact_read_limit") }).strict(),
+]);
+
+const continuedExactItemSchema = readEvidenceSchema
+  .extend({
+    kind: z.literal("exact"),
+    start: z.number().int().nonnegative(),
+    end: z.number().int().positive(),
+    content: z.string(),
+    complete: z.boolean(),
+  })
+  .strict();
+
+const continuedSectionItemSchema = readEvidenceSchema
+  .extend({
+    kind: z.literal("section"),
+    hierarchy: z.array(z.string().min(1)).min(1),
+    occurrence: z.number().int().positive(),
+    start: z.number().int().nonnegative(),
+    end: z.number().int().positive(),
+    content: z.string(),
+    complete: z.boolean(),
+  })
+  .strict();
+
+const continuedContentItemSchema = z
+  .union([continuedExactItemSchema, continuedSectionItemSchema])
+  .refine((item) => item.start < item.end, {
+    message: "continued byte range must be non-empty",
+  })
+  .refine(
+    (item) => new TextEncoder().encode(item.content).byteLength === item.end - item.start,
+    { message: "content must exactly match the declared UTF-8 byte range" },
+  );
+
+const continuedWholeItemSchema = z
+  .object({
+    index: z.number().int().nonnegative(),
+    item: nonContentReadItemResultSchema,
+  })
+  .strict();
+
+const continuePageItemSchema = z.union([
+  continuedContentItemSchema,
+  continuedWholeItemSchema,
+]);
+
+const continuePageResultSchema = z
+  .object({
+    outcome: z.literal("page"),
+    items: z.array(continuePageItemSchema).min(1),
+    continuation: z.string().min(1).nullable(),
+    complete: z.boolean(),
+  })
+  .strict()
+  .refine(
+    (page) =>
+      (page.complete && page.continuation === null) ||
+      (!page.complete && page.continuation !== null),
+    { message: "only incomplete pages carry a replacement continuation" },
+  );
+
+const continuationUnavailableSchema = z
+  .object({ code: z.literal("continuation_unavailable") })
+  .strict();
+
+export const readToolResultSchema = z.union([
+  readResultSchema,
+  continuePageResultSchema,
+  continuationUnavailableSchema,
+]);
+
+export type ReadToolResult = z.infer<typeof readToolResultSchema>;
+
+export function parseReadToolResult(value: unknown): ReadToolResult {
+  return readToolResultSchema.parse(value);
+}
+
+export function serializeReadToolCompatibilityText(value: ReadToolResult): string {
+  return JSON.stringify(parseReadToolResult(value));
+}
+
+export const continueInputSchema = z
+  .object({ continuation: z.string().min(1) })
+  .strict();
+
+export const continueResultSchema = z.union([
+  continuePageResultSchema,
+  continuationUnavailableSchema,
+  operationallyBlockedReadResultSchema,
+]);
+
+export type ContinueInput = z.infer<typeof continueInputSchema>;
+export type ContinuePageResult = z.infer<typeof continuePageResultSchema>;
+export type ContinueResult = z.infer<typeof continueResultSchema>;
+
+export function parseContinueInput(value: unknown): ContinueInput {
+  return continueInputSchema.parse(value);
+}
+
+export function parseContinueResult(value: unknown): ContinueResult {
+  return continueResultSchema.parse(value);
+}
+
+export function serializeContinueCompatibilityText(value: ContinueResult): string {
+  return JSON.stringify(parseContinueResult(value));
+}
+
+export function createContinueInputJsonSchema(): Record<string, unknown> {
+  return {
+    $id: "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-continue.input.schema.json",
+    title: "vault_continue v1 input",
+    ...z.toJSONSchema(continueInputSchema, { target: "draft-2020-12", reused: "ref" }),
+  };
+}
+
+export function createContinueResultJsonSchema(): Record<string, unknown> {
+  return {
+    $id: "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-continue.output.schema.json",
+    title: "vault_continue v1 output",
+    ...z.toJSONSchema(continueResultSchema, { target: "draft-2020-12", reused: "ref" }),
   };
 }
 

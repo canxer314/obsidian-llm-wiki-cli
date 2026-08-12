@@ -1,0 +1,16 @@
+{
+  "$id": "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-continue.input.schema.json",
+  "title": "vault_continue v1 input",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "continuation": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "continuation"
+  ],
+  "additionalProperties": false
+}

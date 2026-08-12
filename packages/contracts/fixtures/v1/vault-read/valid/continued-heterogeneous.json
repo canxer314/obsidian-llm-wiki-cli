@@ -1,0 +1,38 @@
+{
+  "result": {
+    "outcome": "page",
+    "items": [
+      {
+        "index": 0,
+        "item": {
+          "outcome": "satisfied",
+          "result": {
+            "kind": "metadata",
+            "index": 0,
+            "path": "mixed.md",
+            "contentVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sizeBytes": 320004,
+            "frontmatter": { "status": "ready" }
+          }
+        }
+      },
+      {
+        "index": 1,
+        "item": { "outcome": "not_satisfied" }
+      },
+      {
+        "kind": "exact",
+        "index": 2,
+        "path": "mixed.md",
+        "contentVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 320004,
+        "start": 0,
+        "end": 4,
+        "content": "😀",
+        "complete": false
+      }
+    ],
+    "continuation": "opaque-replacement-token",
+    "complete": false
+  }
+}
