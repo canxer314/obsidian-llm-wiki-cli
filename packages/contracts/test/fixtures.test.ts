@@ -74,6 +74,10 @@ describe("versioned vault_health fixture corpus", () => {
       "change-set-preflight-rejection",
       "change-set-uncertain-response-recovery",
       "change-set-seven-day-retention",
+      "frozen-byte-exact-continuation",
+      "single-use-client-bound-sliding-continuation",
+      "continuation-quota-and-lifecycle-cleanup",
+      "continuation-operational-gate-precedence",
     ]);
   });
 });

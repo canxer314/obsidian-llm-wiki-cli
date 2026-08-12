@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
 import { randomUUID } from "node:crypto";
 
@@ -11,10 +12,13 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   changeSetSubmitInputSchema,
+  continueInputSchema,
   createChangeSetStatusInputJsonSchema,
   parseChangeSetStatusInput,
   parseChangeSetStatusResult,
   parseChangeSetSubmitResult,
+  parseContinueInput,
+  parseContinueResult,
   parseHealthResult,
   parseReadInput,
   parseReadResult,
@@ -22,7 +26,10 @@ import {
   serializeChangeSetStatusCompatibilityText,
   serializeChangeSetSubmitCompatibilityText,
   serializeCompatibilityText,
+  serializeContinueCompatibilityText,
   serializeReadCompatibilityText,
+  serializeReadToolCompatibilityText,
+  type ContinueResult,
   type HealthResult,
 } from "@llm-wiki/vault-contracts";
 import { z } from "zod";
@@ -34,6 +41,10 @@ import {
 import { rejectRequest, verifyRequestPolicy } from "./request-policy.js";
 import { createRegistrationCommand } from "./registration-command.js";
 import { performVaultRead, type VaultReadDataSource } from "./vault-read.js";
+import {
+  MAXIMUM_COMPACT_RESPONSE_BYTES,
+  createVaultContinuationStore,
+} from "./vault-continuation.js";
 import {
   BRIDGE_VERSION,
   PLUGIN_VERSION,
@@ -81,6 +92,8 @@ export interface BridgeInstanceOptions {
   authenticator?: BridgeRequestAuthenticator;
   readDataSource?: VaultReadDataSource;
   changeSets?: ChangeSetServiceOptions;
+  continuationNow?: () => number;
+  continuationToken?: () => string;
 }
 
 export interface BridgeInstance {
@@ -142,15 +155,43 @@ function projectEffectiveGate(state: BridgeHealthState): NonNullable<BridgeHealt
   return state.effectiveGate;
 }
 
+function blocksVaultContent(
+  gate:
+    | BridgeHealthState["effectiveGate"]
+    | Extract<HealthResult, { outcome: "incompatible" }>["gate"],
+): boolean {
+  return (
+    gate?.code === "incompatible_protocol" ||
+    gate?.code === "recovery_in_progress" ||
+    gate?.code === "recovery_blocked"
+  );
+}
+
 export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInstance {
   let port = options.port;
   let httpServer: HttpServer | undefined;
   let changeSetService: ChangeSetService | undefined;
+  const continuationStore = createVaultContinuationStore({
+    now: options.continuationNow,
+    token: options.continuationToken,
+    measureResponse: (result) => {
+      const text = serializeContinueCompatibilityText(result);
+      return Buffer.byteLength(
+        JSON.stringify({
+          content: [{ type: "text", text }],
+          structuredContent: result,
+          isError: false,
+        }),
+        "utf8",
+      );
+    },
+  });
   const sessions = new Map<
     string,
     {
       server: McpServer;
       transport: StreamableHTTPServerTransport;
+      clientId?: string;
       incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
     }
   >();
@@ -165,6 +206,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
   }
 
   function createMcpServer(sessionState: {
+    clientId?: string;
     incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
   }): McpServer {
     const server = new McpServer({
@@ -185,6 +227,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       additionalProperties: false,
     };
     const readToolInputSchema = z.toJSONSchema(readInputSchema, {
+      target: "draft-2020-12",
+    });
+    const continueToolInputSchema = z.toJSONSchema(continueInputSchema, {
       target: "draft-2020-12",
     });
     const submitToolInputSchema = z.toJSONSchema(changeSetSubmitInputSchema, {
@@ -208,6 +253,11 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
                 description:
                   "Read ordered metadata, outline, heading section, and exact Markdown observations.",
                 inputSchema: readToolInputSchema,
+              },
+              {
+                name: "vault_continue",
+                description: "Continue transporting one accepted frozen Vault read result.",
+                inputSchema: continueToolInputSchema,
               },
             ]),
         ...(changeSetService === undefined
@@ -279,21 +329,62 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
 
       if (request.params.name === "vault_read" && options.readDataSource !== undefined) {
         const input = parseReadInput(request.params.arguments);
-        const effectiveGate = projectEffectiveGate(options.health);
-        const blocksContent =
-          effectiveGate?.code === "recovery_in_progress" ||
-          effectiveGate?.code === "recovery_blocked";
-        const result = blocksContent
+        const effectiveGate =
+          sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health);
+        const result = blocksVaultContent(effectiveGate)
           ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
           : await performVaultRead(options.readDataSource, input);
+        const text = serializeReadCompatibilityText(result);
+        const directResponseBytes = Buffer.byteLength(
+          JSON.stringify({
+            content: [{ type: "text", text }],
+            structuredContent: result,
+            isError:
+              result.outcome === "grouping_required" ||
+              result.outcome === "operationally_blocked",
+          }),
+          "utf8",
+        );
+        if (result.outcome === "items" && directResponseBytes > MAXIMUM_COMPACT_RESPONSE_BYTES) {
+          if (sessionState.clientId === undefined) {
+            throw new Error("MCP session identity is unavailable");
+          }
+          const page = continuationStore.issue(sessionState.clientId, result);
+          return {
+            content: [
+              { type: "text" as const, text: serializeReadToolCompatibilityText(page) },
+            ],
+            structuredContent: page,
+            isError: !("outcome" in page && page.outcome === "page"),
+          };
+        }
         return {
-          content: [
-            { type: "text" as const, text: serializeReadCompatibilityText(result) },
-          ],
+          content: [{ type: "text" as const, text }],
           structuredContent: result,
           isError:
             result.outcome === "grouping_required" ||
             result.outcome === "operationally_blocked",
+        };
+      }
+
+      if (request.params.name === "vault_continue" && options.readDataSource !== undefined) {
+        const input = parseContinueInput(request.params.arguments);
+        const effectiveGate =
+          sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health);
+        let result: ContinueResult;
+        if (blocksVaultContent(effectiveGate)) {
+          result = parseContinueResult({ outcome: "operationally_blocked", gate: effectiveGate });
+        } else if (sessionState.clientId === undefined) {
+          result = parseContinueResult({ code: "continuation_unavailable" });
+        } else {
+          result = continuationStore.continue(sessionState.clientId, input.continuation);
+        }
+        return {
+          content: [
+            { type: "text" as const, text: serializeContinueCompatibilityText(result) },
+          ],
+          structuredContent: result,
+          isError: !("outcome" in result && result.outcome === "page"),
         };
       }
 
@@ -401,6 +492,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         sessionIdGenerator: () => randomUUID(),
       });
       const sessionState: {
+        clientId?: string;
         incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
       } = {};
       if (options.peerProtocol !== undefined && !protocolsOverlap(options.peerProtocol)) {
@@ -408,11 +500,15 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       }
       const server = createMcpServer(sessionState);
       transport.onclose = () => {
-        if (transport.sessionId !== undefined) sessions.delete(transport.sessionId);
+        if (transport.sessionId !== undefined) {
+          continuationStore.releaseClient(transport.sessionId);
+          sessions.delete(transport.sessionId);
+        }
       };
       await server.connect(transport);
       await transport.handleRequest(request, response, body);
       if (transport.sessionId !== undefined) {
+        sessionState.clientId = transport.sessionId;
         sessions.set(transport.sessionId, { server, transport, ...sessionState });
       }
       return;
@@ -479,6 +575,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       const server = httpServer;
       if (server === undefined) return;
       httpServer = undefined;
+      for (const sessionId of sessions.keys()) {
+        continuationStore.releaseClient(sessionId);
+      }
       await Promise.all([...sessions.values()].map(({ server: mcp }) => mcp.close()));
       sessions.clear();
       await new Promise<void>((resolve, reject) => {

@@ -1,0 +1,20 @@
+{
+  "result": {
+    "outcome": "page",
+    "items": [
+      {
+        "index": 0,
+        "kind": "exact",
+        "path": "note.md",
+        "contentVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 4,
+        "start": 0,
+        "end": 3,
+        "content": "😀",
+        "complete": false
+      }
+    ],
+    "continuation": "replacement",
+    "complete": false
+  }
+}

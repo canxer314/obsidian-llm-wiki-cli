@@ -43,6 +43,15 @@ export {
   type VaultReadHeading,
 } from "./vault-read.js";
 export {
+  CONTINUATION_LIFETIME_MILLISECONDS,
+  MAXIMUM_ACTIVE_CHAINS_PER_CLIENT,
+  MAXIMUM_COMPACT_RESPONSE_BYTES,
+  MAXIMUM_RETAINED_BYTES_PER_CLIENT,
+  createVaultContinuationStore,
+  type VaultContinuationStore,
+  type VaultContinuationStoreOptions,
+} from "./vault-continuation.js";
+export {
   EXPECTED_VAULT_ID_HEADER,
   type RequestPolicyFailure,
   verifyRequestPolicy,

@@ -1,0 +1,21 @@
+{
+  "input": { "continuation": "opaque-client-bound-token" },
+  "result": {
+    "outcome": "page",
+    "items": [
+      {
+        "index": 0,
+        "kind": "exact",
+        "path": "资料/重复.md",
+        "contentVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 13,
+        "start": 0,
+        "end": 13,
+        "content": "﻿正文😀",
+        "complete": false
+      }
+    ],
+    "continuation": "opaque-replacement-token",
+    "complete": false
+  }
+}

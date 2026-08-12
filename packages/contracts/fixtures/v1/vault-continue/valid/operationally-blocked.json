@@ -1,0 +1,6 @@
+{
+  "result": {
+    "outcome": "operationally_blocked",
+    "gate": { "code": "recovery_in_progress" }
+  }
+}

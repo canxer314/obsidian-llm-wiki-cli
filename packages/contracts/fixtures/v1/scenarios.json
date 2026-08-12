@@ -84,6 +84,26 @@
       "id": "change-set-seven-day-retention",
       "authority": "runtime",
       "expectation": "Accepted keys and complete records survive disconnect and restart for at least seven days, then retain expired tombstones."
+    },
+    {
+      "id": "frozen-byte-exact-continuation",
+      "authority": "contract-and-runtime",
+      "expectation": "Every compact continuation page is within 256 KiB and contiguous per-index UTF-8 ranges reconstruct the accepted frozen Exact Read after Vault bytes change."
+    },
+    {
+      "id": "single-use-client-bound-sliding-continuation",
+      "authority": "runtime",
+      "expectation": "Every token is single-use and client-bound; each replacement starts a new 15-minute lifetime while consumed, expired, malformed, and wrong-client tokens expose only continuation_unavailable."
+    },
+    {
+      "id": "continuation-quota-and-lifecycle-cleanup",
+      "authority": "runtime",
+      "expectation": "Eight live chains or 8 MiB retained bytes reject new issuance without eviction, and completion, expiry, rejection, session teardown, and Bridge teardown immediately release capacity."
+    },
+    {
+      "id": "continuation-operational-gate-precedence",
+      "authority": "contract-and-runtime",
+      "expectation": "A content-blocking effective gate returns operationally_blocked before inspecting or consuming a continuation token."
     }
   ]
 }

@@ -9,6 +9,8 @@ import {
   createChangeSetStatusResultJsonSchema,
   createChangeSetSubmitInputJsonSchema,
   createChangeSetSubmitResultJsonSchema,
+  createContinueInputJsonSchema,
+  createContinueResultJsonSchema,
   createHealthInputJsonSchema,
   createHealthResultJsonSchema,
   createReadInputJsonSchema,
@@ -47,6 +49,12 @@ describe("committed JSON Schema artifacts", () => {
     );
     expect(readSchema("vault-read.output.schema.json")).toEqual(
       createReadResultJsonSchema(),
+    );
+    expect(readSchema("vault-continue.input.schema.json")).toEqual(
+      createContinueInputJsonSchema(),
+    );
+    expect(readSchema("vault-continue.output.schema.json")).toEqual(
+      createContinueResultJsonSchema(),
     );
   });
 });
