@@ -235,6 +235,63 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await runtime.unload();
   });
 
+  it("keeps a durable registry update when the primary mirror write fails", async () => {
+    let primary: PersistedBridgeSettings | undefined;
+    let recovery: PersistedBridgeSettings | undefined;
+    let failPrimary = false;
+    let registryStore:
+      | { save(state: NonNullable<PersistedBridgeSettings["changeSets"]>): Promise<void> }
+      | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => primary,
+        save: async (settings) => {
+          if (failPrimary) throw new Error("injected primary mirror failure");
+          primary = structuredClone(settings);
+        },
+        loadRecovery: async () => recovery,
+        saveRecovery: async (settings) => {
+          recovery = structuredClone(settings);
+        },
+      },
+      createBridge: ({ port, changeSets }) => {
+        registryStore = changeSets?.store;
+        return fakeBridge(port);
+      },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+    failPrimary = true;
+    const accepted = {
+      schemaVersion: 1 as const,
+      nextEnqueueSeq: 2,
+      entries: [
+        {
+          submissionKey: "submission-1",
+          fingerprint: `sha256:${"a".repeat(64)}`,
+          changeSetId: "change-set-1",
+          enqueueSeq: 1,
+          acceptedAt: 0,
+          expiresAt: 7 * 24 * 60 * 60 * 1_000,
+          changeSet: { changeSetId: "change-set-1", state: "in_progress" as const },
+        },
+      ],
+      tombstones: [],
+    };
+
+    await expect(registryStore?.save(accepted)).resolves.toBeUndefined();
+    expect(recovery?.changeSets).toEqual(accepted);
+    expect(primary?.changeSets).not.toEqual(accepted);
+    await runtime.unload();
+  });
+
   it("persists primary and recovery settings before first startup", async () => {
     const calls: string[] = [];
     const runtime = new ManagedVaultBridgeRuntime({

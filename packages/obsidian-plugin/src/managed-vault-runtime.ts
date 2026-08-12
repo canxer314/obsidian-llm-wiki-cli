@@ -150,8 +150,17 @@ export class ManagedVaultBridgeRuntime {
   }
 
   async #saveSettings(settings: PersistedBridgeSettings): Promise<void> {
-    await this.#options.settings.saveRecovery?.(settings);
-    await this.#options.settings.save(settings);
+    const saveRecovery = this.#options.settings.saveRecovery;
+    if (saveRecovery === undefined) {
+      await this.#options.settings.save(settings);
+      return;
+    }
+    await saveRecovery(settings);
+    try {
+      await this.#options.settings.save(settings);
+    } catch {
+      // The recovery copy is authoritative and is loaded before this best-effort mirror.
+    }
   }
 
   async classifyPathChange(classification: PathChangeClassification): Promise<void> {
