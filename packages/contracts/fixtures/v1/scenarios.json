@@ -55,6 +55,31 @@
       "id": "invalid-utf8-no-trusted-result",
       "authority": "runtime",
       "expectation": "Invalid UTF-8 produces no trustworthy vault_read product result and never becomes not_satisfied."
+    },
+    {
+      "id": "change-set-same-key-replay",
+      "authority": "contract-and-runtime",
+      "expectation": "The same Submission Key and canonical request return the durable Change Set identity and current proof without duplicate execution."
+    },
+    {
+      "id": "change-set-key-conflict",
+      "authority": "contract-and-runtime",
+      "expectation": "The same Submission Key with different canonical content returns only submission_key_conflict and preserves the existing record."
+    },
+    {
+      "id": "change-set-preflight-rejection",
+      "authority": "contract-and-runtime",
+      "expectation": "Canonical path, protected boundary, stale observation, absence, and exact-match failures register intent_not_applied before any mutation."
+    },
+    {
+      "id": "change-set-uncertain-response-recovery",
+      "authority": "runtime",
+      "expectation": "After a lost or untrusted submit response, status by the original Submission Key recovers found, unknown, or expired knowledge without changing keys."
+    },
+    {
+      "id": "change-set-seven-day-retention",
+      "authority": "runtime",
+      "expectation": "Accepted keys and complete records survive disconnect and restart for at least seven days, then retain expired tombstones."
     }
   ]
 }

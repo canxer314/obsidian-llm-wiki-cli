@@ -48,6 +48,11 @@ describe("versioned vault_health fixture corpus", () => {
       "exact-read-limit-and-grouping",
       "content-read-operational-block",
       "invalid-utf8-no-trusted-result",
+      "change-set-same-key-replay",
+      "change-set-key-conflict",
+      "change-set-preflight-rejection",
+      "change-set-uncertain-response-recovery",
+      "change-set-seven-day-retention",
     ]);
   });
 });

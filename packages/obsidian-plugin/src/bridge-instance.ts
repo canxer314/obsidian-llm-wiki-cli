@@ -4,16 +4,33 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
+import {
+  changeSetSubmitInputSchema,
+  createChangeSetStatusInputJsonSchema,
+  parseChangeSetStatusInput,
+  parseChangeSetStatusResult,
+  parseChangeSetSubmitResult,
   parseHealthResult,
   parseReadInput,
   parseReadResult,
   readInputSchema,
+  serializeChangeSetStatusCompatibilityText,
+  serializeChangeSetSubmitCompatibilityText,
   serializeCompatibilityText,
   serializeReadCompatibilityText,
   type HealthResult,
 } from "@llm-wiki/vault-contracts";
 import { z } from "zod";
 
+import {
+  ChangeSetService,
+  type ChangeSetServiceOptions,
+} from "./change-set.js";
 import { rejectRequest, verifyRequestPolicy } from "./request-policy.js";
 import { createRegistrationCommand } from "./registration-command.js";
 import { performVaultRead, type VaultReadDataSource } from "./vault-read.js";
@@ -63,6 +80,7 @@ export interface BridgeInstanceOptions {
   peerProtocol?: ProtocolParticipant;
   authenticator?: BridgeRequestAuthenticator;
   readDataSource?: VaultReadDataSource;
+  changeSets?: ChangeSetServiceOptions;
 }
 
 export interface BridgeInstance {
@@ -84,7 +102,7 @@ function projectObservedHealth(
       bridge: BRIDGE_VERSION,
       plugin: PLUGIN_VERSION,
       protocol: PROTOCOL_VERSION,
-      persistentStateSchema: 1,
+      persistentStateSchema: 2,
       recoveryJournalSchema: 1,
     },
     listener: { address: LOOPBACK_ADDRESS, port },
@@ -118,9 +136,16 @@ function protocolsOverlap(peer: ProtocolParticipant): boolean {
   );
 }
 
+function projectEffectiveGate(state: BridgeHealthState): NonNullable<BridgeHealthState["effectiveGate"]> | null {
+  if (state.recovery.state === "blocked") return { code: "recovery_blocked" };
+  if (state.recovery.state === "in_progress") return { code: "recovery_in_progress" };
+  return state.effectiveGate;
+}
+
 export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInstance {
   let port = options.port;
   let httpServer: HttpServer | undefined;
+  let changeSetService: ChangeSetService | undefined;
   const sessions = new Map<
     string,
     {
@@ -146,52 +171,189 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       name: "obsidian-vault-operation-bridge",
       version: PLUGIN_VERSION,
     });
-
-    server.registerTool(
-      "vault_health",
-      {
-        description: "Observe this Managed Vault's Bridge health evidence.",
-        inputSchema: z.object({}).strict(),
+    const requestState = () => ({
+      vault: {
+        writeGate: options.health.write.gate,
+        writeState: options.health.write.state,
       },
-      () => {
+      effectiveGate:
+        sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health),
+    });
+    const healthInputSchema = {
+      type: "object" as const,
+      properties: {},
+      additionalProperties: false,
+    };
+    const readToolInputSchema = z.toJSONSchema(readInputSchema, {
+      target: "draft-2020-12",
+    });
+    const submitToolInputSchema = z.toJSONSchema(changeSetSubmitInputSchema, {
+      target: "draft-2020-12",
+    });
+    const statusToolInputSchema = createChangeSetStatusInputJsonSchema();
+
+    server.server.registerCapabilities({ tools: { listChanged: false } });
+    server.server.setRequestHandler(ListToolsRequestSchema, () => ({
+      tools: [
+        {
+          name: "vault_health",
+          description: "Observe this Managed Vault's Bridge health evidence.",
+          inputSchema: healthInputSchema,
+        },
+        ...(options.readDataSource === undefined
+          ? []
+          : [
+              {
+                name: "vault_read",
+                description:
+                  "Read ordered metadata, outline, heading section, and exact Markdown observations.",
+                inputSchema: readToolInputSchema,
+              },
+            ]),
+        ...(changeSetService === undefined
+          ? []
+          : [
+              {
+                name: "vault_change_set_submit",
+                description:
+                  "Preflight and durably register one idempotent Change Set intent without a separate apply handshake.",
+                inputSchema: submitToolInputSchema,
+              },
+              {
+                name: "vault_change_set_status",
+                description:
+                  "Look up a trusted Change Set proof record by Submission Key or Change Set identity.",
+                inputSchema: statusToolInputSchema,
+              },
+            ]),
+      ],
+    }));
+    server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      try {
+        if (request.params.name === "vault_health") {
+        z.object({}).strict().parse(request.params.arguments ?? {});
         const health =
           sessionState.incompatibleHealth ?? projectObservedHealth(options.health, port);
         return {
-          content: [{ type: "text", text: serializeCompatibilityText(health) }],
+          content: [{ type: "text" as const, text: serializeCompatibilityText(health) }],
           structuredContent: health,
           isError: false,
         };
-      },
-    );
+      }
 
-    if (options.readDataSource !== undefined) {
-      server.registerTool(
-        "vault_read",
-        {
-          description:
-            "Read ordered metadata, outline, heading section, and exact Markdown observations.",
-          inputSchema: readInputSchema,
-        },
-        async (arguments_) => {
-          const input = parseReadInput(arguments_);
-          const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
-          const blocksContent =
-            effectiveGate?.code === "incompatible_protocol" ||
-            effectiveGate?.code === "recovery_in_progress" ||
-            effectiveGate?.code === "recovery_blocked";
-          const result = blocksContent
-            ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
-            : await performVaultRead(options.readDataSource!, input);
+      const incompatibleGate = sessionState.incompatibleHealth?.gate;
+      if (incompatibleGate !== undefined) {
+        if (request.params.name === "vault_change_set_status") {
+          const result = parseChangeSetStatusResult({
+            lookup: "operationally_blocked",
+            gate: incompatibleGate,
+          });
           return {
-            content: [{ type: "text", text: serializeReadCompatibilityText(result) }],
+            content: [
+              {
+                type: "text" as const,
+                text: serializeChangeSetStatusCompatibilityText(result),
+              },
+            ],
             structuredContent: result,
-            isError:
-              result.outcome === "grouping_required" ||
-              result.outcome === "operationally_blocked",
+            isError: true,
           };
-        },
-      );
-    }
+        }
+        if (request.params.name === "vault_change_set_submit") {
+          const result = parseChangeSetSubmitResult({
+            outcome: "operationally_blocked",
+            gate: incompatibleGate,
+          });
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: serializeChangeSetSubmitCompatibilityText(result),
+              },
+            ],
+            structuredContent: result,
+            isError: true,
+          };
+        }
+      }
+
+      if (request.params.name === "vault_read" && options.readDataSource !== undefined) {
+        const input = parseReadInput(request.params.arguments);
+        const effectiveGate = projectEffectiveGate(options.health);
+        const blocksContent =
+          effectiveGate?.code === "recovery_in_progress" ||
+          effectiveGate?.code === "recovery_blocked";
+        const result = blocksContent
+          ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
+          : await performVaultRead(options.readDataSource, input);
+        return {
+          content: [
+            { type: "text" as const, text: serializeReadCompatibilityText(result) },
+          ],
+          structuredContent: result,
+          isError:
+            result.outcome === "grouping_required" ||
+            result.outcome === "operationally_blocked",
+        };
+      }
+
+      if (
+        request.params.name === "vault_change_set_submit" &&
+        changeSetService !== undefined
+      ) {
+        const parsed = changeSetSubmitInputSchema.safeParse(request.params.arguments);
+        const result = parsed.success
+          ? await changeSetService.submit(parsed.data, requestState())
+          : parseChangeSetSubmitResult({ outcome: "request_invalid" });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: serializeChangeSetSubmitCompatibilityText(result),
+            },
+          ],
+          structuredContent: result,
+          isError:
+            result.outcome !== "registered" ||
+            result.changeSet.state === "intent_not_applied" ||
+            result.changeSet.state === "result_unproven",
+        };
+      }
+
+      if (
+        request.params.name === "vault_change_set_status" &&
+        changeSetService !== undefined
+      ) {
+        const result = await changeSetService.status(
+          parseChangeSetStatusInput(request.params.arguments),
+          requestState(),
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: serializeChangeSetStatusCompatibilityText(result),
+            },
+          ],
+          structuredContent: result,
+          isError: result.lookup === "operationally_blocked",
+        };
+      }
+
+      throw new McpError(ErrorCode.InvalidParams, `Tool ${request.params.name} not found`);
+      } catch (error) {
+        if (error instanceof McpError) throw error;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: error instanceof Error ? error.message : "Tool execution failed",
+            },
+          ],
+          isError: true,
+        };
+      }
+    });
 
     return server;
   }
@@ -283,6 +445,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     },
     async start() {
       if (httpServer !== undefined) throw new Error("Bridge Instance already started");
+      if (options.changeSets !== undefined) {
+        changeSetService = await ChangeSetService.open(options.changeSets);
+      }
       const server = createServer((request, response) => {
         void handleRequest(request, response).catch(() => {
           if (!response.headersSent) response.writeHead(500);

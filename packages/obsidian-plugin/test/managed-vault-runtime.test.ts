@@ -67,14 +67,56 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     expect(store.save).toHaveBeenCalledOnce();
     expect(createBridge.mock.calls.map(([value]) => value.port)).toEqual([27123, 27123]);
     expect(stored).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       vaultId: "vault-a",
       port: 27123,
       diagnosticPath: "D:/Vaults/Alpha",
+      changeSets: {
+        schemaVersion: 1,
+        nextEnqueueSeq: 1,
+        entries: [],
+        tombstones: [],
+      },
     });
     expect(bridges[0]?.stop).toHaveBeenCalledOnce();
 
     await second.unload();
+  });
+
+  it("migrates v1 identity settings without changing the Vault identity or port", async () => {
+    let stored: unknown = {
+      schemaVersion: 1,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+    };
+    const save = vi.fn(async (settings: PersistedBridgeSettings) => {
+      stored = settings;
+    });
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => stored, save },
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "must-not-regenerate",
+      selectInitialPort: () => 29999,
+    });
+
+    await runtime.load();
+
+    expect(stored).toEqual({
+      schemaVersion: 2,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+      changeSets: {
+        schemaVersion: 1,
+        nextEnqueueSeq: 1,
+        entries: [],
+        tombstones: [],
+      },
+    });
+    expect(runtime.persistedSettings).toEqual(stored);
+    await runtime.unload();
   });
 
   it("fails closed when the persistent port cannot bind and never changes it", async () => {
@@ -113,6 +155,67 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
       createBridge,
       createVaultId: () => "new-vault",
       selectInitialPort: () => 29999,
+    });
+
+    await expect(runtime.load()).rejects.toThrow("incompatible or invalid");
+    expect(save).not.toHaveBeenCalled();
+    expect(createBridge).not.toHaveBeenCalled();
+  });
+
+  it("rejects a corrupt Change Set registry instead of reporting accepted keys unknown", async () => {
+    const save = vi.fn(async () => undefined);
+    const createBridge = vi.fn(() => fakeBridge(27123));
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => ({
+          schemaVersion: 2,
+          vaultId: "vault-a",
+          port: 27123,
+          diagnosticPath: "D:/Vaults/Alpha",
+          changeSets: null,
+        }),
+        save,
+      },
+      createBridge,
+    });
+
+    await expect(runtime.load()).rejects.toThrow("incompatible or invalid");
+    expect(save).not.toHaveBeenCalled();
+    expect(createBridge).not.toHaveBeenCalled();
+  });
+
+  it("rejects a persisted record whose public and registry identities disagree", async () => {
+    const save = vi.fn(async () => undefined);
+    const createBridge = vi.fn(() => fakeBridge(27123));
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => ({
+          schemaVersion: 2,
+          vaultId: "vault-a",
+          port: 27123,
+          diagnosticPath: "D:/Vaults/Alpha",
+          changeSets: {
+            schemaVersion: 1,
+            nextEnqueueSeq: 2,
+            entries: [
+              {
+                submissionKey: "submission-1",
+                fingerprint: `sha256:${"a".repeat(64)}`,
+                changeSetId: "registry-id",
+                enqueueSeq: 1,
+                acceptedAt: 0,
+                expiresAt: 7 * 24 * 60 * 60 * 1_000,
+                changeSet: { changeSetId: "public-id", state: "in_progress" },
+              },
+            ],
+            tombstones: [],
+          },
+        }),
+        save,
+      },
+      createBridge,
     });
 
     await expect(runtime.load()).rejects.toThrow("incompatible or invalid");
@@ -163,10 +266,16 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await runtime.load();
 
     expect(stored).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       vaultId: "vault-a",
       port: 27123,
       diagnosticPath: "E:/Moved/Alpha",
+      changeSets: {
+        schemaVersion: 1,
+        nextEnqueueSeq: 1,
+        entries: [],
+        tombstones: [],
+      },
     });
     await runtime.unload();
   });
@@ -194,10 +303,16 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await runtime.load();
 
     expect(stored).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       vaultId: "vault-copy",
       port: 29999,
       diagnosticPath: "E:/Copies/Alpha",
+      changeSets: {
+        schemaVersion: 1,
+        nextEnqueueSeq: 1,
+        entries: [],
+        tombstones: [],
+      },
     });
     await runtime.unload();
   });

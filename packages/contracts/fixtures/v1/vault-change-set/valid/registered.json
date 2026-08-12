@@ -1,0 +1,36 @@
+{
+  "submitInput": {
+    "submissionKey": "fixture-submit-1",
+    "operations": [
+      {
+        "operationId": "edit-1",
+        "kind": "edit_body",
+        "path": "Notes/A.md",
+        "targetVersion": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "edit": {
+          "kind": "replace_exact",
+          "old": "before",
+          "replacement": "after",
+          "expectedOccurrences": 1
+        }
+      }
+    ],
+    "readDependencies": [
+      {
+        "path": "Notes/Context.md",
+        "contentVersion": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ]
+  },
+  "submitResult": {
+    "outcome": "registered",
+    "changeSet": {
+      "changeSetId": "change-set-1",
+      "state": "in_progress"
+    },
+    "vault": {
+      "writeGate": "open",
+      "writeState": "writable"
+    }
+  }
+}

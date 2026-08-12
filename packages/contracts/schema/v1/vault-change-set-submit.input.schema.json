@@ -1,0 +1,460 @@
+{
+  "$id": "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-change-set-submit.input.schema.json",
+  "title": "vault_change_set_submit v1 input",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "submissionKey": {
+      "$ref": "#/$defs/__schema0"
+    },
+    "operations": {
+      "$ref": "#/$defs/__schema1"
+    },
+    "readDependencies": {
+      "$ref": "#/$defs/__schema11"
+    }
+  },
+  "required": [
+    "submissionKey",
+    "operations"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "__schema0": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema1": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/__schema2"
+      }
+    },
+    "__schema2": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "create_directory"
+            },
+            "path": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "ifExists": {
+              "type": "string",
+              "const": "reject"
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "path",
+            "ifExists"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "create_note"
+            },
+            "path": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "content": {
+              "type": "string"
+            },
+            "ifExists": {
+              "type": "string",
+              "const": "reject"
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "path",
+            "content",
+            "ifExists"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "edit_body"
+            },
+            "path": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "targetVersion": {
+              "$ref": "#/$defs/__schema7"
+            },
+            "edit": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "replace_exact"
+                    },
+                    "old": {
+                      "type": "string"
+                    },
+                    "replacement": {
+                      "type": "string"
+                    },
+                    "expectedOccurrences": {
+                      "type": "number",
+                      "const": 1
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "old",
+                    "replacement",
+                    "expectedOccurrences"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "replace_whole"
+                    },
+                    "replacement": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "replacement"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "path",
+            "targetVersion",
+            "edit"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "edit_frontmatter"
+            },
+            "path": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "targetVersion": {
+              "$ref": "#/$defs/__schema7"
+            },
+            "changes": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/__schema8"
+              }
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "path",
+            "targetVersion",
+            "changes"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "move"
+            },
+            "sourcePath": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "destinationPath": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "targetVersion": {
+              "$ref": "#/$defs/__schema7"
+            },
+            "linkEffect": {
+              "type": "string",
+              "const": "update_resolved_references"
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "sourcePath",
+            "destinationPath",
+            "targetVersion",
+            "linkEffect"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "copy_attachment"
+            },
+            "sourcePath": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "destinationPath": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "expectedSha256": {
+              "$ref": "#/$defs/__schema10"
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "sourcePath",
+            "destinationPath",
+            "expectedSha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "move_attachment"
+            },
+            "sourcePath": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "destinationPath": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "expectedSha256": {
+              "$ref": "#/$defs/__schema10"
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "sourcePath",
+            "destinationPath",
+            "expectedSha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/__schema3"
+            },
+            "afterOperationId": {
+              "$ref": "#/$defs/__schema4"
+            },
+            "kind": {
+              "type": "string",
+              "const": "trash"
+            },
+            "path": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "targetVersion": {
+              "$ref": "#/$defs/__schema7"
+            }
+          },
+          "required": [
+            "operationId",
+            "kind",
+            "path",
+            "targetVersion"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "__schema3": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema4": {
+      "$ref": "#/$defs/__schema3"
+    },
+    "__schema5": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/)(?!.*\\/$).+$"
+    },
+    "__schema6": {
+      "type": "string",
+      "pattern": "^(?!\\/)(?!.*\\\\)(?!.*(?:^|\\/)(?:\\.{1,2})(?:\\/|$))(?!.*\\/\\/).+\\.md$"
+    },
+    "__schema7": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "__schema8": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "set"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "value": {
+              "$ref": "#/$defs/__schema9"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "remove"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "__schema9": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema9"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema9"
+          }
+        }
+      ]
+    },
+    "__schema10": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "__schema11": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/__schema6"
+          },
+          "contentVersion": {
+            "$ref": "#/$defs/__schema7"
+          }
+        },
+        "required": [
+          "path",
+          "contentVersion"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

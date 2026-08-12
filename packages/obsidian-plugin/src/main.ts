@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+
 import {
   FileSystemAdapter,
   Plugin,
@@ -19,6 +22,36 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const adapter = this.app.vault.adapter;
     const basePath =
       adapter instanceof FileSystemAdapter ? adapter.getBasePath() : this.app.vault.getName();
+    const changeSetDataSource =
+      adapter instanceof FileSystemAdapter
+        ? {
+            readBinary: async (path: string) =>
+              (await adapter.exists(path)) ? adapter.readBinary(path) : null,
+            pathKind: async (path: string) => {
+              const stat = await adapter.stat(path);
+              if (stat === null) return null;
+              return stat.type === "folder" ? ("directory" as const) : ("file" as const);
+            },
+            isContained: async (path: string) => {
+              if (isAbsolute(path)) return false;
+              const root = await realpath(basePath);
+              let candidate = resolve(basePath, path);
+              while (candidate !== basePath) {
+                try {
+                  candidate = await realpath(candidate);
+                  break;
+                } catch {
+                  candidate = dirname(candidate);
+                }
+              }
+              const relativePath = relative(root, candidate);
+              return (
+                relativePath === "" ||
+                (!relativePath.startsWith("..") && !isAbsolute(relativePath))
+              );
+            },
+          }
+        : undefined;
     const runtime = new ManagedVaultBridgeRuntime({
       vault: { name: this.app.vault.getName(), path: basePath },
       settings: {
@@ -47,6 +80,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
           })) ?? null;
         },
       },
+      changeSetDataSource,
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;
