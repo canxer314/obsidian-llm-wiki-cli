@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { BridgeInstance } from "../src/bridge-instance.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+import {
+  createBridgeInstance,
+  type BridgeInstance,
+} from "../src/bridge-instance.js";
 import {
   ManagedVaultBridgeRuntime,
   type ManagedVaultBridgeRuntimeOptions,
@@ -552,6 +558,126 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     ).resolves.toMatchObject({ outcome: "results", items: [{ path: "note.md" }] });
     expect(bridge.start).toHaveBeenCalledOnce();
     await runtime.unload();
+  });
+
+  it("starts an observable recovery-blocked Bridge through the production composition", async () => {
+    const settings: PersistedBridgeSettings = {
+      schemaVersion: 2,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+      changeSets: {
+        schemaVersion: 1,
+        nextEnqueueSeq: 2,
+        entries: [
+          {
+            submissionKey: "directory-key",
+            fingerprint: `sha256:${"a".repeat(64)}`,
+            changeSetId: "change-set-unproven",
+            enqueueSeq: 1,
+            acceptedAt: 0,
+            expiresAt: Number.MAX_SAFE_INTEGER,
+            execution: {
+              phase: "queued",
+              input: {
+                submissionKey: "directory-key",
+                operations: [
+                  {
+                    operationId: "mkdir-1",
+                    kind: "create_directory",
+                    path: "Directory",
+                    ifExists: "reject",
+                  },
+                ],
+              },
+            },
+            changeSet: {
+              changeSetId: "change-set-unproven",
+              state: "in_progress",
+              preview: {
+                requestedEffects: [
+                  {
+                    operationId: "mkdir-1",
+                    kind: "create_directory",
+                    projectedOutcome: "changed",
+                  },
+                ],
+                derivedEffects: [],
+                paths: [
+                  {
+                    path: "Directory",
+                    preState: { kind: "absent" },
+                    projectedFinalState: { kind: "directory" },
+                    projectedOutcome: "changed",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        tombstones: [],
+      },
+    };
+    const execution = {
+      loadRecoveryFrame: async () => {
+        throw new Error("corrupt recovery journal");
+      },
+      persistRecoveryFrame: async () => undefined,
+      pathKind: async () => null,
+      directoryIdentity: async () => null,
+      prepareDirectory: async () => "directory",
+      publishDirectory: async () => undefined,
+      discardPreparedDirectory: async () => undefined,
+      removeDirectory: async () => undefined,
+      publishSearchSnapshot: async () => undefined,
+    };
+    let bridge: BridgeInstance | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => settings, save: async () => undefined },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      changeSetExecution: execution,
+      createBridge: (options) => {
+        bridge = createBridgeInstance({ ...options, port: 0 });
+        return bridge;
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+
+    await expect(runtime.load()).resolves.toBeUndefined();
+    const client = new Client({ name: "recovery-test", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(bridge!.endpoint, {
+        requestInit: { headers: { "X-Expected-Vault-ID": "vault-a" } },
+      }),
+    );
+
+    try {
+      const health = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(health.structuredContent).toMatchObject({
+        recovery: { state: "blocked" },
+        write: { gate: "blocked", state: "paused" },
+        effectiveGate: { code: "recovery_blocked" },
+        overall: "blocked",
+        operatorAction: "review_recovery",
+      });
+      const status = await client.callTool({
+        name: "vault_change_set_status",
+        arguments: { changeSetId: "change-set-unproven" },
+      });
+      expect(status.structuredContent).toMatchObject({
+        lookup: "found",
+        changeSet: { state: "result_unproven" },
+      });
+    } finally {
+      await client.close();
+      await runtime.unload();
+    }
   });
 
   it("reports healthy readiness when snapshots and durable mutation execution are ready", async () => {
