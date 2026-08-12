@@ -16,8 +16,10 @@ import {
 } from "./search-snapshot.js";
 
 interface FrozenDiscovery {
+  readonly clientId: string;
   readonly items: readonly DiscoverItem[];
   readonly direction: "asc" | "desc";
+  readonly retainedBytes: number;
   offset: number;
   expiresAt: number;
 }
@@ -28,6 +30,8 @@ export interface VaultDiscoverServiceOptions {
 }
 
 const DISCOVERY_CONTINUATION_LIFETIME_MS = 15 * 60 * 1_000;
+const MAX_ACTIVE_CONTINUATIONS_PER_CLIENT = 8;
+const MAX_RETAINED_BYTES_PER_CLIENT = 8 * 1024 * 1024;
 
 function compareText(left: string, right: string, caseSensitive: boolean): boolean {
   return caseSensitive
@@ -155,23 +159,30 @@ export class VaultDiscoverService {
     this.#now = options.now ?? Date.now;
   }
 
-  async execute(rawInput: unknown): Promise<DiscoverResult> {
+  releaseClient(clientId: string): void {
+    for (const [token, frozen] of this.#continuations) {
+      if (frozen.clientId === clientId) this.#releaseContinuation(token);
+    }
+  }
+
+  async execute(rawInput: unknown, clientId: string): Promise<DiscoverResult> {
     const input = parseDiscoverInput(rawInput);
     const now = this.#now();
     this.#releaseExpired(now);
     const token = input.page.continuation;
     if (token !== null) {
       const frozen = this.#continuations.get(token);
-      if (frozen === undefined || frozen.expiresAt <= now) {
+      if (
+        frozen === undefined ||
+        frozen.clientId !== clientId ||
+        frozen.expiresAt <= now
+      ) {
         return parseDiscoverResult({
           outcome: "snapshot_unavailable",
           code: "search_snapshot_unavailable",
         });
       }
-      this.#continuations.delete(token);
-      const expiryTimer = this.#expiryTimers.get(token);
-      if (expiryTimer !== undefined) clearTimeout(expiryTimer);
-      this.#expiryTimers.delete(token);
+      this.#releaseContinuation(token);
       frozen.expiresAt = now + DISCOVERY_CONTINUATION_LIFETIME_MS;
       return this.#consumePage(frozen, input.page.maxItems);
     }
@@ -198,8 +209,10 @@ export class VaultDiscoverService {
     });
     return this.#consumePage(
       {
+        clientId,
         items: Object.freeze(items),
         direction: input.order.direction,
+        retainedBytes: Buffer.byteLength(JSON.stringify(items), "utf8"),
         offset: 0,
         expiresAt: now + DISCOVERY_CONTINUATION_LIFETIME_MS,
       },
@@ -209,9 +222,22 @@ export class VaultDiscoverService {
 
   #consumePage(frozen: FrozenDiscovery, maxItems: number): DiscoverResult {
     const end = Math.min(frozen.offset + maxItems, frozen.items.length);
+    const complete = end === frozen.items.length;
+    const quota = this.#clientQuota(frozen.clientId);
+    if (
+      !complete &&
+      (
+        quota.activeContinuations >= MAX_ACTIVE_CONTINUATIONS_PER_CLIENT ||
+        quota.retainedBytes + frozen.retainedBytes > MAX_RETAINED_BYTES_PER_CLIENT
+      )
+    ) {
+      return parseDiscoverResult({
+        outcome: "snapshot_unavailable",
+        code: "search_snapshot_unavailable",
+      });
+    }
     const items = frozen.items.slice(frozen.offset, end);
     frozen.offset = end;
-    const complete = end === frozen.items.length;
     const continuation = complete ? null : this.#uniqueToken();
     if (continuation !== null) {
       this.#continuations.set(continuation, frozen);
@@ -235,6 +261,27 @@ export class VaultDiscoverService {
     });
   }
 
+  #clientQuota(clientId: string): {
+    activeContinuations: number;
+    retainedBytes: number;
+  } {
+    let activeContinuations = 0;
+    let retainedBytes = 0;
+    for (const frozen of this.#continuations.values()) {
+      if (frozen.clientId !== clientId) continue;
+      activeContinuations += 1;
+      retainedBytes += frozen.retainedBytes;
+    }
+    return { activeContinuations, retainedBytes };
+  }
+
+  #releaseContinuation(token: string): void {
+    this.#continuations.delete(token);
+    const expiryTimer = this.#expiryTimers.get(token);
+    if (expiryTimer !== undefined) clearTimeout(expiryTimer);
+    this.#expiryTimers.delete(token);
+  }
+
   #uniqueToken(): string {
     this.#tokenSequence += 1;
     return `${this.#createToken()}:${this.#tokenSequence.toString(36)}`;
@@ -242,12 +289,7 @@ export class VaultDiscoverService {
 
   #releaseExpired(now: number): void {
     for (const [token, frozen] of this.#continuations) {
-      if (frozen.expiresAt <= now) {
-        this.#continuations.delete(token);
-        const expiryTimer = this.#expiryTimers.get(token);
-        if (expiryTimer !== undefined) clearTimeout(expiryTimer);
-        this.#expiryTimers.delete(token);
-      }
+      if (frozen.expiresAt <= now) this.#releaseContinuation(token);
     }
   }
 }

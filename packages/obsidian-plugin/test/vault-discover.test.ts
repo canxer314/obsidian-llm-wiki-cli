@@ -251,6 +251,108 @@ describe("vault_discover over a real Vault source", () => {
     });
   });
 
+  it("binds each continuation to the client that created it", async () => {
+    const vault = mutableVault({ "a.md": "needle", "b.md": "needle" });
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+    const discover = new VaultDiscoverService(snapshots, {
+      createToken: () => "client-bound",
+    });
+    const first = await discover.execute(
+      input({ text: { literal: "needle", caseSensitive: true } }, 1),
+      "client-a",
+    );
+    expect(first).toMatchObject({ continuation: "client-bound:1" });
+    const continuationRequest = {
+      ...input({ path: { exact: "ignored.md" } }, 1, false),
+      page: { maxItems: 1, continuation: "client-bound:1" },
+    };
+
+    await expect(discover.execute(continuationRequest, "client-b")).resolves.toEqual({
+      outcome: "snapshot_unavailable",
+      code: "search_snapshot_unavailable",
+    });
+    await expect(discover.execute(continuationRequest, "client-a")).resolves.toMatchObject({
+      outcome: "results",
+      items: [{ path: "b.md" }],
+      complete: true,
+    });
+  });
+
+  it("releases every continuation owned by a disconnected client", async () => {
+    const vault = mutableVault({ "a.md": "needle", "b.md": "needle" });
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+    const discover = new VaultDiscoverService(snapshots, {
+      createToken: () => "released",
+    });
+    const first = await discover.execute(
+      input({ text: { literal: "needle", caseSensitive: true } }, 1),
+      "client-a",
+    );
+    expect(first).toMatchObject({ continuation: "released:1" });
+
+    discover.releaseClient("client-a");
+
+    await expect(discover.execute({
+      ...input({ path: { exact: "ignored.md" } }, 1, false),
+      page: { maxItems: 1, continuation: "released:1" },
+    }, "client-a")).resolves.toEqual({
+      outcome: "snapshot_unavailable",
+      code: "search_snapshot_unavailable",
+    });
+  });
+
+  it("limits each client to eight active continuation chains without eviction", async () => {
+    const vault = mutableVault({ "a.md": "needle", "b.md": "needle" });
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+    let tokenIndex = 0;
+    const discover = new VaultDiscoverService(snapshots, {
+      createToken: () => `quota-${++tokenIndex}`,
+    });
+    const query = input({ text: { literal: "needle", caseSensitive: true } }, 1);
+    const continuations: string[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      const result = await discover.execute(query, "client-a");
+      expect(result).toMatchObject({ outcome: "results", complete: false });
+      if (result.outcome === "results" && result.continuation !== null) {
+        continuations.push(result.continuation);
+      }
+    }
+
+    await expect(discover.execute(query, "client-a")).resolves.toEqual({
+      outcome: "snapshot_unavailable",
+      code: "search_snapshot_unavailable",
+    });
+    await expect(discover.execute({
+      ...query,
+      page: { maxItems: 1, continuation: continuations[0] },
+    }, "client-a")).resolves.toMatchObject({
+      outcome: "results",
+      items: [{ path: "b.md" }],
+      complete: true,
+    });
+  });
+
+  it("limits each client to eight MiB of retained frozen discovery evidence", async () => {
+    const largeContent = "x".repeat(1_000_000);
+    const vault = mutableVault(Object.fromEntries(
+      Array.from({ length: 9 }, (_, index) => [`${index}.md`, largeContent]),
+    ));
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+    const discover = new VaultDiscoverService(snapshots);
+
+    await expect(discover.execute(
+      input({ text: { regex: "x+", caseSensitive: true } }, 1),
+      "client-a",
+    )).resolves.toEqual({
+      outcome: "snapshot_unavailable",
+      code: "search_snapshot_unavailable",
+    });
+  });
+
   it("releases abandoned frozen results after the continuation lifetime", async () => {
     const vault = mutableVault({ "a.md": "needle", "b.md": "needle" });
     const snapshots = new SearchSnapshotManager(vault.source);

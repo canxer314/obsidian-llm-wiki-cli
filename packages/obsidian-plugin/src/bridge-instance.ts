@@ -63,7 +63,8 @@ export interface BridgeHealthState {
 }
 
 export interface BridgeDiscoverService {
-  execute(input: unknown): Promise<DiscoverResult>;
+  execute(input: unknown, clientId: string): Promise<DiscoverResult>;
+  releaseClient(clientId: string): void;
 }
 
 export interface BridgeInstanceOptions {
@@ -192,6 +193,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     {
       server: McpServer;
       transport: StreamableHTTPServerTransport;
+      clientId: string;
       incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
     }
   >();
@@ -206,6 +208,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
   }
 
   function createMcpServer(sessionState: {
+    clientId: string;
     incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
   }): McpServer {
     const server = new McpServer({
@@ -244,7 +247,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
           const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
           const result = blocksContentTools(effectiveGate)
             ? parseDiscoverResult({ outcome: "operationally_blocked", gate: effectiveGate })
-            : await options.discoverService!.execute(input);
+            : await options.discoverService!.execute(input, sessionState.clientId);
           return {
             content: [{ type: "text", text: serializeDiscoverCompatibilityText(result) }],
             structuredContent: result,
@@ -325,13 +328,15 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         sessionIdGenerator: () => randomUUID(),
       });
       const sessionState: {
+        clientId: string;
         incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
-      } = {};
+      } = { clientId: randomUUID() };
       if (options.peerProtocol !== undefined && !protocolsOverlap(options.peerProtocol)) {
         sessionState.incompatibleHealth = projectIncompatibleHealth(options.peerProtocol);
       }
       const server = createMcpServer(sessionState);
       transport.onclose = () => {
+        options.discoverService?.releaseClient(sessionState.clientId);
         if (transport.sessionId !== undefined) sessions.delete(transport.sessionId);
       };
       await server.connect(transport);
