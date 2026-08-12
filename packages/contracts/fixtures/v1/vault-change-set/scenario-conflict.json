@@ -1,0 +1,27 @@
+{
+  "id": "change-set-key-conflict",
+  "steps": [
+    {
+      "call": "submit",
+      "arguments": {
+        "submissionKey": "scenario-conflict",
+        "operations": [{ "operationId": "create-1", "kind": "create_note", "path": "Notes/Conflict.md", "content": "first", "ifExists": "reject" }]
+      },
+      "capture": "accepted",
+      "expect": { "outcome": "registered", "state": "in_progress" }
+    },
+    {
+      "call": "submit",
+      "arguments": {
+        "submissionKey": "scenario-conflict",
+        "operations": [{ "operationId": "create-1", "kind": "create_note", "path": "Notes/Conflict.md", "content": "different", "ifExists": "reject" }]
+      },
+      "expect": { "outcome": "submission_key_conflict" }
+    },
+    {
+      "call": "status",
+      "arguments": { "submissionKey": "scenario-conflict" },
+      "expect": { "lookup": "found", "state": "in_progress", "sameChangeSetAs": "accepted" }
+    }
+  ]
+}

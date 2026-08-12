@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/vault-change-set-status.input.schema.json",
+  "title": "vault_change_set_status v1 input",
+  "type": "object",
+  "properties": {
+    "submissionKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "changeSetId": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "submissionKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "submissionKey"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "changeSetId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "changeSetId"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": "change-set-preflight-rejection",
+  "steps": [
+    {
+      "call": "submit",
+      "arguments": {
+        "submissionKey": "scenario-rejection",
+        "operations": [{ "operationId": "create-1", "kind": "create_note", "path": ".obsidian/Rejected.md", "content": "blocked", "ifExists": "reject" }]
+      },
+      "capture": "rejected",
+      "expect": { "outcome": "registered", "state": "intent_not_applied", "failureCode": "path_conflict" }
+    },
+    {
+      "call": "status",
+      "arguments": { "submissionKey": "scenario-rejection" },
+      "expect": { "lookup": "found", "state": "intent_not_applied", "sameChangeSetAs": "rejected" }
+    }
+  ]
+}

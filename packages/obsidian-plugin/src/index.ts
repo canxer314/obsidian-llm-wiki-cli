@@ -7,6 +7,24 @@ export {
   type BridgeRequestAuthenticator,
   type ProtocolParticipant,
 } from "./bridge-instance.js";
+export {
+  CHANGE_SET_RECORD_RETENTION_MS,
+  CHANGE_SET_REGISTRY_SCHEMA_VERSION,
+  ChangeSetService,
+  fingerprintChangeSetRequest,
+  type FrontmatterChange,
+  type MoveDerivedProjection,
+  type MoveProjection,
+  type ChangeSetGate,
+  type ChangeSetPathKind,
+  type ChangeSetPreflightDataSource,
+  type ChangeSetRegistryEntry,
+  type ChangeSetRegistryState,
+  type ChangeSetRegistryStore,
+  type ChangeSetRegistryTombstone,
+  type ChangeSetRequestState,
+  type ChangeSetServiceOptions,
+} from "./change-set.js";
 export { createRegistrationCommand } from "./registration-command.js";
 export {
   ManagedVaultBridgeRuntime,

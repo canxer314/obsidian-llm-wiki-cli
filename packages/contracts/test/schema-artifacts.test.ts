@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  createChangeSetStatusInputJsonSchema,
+  createChangeSetStatusResultJsonSchema,
+  createChangeSetSubmitInputJsonSchema,
+  createChangeSetSubmitResultJsonSchema,
   createDiscoverInputJsonSchema,
   createDiscoverResultJsonSchema,
   createContinueInputJsonSchema,
@@ -24,6 +28,18 @@ function readSchema(name: string): unknown {
 
 describe("committed JSON Schema artifacts", () => {
   it("stay identical to the authoritative generated contract", () => {
+    expect(readSchema("vault-change-set-submit.input.schema.json")).toEqual(
+      createChangeSetSubmitInputJsonSchema(),
+    );
+    expect(readSchema("vault-change-set-submit.output.schema.json")).toEqual(
+      createChangeSetSubmitResultJsonSchema(),
+    );
+    expect(readSchema("vault-change-set-status.input.schema.json")).toEqual(
+      createChangeSetStatusInputJsonSchema(),
+    );
+    expect(readSchema("vault-change-set-status.output.schema.json")).toEqual(
+      createChangeSetStatusResultJsonSchema(),
+    );
     expect(readSchema("vault-discover.input.schema.json")).toEqual(
       createDiscoverInputJsonSchema(),
     );

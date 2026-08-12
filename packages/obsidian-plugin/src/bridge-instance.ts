@@ -5,8 +5,19 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
+import {
+  changeSetSubmitInputSchema,
   continueInputSchema,
+  createChangeSetStatusInputJsonSchema,
   discoverInputSchema,
+  parseChangeSetStatusInput,
+  parseChangeSetStatusResult,
+  parseChangeSetSubmitResult,
   parseContinueInput,
   parseContinueResult,
   parseDiscoverInput,
@@ -15,6 +26,8 @@ import {
   parseReadInput,
   parseReadResult,
   readInputSchema,
+  serializeChangeSetStatusCompatibilityText,
+  serializeChangeSetSubmitCompatibilityText,
   serializeCompatibilityText,
   serializeContinueCompatibilityText,
   serializeDiscoverCompatibilityText,
@@ -26,6 +39,10 @@ import {
 } from "@llm-wiki/vault-contracts";
 import { z } from "zod";
 
+import {
+  ChangeSetService,
+  type ChangeSetServiceOptions,
+} from "./change-set.js";
 import { rejectRequest, verifyRequestPolicy } from "./request-policy.js";
 import { createRegistrationCommand } from "./registration-command.js";
 import { performVaultRead, type VaultReadDataSource } from "./vault-read.js";
@@ -86,6 +103,7 @@ export interface BridgeInstanceOptions {
   readDataSource?: VaultReadDataSource;
   discoverService?: BridgeDiscoverService;
   searchSnapshotReadiness?: () => "ready" | "building" | "unavailable";
+  changeSets?: ChangeSetServiceOptions;
   continuationNow?: () => number;
   continuationToken?: () => string;
 }
@@ -132,7 +150,7 @@ function projectObservedHealth(
       bridge: BRIDGE_VERSION,
       plugin: PLUGIN_VERSION,
       protocol: PROTOCOL_VERSION,
-      persistentStateSchema: 1,
+      persistentStateSchema: 2,
       recoveryJournalSchema: 1,
     },
     listener: { address: LOOPBACK_ADDRESS, port },
@@ -186,6 +204,12 @@ function protocolsOverlap(peer: ProtocolParticipant): boolean {
   );
 }
 
+function projectEffectiveGate(state: BridgeHealthState): NonNullable<BridgeHealthState["effectiveGate"]> | null {
+  if (state.recovery.state === "blocked") return { code: "recovery_blocked" };
+  if (state.recovery.state === "in_progress") return { code: "recovery_in_progress" };
+  return state.effectiveGate;
+}
+
 function blocksVaultContent(
   gate: { code: string } | null | undefined,
 ): gate is {
@@ -201,6 +225,7 @@ function blocksVaultContent(
 export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInstance {
   let port = options.port;
   let httpServer: HttpServer | undefined;
+  let changeSetService: ChangeSetService | undefined;
   const continuationStore = createVaultContinuationStore({
     now: options.continuationNow,
     token: options.continuationToken,
@@ -221,6 +246,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     {
       server: McpServer;
       transport: StreamableHTTPServerTransport;
+      clientId?: string;
       incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
     }
   >();
@@ -248,136 +274,276 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       name: "obsidian-vault-operation-bridge",
       version: PLUGIN_VERSION,
     });
-
-    server.registerTool(
-      "vault_health",
-      {
-        description: "Observe this Managed Vault's Bridge health evidence.",
-        inputSchema: z.object({}).strict(),
+    const requestState = () => ({
+      vault: {
+        writeGate: options.health.write.gate,
+        writeState: options.health.write.state,
       },
-      () => {
+      effectiveGate:
+        sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health),
+    });
+    const healthInputSchema = {
+      type: "object" as const,
+      properties: {},
+      additionalProperties: false,
+    };
+    const discoverToolInputSchema = z.toJSONSchema(discoverInputSchema, {
+      target: "draft-2020-12",
+    });
+    const readToolInputSchema = z.toJSONSchema(readInputSchema, {
+      target: "draft-2020-12",
+    });
+    const continueToolInputSchema = z.toJSONSchema(continueInputSchema, {
+      target: "draft-2020-12",
+    });
+    const submitToolInputSchema = z.toJSONSchema(changeSetSubmitInputSchema, {
+      target: "draft-2020-12",
+    });
+    const statusToolInputSchema = createChangeSetStatusInputJsonSchema();
+
+    server.server.registerCapabilities({ tools: { listChanged: false } });
+    server.server.setRequestHandler(ListToolsRequestSchema, () => ({
+      tools: [
+        {
+          name: "vault_health",
+          description: "Observe this Managed Vault's Bridge health evidence.",
+          inputSchema: healthInputSchema,
+        },
+        ...(options.discoverService === undefined
+          ? []
+          : [
+              {
+                name: "vault_discover",
+                description:
+                  "Discover canonical Markdown paths and text evidence from one immutable Search Snapshot.",
+                inputSchema: discoverToolInputSchema,
+              },
+            ]),
+        ...(options.readDataSource === undefined
+          ? []
+          : [
+              {
+                name: "vault_read",
+                description:
+                  "Read ordered metadata, outline, heading section, and exact Markdown observations.",
+                inputSchema: readToolInputSchema,
+              },
+              {
+                name: "vault_continue",
+                description: "Continue transporting one accepted frozen Vault read result.",
+                inputSchema: continueToolInputSchema,
+              },
+            ]),
+        ...(changeSetService === undefined
+          ? []
+          : [
+              {
+                name: "vault_change_set_submit",
+                description:
+                  "Preflight and durably register one idempotent Change Set intent without a separate apply handshake.",
+                inputSchema: submitToolInputSchema,
+              },
+              {
+                name: "vault_change_set_status",
+                description:
+                  "Look up a trusted Change Set proof record by Submission Key or Change Set identity.",
+                inputSchema: statusToolInputSchema,
+              },
+            ]),
+      ],
+    }));
+    server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      try {
+        if (request.params.name === "vault_health") {
+        z.object({}).strict().parse(request.params.arguments ?? {});
         const health =
           sessionState.incompatibleHealth ??
           projectObservedHealth(options.health, port, options.searchSnapshotReadiness);
         return {
-          content: [{ type: "text", text: serializeCompatibilityText(health) }],
+          content: [{ type: "text" as const, text: serializeCompatibilityText(health) }],
           structuredContent: health,
           isError: false,
         };
-      },
-    );
+      }
 
-    if (options.discoverService !== undefined) {
-      server.registerTool(
-        "vault_discover",
-        {
-          description:
-            "Discover canonical Markdown paths and text evidence from one immutable Search Snapshot.",
-          inputSchema: discoverInputSchema,
-        },
-        async (arguments_) => {
-          const input = parseDiscoverInput(arguments_);
-          const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
-          let result: DiscoverResult;
-          if (blocksVaultContent(effectiveGate)) {
-            result = parseDiscoverResult({ outcome: "operationally_blocked", gate: effectiveGate });
-          } else if (sessionState.clientId === undefined) {
-            result = parseDiscoverResult({
-              outcome: "snapshot_unavailable",
-              code: "search_snapshot_unavailable",
-            });
-          } else {
-            result = await options.discoverService!.execute(input, sessionState.clientId);
-          }
+      const incompatibleGate = sessionState.incompatibleHealth?.gate;
+      if (incompatibleGate !== undefined) {
+        if (request.params.name === "vault_change_set_status") {
+          const result = parseChangeSetStatusResult({
+            lookup: "operationally_blocked",
+            gate: incompatibleGate,
+          });
           return {
-            content: [{ type: "text", text: serializeDiscoverCompatibilityText(result) }],
+            content: [
+              {
+                type: "text" as const,
+                text: serializeChangeSetStatusCompatibilityText(result),
+              },
+            ],
             structuredContent: result,
-            isError: result.outcome !== "results",
+            isError: true,
           };
-        },
-      );
-    }
-
-    if (options.readDataSource !== undefined) {
-      server.registerTool(
-        "vault_read",
-        {
-          description:
-            "Read ordered metadata, outline, heading section, and exact Markdown observations.",
-          inputSchema: readInputSchema,
-        },
-        async (arguments_) => {
-          const input = parseReadInput(arguments_);
-          const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
-          const result = blocksVaultContent(effectiveGate)
-            ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
-            : await performVaultRead(options.readDataSource!, input);
-          const text = serializeReadCompatibilityText(result);
-          const directResponseBytes = Buffer.byteLength(
-            JSON.stringify({
-              content: [{ type: "text", text }],
-              structuredContent: result,
-              isError:
-                result.outcome === "grouping_required" ||
-                result.outcome === "operationally_blocked",
-            }),
-            "utf8",
-          );
-          if (
-            result.outcome === "items" &&
-            directResponseBytes > MAXIMUM_COMPACT_RESPONSE_BYTES
-          ) {
-            if (sessionState.clientId === undefined) {
-              throw new Error("MCP session identity is unavailable");
-            }
-            const page = continuationStore.issue(sessionState.clientId, result);
-            return {
-              content: [{ type: "text", text: serializeReadToolCompatibilityText(page) }],
-              structuredContent: page,
-              isError: !("outcome" in page && page.outcome === "page"),
-            };
-          }
+        }
+        if (request.params.name === "vault_change_set_submit") {
+          const result = parseChangeSetSubmitResult({
+            outcome: "operationally_blocked",
+            gate: incompatibleGate,
+          });
           return {
+            content: [
+              {
+                type: "text" as const,
+                text: serializeChangeSetSubmitCompatibilityText(result),
+              },
+            ],
+            structuredContent: result,
+            isError: true,
+          };
+        }
+      }
+
+      if (request.params.name === "vault_discover" && options.discoverService !== undefined) {
+        const input = parseDiscoverInput(request.params.arguments);
+        const effectiveGate =
+          sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health);
+        let result: DiscoverResult;
+        if (blocksVaultContent(effectiveGate)) {
+          result = parseDiscoverResult({ outcome: "operationally_blocked", gate: effectiveGate });
+        } else if (sessionState.clientId === undefined) {
+          result = parseDiscoverResult({
+            outcome: "snapshot_unavailable",
+            code: "search_snapshot_unavailable",
+          });
+        } else {
+          result = await options.discoverService.execute(input, sessionState.clientId);
+        }
+        return {
+          content: [
+            { type: "text" as const, text: serializeDiscoverCompatibilityText(result) },
+          ],
+          structuredContent: result,
+          isError: result.outcome !== "results",
+        };
+      }
+
+      if (request.params.name === "vault_read" && options.readDataSource !== undefined) {
+        const input = parseReadInput(request.params.arguments);
+        const effectiveGate =
+          sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health);
+        const result = blocksVaultContent(effectiveGate)
+          ? parseReadResult({ outcome: "operationally_blocked", gate: effectiveGate })
+          : await performVaultRead(options.readDataSource, input);
+        const text = serializeReadCompatibilityText(result);
+        const directResponseBytes = Buffer.byteLength(
+          JSON.stringify({
             content: [{ type: "text", text }],
             structuredContent: result,
             isError:
               result.outcome === "grouping_required" ||
               result.outcome === "operationally_blocked",
-          };
-        },
-      );
-
-      server.registerTool(
-        "vault_continue",
-        {
-          description: "Continue transporting one accepted frozen Vault read result.",
-          inputSchema: continueInputSchema,
-        },
-        (arguments_) => {
-          const input = parseContinueInput(arguments_);
-          const effectiveGate = sessionState.incompatibleHealth?.gate ?? options.health.effectiveGate;
-          let result: ContinueResult;
-          if (blocksVaultContent(effectiveGate)) {
-            result = parseContinueResult({
-              outcome: "operationally_blocked",
-              gate: effectiveGate,
-            });
-          } else if (sessionState.clientId === undefined) {
-            result = parseContinueResult({ code: "continuation_unavailable" });
-          } else {
-            result = continuationStore.continue(
-              sessionState.clientId,
-              input.continuation,
-            );
+          }),
+          "utf8",
+        );
+        if (result.outcome === "items" && directResponseBytes > MAXIMUM_COMPACT_RESPONSE_BYTES) {
+          if (sessionState.clientId === undefined) {
+            throw new Error("MCP session identity is unavailable");
           }
+          const page = continuationStore.issue(sessionState.clientId, result);
           return {
-            content: [{ type: "text", text: serializeContinueCompatibilityText(result) }],
-            structuredContent: result,
-            isError: !("outcome" in result && result.outcome === "page"),
+            content: [
+              { type: "text" as const, text: serializeReadToolCompatibilityText(page) },
+            ],
+            structuredContent: page,
+            isError: !("outcome" in page && page.outcome === "page"),
           };
-        },
-      );
-    }
+        }
+        return {
+          content: [{ type: "text" as const, text }],
+          structuredContent: result,
+          isError:
+            result.outcome === "grouping_required" ||
+            result.outcome === "operationally_blocked",
+        };
+      }
+
+      if (request.params.name === "vault_continue" && options.readDataSource !== undefined) {
+        const input = parseContinueInput(request.params.arguments);
+        const effectiveGate =
+          sessionState.incompatibleHealth?.gate ?? projectEffectiveGate(options.health);
+        let result: ContinueResult;
+        if (blocksVaultContent(effectiveGate)) {
+          result = parseContinueResult({ outcome: "operationally_blocked", gate: effectiveGate });
+        } else if (sessionState.clientId === undefined) {
+          result = parseContinueResult({ code: "continuation_unavailable" });
+        } else {
+          result = continuationStore.continue(sessionState.clientId, input.continuation);
+        }
+        return {
+          content: [
+            { type: "text" as const, text: serializeContinueCompatibilityText(result) },
+          ],
+          structuredContent: result,
+          isError: !("outcome" in result && result.outcome === "page"),
+        };
+      }
+
+      if (
+        request.params.name === "vault_change_set_submit" &&
+        changeSetService !== undefined
+      ) {
+        const parsed = changeSetSubmitInputSchema.safeParse(request.params.arguments);
+        const result = parsed.success
+          ? await changeSetService.submit(parsed.data, requestState())
+          : parseChangeSetSubmitResult({ outcome: "request_invalid" });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: serializeChangeSetSubmitCompatibilityText(result),
+            },
+          ],
+          structuredContent: result,
+          isError:
+            result.outcome !== "registered" ||
+            result.changeSet.state === "intent_not_applied" ||
+            result.changeSet.state === "result_unproven",
+        };
+      }
+
+      if (
+        request.params.name === "vault_change_set_status" &&
+        changeSetService !== undefined
+      ) {
+        const result = await changeSetService.status(
+          parseChangeSetStatusInput(request.params.arguments),
+          requestState(),
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: serializeChangeSetStatusCompatibilityText(result),
+            },
+          ],
+          structuredContent: result,
+          isError: result.lookup === "operationally_blocked",
+        };
+      }
+
+      throw new McpError(ErrorCode.InvalidParams, `Tool ${request.params.name} not found`);
+      } catch (error) {
+        if (error instanceof McpError) throw error;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: error instanceof Error ? error.message : "Tool execution failed",
+            },
+          ],
+          isError: true,
+        };
+      }
+    });
 
     return server;
   }
@@ -471,6 +637,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     },
     async start() {
       if (httpServer !== undefined) throw new Error("Bridge Instance already started");
+      if (options.changeSets !== undefined) {
+        changeSetService = await ChangeSetService.open(options.changeSets);
+      }
       const server = createServer((request, response) => {
         void handleRequest(request, response).catch(() => {
           if (!response.headersSent) response.writeHead(500);
