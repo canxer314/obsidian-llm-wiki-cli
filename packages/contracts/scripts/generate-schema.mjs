@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import {
   createDiscoverInputJsonSchema,
   createDiscoverResultJsonSchema,
+  createContinueInputJsonSchema,
+  createContinueResultJsonSchema,
   createHealthInputJsonSchema,
   createHealthResultJsonSchema,
   createReadInputJsonSchema,
@@ -43,6 +45,16 @@ await Promise.all([
   writeFile(
     resolve(schemaRoot, "vault-read.output.schema.json"),
     `${JSON.stringify(createReadResultJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(
+    resolve(schemaRoot, "vault-continue.input.schema.json"),
+    `${JSON.stringify(createContinueInputJsonSchema(), null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(
+    resolve(schemaRoot, "vault-continue.output.schema.json"),
+    `${JSON.stringify(createContinueResultJsonSchema(), null, 2)}\n`,
     "utf8",
   ),
 ]);

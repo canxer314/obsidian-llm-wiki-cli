@@ -735,6 +735,444 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
     }
   });
 
+  it("continues an oversized metadata item through bounded transport pages", async () => {
+    const frontmatter = { large: "界😀".repeat(60_000) };
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      readDataSource: {
+        readBinary: async () => Buffer.from("x", "utf8"),
+        parseFrontmatter: () => frontmatter,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const results = [
+        await client.callTool({
+          name: "vault_read",
+          arguments: { items: [{ kind: "metadata", path: "large.md" }] },
+        }),
+      ];
+      let continuation = (results[0]?.structuredContent as { continuation: string | null })
+        .continuation;
+      while (continuation !== null) {
+        const continued = await client.callTool({
+          name: "vault_continue",
+          arguments: { continuation },
+        });
+        results.push(continued);
+        continuation = (continued.structuredContent as { continuation: string | null })
+          .continuation;
+      }
+
+      const chunks = results.flatMap((result) =>
+        (result.structuredContent as {
+          items: Array<{
+            kind: string;
+            start: number;
+            end: number;
+            content: string;
+            complete: boolean;
+          }>;
+        }).items,
+      );
+      expect(results.every((result) => result.isError === false)).toBe(true);
+      expect(
+        results.every(
+          (result) =>
+            Buffer.byteLength(
+              JSON.stringify({
+                content: result.content,
+                structuredContent: result.structuredContent,
+                isError: result.isError,
+              }),
+              "utf8",
+            ) <= 262_144,
+        ),
+      ).toBe(true);
+      expect(chunks.every((chunk) => chunk.kind === "item")).toBe(true);
+      expect(
+        chunks.every(
+          (chunk, index) => index === 0 || chunks[index - 1]?.end === chunk.start,
+        ),
+      ).toBe(true);
+      expect(chunks.at(-1)?.complete).toBe(true);
+      expect(JSON.parse(chunks.map((chunk) => chunk.content).join(""))).toMatchObject({
+        outcome: "satisfied",
+        result: { kind: "metadata", frontmatter },
+      });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("continues an accepted Exact Read through frozen bounded transport pages", async () => {
+    const original = `﻿${"正文😀\r\n".repeat(50_000)}`;
+    let current = Buffer.from(original, "utf8");
+    let readCount = 0;
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      readDataSource: {
+        readBinary: async () => {
+          readCount += 1;
+          return current;
+        },
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const owner = await connect(bridge.endpoint, "vault-a");
+      const other = await connect(bridge.endpoint, "vault-a");
+      const first = await owner.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "exact", path: "large.md" }] },
+      });
+      expect(first.isError).toBe(false);
+      expect(first.structuredContent).toMatchObject({
+        outcome: "page",
+        complete: false,
+      });
+      expect(
+        Buffer.byteLength(
+          JSON.stringify({
+            content: first.content,
+            structuredContent: first.structuredContent,
+            isError: first.isError,
+          }),
+          "utf8",
+        ),
+      ).toBeLessThanOrEqual(262_144);
+
+      const firstPage = first.structuredContent as {
+        items: Array<{ content: string; start: number; end: number }>;
+        continuation: string;
+      };
+      const firstToken = firstPage.continuation;
+      const wrongClient = await other.callTool({
+        name: "vault_continue",
+        arguments: { continuation: firstToken },
+      });
+      expect(wrongClient.isError).toBe(true);
+      expect(wrongClient.structuredContent).toEqual({
+        code: "continuation_unavailable",
+      });
+
+      current = Buffer.from("changed after accepted read", "utf8");
+      const pages = [firstPage];
+      let continuation: string | null = firstToken;
+      while (continuation !== null) {
+        const continued = await owner.callTool({
+          name: "vault_continue",
+          arguments: { continuation },
+        });
+        expect(continued.isError).toBe(false);
+        expect(
+          Buffer.byteLength(
+            JSON.stringify({
+              content: continued.content,
+              structuredContent: continued.structuredContent,
+              isError: continued.isError,
+            }),
+            "utf8",
+          ),
+        ).toBeLessThanOrEqual(262_144);
+        const page = continued.structuredContent as {
+          items: Array<{ content: string; start: number; end: number }>;
+          continuation: string | null;
+        };
+        pages.push(page);
+        continuation = page.continuation;
+      }
+
+      const chunks = pages.flatMap((page) => page.items);
+      expect(
+        chunks.every(
+          (chunk, index) => index === 0 || chunks[index - 1]?.end === chunk.start,
+        ),
+      ).toBe(true);
+      expect(Buffer.from(chunks.map((chunk) => chunk.content).join(""), "utf8")).toEqual(
+        Buffer.from(original, "utf8"),
+      );
+      expect(readCount).toBe(1);
+
+      const replay = await owner.callTool({
+        name: "vault_continue",
+        arguments: { continuation: firstToken },
+      });
+      expect(replay.isError).toBe(true);
+      expect(replay.structuredContent).toEqual({
+        code: "continuation_unavailable",
+      });
+      await owner.close();
+      await other.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("maps malformed and never-issued tokens to one trusted failure", async () => {
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      readDataSource: {
+        readBinary: async () => Buffer.from("content", "utf8"),
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const unavailable = await client.callTool({
+        name: "vault_continue",
+        arguments: { continuation: "malformed-never-issued-token" },
+      });
+      expect(unavailable.isError).toBe(true);
+      expect(unavailable.structuredContent).toEqual({
+        code: "continuation_unavailable",
+      });
+      expect(
+        JSON.parse(
+          unavailable.content[0]?.type === "text" ? unavailable.content[0].text : "",
+        ),
+      ).toEqual(unavailable.structuredContent);
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("projects blocking gates before inspecting a continuation token", async () => {
+    const health = healthState("vault-a", "Alpha");
+    const bridge = createBridgeInstance({
+      port: 0,
+      health,
+      readDataSource: {
+        readBinary: async () => Buffer.from("x".repeat(300_000), "utf8"),
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const first = await client.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "exact", path: "large.md" }] },
+      });
+      const token = (first.structuredContent as { continuation: string }).continuation;
+      health.effectiveGate = { code: "recovery_in_progress" };
+      health.recovery = { state: "in_progress" };
+
+      const blocked = await client.callTool({
+        name: "vault_continue",
+        arguments: { continuation: token },
+      });
+      expect(blocked.isError).toBe(true);
+      expect(blocked.structuredContent).toEqual({
+        outcome: "operationally_blocked",
+        gate: { code: "recovery_in_progress" },
+      });
+
+      health.effectiveGate = null;
+      health.recovery = { state: "none" };
+      const resumed = await client.callTool({
+        name: "vault_continue",
+        arguments: { continuation: token },
+      });
+      expect(resumed.isError).toBe(false);
+      expect(resumed.structuredContent).toMatchObject({ outcome: "page" });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("expires continuation tokens at the fifteen-minute boundary", async () => {
+    let now = 0;
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      continuationNow: () => now,
+      readDataSource: {
+        readBinary: async () => Buffer.from("x".repeat(300_000), "utf8"),
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const first = await client.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "exact", path: "large.md" }] },
+      });
+      const token = (first.structuredContent as { continuation: string }).continuation;
+      now = 15 * 60_000;
+
+      const expired = await client.callTool({
+        name: "vault_continue",
+        arguments: { continuation: token },
+      });
+      expect(expired.isError).toBe(true);
+      expect(expired.structuredContent).toEqual({ code: "continuation_unavailable" });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("rejects a ninth live continuation without evicting existing chains", async () => {
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      readDataSource: {
+        readBinary: async (path) => Buffer.from(`${path}:${"x".repeat(300_000)}`, "utf8"),
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const issued = [];
+      for (let index = 0; index < 8; index += 1) {
+        issued.push(
+          await client.callTool({
+            name: "vault_read",
+            arguments: { items: [{ kind: "exact", path: `live-${index}.md` }] },
+          }),
+        );
+      }
+      const ninth = await client.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "exact", path: "rejected.md" }] },
+      });
+      expect(ninth.isError).toBe(true);
+      expect(ninth.structuredContent).toEqual({ code: "continuation_unavailable" });
+
+      for (const result of issued) {
+        const token = (result.structuredContent as { continuation: string }).continuation;
+        const next = await client.callTool({
+          name: "vault_continue",
+          arguments: { continuation: token },
+        });
+        expect(next.isError).toBe(false);
+      }
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("enforces retained-byte quota independently and releases delivered prefixes", async () => {
+    const section = `# Large\n${"界".repeat(2_650_000)}`;
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      readDataSource: {
+        readBinary: async (path) =>
+          Buffer.from(path === "section.md" ? section : "x".repeat(1_000_000), "utf8"),
+        parseFrontmatter: () => null,
+        headings: (path) =>
+          path === "section.md"
+            ? [{ heading: "Large", level: 1, startOffset: 0, endOffset: 7 }]
+            : [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      let sectionPage = await client.callTool({
+        name: "vault_read",
+        arguments: {
+          items: [
+            {
+              kind: "section",
+              path: "section.md",
+              hierarchy: ["Large"],
+              occurrence: 1,
+            },
+          ],
+        },
+      });
+      expect(sectionPage.isError).toBe(false);
+
+      const rejected = await client.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "exact", path: "exact.md" }] },
+      });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.structuredContent).toEqual({ code: "continuation_unavailable" });
+
+      for (let index = 0; index < 5; index += 1) {
+        const token = (sectionPage.structuredContent as { continuation: string }).continuation;
+        sectionPage = await client.callTool({
+          name: "vault_continue",
+          arguments: { continuation: token },
+        });
+        expect(sectionPage.isError).toBe(false);
+      }
+
+      const accepted = await client.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "exact", path: "exact.md" }] },
+      });
+      expect(accepted.isError).toBe(false);
+      expect(accepted.structuredContent).toMatchObject({ outcome: "page" });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("releases frozen continuations when their MCP session closes", async () => {
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      readDataSource: {
+        readBinary: async () => Buffer.from("x".repeat(300_000), "utf8"),
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+    });
+    await bridge.start();
+
+    try {
+      const owner = await connect(bridge.endpoint, "vault-a");
+      const first = await owner.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "exact", path: "large.md" }] },
+      });
+      const token = (first.structuredContent as { continuation: string }).continuation;
+      await owner.close();
+
+      const replacementClient = await connect(bridge.endpoint, "vault-a");
+      const unavailable = await replacementClient.callTool({
+        name: "vault_continue",
+        arguments: { continuation: token },
+      });
+      expect(unavailable.isError).toBe(true);
+      expect(unavailable.structuredContent).toEqual({ code: "continuation_unavailable" });
+      await replacementClient.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   it("blocks content reads before touching bytes during recovery", async () => {
     let readCount = 0;
     const bridge = createBridgeInstance({
