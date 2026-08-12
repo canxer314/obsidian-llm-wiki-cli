@@ -307,7 +307,7 @@ export class SearchSnapshotManager {
   #version = 0;
   #generation = 0;
   #readiness: SearchSnapshotReadiness = "unavailable";
-  #building = false;
+  #buildTail: Promise<void> = Promise.resolve();
 
   constructor(dataSource: SearchSnapshotDataSource) {
     this.#dataSource = dataSource;
@@ -326,10 +326,18 @@ export class SearchSnapshotManager {
     this.#readiness = "building";
   }
 
-  async rebuild(dataSource: SearchSnapshotDataSource = this.#dataSource): Promise<void> {
-    if (this.#building) throw new Error("Search Snapshot build already in progress");
+  rebuild(dataSource: SearchSnapshotDataSource = this.#dataSource): Promise<void> {
     const generation = this.#generation;
-    this.#building = true;
+    this.#readiness = "building";
+    const build = this.#buildTail.then(() => this.#rebuild(dataSource, generation));
+    this.#buildTail = build.catch(() => undefined);
+    return build;
+  }
+
+  async #rebuild(
+    dataSource: SearchSnapshotDataSource,
+    generation: number,
+  ): Promise<void> {
     this.#readiness = "building";
 
     try {
@@ -357,8 +365,6 @@ export class SearchSnapshotManager {
     } catch (error) {
       if (generation === this.#generation) this.#readiness = "unavailable";
       throw error;
-    } finally {
-      this.#building = false;
     }
   }
 }
@@ -367,7 +373,7 @@ export class SearchSnapshotRefreshCoordinator {
   readonly #manager: SearchSnapshotManager;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #builds: Promise<void> = Promise.resolve();
-  #idle: Promise<void> = Promise.resolve();
+  #waiters: Array<{ resolve(): void; reject(error: unknown): void }> = [];
 
   constructor(manager: SearchSnapshotManager) {
     this.#manager = manager;
@@ -376,23 +382,30 @@ export class SearchSnapshotRefreshCoordinator {
   schedule(): void {
     this.#manager.invalidate();
     if (this.#timer !== undefined) clearTimeout(this.#timer);
-    let resolveIdle!: () => void;
-    let rejectIdle!: (error: unknown) => void;
-    this.#idle = new Promise<void>((resolve, reject) => {
-      resolveIdle = resolve;
-      rejectIdle = reject;
-    });
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
+      const waiters = this.#waiters.splice(0);
       const build = this.#builds.then(() => this.#manager.rebuild());
       this.#builds = build.catch(() => undefined);
-      void build.then(resolveIdle, rejectIdle);
+      void build.then(
+        () => waiters.forEach(({ resolve }) => resolve()),
+        (error) => waiters.forEach(({ reject }) => reject(error)),
+      );
     }, SEARCH_SNAPSHOT_QUIET_WINDOW_MS);
     this.#timer.unref?.();
   }
 
-  whenIdle(): Promise<void> {
-    return this.#idle;
+  async whenIdle(): Promise<void> {
+    do {
+      if (this.#timer === undefined) {
+        await this.#builds;
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          this.#waiters.push({ resolve, reject });
+        });
+      }
+    } while (this.#timer !== undefined);
+    await this.#builds;
   }
 
   dispose(): void {

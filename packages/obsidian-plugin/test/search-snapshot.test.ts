@@ -194,6 +194,11 @@ describe("Search Snapshot publication", () => {
 
       files.set("source.md", new TextEncoder().encode("first change"));
       coordinator.schedule();
+      const barrier = coordinator.whenIdle();
+      let barrierComplete = false;
+      void barrier.then(() => {
+        barrierComplete = true;
+      });
       expect(manager.readiness).toBe("building");
       await expect(discover.execute(request)).resolves.toEqual({
         outcome: "snapshot_unavailable",
@@ -205,11 +210,50 @@ describe("Search Snapshot publication", () => {
       coordinator.schedule();
       await vi.advanceTimersByTimeAsync(249);
       expect(manager.current()?.notes[0]?.content).toBe("old");
+      expect(barrierComplete).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1);
-      await coordinator.whenIdle();
+      await barrier;
       expect(manager.readiness).toBe("ready");
       expect(manager.current()?.notes[0]?.content).toBe("settled change");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a barrier pending when evidence changes during publication", async () => {
+    vi.useFakeTimers();
+    try {
+      const files = new Map([["source.md", new TextEncoder().encode("old")]]);
+      const pendingRead = deferred<Uint8Array | null>();
+      let blockNextRead = false;
+      const manager = new SearchSnapshotManager({
+        listMarkdownPaths: async () => [...files.keys()],
+        readBinary: async (path) =>
+          blockNextRead ? pendingRead.promise : files.get(path) ?? null,
+      });
+      await manager.rebuild();
+      const coordinator = new SearchSnapshotRefreshCoordinator(manager);
+      files.set("source.md", new TextEncoder().encode("first"));
+      blockNextRead = true;
+      coordinator.schedule();
+      const barrier = coordinator.whenIdle();
+      await vi.advanceTimersByTimeAsync(250);
+      files.set("source.md", new TextEncoder().encode("settled"));
+      coordinator.schedule();
+      blockNextRead = false;
+      pendingRead.resolve(new TextEncoder().encode("stale"));
+      await Promise.resolve();
+      let complete = false;
+      void barrier.then(() => {
+        complete = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(complete).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await barrier;
+      expect(manager.current()?.notes[0]?.content).toBe("settled");
     } finally {
       vi.useRealTimers();
     }
@@ -231,6 +275,25 @@ describe("Search Snapshot publication", () => {
 
     expect(manager.readiness).toBe("building");
     expect(manager.current()?.notes[0]?.content).toBe("old");
+  });
+
+  it("serializes a Change Set successor publication behind an active refresh", async () => {
+    const initial = new Map([["source.md", new TextEncoder().encode("initial")]]);
+    const manager = new SearchSnapshotManager(source(initial));
+    await manager.rebuild();
+    const pendingRead = deferred<Uint8Array | null>();
+    const firstBuild = manager.rebuild({
+      listMarkdownPaths: async () => ["source.md"],
+      readBinary: () => pendingRead.promise,
+    });
+    initial.set("source.md", new TextEncoder().encode("successor"));
+    const successorBuild = manager.rebuild();
+    pendingRead.resolve(new TextEncoder().encode("refresh"));
+
+    await Promise.all([firstBuild, successorBuild]);
+
+    expect(manager.readiness).toBe("ready");
+    expect(manager.current()?.notes[0]?.content).toBe("successor");
   });
 
   it("fails closed and preserves the last publication when a build is inconsistent", async () => {

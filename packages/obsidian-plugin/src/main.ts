@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -15,6 +15,7 @@ import {
 
 import { createBridgeInstance } from "./bridge-instance.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
+import { createFileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
 import {
   createObsidianSearchDataSource,
   enumerateCanonicalReferenceTargets,
@@ -40,7 +41,57 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const stateDirectory = join(basePath, ".llm-wiki");
     const recoveryStatePath = join(stateDirectory, "bridge-state.json");
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
-    const runtime = new ManagedVaultBridgeRuntime({
+    const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
+    const stagingDirectory = join(stateDirectory, "staging");
+    let runtime!: ManagedVaultBridgeRuntime;
+    const changeSetExecution =
+      adapter instanceof FileSystemAdapter
+        ? await createFileSystemChangeSetExecutionAdapter({
+            journalPath: recoveryJournalPath,
+            host: {
+              pathKind: async (path) => {
+                const value = await adapter.stat(path);
+                if (value === null) return null;
+                return value.type === "folder" ? "directory" : "file";
+              },
+              directoryIdentity: async (path) => {
+                try {
+                  const value = await stat(join(basePath, ...path.split("/")));
+                  return value.isDirectory()
+                    ? `${value.dev}:${value.ino}:${value.birthtimeMs}`
+                    : null;
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+                  throw error;
+                }
+              },
+              prepareDirectory: async (stageId) => {
+                const stagePath = join(stagingDirectory, ...stageId.split("/"));
+                await mkdir(stagePath, { recursive: true });
+                const value = await stat(stagePath);
+                return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
+              },
+              publishDirectory: async (stageId, path) => {
+                await rename(
+                  join(stagingDirectory, ...stageId.split("/")),
+                  join(basePath, ...path.split("/")),
+                );
+              },
+              discardPreparedDirectory: async (stageId) => {
+                try {
+                  await rmdir(join(stagingDirectory, ...stageId.split("/")));
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+                }
+              },
+              removeDirectory: (path) => adapter.rmdir(path, false),
+              publishSearchSnapshot: async () => {
+                await runtime.publishSuccessorSearchSnapshot();
+              },
+            },
+          })
+        : undefined;
+    runtime = new ManagedVaultBridgeRuntime({
       vault: { name: this.app.vault.getName(), path: basePath },
       settings: {
         load: () => this.loadData() as Promise<unknown>,
@@ -149,6 +200,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
         },
       },
       changeSetDataSource,
+      changeSetExecution,
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;

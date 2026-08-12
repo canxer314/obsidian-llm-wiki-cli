@@ -3,6 +3,7 @@ import { TextDecoder } from "node:util";
 
 import {
   parseChangeSetStatusResult,
+  parseChangeSetSubmitInput,
   parseChangeSetSubmitResult,
   type ChangeSetOperation,
   type ChangeSetRecord,
@@ -16,6 +17,11 @@ import {
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
 
+export interface ChangeSetExecutionState {
+  phase: "queued" | "executing" | "terminal";
+  input: ChangeSetSubmitInput;
+}
+
 export interface ChangeSetRegistryEntry {
   submissionKey: string;
   fingerprint: string;
@@ -24,6 +30,7 @@ export interface ChangeSetRegistryEntry {
   acceptedAt: number;
   expiresAt: number;
   historicalGate?: ChangeSetGate;
+  execution?: ChangeSetExecutionState;
   changeSet: ChangeSetRecord;
 }
 
@@ -76,9 +83,62 @@ export interface ChangeSetPreflightDataSource {
   ): Promise<MoveProjection | null>;
 }
 
+export type RecoveryJournalPhase = "PREPARED" | "COMMITTED" | "ROLLED_BACK" | "FAILED";
+
+export interface RecoveryJournalFrame {
+  schemaVersion: 1;
+  vaultId: string;
+  changeSetId: string;
+  enqueueSeq: number;
+  phase: RecoveryJournalPhase;
+  input: ChangeSetSubmitInput;
+  preview: ImmutableChangeSetPreview;
+  directories: readonly {
+    path: string;
+    before: "absent";
+    expectedAfter: "directory";
+    identity?: string;
+    stageId?: string;
+  }[];
+  finalPaths?: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"];
+}
+
+export interface ChangeSetExecutionAdapter {
+  loadRecoveryFrame(): Promise<RecoveryJournalFrame | null>;
+  persistRecoveryFrame(frame: RecoveryJournalFrame): Promise<void>;
+  pathKind(path: string): Promise<ChangeSetPathKind | null>;
+  directoryIdentity(path: string): Promise<string | null>;
+  prepareDirectory(stageId: string): Promise<string>;
+  publishDirectory(stageId: string, path: string): Promise<void>;
+  discardPreparedDirectory(stageId: string): Promise<void>;
+  removeDirectory(path: string): Promise<void>;
+  publishSearchSnapshot(): Promise<void>;
+  close?(): Promise<void>;
+}
+
+export interface ChangeSetRuntimeStatePort {
+  setQueue(state: {
+    currentExecutionId: string | null;
+    length: number;
+    headChangeSetId: string | null;
+  }): void;
+  blockWritesForUnproven(changeSetId: string): void | Promise<void>;
+}
+
+export class InjectedChangeSetCrash extends Error {
+  constructor(readonly point: string) {
+    super(`Injected Change Set crash at ${point}`);
+    this.name = "InjectedChangeSetCrash";
+  }
+}
+
 export interface ChangeSetServiceOptions {
   store: ChangeSetRegistryStore;
   dataSource: ChangeSetPreflightDataSource;
+  execution?: ChangeSetExecutionAdapter;
+  runtimeState?: ChangeSetRuntimeStatePort;
+  vaultId?: string;
+  crashInjector?: (point: string) => void | Promise<void>;
   now?: () => number;
   createChangeSetId?: () => string;
 }
@@ -148,7 +208,33 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
     if (changeSet.changeSetId !== entry.changeSetId) {
       throw new Error("Change Set registry is corrupt or incompatible");
     }
-    return { ...entry, changeSet };
+    let execution: ChangeSetExecutionState | undefined;
+    if (entry.execution !== undefined) {
+      if (
+        typeof entry.execution !== "object" ||
+        entry.execution === null ||
+        !["queued", "executing", "terminal"].includes(entry.execution.phase)
+      ) {
+        throw new Error("Change Set registry is corrupt or incompatible");
+      }
+      execution = {
+        phase: entry.execution.phase as ChangeSetExecutionState["phase"],
+        input: parseChangeSetSubmitInput(entry.execution.input),
+      };
+    }
+    return {
+      submissionKey: entry.submissionKey,
+      fingerprint: entry.fingerprint,
+      changeSetId: entry.changeSetId,
+      enqueueSeq: entry.enqueueSeq,
+      acceptedAt: entry.acceptedAt,
+      expiresAt: entry.expiresAt,
+      ...(entry.historicalGate === undefined
+        ? {}
+        : { historicalGate: entry.historicalGate }),
+      ...(execution === undefined ? {} : { execution }),
+      changeSet,
+    };
   });
   const tombstones = state.tombstones.map((tombstone) => {
     if (
@@ -270,7 +356,10 @@ type ChangeSetFailure = Extract<
   { state: "intent_not_applied" }
 >["failure"];
 
-type Preview = NonNullable<Extract<ChangeSetRecord, { state: "in_progress" }>["preview"]>;
+type ImmutableChangeSetPreview = NonNullable<
+  Extract<ChangeSetRecord, { state: "in_progress" }>["preview"]
+>;
+type Preview = ImmutableChangeSetPreview;
 
 interface PreflightResult {
   accepted: boolean;
@@ -617,6 +706,8 @@ export class ChangeSetService {
     Omit<ChangeSetServiceOptions, "now" | "createChangeSetId">;
   #state: ChangeSetRegistryState;
   #operationTail: Promise<void> = Promise.resolve();
+  #writeTail: Promise<void> = Promise.resolve();
+  #recoveryBlocked = false;
 
   private constructor(options: ChangeSetServiceOptions, state: ChangeSetRegistryState) {
     this.#options = {
@@ -629,10 +720,364 @@ export class ChangeSetService {
 
   static async open(options: ChangeSetServiceOptions): Promise<ChangeSetService> {
     const state = parseChangeSetRegistryState(await options.store.load());
-    return new ChangeSetService(options, state);
+    const service = new ChangeSetService(options, state);
+    let recoveryBlocked = false;
+    try {
+      await service.#recover();
+    } catch (error) {
+      recoveryBlocked = true;
+      service.#recoveryBlocked = true;
+      const unfinished = service.#state.entries.filter(
+        ({ execution }) => execution !== undefined && execution.phase !== "terminal",
+      );
+      for (const entry of unfinished) await service.#markUnproven(entry);
+      if (unfinished.length === 0) {
+        await options.runtimeState?.blockWritesForUnproven("unknown");
+      }
+      if (options.runtimeState === undefined) throw error;
+    }
+    if (!recoveryBlocked) await service.#resumeQueue();
+    return service;
   }
 
-  async #serialize<T>(operation: () => Promise<T>): Promise<T> {
+  async #crash(point: string): Promise<void> {
+    await this.#options.crashInjector?.(point);
+  }
+
+  #directoryPlan(
+    entry: ChangeSetRegistryEntry,
+  ): { input: ChangeSetSubmitInput; preview: Preview; directories: string[] } | null {
+    if (
+      entry.execution === undefined ||
+      entry.changeSet.state !== "in_progress" ||
+      entry.changeSet.preview === undefined ||
+      entry.execution.input.operations.some(({ kind }) => kind !== "create_directory")
+    ) {
+      return null;
+    }
+    const directories = entry.changeSet.preview.paths
+      .filter(
+        ({ preState, projectedFinalState }) =>
+          preState.kind === "absent" && projectedFinalState.kind === "directory",
+      )
+      .map(({ path }) => path)
+      .sort((left, right) => {
+        const depth = left.split("/").length - right.split("/").length;
+        return depth || compareCodeUnits(left, right);
+      });
+    return {
+      input: entry.execution.input,
+      preview: entry.changeSet.preview,
+      directories,
+    };
+  }
+
+  #appliedRecord(
+    entry: ChangeSetRegistryEntry,
+    preview: Preview,
+    finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"],
+  ): Extract<ChangeSetRecord, { state: "intent_applied" }> {
+    return {
+      changeSetId: entry.changeSetId,
+      state: "intent_applied",
+      preview,
+      requestedEffects: preview.requestedEffects.map(({ projectedOutcome, ...effect }) => ({
+        ...effect,
+        outcome: projectedOutcome,
+      })),
+      derivedEffects: preview.derivedEffects.map(({ projectedOutcome, ...effect }) => ({
+        ...effect,
+        outcome: projectedOutcome,
+      })),
+      paths: finalPaths,
+    };
+  }
+
+  async #updateEntry(
+    changeSetId: string,
+    update: (entry: ChangeSetRegistryEntry) => void,
+  ): Promise<void> {
+    await this.#serialize(async () => {
+      const nextState = structuredClone(this.#state);
+      const entry = nextState.entries.find((candidate) => candidate.changeSetId === changeSetId);
+      if (entry === undefined) throw new Error("Change Set registry entry disappeared");
+      update(entry);
+      await this.#save(nextState);
+    });
+  }
+
+  async #markUnproven(entry: ChangeSetRegistryEntry): Promise<void> {
+    this.#recoveryBlocked = true;
+    await this.#updateEntry(entry.changeSetId, (current) => {
+      current.changeSet = {
+        changeSetId: current.changeSetId,
+        state: "result_unproven",
+        ...(current.changeSet.state === "in_progress" && current.changeSet.preview !== undefined
+          ? { preview: current.changeSet.preview }
+          : {}),
+      };
+      if (current.execution !== undefined) current.execution.phase = "terminal";
+    });
+    await this.#options.runtimeState?.blockWritesForUnproven(entry.changeSetId);
+  }
+
+  async #restorePrepared(
+    entry: ChangeSetRegistryEntry,
+    frame: RecoveryJournalFrame,
+  ): Promise<boolean> {
+    const execution = this.#options.execution;
+    if (execution === undefined) return false;
+    let rolledBackDurable = false;
+    try {
+      for (const directory of [...frame.directories].reverse()) {
+        const current = await execution.pathKind(directory.path);
+        if (current === null) {
+          if (directory.stageId !== undefined) {
+            await execution.discardPreparedDirectory(directory.stageId);
+          }
+          continue;
+        }
+        if (
+          current !== "directory" ||
+          directory.identity === undefined ||
+          (await execution.directoryIdentity(directory.path)) !== directory.identity
+        ) {
+          throw new Error("third-party path state");
+        }
+        await execution.removeDirectory(directory.path);
+      }
+      for (const directory of frame.directories) {
+        if ((await execution.pathKind(directory.path)) !== null) {
+          throw new Error("before state was not restored");
+        }
+      }
+      await execution.publishSearchSnapshot();
+      await execution.persistRecoveryFrame({ ...frame, phase: "ROLLED_BACK" });
+      rolledBackDurable = true;
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        current.changeSet = {
+          changeSetId: current.changeSetId,
+          state: "intent_not_applied",
+          preview: frame.preview,
+        };
+        if (current.execution !== undefined) current.execution.phase = "terminal";
+      });
+      return true;
+    } catch (error) {
+      if (rolledBackDurable) throw error;
+      try {
+        await execution.persistRecoveryFrame({ ...frame, phase: "FAILED" });
+      } finally {
+        await this.#markUnproven(entry);
+      }
+      return false;
+    }
+  }
+
+  async #recover(): Promise<void> {
+    const execution = this.#options.execution;
+    if (execution === undefined) return;
+    const frame = await execution.loadRecoveryFrame();
+    if (frame === null) return;
+    const entry = this.#state.entries.find(
+      (candidate) => candidate.changeSetId === frame.changeSetId,
+    );
+    if (entry === undefined) {
+      const expired = this.#state.tombstones.some(
+        (candidate) => candidate.changeSetId === frame.changeSetId,
+      );
+      if (expired && frame.phase !== "PREPARED") return;
+      throw new Error("Recovery Journal does not match the Change Set registry");
+    }
+    if (frame.vaultId !== (this.#options.vaultId ?? "vault")) {
+      await this.#markUnproven(entry);
+      throw new Error("Recovery Journal does not match the Change Set registry");
+    }
+    if (frame.phase === "PREPARED") {
+      if (entry.changeSet.state !== "in_progress") {
+        await this.#markUnproven(entry);
+        return;
+      }
+      await this.#restorePrepared(entry, frame);
+      return;
+    }
+    if (frame.phase === "FAILED") {
+      await this.#markUnproven(entry);
+      return;
+    }
+    if (frame.phase === "COMMITTED" && entry.changeSet.state === "in_progress") {
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        current.changeSet = this.#appliedRecord(
+          current,
+          frame.preview,
+          frame.finalPaths ?? frame.preview.paths.map(({ path, projectedOutcome }) => ({
+            path,
+            outcome: projectedOutcome,
+            finalState: { kind: "directory" },
+          })),
+        );
+        if (current.execution !== undefined) current.execution.phase = "terminal";
+      });
+      return;
+    }
+    if (frame.phase === "ROLLED_BACK" && entry.changeSet.state === "in_progress") {
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        current.changeSet = {
+          changeSetId: current.changeSetId,
+          state: "intent_not_applied",
+          preview: frame.preview,
+        };
+        if (current.execution !== undefined) current.execution.phase = "terminal";
+      });
+    }
+  }
+
+  async #resumeQueue(): Promise<void> {
+    if (this.#options.execution === undefined || this.#recoveryBlocked) return;
+    const queued = [...this.#state.entries]
+      .filter((entry) => entry.execution?.phase !== "terminal")
+      .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
+    for (const entry of queued) await this.#executeDirectory(entry.changeSetId);
+  }
+
+  async #executeDirectory(changeSetId: string): Promise<void> {
+    const execution = this.#options.execution;
+    if (execution === undefined) return;
+    const entry = this.#state.entries.find((candidate) => candidate.changeSetId === changeSetId);
+    if (entry === undefined) return;
+    const head = this.#state.entries
+      .filter(
+        ({ execution }) => execution !== undefined && execution.phase !== "terminal",
+      )
+      .sort((left, right) => left.enqueueSeq - right.enqueueSeq)[0];
+    if (head?.changeSetId !== entry.changeSetId) return;
+    const plan = this.#directoryPlan(entry);
+    if (plan === null) return;
+    this.#options.runtimeState?.setQueue({
+      currentExecutionId: entry.changeSetId,
+      length: this.#state.entries.filter(
+        ({ execution }) => execution !== undefined && execution.phase !== "terminal",
+      ).length,
+      headChangeSetId: entry.changeSetId,
+    });
+    const checked = await preflight(this.#options.dataSource, plan.input);
+    if (!checked.accepted || JSON.stringify(checked.preview) !== JSON.stringify(plan.preview)) {
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        current.changeSet = {
+          changeSetId: current.changeSetId,
+          state: "intent_not_applied",
+          preview: plan.preview,
+          ...(checked.failure === undefined ? {} : { failure: checked.failure }),
+        };
+        if (current.execution !== undefined) current.execution.phase = "terminal";
+      });
+      this.#options.runtimeState?.setQueue({
+        currentExecutionId: null,
+        length: 0,
+        headChangeSetId: null,
+      });
+      return;
+    }
+    let frame: RecoveryJournalFrame = {
+      schemaVersion: 1,
+      vaultId: this.#options.vaultId ?? "vault",
+      changeSetId: entry.changeSetId,
+      enqueueSeq: entry.enqueueSeq,
+      phase: "PREPARED",
+      input: structuredClone(plan.input),
+      preview: plan.preview,
+      directories: plan.directories.map((path, index) => ({
+        path,
+        before: "absent",
+        expectedAfter: "directory",
+        stageId: `${entry.changeSetId}/${index}`,
+      })),
+    };
+    await this.#crash("before_prepared");
+    await execution.persistRecoveryFrame(frame);
+    let committedDurable = false;
+    try {
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        if (current.execution !== undefined) current.execution.phase = "executing";
+      });
+      await this.#crash("after_prepared");
+      for (const [index, directory] of plan.directories.entries()) {
+        const stageId = frame.directories.find(
+          (candidate) => candidate.path === directory,
+        )?.stageId;
+        if (stageId === undefined) throw new Error("Directory staging identity is missing");
+        const identity = await execution.prepareDirectory(stageId);
+        frame = {
+          ...frame,
+          directories: frame.directories.map((candidate) =>
+            candidate.path === directory
+              ? { ...candidate, identity, stageId }
+              : candidate,
+          ),
+        };
+        await execution.persistRecoveryFrame(frame);
+        await execution.publishDirectory(stageId, directory);
+        await this.#crash(`after_mutation:${index}`);
+      }
+      for (const directory of plan.directories) {
+        if ((await execution.pathKind(directory)) !== "directory") {
+          throw new Error("Final directory evidence did not match");
+        }
+      }
+      await this.#crash("after_raw_verification");
+      await execution.publishSearchSnapshot();
+      const finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"] = [];
+      for (const path of plan.preview.paths.map(({ path }) => path)) {
+        if ((await execution.pathKind(path)) !== "directory") {
+          throw new Error("Final directory evidence changed during the success barrier");
+        }
+        const projected = plan.preview.paths.find((candidate) => candidate.path === path);
+        if (projected === undefined) throw new Error("Final path evidence is incomplete");
+        finalPaths.push({
+          path,
+          outcome: projected.projectedOutcome,
+          finalState: { kind: "directory" },
+        });
+      }
+      await this.#crash("after_snapshot");
+      await execution.persistRecoveryFrame({
+        ...frame,
+        phase: "COMMITTED",
+        finalPaths,
+      });
+      committedDurable = true;
+      await this.#crash("after_committed");
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        current.changeSet = this.#appliedRecord(current, plan.preview, finalPaths);
+        if (current.execution !== undefined) current.execution.phase = "terminal";
+      });
+    } catch (error) {
+      if (error instanceof InjectedChangeSetCrash || committedDurable) throw error;
+      await this.#restorePrepared(entry, frame);
+    } finally {
+      this.#options.runtimeState?.setQueue({
+        currentExecutionId: null,
+        length: 0,
+        headChangeSetId: null,
+      });
+    }
+  }
+
+  async #withWriteLease<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#writeTail;
+    let release!: () => void;
+    this.#writeTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  async #serialize<T>(operation: () => T | Promise<T>): Promise<T> {
     const previous = this.#operationTail;
     let release!: () => void;
     this.#operationTail = new Promise<void>((resolve) => {
@@ -673,7 +1118,35 @@ export class ChangeSetService {
     input: ChangeSetSubmitInput,
     requestState: ChangeSetRequestState,
   ): Promise<ChangeSetSubmitResult> {
-    return this.#serialize(() => this.#submitUnlocked(input, requestState));
+    const registered = await this.#serialize(() =>
+      this.#submitUnlocked(input, requestState),
+    );
+    if (
+      registered.outcome !== "registered" ||
+      registered.changeSet.state !== "in_progress" ||
+      this.#options.execution === undefined
+    ) {
+      return registered;
+    }
+    await this.#withWriteLease(async () => {
+      await this.#recover();
+      if (!this.#recoveryBlocked) {
+        await this.#executeDirectory(registered.changeSet.changeSetId);
+      }
+    });
+    return this.#serialize(() => {
+      const current = this.#state.entries.find(
+        ({ submissionKey }) => submissionKey === input.submissionKey,
+      );
+      return parseChangeSetSubmitResult({
+        outcome: "registered",
+        changeSet: current?.changeSet ?? registered.changeSet,
+        vault: requestState.vault,
+        ...(current?.historicalGate === undefined
+          ? {}
+          : { gate: current.historicalGate }),
+      });
+    });
   }
 
   async #submitUnlocked(
@@ -750,6 +1223,16 @@ export class ChangeSetService {
       acceptedAt,
       expiresAt: acceptedAt + CHANGE_SET_RECORD_RETENTION_MS,
       ...(historicalGate === undefined ? {} : { historicalGate }),
+      ...(changeSet.state === "in_progress" &&
+      changeSet.preview !== undefined &&
+      input.operations.every(({ kind }) => kind === "create_directory")
+        ? {
+            execution: {
+              phase: "queued" as const,
+              input: structuredClone(input),
+            },
+          }
+        : {}),
       changeSet,
     };
     nextState.nextEnqueueSeq += 1;

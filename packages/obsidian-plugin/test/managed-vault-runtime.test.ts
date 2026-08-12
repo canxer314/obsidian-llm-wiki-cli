@@ -554,6 +554,56 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await runtime.unload();
   });
 
+  it("reports healthy readiness when snapshots and durable mutation execution are ready", async () => {
+    let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
+    const execution = {
+      loadRecoveryFrame: async () => null,
+      persistRecoveryFrame: async () => undefined,
+      pathKind: async () => null,
+      directoryIdentity: async () => null,
+      prepareDirectory: async () => "directory",
+      publishDirectory: async () => undefined,
+      discardPreparedDirectory: async () => undefined,
+      removeDirectory: async () => undefined,
+      publishSearchSnapshot: async () => undefined,
+    };
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["note.md"],
+        readBinary: async () => new TextEncoder().encode("ready"),
+      },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      changeSetExecution: execution,
+      createBridge: (options) => {
+        captured = options;
+        return fakeBridge(27123);
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+
+    await runtime.load();
+
+    expect(captured?.health).toMatchObject({
+      write: { gate: "open", state: "writable" },
+      effectiveGate: null,
+      overall: "healthy",
+      reasonCodes: [],
+      operatorAction: "none",
+    });
+    expect(captured?.changeSets).toMatchObject({
+      execution,
+      vaultId: "vault-a",
+    });
+    await runtime.unload();
+  });
+
   it("starts health reporting when the initial Search Snapshot build fails closed", async () => {
     const bridge = fakeBridge(27123);
     let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
