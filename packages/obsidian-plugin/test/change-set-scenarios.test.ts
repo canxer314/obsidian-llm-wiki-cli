@@ -80,12 +80,24 @@ function loadScenarios(): Scenario[] {
     );
 }
 
-async function connect(bridge: BridgeInstance): Promise<Client> {
+interface ResponseFaults {
+  discardNextPost: boolean;
+}
+
+async function connect(bridge: BridgeInstance, faults: ResponseFaults): Promise<Client> {
   await bridge.start();
   const client = new Client({ name: "change-set-scenario-runner", version: "1.0.0" });
   await client.connect(
     new StreamableHTTPClientTransport(bridge.endpoint, {
       requestInit: { headers: { "X-Expected-Vault-ID": "vault-a" } },
+      fetch: async (input, init) => {
+        const response = await fetch(input, init);
+        if (faults.discardNextPost && init?.method === "POST") {
+          faults.discardNextPost = false;
+          throw new Error("injected lost product response");
+        }
+        return response;
+      },
     }),
   );
   return client;
@@ -111,7 +123,8 @@ describe("versioned Change Set cross-call scenario corpus", () => {
           },
         });
       let bridge = createBridge();
-      let client = await connect(bridge);
+      const faults = { discardNextPost: false };
+      let client = await connect(bridge, faults);
       const captures = new Map<string, string>();
 
       try {
@@ -120,7 +133,20 @@ describe("versioned Change Set cross-call scenario corpus", () => {
             await client.close();
             await bridge.stop();
             bridge = createBridge();
-            client = await connect(bridge);
+            client = await connect(bridge, faults);
+            continue;
+          }
+          if (step.discardResponse) {
+            faults.discardNextPost = true;
+            await expect(
+              client.callTool({
+                name:
+                  step.call === "submit"
+                    ? "vault_change_set_submit"
+                    : "vault_change_set_status",
+                arguments: step.arguments,
+              }),
+            ).rejects.toThrow("injected lost product response");
             continue;
           }
           const response = await client.callTool({
@@ -146,7 +172,6 @@ describe("versioned Change Set cross-call scenario corpus", () => {
           if (step.expect?.sameChangeSetAs !== undefined) {
             expect(record?.changeSetId).toBe(captures.get(step.expect.sameChangeSetAs));
           }
-          if (step.discardResponse) continue;
         }
       } finally {
         await client.close();
