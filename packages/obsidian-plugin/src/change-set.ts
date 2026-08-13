@@ -964,9 +964,15 @@ export class ChangeSetService {
       }
       await this.#crash("before_rollback");
       let restoredFootprints = 0;
+      const conflictedFiles = new Set<string>();
+      const conflictedDirectories = new Set<string>();
       for (const file of [...files].reverse()) {
         const current = await execution.readBinary!(file.path);
-        if (current === null) throw new Error("third-party path state");
+        if (current === null) {
+          conflictedFiles.add(file.path);
+          await execution.discardPreparedFile!(file.stageId);
+          continue;
+        }
         const currentVersion = contentVersion(
           current instanceof Uint8Array ? current : new Uint8Array(current),
         );
@@ -977,7 +983,9 @@ export class ChangeSetService {
           continue;
         }
         if (currentVersion !== file.expectedAfterVersion) {
-          throw new Error("third-party path state");
+          conflictedFiles.add(file.path);
+          await execution.discardPreparedFile!(file.stageId);
+          continue;
         }
         await execution.prepareFile!(file.stageId, Buffer.from(file.beforeBase64, "base64"));
         if (
@@ -987,7 +995,9 @@ export class ChangeSetService {
             file.expectedAfterVersion,
           ))
         ) {
-          throw new Error("third-party path state");
+          conflictedFiles.add(file.path);
+          await execution.discardPreparedFile!(file.stageId);
+          continue;
         }
         restoredFootprints += 1;
         await this.#crash(`during_rollback:${restoredFootprints}`);
@@ -1005,18 +1015,26 @@ export class ChangeSetService {
           directory.identity === undefined ||
           (await execution.directoryIdentity(directory.path)) !== directory.identity
         ) {
-          throw new Error("third-party path state");
+          conflictedDirectories.add(directory.path);
+          if (directory.stageId !== undefined) {
+            await execution.discardPreparedDirectory(directory.stageId);
+          }
+          continue;
         }
         await execution.removeDirectory(directory.path);
         restoredFootprints += 1;
         await this.#crash(`during_rollback:${restoredFootprints}`);
       }
       for (const directory of frame.directories) {
-        if ((await execution.pathKind(directory.path)) !== null) {
+        if (
+          !conflictedDirectories.has(directory.path) &&
+          (await execution.pathKind(directory.path)) !== null
+        ) {
           throw new Error("before state was not restored");
         }
       }
       for (const file of files) {
+        if (conflictedFiles.has(file.path)) continue;
         const restored = await execution.readBinary!(file.path);
         if (
           restored === null ||
@@ -1027,6 +1045,11 @@ export class ChangeSetService {
         }
       }
       await execution.publishSearchSnapshot();
+      if (conflictedFiles.size > 0 || conflictedDirectories.size > 0) {
+        await execution.persistRecoveryFrame({ ...frame, phase: "FAILED" });
+        await this.#markUnproven(entry);
+        return false;
+      }
       await this.#crash("before_rolled_back");
       await execution.persistRecoveryFrame({ ...frame, phase: "ROLLED_BACK" });
       rolledBackDurable = true;
