@@ -862,6 +862,66 @@ describe("durable attachment and managed-trash Change Set execution", () => {
     }
   });
 
+  it("rejects stale attachment SHA-256 evidence before any mutation", async () => {
+    const bytes = Uint8Array.from([1, 2, 3]);
+    const staleSha256 = "0".repeat(64);
+    const cases = [
+      {
+        operationId: "copy-stale",
+        kind: "copy_attachment" as const,
+        sourcePath: "assets/source.bin",
+        destinationPath: "assets/copy.bin",
+        expectedSha256: staleSha256,
+      },
+      {
+        operationId: "move-stale",
+        kind: "move_attachment" as const,
+        sourcePath: "assets/source.bin",
+        destinationPath: "assets/moved.bin",
+        expectedSha256: staleSha256,
+      },
+      {
+        operationId: "trash-stale",
+        kind: "trash" as const,
+        path: "assets/source.bin",
+        expectedSha256: staleSha256,
+      },
+    ];
+    for (const [index, operation] of cases.entries()) {
+      const store = new MemoryStore();
+      const adapter = new FileAdapter();
+      adapter.directories.add("assets");
+      adapter.files.set("assets/source.bin", bytes);
+      const service = await ChangeSetService.open({
+        store,
+        dataSource: {
+          readBinary: (path) => adapter.readBinary(path),
+          pathKind: (path) => adapter.pathKind(path),
+          isContained: async () => true,
+        },
+        execution: adapter,
+        createChangeSetId: () => `change-set-stale-sha256-${index}`,
+      });
+
+      const result = await service.submit(
+        { submissionKey: `stale-sha256-${index}`, operations: [operation] },
+        requestState,
+      );
+
+      expect(result).toMatchObject({
+        outcome: "registered",
+        changeSet: {
+          state: "intent_not_applied",
+          failure: { code: "stale_observation" },
+        },
+      });
+      expect(adapter.files.get("assets/source.bin")).toEqual(bytes);
+      expect(adapter.files.has("assets/copy.bin")).toBe(false);
+      expect(adapter.files.has("assets/moved.bin")).toBe(false);
+      expect(adapter.events.some((event) => event.startsWith("publish-file:"))).toBe(false);
+    }
+  });
+
   it("blocks recovery rather than overwriting a third-party attachment", async () => {
     const bytes = Uint8Array.from([1, 2, 3, 4]);
     const sha256 = createHash("sha256").update(bytes).digest("hex");

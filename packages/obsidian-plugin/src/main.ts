@@ -14,6 +14,7 @@ import {
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
+import { BRIDGE_STATE_DIRECTORY_NAME } from "./change-set.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import {
   createChangeSetSemanticEvidenceTracker,
@@ -42,7 +43,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       adapter instanceof FileSystemAdapter
         ? createFileSystemChangeSetDataSource(basePath, adapter)
         : undefined;
-    const stateDirectory = join(basePath, ".llm-wiki");
+    const stateDirectory = join(basePath, BRIDGE_STATE_DIRECTORY_NAME);
     const recoveryStatePath = join(stateDirectory, "bridge-state.json");
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
@@ -78,12 +79,19 @@ export default class VaultOperationBridgePlugin extends Plugin {
               removeFile: async (path) => {
                 const file = this.app.vault.getFileByPath(path);
                 if (file === null) throw new Error("Attachment removal source disappeared");
-                await this.app.vault.delete(file, true);
+                // Reached only from compare-before-restore rollback of
+                // Change-Set-created copies. Permanent deletion is unavailable:
+                // route through the system trash as a last-resort safety net.
+                await this.app.vault.trash(file, true);
               },
               moveToTrash: async (path) => {
                 const file = this.app.vault.getFileByPath(path);
                 if (file === null) throw new Error("Managed trash source disappeared");
-                await this.app.vault.delete(file, true);
+                // The host has already hard-linked the bytes into the
+                // Bridge-owned managed trash before this call; use the system
+                // trash rather than permanent deletion so the Bridge never
+                // irreversibly destroys Vault content.
+                await this.app.vault.trash(file, true);
               },
               restoreFromTrash: async (_trashId, path, bytes) => {
                 const exactBytes = Uint8Array.from(bytes);

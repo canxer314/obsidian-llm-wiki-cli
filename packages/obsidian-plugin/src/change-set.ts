@@ -237,7 +237,16 @@ export interface ChangeSetRequestState {
 }
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const protectedRoots = [".git", ".obsidian", ".llm-wiki", ".trash"];
+
+/**
+ * Name of the Bridge-private state directory inside the Vault. main.ts places
+ * staging, the Recovery Journal, and managed trash under this directory, and
+ * the protected-roots check below rejects any Change Set path targeting it.
+ * Keep a single source of truth so the two can never drift apart.
+ */
+export const BRIDGE_STATE_DIRECTORY_NAME = ".llm-wiki";
+
+const protectedRoots = [".git", ".obsidian", BRIDGE_STATE_DIRECTORY_NAME, ".trash"];
 
 function emptyState(): ChangeSetRegistryState {
   return {
