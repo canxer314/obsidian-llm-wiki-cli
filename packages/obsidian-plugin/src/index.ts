@@ -10,6 +10,7 @@ export {
 export {
   CHANGE_SET_RECORD_RETENTION_MS,
   CHANGE_SET_REGISTRY_SCHEMA_VERSION,
+  RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   ChangeSetService,
   fingerprintChangeSetRequest,
   type FrontmatterChange,
@@ -34,6 +35,7 @@ export {
 export {
   DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
   createFileSystemChangeSetExecutionAdapter,
+  type ChangeSetExecutionHost,
   type DirectoryExecutionHost,
   type FileSystemChangeSetExecutionOptions,
 } from "./file-system-change-set-execution.js";

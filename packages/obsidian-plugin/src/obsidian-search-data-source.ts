@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { isCanonicalVaultPath } from "./canonical-vault-path.js";
 import type {
   HostReferenceEvidence,
@@ -34,10 +36,45 @@ interface InstalledFileCache {
   embeds?: CacheReference[];
 }
 
+export class ObsidianSemanticVersionTracker {
+  // Observed Obsidian reads strip the UTF-8 BOM from `data`, so a single parse
+  // maps to either the raw byte version (no BOM) or its BOM-prefixed form.
+  readonly #versions = new Map<string, { plain: string; bomPrefixed: string }>();
+
+  observe(path: string, parsedContent: string): void {
+    const bytes = new TextEncoder().encode(parsedContent);
+    const plain = createHash("sha256").update(bytes).digest("hex");
+    const bomPrefixed = createHash("sha256")
+      .update(Buffer.from([0xef, 0xbb, 0xbf]))
+      .update(bytes)
+      .digest("hex");
+    this.#versions.set(path, { plain, bomPrefixed });
+  }
+
+  matches(path: string, bytes: Uint8Array): boolean {
+    const observed = this.#versions.get(path);
+    if (observed === undefined) return false;
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    return observed.plain === digest || observed.bomPrefixed === digest;
+  }
+
+  remove(path: string): void {
+    this.#versions.delete(path);
+  }
+
+  rename(oldPath: string, newPath: string): void {
+    const version = this.#versions.get(oldPath);
+    this.#versions.delete(oldPath);
+    if (version !== undefined) this.#versions.set(newPath, version);
+  }
+}
+
 export interface ObsidianSearchAdapter {
   markdownFiles(): Array<{ path: string }>;
   readBinary(path: string): Promise<ArrayBuffer | Uint8Array>;
   fileCache(path: string): InstalledFileCache | null;
+  /** Whether a parsed-content observation corresponds to these exact bytes. */
+  semanticContentMatches?(path: string, bytes: Uint8Array): boolean;
   resolveLink(target: string, sourcePath: string): string | null;
   candidatePaths(target: string, sourcePath: string): string[];
   validSubpath(target: string, resolvedPath: string): boolean;
@@ -234,11 +271,21 @@ export function createObsidianSearchDataSource(
     semanticEvidence: async (path) => {
       const cache = adapter.fileCache(path);
       if (cache === null) return null;
+      let contentVersion: string | undefined;
+      if (adapter.semanticContentMatches !== undefined) {
+        const bytes = await adapter.readBinary(path);
+        const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        if (adapter.semanticContentMatches(path, raw)) {
+          contentVersion =
+            `sha256:${createHash("sha256").update(raw).digest("hex")}`;
+        }
+      }
       const references = [
         ...(cache.links ?? []),
         ...(cache.embeds ?? []),
       ].map((reference) => referenceEvidence(reference, path, adapter));
       return {
+        ...(contentVersion === undefined ? {} : { contentVersion }),
         frontmatter: cache.frontmatter === undefined
           ? null
           : adapter.parseFrontmatter(cache.frontmatter),

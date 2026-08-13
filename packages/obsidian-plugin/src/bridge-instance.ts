@@ -41,6 +41,7 @@ import { z } from "zod";
 
 import {
   ChangeSetService,
+  RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   type ChangeSetServiceOptions,
 } from "./change-set.js";
 import { rejectRequest, verifyRequestPolicy } from "./request-policy.js";
@@ -151,7 +152,7 @@ function projectObservedHealth(
       plugin: PLUGIN_VERSION,
       protocol: PROTOCOL_VERSION,
       persistentStateSchema: 2,
-      recoveryJournalSchema: 1,
+      recoveryJournalSchema: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
     },
     listener: { address: LOOPBACK_ADDRESS, port },
     readiness: {

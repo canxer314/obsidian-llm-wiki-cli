@@ -1,6 +1,17 @@
-import { mkdir, mkdtemp, rename, rm, rmdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -37,6 +48,9 @@ class DirectoryAdapter implements ChangeSetExecutionAdapter {
   readonly directories = new Set<string>();
   readonly identities = new Map<string, string>();
   readonly prepared = new Map<string, string>();
+  readonly files = new Map<string, Uint8Array>();
+  readonly fileIdentities = new Map<string, string>();
+  readonly preparedFiles = new Map<string, { bytes: Uint8Array; identity: string }>();
   readonly events: string[] = [];
   frame: RecoveryJournalFrame | null = null;
   #nextIdentity = 0;
@@ -52,7 +66,11 @@ class DirectoryAdapter implements ChangeSetExecutionAdapter {
 
   async pathKind(path: string): Promise<"directory" | "file" | null> {
     this.events.push(`inspect:${path}`);
-    return this.directories.has(path) ? "directory" : null;
+    return this.directories.has(path)
+      ? "directory"
+      : this.files.has(path)
+        ? "file"
+        : null;
   }
 
   async directoryIdentity(path: string): Promise<string | null> {
@@ -87,6 +105,41 @@ class DirectoryAdapter implements ChangeSetExecutionAdapter {
 
   async publishSearchSnapshot(): Promise<void> {
     this.events.push("snapshot");
+  }
+
+  async readBinary(path: string): Promise<Uint8Array | null> {
+    const bytes = this.files.get(path);
+    return bytes === undefined ? null : Uint8Array.from(bytes);
+  }
+
+  async fileIdentity(path: string): Promise<string | null> {
+    return this.fileIdentities.get(path) ?? null;
+  }
+
+  async prepareFile(stageId: string, bytes: Uint8Array): Promise<string> {
+    this.#nextIdentity += 1;
+    const identity = `file-${this.#nextIdentity}`;
+    this.preparedFiles.set(stageId, { bytes: Uint8Array.from(bytes), identity });
+    return identity;
+  }
+
+  async publishFile(stageId: string, path: string): Promise<void> {
+    const prepared = this.preparedFiles.get(stageId);
+    if (prepared === undefined) throw new Error("prepared file is missing");
+    this.events.push(`write:${path}`);
+    this.files.set(path, prepared.bytes);
+    this.fileIdentities.set(path, prepared.identity);
+    this.preparedFiles.delete(stageId);
+  }
+
+  async discardPreparedFile(stageId: string): Promise<void> {
+    this.preparedFiles.delete(stageId);
+  }
+
+  async removeFile(path: string): Promise<void> {
+    this.events.push(`unlink:${path}`);
+    this.files.delete(path);
+    this.fileIdentities.delete(path);
   }
 }
 
@@ -123,6 +176,1074 @@ function appliedRecord(value: unknown): Extract<ChangeSetRecord, { state: "inten
   expect(result.changeSet.state).toBe("intent_applied");
   return result.changeSet as Extract<ChangeSetRecord, { state: "intent_applied" }>;
 }
+
+async function fileSystemPathKind(
+  root: string,
+  path: string,
+): Promise<"directory" | "file" | null> {
+  try {
+    const value = await stat(join(root, ...path.split("/")));
+    return value.isDirectory() ? "directory" : "file";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function fileSystemIdentity(root: string, path: string): Promise<string | null> {
+  try {
+    const value = await stat(join(root, ...path.split("/")));
+    return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function realExecutionAdapter(
+  root: string,
+  publishSearchSnapshot: () => Promise<void>,
+): Promise<ChangeSetExecutionAdapter> {
+  const staging = join(root, ".llm-wiki", "staging");
+  return createFileSystemChangeSetExecutionAdapter({
+    journalPath: join(root, ".llm-wiki", "recovery-journal.bin"),
+    slotCapacity: 32 * 1024,
+    host: {
+      pathKind: (path) => fileSystemPathKind(root, path),
+      directoryIdentity: (path) => fileSystemIdentity(root, path),
+      prepareDirectory: async (stageId) => {
+        const stagePath = join(staging, ...stageId.split("/"));
+        await mkdir(stagePath, { recursive: true });
+        return (await fileSystemIdentity(staging, stageId))!;
+      },
+      publishDirectory: (stageId, path) =>
+        rename(join(staging, ...stageId.split("/")), join(root, ...path.split("/"))),
+      discardPreparedDirectory: async (stageId) => {
+        await rmdir(join(staging, ...stageId.split("/"))).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+          },
+        );
+      },
+      removeDirectory: (path) => rmdir(join(root, ...path.split("/"))),
+      readBinary: async (path) => {
+        try {
+          return await readFile(join(root, ...path.split("/")));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      },
+      fileIdentity: (path) => fileSystemIdentity(root, path),
+      prepareFile: async (stageId, bytes) => {
+        const stagePath = join(staging, ...stageId.split("/"));
+        await mkdir(dirname(stagePath), { recursive: true });
+        await writeFile(stagePath, bytes, { flag: "wx" });
+        return (await fileSystemIdentity(staging, stageId))!;
+      },
+      publishFile: (stageId, path) =>
+        rename(join(staging, ...stageId.split("/")), join(root, ...path.split("/"))),
+      discardPreparedFile: async (stageId) => {
+        await unlink(join(staging, ...stageId.split("/"))).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+          },
+        );
+      },
+      removeFile: (path) => unlink(join(root, ...path.split("/"))),
+      publishSearchSnapshot,
+    },
+  });
+}
+
+describe("durable Markdown Change Set execution", () => {
+  it("creates and edits Markdown through the real filesystem Journal adapter", async () => {
+    const root = await mkdtemp(join(tmpdir(), "change-set-markdown-real-"));
+    temporaryRoots.push(root);
+    const store = new MemoryStore();
+    let snapshots = 0;
+    const adapter = await realExecutionAdapter(root, async () => {
+      snapshots += 1;
+    });
+    const dataSource = {
+      readBinary: async (path: string) => {
+        try {
+          return await readFile(join(root, ...path.split("/")));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      },
+      pathKind: (path: string) => fileSystemPathKind(root, path),
+      isContained: async () => true,
+    };
+    const service = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution: adapter,
+      vaultId: "vault-real-markdown",
+      createChangeSetId: () => "change-set-real-markdown",
+    });
+    const first = "# First\r\nold\r\n";
+    const second = "# Second\n";
+    const version = (content: string) =>
+      `sha256:${createHash("sha256").update(content).digest("hex")}` as const;
+    const input = {
+      submissionKey: "real-markdown-key",
+      operations: [
+        {
+          operationId: "create-first",
+          kind: "create_note" as const,
+          path: "Notes/First.md",
+          content: first,
+          ifExists: "reject" as const,
+        },
+        {
+          operationId: "edit-first",
+          afterOperationId: "create-first",
+          kind: "edit_body" as const,
+          path: "Notes/First.md",
+          targetVersion: version(first),
+          edit: {
+            kind: "replace_exact" as const,
+            old: "old",
+            replacement: "new",
+            expectedOccurrences: 1 as const,
+          },
+        },
+        {
+          operationId: "create-second",
+          kind: "create_note" as const,
+          path: "Notes/Second.md",
+          content: second,
+          ifExists: "reject" as const,
+        },
+      ],
+    };
+
+    const submitted = await service.submit(input, requestState);
+    const record = appliedRecord(submitted);
+
+    expect(await readFile(join(root, "Notes", "First.md"), "utf8")).toBe(
+      "# First\r\nnew\r\n",
+    );
+    expect(await readFile(join(root, "Notes", "Second.md"), "utf8")).toBe(second);
+    expect(record.paths).toMatchObject([
+      { path: "Notes", finalState: { kind: "directory" } },
+      { path: "Notes/First.md", finalState: { kind: "markdown" } },
+      { path: "Notes/Second.md", finalState: { kind: "markdown" } },
+    ]);
+    expect(snapshots).toBe(1);
+    await adapter.close?.();
+  });
+
+  it("restores real edited bytes from PREPARED after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "change-set-edit-recovery-real-"));
+    temporaryRoots.push(root);
+    await mkdir(join(root, "Notes"));
+    const before = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("before 🚀\r\n", "utf8"),
+    ]);
+    await writeFile(join(root, "Notes", "Edit.md"), before);
+    const store = new MemoryStore();
+    let snapshots = 0;
+    const adapter = await realExecutionAdapter(root, async () => {
+      snapshots += 1;
+    });
+    const dataSource = {
+      readBinary: async (path: string) => {
+        try {
+          return await readFile(join(root, ...path.split("/")));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      },
+      pathKind: (path: string) => fileSystemPathKind(root, path),
+      isContained: async () => true,
+    };
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution: adapter,
+      vaultId: "vault-real-edit-recovery",
+      createChangeSetId: () => "change-set-real-edit-recovery",
+      crashInjector: (point) => {
+        if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    const beforeVersion = `sha256:${createHash("sha256").update(before).digest("hex")}` as const;
+
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "real-edit-recovery-key",
+          operations: [
+            {
+              operationId: "edit-real",
+              kind: "edit_body",
+              path: "Notes/Edit.md",
+              targetVersion: beforeVersion,
+              edit: { kind: "replace_whole", replacement: "after\n" },
+            },
+          ],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    expect(await readFile(join(root, "Notes", "Edit.md"))).toEqual(
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("after\n")]),
+    );
+    await adapter.close?.();
+
+    const reopened = await realExecutionAdapter(root, async () => {
+      snapshots += 1;
+    });
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution: reopened,
+      vaultId: "vault-real-edit-recovery",
+    });
+
+    expect(await readFile(join(root, "Notes", "Edit.md"))).toEqual(before);
+    await expect(
+      recovered.status({ submissionKey: "real-edit-recovery-key" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "intent_not_applied" },
+    });
+    expect(snapshots).toBe(1);
+    await reopened.close?.();
+  });
+
+  it("creates a nested note with durable final evidence stable across replay and status", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: async (path) =>
+          adapter.directories.has(path) ? "directory" : adapter.files.has(path) ? "file" : null,
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-note",
+    });
+    const input = {
+      submissionKey: "note-key",
+      operations: [
+        {
+          operationId: "note-1",
+          kind: "create_note" as const,
+          path: "Projects/Alpha.md",
+          content: "# Alpha\r\n你好\r\n",
+          ifExists: "reject" as const,
+        },
+      ],
+    };
+
+    const submitted = await service.submit(input, requestState);
+    const record = appliedRecord(submitted);
+    const replayed = await service.submit(input, requestState);
+    const status = await service.status({ submissionKey: "note-key" }, requestState);
+
+    expect(Buffer.from(adapter.files.get("Projects/Alpha.md") ?? []).toString()).toBe(
+      "# Alpha\r\n你好\r\n",
+    );
+    expect(record).toMatchObject({
+      changeSetId: "change-set-note",
+      requestedEffects: [
+        { operationId: "note-1", kind: "create_note", outcome: "changed" },
+      ],
+      derivedEffects: [
+        {
+          operationId: "derived/note-1/directory/Projects",
+          causedByOperationId: "note-1",
+          kind: "create_directory",
+          outcome: "changed",
+        },
+      ],
+      paths: [
+        { path: "Projects", outcome: "changed", finalState: { kind: "directory" } },
+        {
+          path: "Projects/Alpha.md",
+          outcome: "changed",
+          finalState: {
+            kind: "markdown",
+            contentVersion: "sha256:1b6719ff94dc86dfa3609075be2be99addc1901b57b4645827c239a2361f751d",
+          },
+        },
+      ],
+    });
+    expect(replayed).toEqual(submitted);
+    expect(status).toEqual({ lookup: "found", changeSet: record, vault: requestState.vault });
+  });
+
+  it("restores created and edited notes after a crash before COMMITTED", async () => {
+    for (const kind of ["create", "edit"] as const) {
+      const store = new MemoryStore();
+      const adapter = new DirectoryAdapter();
+      adapter.directories.add("Notes");
+      if (kind === "edit") {
+        adapter.files.set("Notes/Crash.md", Buffer.from("before"));
+        adapter.fileIdentities.set("Notes/Crash.md", "before-file");
+      }
+      const version = `sha256:${createHash("sha256").update("before").digest("hex")}` as const;
+      const input = {
+        submissionKey: `crash-${kind}-key`,
+        operations: [
+          kind === "create"
+            ? {
+                operationId: "create-crash",
+                kind: "create_note" as const,
+                path: "Notes/Crash.md",
+                content: "after",
+                ifExists: "reject" as const,
+              }
+            : {
+                operationId: "edit-crash",
+                kind: "edit_body" as const,
+                path: "Notes/Crash.md",
+                targetVersion: version,
+                edit: { kind: "replace_whole" as const, replacement: "after" },
+              },
+        ],
+      };
+      const crashing = await ChangeSetService.open({
+        store,
+        dataSource: {
+          readBinary: (path) => adapter.readBinary(path),
+          pathKind: (path) => adapter.pathKind(path),
+          isContained: async () => true,
+        },
+        execution: adapter,
+        createChangeSetId: () => `change-set-crash-${kind}`,
+        crashInjector: (point) => {
+          if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+        },
+      });
+
+      await expect(crashing.submit(input, requestState)).rejects.toThrow(
+        InjectedChangeSetCrash,
+      );
+      expect(Buffer.from(adapter.files.get("Notes/Crash.md") ?? []).toString()).toBe(
+        "after",
+      );
+      expect(adapter.frame?.phase).toBe("PREPARED");
+
+      const recovered = await ChangeSetService.open({
+        store,
+        dataSource: {
+          readBinary: (path) => adapter.readBinary(path),
+          pathKind: (path) => adapter.pathKind(path),
+          isContained: async () => true,
+        },
+        execution: adapter,
+      });
+      const status = await recovered.status(
+        { changeSetId: `change-set-crash-${kind}` },
+        requestState,
+      );
+
+      expect(
+        adapter.files.has("Notes/Crash.md")
+          ? Buffer.from(adapter.files.get("Notes/Crash.md") ?? []).toString()
+          : null,
+      ).toBe(kind === "create" ? null : "before");
+      expect(adapter.frame?.phase).toBe("ROLLED_BACK");
+      expect(status).toMatchObject({
+        lookup: "found",
+        changeSet: { state: "intent_not_applied" },
+      });
+    }
+  });
+
+  it("recovers exact final note evidence after durable COMMITTED", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Committed.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/Committed.md", "before-file");
+    const beforeVersion = `sha256:${createHash("sha256").update("before").digest("hex")}` as const;
+    const afterVersion = `sha256:${createHash("sha256").update("after 🚀\r\n").digest("hex")}` as const;
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-file-committed",
+      crashInjector: (point) => {
+        if (point === "after_committed") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    const input = {
+      submissionKey: "file-committed-key",
+      operations: [
+        {
+          operationId: "edit-committed",
+          kind: "edit_body" as const,
+          path: "Notes/Committed.md",
+          targetVersion: beforeVersion,
+          edit: { kind: "replace_whole" as const, replacement: "after 🚀\r\n" },
+        },
+      ],
+    };
+
+    await expect(crashing.submit(input, requestState)).rejects.toThrow(
+      InjectedChangeSetCrash,
+    );
+    expect(adapter.frame?.phase).toBe("COMMITTED");
+
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+    });
+    const status = await recovered.status(
+      { submissionKey: "file-committed-key" },
+      requestState,
+    );
+
+    expect(Buffer.from(adapter.files.get("Notes/Committed.md") ?? []).toString()).toBe(
+      "after 🚀\r\n",
+    );
+    expect(status).toMatchObject({
+      lookup: "found",
+      changeSet: {
+        state: "intent_applied",
+        paths: [
+          {
+            path: "Notes/Committed.md",
+            finalState: { kind: "markdown", contentVersion: afterVersion },
+          },
+        ],
+      },
+    });
+  });
+
+  for (const recoveryCrashPoint of [
+    "recovery_after_file_prepared:Notes/Retry.md",
+    "recovery_after_file_published:Notes/Retry.md",
+  ]) {
+    it(`retries file rollback after a crash at ${recoveryCrashPoint}`, async () => {
+      const store = new MemoryStore();
+      const adapter = new DirectoryAdapter();
+      adapter.directories.add("Notes");
+      adapter.files.set("Notes/Retry.md", Buffer.from("before"));
+      adapter.fileIdentities.set("Notes/Retry.md", "retry-before");
+      const beforeVersion = `sha256:${createHash("sha256").update("before").digest("hex")}` as const;
+      const input = {
+        submissionKey: `rollback-retry-${recoveryCrashPoint}`,
+        operations: [
+          {
+            operationId: "edit-retry",
+            kind: "edit_body" as const,
+            path: "Notes/Retry.md",
+            targetVersion: beforeVersion,
+            edit: { kind: "replace_whole" as const, replacement: "after" },
+          },
+        ],
+      };
+      const crashingExecution = await ChangeSetService.open({
+        store,
+        dataSource: {
+          readBinary: (path) => adapter.readBinary(path),
+          pathKind: (path) => adapter.pathKind(path),
+          isContained: async () => true,
+        },
+        execution: adapter,
+        createChangeSetId: () => `change-set-${recoveryCrashPoint}`,
+        crashInjector: (point) => {
+          if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+        },
+      });
+      await expect(crashingExecution.submit(input, requestState)).rejects.toThrow(
+        InjectedChangeSetCrash,
+      );
+
+      await expect(
+        ChangeSetService.open({
+          store,
+          dataSource: {
+            readBinary: (path) => adapter.readBinary(path),
+            pathKind: (path) => adapter.pathKind(path),
+            isContained: async () => true,
+          },
+          execution: adapter,
+          crashInjector: (point) => {
+            if (point === recoveryCrashPoint) throw new InjectedChangeSetCrash(point);
+          },
+        }),
+      ).rejects.toThrow(InjectedChangeSetCrash);
+      expect(adapter.frame?.phase).toBe("PREPARED");
+
+      const recovered = await ChangeSetService.open({
+        store,
+        dataSource: {
+          readBinary: (path) => adapter.readBinary(path),
+          pathKind: (path) => adapter.pathKind(path),
+          isContained: async () => true,
+        },
+        execution: adapter,
+      });
+
+      expect(Buffer.from(adapter.files.get("Notes/Retry.md") ?? []).toString()).toBe(
+        "before",
+      );
+      expect(adapter.frame?.phase).toBe("ROLLED_BACK");
+      await expect(
+        recovered.status(
+          { changeSetId: `change-set-${recoveryCrashPoint}` },
+          requestState,
+        ),
+      ).resolves.toMatchObject({
+        lookup: "found",
+        changeSet: { state: "intent_not_applied" },
+      });
+    });
+  }
+
+  it("does not overwrite third-party file bytes during recovery", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/ThirdParty.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/ThirdParty.md", "before-file");
+    const beforeVersion = `sha256:${createHash("sha256").update("before").digest("hex")}` as const;
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-third-party-file",
+      crashInjector: (point) => {
+        if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "third-party-file-key",
+          operations: [
+            {
+              operationId: "edit-third-party",
+              kind: "edit_body",
+              path: "Notes/ThirdParty.md",
+              targetVersion: beforeVersion,
+              edit: { kind: "replace_whole", replacement: "expected after" },
+            },
+          ],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    adapter.files.set("Notes/ThirdParty.md", Buffer.from("third-party bytes"));
+    adapter.fileIdentities.set("Notes/ThirdParty.md", "third-party-file");
+    const blocked: string[] = [];
+
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState: {
+        setQueue: () => undefined,
+        blockWritesForUnproven: (changeSetId) => {
+          blocked.push(changeSetId);
+        },
+      },
+    });
+
+    expect(Buffer.from(adapter.files.get("Notes/ThirdParty.md") ?? []).toString()).toBe(
+      "third-party bytes",
+    );
+    expect(adapter.frame?.phase).toBe("FAILED");
+    expect(blocked).toEqual(["change-set-third-party-file"]);
+    await expect(
+      recovered.status({ submissionKey: "third-party-file-key" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "result_unproven" },
+    });
+  });
+
+  it("revalidates target versions, absence, and Read Dependencies under the write lease", async () => {
+    const scenarios = ["target", "absence", "dependency"] as const;
+    for (const scenario of scenarios) {
+      const store = new MemoryStore();
+      const adapter = new DirectoryAdapter();
+      adapter.directories.add("Notes");
+      adapter.files.set("Notes/Target.md", Buffer.from("old"));
+      adapter.fileIdentities.set("Notes/Target.md", "target-before");
+      adapter.files.set("Notes/Dependency.md", Buffer.from("observed"));
+      adapter.fileIdentities.set("Notes/Dependency.md", "dependency-before");
+      let targetReads = 0;
+      let dependencyReads = 0;
+      let destinationChecks = 0;
+      const version = (content: string) =>
+        `sha256:${createHash("sha256").update(content).digest("hex")}` as const;
+      const service = await ChangeSetService.open({
+        store,
+        dataSource: {
+          readBinary: async (path) => {
+            if (path === "Notes/Target.md") {
+              targetReads += 1;
+              return Buffer.from(
+                scenario === "target" && targetReads > 1 ? "changed outside lease" : "old",
+              );
+            }
+            if (path === "Notes/Dependency.md") {
+              dependencyReads += 1;
+              return Buffer.from(
+                scenario === "dependency" && dependencyReads > 1
+                  ? "changed outside lease"
+                  : "observed",
+              );
+            }
+            return null;
+          },
+          pathKind: async (path) => {
+            if (path === "Notes/New.md") {
+              destinationChecks += 1;
+              return scenario === "absence" && destinationChecks > 1 ? "file" : null;
+            }
+            return path === "Notes" ? "directory" : adapter.files.has(path) ? "file" : null;
+          },
+          isContained: async () => true,
+        },
+        execution: adapter,
+        createChangeSetId: () => `change-set-stale-${scenario}`,
+      });
+      const input =
+        scenario === "absence"
+          ? {
+              submissionKey: `stale-${scenario}`,
+              operations: [
+                {
+                  operationId: "create-1",
+                  kind: "create_note" as const,
+                  path: "Notes/New.md",
+                  content: "new",
+                  ifExists: "reject" as const,
+                },
+              ],
+            }
+          : {
+              submissionKey: `stale-${scenario}`,
+              operations: [
+                {
+                  operationId: "edit-1",
+                  kind: "edit_body" as const,
+                  path: "Notes/Target.md",
+                  targetVersion: version("old"),
+                  edit: { kind: "replace_whole" as const, replacement: "new" },
+                },
+              ],
+              ...(scenario === "dependency"
+                ? {
+                    readDependencies: [
+                      {
+                        path: "Notes/Dependency.md",
+                        contentVersion: version("observed"),
+                      },
+                    ],
+                  }
+                : {}),
+            };
+
+      const submitted = await service.submit(input, requestState);
+
+      expect(submitted).toMatchObject({
+        outcome: "registered",
+        changeSet: {
+          state: "intent_not_applied",
+          ...(scenario === "absence"
+            ? {
+                failure: {
+                  code: "path_conflict",
+                  operationId: "create-1",
+                  path: "Notes/New.md",
+                },
+              }
+            : { failure: { code: "stale_observation" } }),
+        },
+      });
+      expect(adapter.events.some((event) => event.startsWith("write:"))).toBe(false);
+    }
+  });
+
+  it("reports already-satisfied without rewriting the target", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Same.md", Buffer.from("same"));
+    adapter.fileIdentities.set("Notes/Same.md", "same-before");
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-already-satisfied",
+    });
+    const version = `sha256:${createHash("sha256").update("same").digest("hex")}` as const;
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "already-satisfied-key",
+        operations: [
+          {
+            operationId: "same-1",
+            kind: "edit_body",
+            path: "Notes/Same.md",
+            targetVersion: version,
+            edit: { kind: "replace_whole", replacement: "same" },
+          },
+        ],
+      },
+      requestState,
+    );
+    const record = appliedRecord(submitted);
+
+    expect(record.requestedEffects).toEqual([
+      { operationId: "same-1", kind: "edit_body", outcome: "already_satisfied" },
+    ]);
+    expect(record.paths).toEqual([
+      {
+        path: "Notes/Same.md",
+        outcome: "unchanged",
+        finalState: { kind: "markdown", contentVersion: version },
+      },
+    ]);
+    expect(adapter.events).not.toContain("write:Notes/Same.md");
+  });
+
+  it("executes changed operations even when their chained final bytes equal the pre-state", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/RoundTrip.md", Buffer.from("start"));
+    adapter.fileIdentities.set("Notes/RoundTrip.md", "round-trip-before");
+    const version = (content: string) =>
+      `sha256:${createHash("sha256").update(content).digest("hex")}` as const;
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-round-trip",
+    });
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "round-trip-key",
+        operations: [
+          {
+            operationId: "to-middle",
+            kind: "edit_body",
+            path: "Notes/RoundTrip.md",
+            targetVersion: version("start"),
+            edit: { kind: "replace_whole", replacement: "middle" },
+          },
+          {
+            operationId: "to-start",
+            afterOperationId: "to-middle",
+            kind: "edit_body",
+            path: "Notes/RoundTrip.md",
+            targetVersion: version("middle"),
+            edit: { kind: "replace_whole", replacement: "start" },
+          },
+        ],
+      },
+      requestState,
+    );
+    const record = appliedRecord(submitted);
+
+    expect(record.requestedEffects).toEqual([
+      { operationId: "to-middle", kind: "edit_body", outcome: "changed" },
+      { operationId: "to-start", kind: "edit_body", outcome: "changed" },
+    ]);
+    expect(record.paths).toEqual([
+      {
+        path: "Notes/RoundTrip.md",
+        outcome: "unchanged",
+        finalState: { kind: "markdown", contentVersion: version("start") },
+      },
+    ]);
+    expect(adapter.events).toContain("write:Notes/RoundTrip.md");
+  });
+
+  it("rejects overlapping exact matches without mutating the file", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Overlap.md", Buffer.from("aaa"));
+    adapter.fileIdentities.set("Notes/Overlap.md", "overlap-file");
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-overlap",
+    });
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "overlap-key",
+        operations: [
+          {
+            operationId: "overlap-1",
+            kind: "edit_body",
+            path: "Notes/Overlap.md",
+            targetVersion: `sha256:${createHash("sha256").update("aaa").digest("hex")}`,
+            edit: {
+              kind: "replace_exact",
+              old: "aa",
+              replacement: "x",
+              expectedOccurrences: 1,
+            },
+          },
+        ],
+      },
+      requestState,
+    );
+
+    expect(submitted).toMatchObject({
+      outcome: "registered",
+      changeSet: {
+        state: "intent_not_applied",
+        failure: {
+          code: "exact_match_count_mismatch",
+          operationId: "overlap-1",
+          actualOccurrences: 2,
+        },
+      },
+    });
+    expect(Buffer.from(adapter.files.get("Notes/Overlap.md") ?? []).toString()).toBe("aaa");
+    expect(adapter.events.some((event) => event.startsWith("write:"))).toBe(false);
+  });
+
+  it("rolls back instead of committing when target semantic evidence never converges", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Stale.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/Stale.md", "stale-before");
+    adapter.publishSearchSnapshot = async (targets) => {
+      if (targets !== undefined) {
+        expect(targets).toEqual([
+          {
+            path: "Notes/Stale.md",
+            contentVersion: `sha256:${createHash("sha256").update("after").digest("hex")}`,
+            requireSemanticMatch: true,
+          },
+        ]);
+      }
+      throw new Error("Successor Search Snapshot target evidence did not match");
+    };
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-stale-semantic",
+    });
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "stale-semantic-key",
+        operations: [
+          {
+            operationId: "edit-stale",
+            kind: "edit_body",
+            path: "Notes/Stale.md",
+            targetVersion: `sha256:${createHash("sha256").update("before").digest("hex")}`,
+            edit: { kind: "replace_whole", replacement: "after" },
+          },
+        ],
+      },
+      requestState,
+    );
+
+    expect(submitted).toMatchObject({
+      outcome: "registered",
+      changeSet: { state: "result_unproven" },
+    });
+    expect(Buffer.from(adapter.files.get("Notes/Stale.md") ?? []).toString()).toBe("before");
+    expect(adapter.frame?.phase).toBe("FAILED");
+  });
+
+  it("preserves BOM, CRLF, Unicode, and untouched bytes around an exact replacement", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    const prefix = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("front 🚀\r\n", "utf8"),
+    ]);
+    const suffix = Buffer.from("\r\ntail ́\r\n", "utf8");
+    const initialBytes = Buffer.concat([prefix, Buffer.from("needle"), suffix]);
+    const finalBytes = Buffer.concat([prefix, Buffer.from("改变"), suffix]);
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Exact.md", initialBytes);
+    adapter.fileIdentities.set("Notes/Exact.md", "exact-file");
+    const version = (bytes: Uint8Array) =>
+      `sha256:${createHash("sha256").update(bytes).digest("hex")}` as const;
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: async (path) =>
+          adapter.directories.has(path) ? "directory" : adapter.files.has(path) ? "file" : null,
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-exact-bytes",
+    });
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "exact-byte-key",
+        operations: [
+          {
+            operationId: "exact-byte-1",
+            kind: "edit_body",
+            path: "Notes/Exact.md",
+            targetVersion: version(initialBytes),
+            edit: {
+              kind: "replace_exact",
+              old: "needle",
+              replacement: "改变",
+              expectedOccurrences: 1,
+            },
+          },
+        ],
+      },
+      requestState,
+    );
+    const record = appliedRecord(submitted);
+    const actual = Buffer.from(adapter.files.get("Notes/Exact.md") ?? []);
+
+    expect(actual).toEqual(finalBytes);
+    expect(actual.subarray(0, prefix.length)).toEqual(prefix);
+    expect(actual.subarray(actual.length - suffix.length)).toEqual(suffix);
+    expect(record.paths).toEqual([
+      {
+        path: "Notes/Exact.md",
+        outcome: "changed",
+        finalState: { kind: "markdown", contentVersion: version(finalBytes) },
+      },
+    ]);
+  });
+
+  it("chains exact and whole body edits with byte-preserving splicing and final versions", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    const initialBytes = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("front 🚀\r\nneedle\r\ntail ́\r\n", "utf8"),
+    ]);
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Source.md", initialBytes);
+    adapter.fileIdentities.set("Notes/Source.md", "source-file");
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: async (path) =>
+          adapter.directories.has(path) ? "directory" : adapter.files.has(path) ? "file" : null,
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-edit-chain",
+    });
+    const exactFinal = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("front 🚀\r\nchanged\r\ntail ́\r\n", "utf8"),
+    ]);
+    const wholeFinal = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("whole\n", "utf8"),
+    ]);
+    const contentVersion = (bytes: Uint8Array) =>
+      `sha256:${createHash("sha256").update(bytes).digest("hex")}` as const;
+    const input = {
+      submissionKey: "edit-chain-key",
+      operations: [
+        {
+          operationId: "exact-1",
+          kind: "edit_body" as const,
+          path: "Notes/Source.md",
+          targetVersion: contentVersion(initialBytes),
+          edit: {
+            kind: "replace_exact" as const,
+            old: "needle",
+            replacement: "changed",
+            expectedOccurrences: 1 as const,
+          },
+        },
+        {
+          operationId: "whole-1",
+          afterOperationId: "exact-1",
+          kind: "edit_body" as const,
+          path: "Notes/Source.md",
+          targetVersion: contentVersion(exactFinal),
+          edit: { kind: "replace_whole" as const, replacement: "whole\n" },
+        },
+      ],
+    };
+
+    const submitted = await service.submit(input, requestState);
+    const record = appliedRecord(submitted);
+    const replayed = await service.submit(input, requestState);
+
+    expect(Buffer.from(adapter.files.get("Notes/Source.md") ?? [])).toEqual(wholeFinal);
+    expect(record).toMatchObject({
+      requestedEffects: [
+        { operationId: "exact-1", kind: "edit_body", outcome: "changed" },
+        { operationId: "whole-1", kind: "edit_body", outcome: "changed" },
+      ],
+      paths: [
+        {
+          path: "Notes/Source.md",
+          outcome: "changed",
+          finalState: {
+            kind: "markdown",
+            contentVersion: contentVersion(wholeFinal),
+          },
+        },
+      ],
+    });
+    expect(replayed).toEqual(submitted);
+  });
+});
 
 describe("durable create-directory Change Set execution", () => {
   it("commits only after locked preflight, final-path proof, and snapshot publication", async () => {
@@ -205,8 +1326,10 @@ describe("durable create-directory Change Set execution", () => {
     });
     expect(adapter.events).toEqual([
       "journal:PREPARED",
+      "inspect:Projects",
       "journal:PREPARED",
       "mkdir:Projects",
+      "inspect:Projects/Alpha",
       "journal:PREPARED",
       "mkdir:Projects/Alpha",
       "inspect:Projects",
@@ -265,7 +1388,7 @@ describe("durable create-directory Change Set execution", () => {
     expect(store.state?.entries.map(({ enqueueSeq }) => enqueueSeq)).toEqual([1, 2]);
   });
 
-  it("keeps unsupported operations outside the directory execution FIFO", async () => {
+  it("keeps Markdown and directory submissions in the same execution FIFO", async () => {
     const store = new MemoryStore();
     const adapter = new DirectoryAdapter();
     let nextId = 0;
@@ -300,9 +1423,11 @@ describe("durable create-directory Change Set execution", () => {
       requestState,
     );
 
-    expect(unsupported).toMatchObject({ changeSet: { state: "in_progress" } });
+    expect(unsupported).toMatchObject({ changeSet: { state: "intent_applied" } });
     expect(directory).toMatchObject({ changeSet: { state: "intent_applied" } });
     expect(adapter.directories).toEqual(new Set(["Directory"]));
+    expect(adapter.files.has("Note.md")).toBe(true);
+    expect(adapter.events).toContain("write:Note.md");
     expect(adapter.events).toContain("mkdir:Directory");
     expect(store.state?.entries.map(({ enqueueSeq }) => enqueueSeq)).toEqual([1, 2]);
   });

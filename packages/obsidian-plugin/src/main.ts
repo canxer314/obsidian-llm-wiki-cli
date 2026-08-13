@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import {
   FileSystemAdapter,
@@ -17,6 +17,7 @@ import { createBridgeInstance } from "./bridge-instance.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import { createFileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
 import {
+  ObsidianSemanticVersionTracker,
   createObsidianSearchDataSource,
   enumerateCanonicalReferenceTargets,
   isRegisteredSubpathResult,
@@ -43,7 +44,23 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const stagingDirectory = join(stateDirectory, "staging");
+    const vaultPath = (path: string) => join(basePath, ...path.split("/"));
+    const stagePath = (stageId: string) => join(stagingDirectory, ...stageId.split("/"));
+    const pathIdentity = async (
+      path: string,
+      expectedKind: "directory" | "file",
+    ): Promise<string | null> => {
+      try {
+        const value = await stat(vaultPath(path));
+        const matches = expectedKind === "directory" ? value.isDirectory() : value.isFile();
+        return matches ? `${value.dev}:${value.ino}:${value.birthtimeMs}` : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    };
     let runtime!: ManagedVaultBridgeRuntime;
+    const semanticVersions = new ObsidianSemanticVersionTracker();
     const changeSetExecution =
       adapter instanceof FileSystemAdapter
         ? await createFileSystemChangeSetExecutionAdapter({
@@ -54,39 +71,46 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 if (value === null) return null;
                 return value.type === "folder" ? "directory" : "file";
               },
-              directoryIdentity: async (path) => {
-                try {
-                  const value = await stat(join(basePath, ...path.split("/")));
-                  return value.isDirectory()
-                    ? `${value.dev}:${value.ino}:${value.birthtimeMs}`
-                    : null;
-                } catch (error) {
-                  if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-                  throw error;
-                }
-              },
+              directoryIdentity: (path) => pathIdentity(path, "directory"),
               prepareDirectory: async (stageId) => {
-                const stagePath = join(stagingDirectory, ...stageId.split("/"));
-                await mkdir(stagePath, { recursive: true });
-                const value = await stat(stagePath);
+                const path = stagePath(stageId);
+                await mkdir(path, { recursive: true });
+                const value = await stat(path);
                 return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
               },
-              publishDirectory: async (stageId, path) => {
-                await rename(
-                  join(stagingDirectory, ...stageId.split("/")),
-                  join(basePath, ...path.split("/")),
-                );
-              },
+              publishDirectory: (stageId, path) =>
+                rename(stagePath(stageId), vaultPath(path)),
               discardPreparedDirectory: async (stageId) => {
                 try {
-                  await rmdir(join(stagingDirectory, ...stageId.split("/")));
+                  await rmdir(stagePath(stageId));
                 } catch (error) {
                   if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
                 }
               },
               removeDirectory: (path) => adapter.rmdir(path, false),
-              publishSearchSnapshot: async () => {
-                await runtime.publishSuccessorSearchSnapshot();
+              readBinary: changeSetDataSource!.readBinary,
+              fileIdentity: (path) => pathIdentity(path, "file"),
+              prepareFile: async (stageId, bytes) => {
+                const path = stagePath(stageId);
+                await mkdir(dirname(path), { recursive: true });
+                await writeFile(path, bytes, { flag: "wx" });
+                const value = await stat(path);
+                return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
+              },
+              publishFile: (stageId, path) =>
+                rename(stagePath(stageId), vaultPath(path)),
+              discardPreparedFile: async (stageId) => {
+                await unlink(stagePath(stageId)).catch(
+                  (error: NodeJS.ErrnoException) => {
+                    if (error.code !== "ENOENT") throw error;
+                  },
+                );
+              },
+              removeFile: async (path) => {
+                await unlink(vaultPath(path));
+              },
+              publishSearchSnapshot: async (targets) => {
+                await runtime.publishSuccessorSearchSnapshot(targets);
               },
             },
           })
@@ -129,6 +153,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
           const file = this.app.vault.getFileByPath(path);
           return file === null ? null : this.app.metadataCache.getFileCache(file);
         },
+        semanticContentMatches: (path, bytes) => semanticVersions.matches(path, bytes),
         resolveLink: (target, sourcePath) =>
           this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path ?? null,
         candidatePaths: (target, sourcePath) => {
@@ -210,18 +235,32 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const scheduleMarkdownRefresh = (file: unknown): void => {
       if (file instanceof TFile && file.extension === "md") scheduleRefresh();
     };
-    this.registerEvent(this.app.metadataCache.on("changed", scheduleMarkdownRefresh));
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file, data) => {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.observe(file.path, data);
+          scheduleRefresh();
+        }
+      }),
+    );
     this.registerEvent(this.app.metadataCache.on("resolve", scheduleMarkdownRefresh));
     this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
     this.registerEvent(this.app.vault.on("create", scheduleMarkdownRefresh));
     this.registerEvent(this.app.vault.on("modify", scheduleMarkdownRefresh));
-    this.registerEvent(this.app.vault.on("delete", scheduleMarkdownRefresh));
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.remove(file.path);
+          scheduleRefresh();
+        }
+      }),
+    );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        if (
-          (file instanceof TFile && file.extension === "md") ||
-          oldPath.endsWith(".md")
-        ) {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.rename(oldPath, file.path);
+          scheduleRefresh();
+        } else if (oldPath.endsWith(".md")) {
           scheduleRefresh();
         }
       }),
