@@ -10,6 +10,7 @@ export {
 export {
   CHANGE_SET_RECORD_RETENTION_MS,
   CHANGE_SET_REGISTRY_SCHEMA_VERSION,
+  RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   ChangeSetService,
   fingerprintChangeSetRequest,
   type BoundMoveDerivedEffect,
@@ -21,6 +22,7 @@ export {
   type ChangeSetExecutionAdapter,
   type ChangeSetExecutionState,
   type ChangeSetRuntimeStatePort,
+  type ChangeSetWriteMode,
   type RecoveryJournalFrame,
   type RecoveryFileFootprint,
   type RecoveryFileState,
@@ -38,9 +40,16 @@ export {
 } from "./change-set.js";
 export {
   DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
+  CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS,
+  createChangeSetSemanticEvidenceTracker,
   createFileSystemChangeSetExecutionAdapter,
+  createNodeFileSystemChangeSetHost,
+  type ChangeSetExecutionHost,
+  type ChangeSetSemanticEvidenceTracker,
+  type ChangeSetSemanticEvidenceTrackerOptions,
   type DirectoryExecutionHost,
   type FileSystemChangeSetExecutionOptions,
+  type NodeFileSystemChangeSetHostOptions,
 } from "./file-system-change-set-execution.js";
 export { createRegistrationCommand } from "./registration-command.js";
 export {
@@ -59,6 +68,13 @@ export {
   type PathChangeEvidence,
   type PersistedBridgeSettings,
 } from "./managed-vault-runtime.js";
+export {
+  RUN_MAINTENANCE_COMMAND_ID,
+  assertValidatedInstalledBundle,
+  registerRunMaintenanceCommand,
+  type InstalledBundleProbe,
+  type MaintenanceCommandRegistry,
+} from "./maintenance-operation.js";
 export {
   MAXIMUM_LOGICAL_EXACT_READ_BYTES,
   performVaultRead,

@@ -6,10 +6,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import {
+  InjectedChangeSetCrash,
   createBridgeInstance,
   type BridgeHealthState,
+  type ChangeSetExecutionAdapter,
   type ChangeSetRegistryState,
   type ChangeSetRegistryStore,
+  type RecoveryJournalFrame,
 } from "../src/index.js";
 
 const DAY = 24 * 60 * 60 * 1_000;
@@ -32,6 +35,94 @@ class MemoryChangeSetStore implements ChangeSetRegistryStore {
       throw new Error("injected persistence failure");
     }
     this.state = structuredClone(state);
+  }
+}
+
+class MemoryMcpExecution implements ChangeSetExecutionAdapter {
+  readonly directories = new Set<string>();
+  readonly files = new Map<string, Uint8Array>();
+  readonly identities = new Map<string, string>();
+  readonly stagedDirectories = new Map<string, string>();
+  readonly stagedFiles = new Map<string, { bytes: Uint8Array; identity: string }>();
+  frame: RecoveryJournalFrame | null = null;
+  snapshots = 0;
+  filePublishes = 0;
+  #identity = 0;
+
+  async loadRecoveryFrame(): Promise<RecoveryJournalFrame | null> {
+    return structuredClone(this.frame);
+  }
+
+  async persistRecoveryFrame(frame: RecoveryJournalFrame): Promise<void> {
+    this.frame = structuredClone(frame);
+  }
+
+  async pathKind(path: string): Promise<"directory" | "file" | null> {
+    return this.directories.has(path) ? "directory" : this.files.has(path) ? "file" : null;
+  }
+
+  async directoryIdentity(path: string): Promise<string | null> {
+    return this.identities.get(path) ?? null;
+  }
+
+  async prepareDirectory(stageId: string): Promise<string> {
+    const identity = `directory-${++this.#identity}`;
+    this.stagedDirectories.set(stageId, identity);
+    return identity;
+  }
+
+  async publishDirectory(stageId: string, path: string): Promise<void> {
+    const identity = this.stagedDirectories.get(stageId);
+    if (identity === undefined) throw new Error("missing staged directory");
+    this.stagedDirectories.delete(stageId);
+    this.directories.add(path);
+    this.identities.set(path, identity);
+  }
+
+  async discardPreparedDirectory(stageId: string): Promise<void> {
+    this.stagedDirectories.delete(stageId);
+  }
+
+  async removeDirectory(path: string): Promise<void> {
+    this.directories.delete(path);
+    this.identities.delete(path);
+  }
+
+  async readBinary(path: string): Promise<Uint8Array | null> {
+    const bytes = this.files.get(path);
+    return bytes === undefined ? null : Uint8Array.from(bytes);
+  }
+
+  async fileIdentity(path: string): Promise<string | null> {
+    return this.identities.get(path) ?? null;
+  }
+
+  async prepareFile(stageId: string, bytes: Uint8Array): Promise<string> {
+    const identity = `file-${++this.#identity}`;
+    this.stagedFiles.set(stageId, { bytes: Uint8Array.from(bytes), identity });
+    return identity;
+  }
+
+  async publishFile(stageId: string, path: string): Promise<void> {
+    const staged = this.stagedFiles.get(stageId);
+    if (staged === undefined) throw new Error("missing staged file");
+    this.filePublishes += 1;
+    this.stagedFiles.delete(stageId);
+    this.files.set(path, staged.bytes);
+    this.identities.set(path, staged.identity);
+  }
+
+  async discardPreparedFile(stageId: string): Promise<void> {
+    this.stagedFiles.delete(stageId);
+  }
+
+  async removeFile(path: string): Promise<void> {
+    this.files.delete(path);
+    this.identities.delete(path);
+  }
+
+  async publishSearchSnapshot(): Promise<void> {
+    this.snapshots += 1;
   }
 }
 
@@ -81,6 +172,274 @@ function createNote(content = "hello") {
 }
 
 describe("public Change Set MCP tools", () => {
+  it("reports already-satisfied over MCP without publishing a file", async () => {
+    const execution = new MemoryMcpExecution();
+    execution.directories.add("Notes");
+    execution.files.set("Notes/Same.md", Buffer.from("same"));
+    execution.identities.set("Notes/Same.md", "same-file");
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState(),
+      changeSets: {
+        store: new MemoryChangeSetStore(),
+        dataSource: {
+          readBinary: (path) => execution.readBinary(path),
+          pathKind: (path) => execution.pathKind(path),
+          isContained: async () => true,
+        },
+        execution,
+        createChangeSetId: () => "change-set-mcp-same",
+      },
+    });
+    await bridge.start();
+    const client = await connect(bridge.endpoint);
+
+    const result = await client.callTool({
+      name: "vault_change_set_submit",
+      arguments: {
+        submissionKey: "mcp-same-key",
+        operations: [
+          {
+            operationId: "same-1",
+            kind: "edit_body",
+            path: "Notes/Same.md",
+            targetVersion: VERSION("same"),
+            edit: { kind: "replace_whole", replacement: "same" },
+          },
+        ],
+      },
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toMatchObject({
+      changeSet: {
+        state: "intent_applied",
+        requestedEffects: [
+          { operationId: "same-1", outcome: "already_satisfied" },
+        ],
+        paths: [{ path: "Notes/Same.md", outcome: "unchanged" }],
+      },
+    });
+    expect(execution.filePublishes).toBe(0);
+    expect(execution.snapshots).toBe(1);
+
+    await client.close();
+    await bridge.stop();
+  });
+
+  for (const [crashPoint, expectedState, expectedContent] of [
+    ["after_file_mutation:0", "intent_not_applied", "before"],
+    ["after_committed", "intent_applied", "after 🚀\r\n"],
+  ] as const) {
+    it(`recovers MCP proof state after a crash at ${crashPoint}`, async () => {
+      const store = new MemoryChangeSetStore();
+      const execution = new MemoryMcpExecution();
+      execution.directories.add("Notes");
+      execution.files.set("Notes/Crash.md", Buffer.from("before"));
+      execution.identities.set("Notes/Crash.md", "crash-before");
+      const request = {
+        submissionKey: `mcp-crash-${crashPoint}`,
+        operations: [
+          {
+            operationId: "edit-crash",
+            kind: "edit_body",
+            path: "Notes/Crash.md",
+            targetVersion: VERSION("before"),
+            edit: { kind: "replace_whole", replacement: "after 🚀\r\n" },
+          },
+        ],
+      };
+      const changeSetId = `change-set-mcp-${crashPoint}`;
+      const dataSource = {
+        readBinary: (path: string) => execution.readBinary(path),
+        pathKind: (path: string) => execution.pathKind(path),
+        isContained: async () => true,
+      };
+      const crashingBridge = createBridgeInstance({
+        port: 0,
+        health: healthState(),
+        changeSets: {
+          store,
+          dataSource,
+          execution,
+          createChangeSetId: () => changeSetId,
+          crashInjector: (point) => {
+            if (point === crashPoint) throw new InjectedChangeSetCrash(point);
+          },
+        },
+      });
+      await crashingBridge.start();
+      const crashingClient = await connect(crashingBridge.endpoint);
+
+      const interrupted = await crashingClient.callTool({
+        name: "vault_change_set_submit",
+        arguments: request,
+      });
+      expect(interrupted.isError).toBe(true);
+      await crashingClient.close();
+      await crashingBridge.stop();
+
+      const recoveredBridge = createBridgeInstance({
+        port: 0,
+        health: healthState(),
+        changeSets: { store, dataSource, execution },
+      });
+      await recoveredBridge.start();
+      const recoveredClient = await connect(recoveredBridge.endpoint);
+      const status = await recoveredClient.callTool({
+        name: "vault_change_set_status",
+        arguments: { submissionKey: `mcp-crash-${crashPoint}` },
+      });
+
+      expect(Buffer.from(execution.files.get("Notes/Crash.md") ?? []).toString()).toBe(
+        expectedContent,
+      );
+      expect(status.isError).toBe(false);
+      expect(status.structuredContent).toMatchObject({
+        lookup: "found",
+        changeSet: {
+          changeSetId,
+          state: expectedState,
+          ...(expectedState === "intent_applied"
+            ? {
+                paths: [
+                  {
+                    path: "Notes/Crash.md",
+                    finalState: {
+                      kind: "markdown",
+                      contentVersion: VERSION(expectedContent),
+                    },
+                  },
+                ],
+              }
+            : {}),
+        },
+      });
+
+      await recoveredClient.close();
+      await recoveredBridge.stop();
+    });
+  }
+
+  it("creates and edits multiple notes through one durable MCP Change Set", async () => {
+    const store = new MemoryChangeSetStore();
+    const execution = new MemoryMcpExecution();
+    const dataSource = {
+      readBinary: (path: string) => execution.readBinary(path),
+      pathKind: (path: string) => execution.pathKind(path),
+      isContained: async () => true,
+    };
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState(),
+      changeSets: {
+        store,
+        dataSource,
+        execution,
+        createChangeSetId: () => "change-set-mcp-notes",
+      },
+    });
+    await bridge.start();
+    const client = await connect(bridge.endpoint);
+    const firstContent = "# One\r\nold 🚀\r\n";
+    const exactContent = "# One\r\nnew 🚀\r\n";
+    const finalContent = "# Final\n";
+    const request = {
+      submissionKey: "mcp-notes-key",
+      operations: [
+        {
+          operationId: "create-one",
+          kind: "create_note",
+          path: "Notes/One.md",
+          content: firstContent,
+          ifExists: "reject",
+        },
+        {
+          operationId: "edit-one-exact",
+          afterOperationId: "create-one",
+          kind: "edit_body",
+          path: "Notes/One.md",
+          targetVersion: VERSION(firstContent),
+          edit: {
+            kind: "replace_exact",
+            old: "old",
+            replacement: "new",
+            expectedOccurrences: 1,
+          },
+        },
+        {
+          operationId: "edit-one-whole",
+          afterOperationId: "edit-one-exact",
+          kind: "edit_body",
+          path: "Notes/One.md",
+          targetVersion: VERSION(exactContent),
+          edit: { kind: "replace_whole", replacement: finalContent },
+        },
+        {
+          operationId: "create-two",
+          kind: "create_note",
+          path: "Notes/Two.md",
+          content: "# Two\n",
+          ifExists: "reject",
+        },
+      ],
+    };
+
+    const submitted = await client.callTool({
+      name: "vault_change_set_submit",
+      arguments: request,
+    });
+    const status = await client.callTool({
+      name: "vault_change_set_status",
+      arguments: { submissionKey: "mcp-notes-key" },
+    });
+    const replayed = await client.callTool({
+      name: "vault_change_set_submit",
+      arguments: request,
+    });
+
+    expect(submitted.isError).toBe(false);
+    expect(submitted.structuredContent).toMatchObject({
+      outcome: "registered",
+      changeSet: {
+        changeSetId: "change-set-mcp-notes",
+        state: "intent_applied",
+        requestedEffects: [
+          { operationId: "create-one", outcome: "changed" },
+          { operationId: "edit-one-exact", outcome: "changed" },
+          { operationId: "edit-one-whole", outcome: "changed" },
+          { operationId: "create-two", outcome: "changed" },
+        ],
+        paths: [
+          { path: "Notes", finalState: { kind: "directory" } },
+          {
+            path: "Notes/One.md",
+            finalState: { kind: "markdown", contentVersion: VERSION(finalContent) },
+          },
+          {
+            path: "Notes/Two.md",
+            finalState: { kind: "markdown", contentVersion: VERSION("# Two\n") },
+          },
+        ],
+      },
+    });
+    expect(Buffer.from(execution.files.get("Notes/One.md") ?? []).toString()).toBe(
+      finalContent,
+    );
+    expect(Buffer.from(execution.files.get("Notes/Two.md") ?? []).toString()).toBe(
+      "# Two\n",
+    );
+    expect(execution.snapshots).toBe(1);
+    expect(status.structuredContent).toMatchObject({
+      lookup: "found",
+      changeSet: (submitted.structuredContent as { changeSet: unknown }).changeSet,
+    });
+    expect(replayed.structuredContent).toEqual(submitted.structuredContent);
+
+    await client.close();
+    await bridge.stop();
+  });
+
   it("replays one durable identity, rejects key conflicts, and recovers status after restart", async () => {
     const store = new MemoryChangeSetStore();
     const files = new Map<string, Uint8Array>();
@@ -800,17 +1159,28 @@ describe("public Change Set MCP tools", () => {
       changeSet: { state: "intent_not_applied", failure: { code: "stale_observation" } },
     });
 
-    const cardinality = await submit(edit("count", VERSION("old old"), "old"));
-    expect(cardinality.structuredContent).toMatchObject({
-      changeSet: {
-        state: "intent_not_applied",
-        failure: {
-          code: "exact_match_count_mismatch",
-          operationId: "edit-1",
-          actualOccurrences: 2,
+    for (const [submissionKey, content, old, actualOccurrences] of [
+      ["count-zero", "old old", "missing", 0],
+      ["count-multiple", "old old", "old", 2],
+      ["count-overlapping", "aaa", "aa", 2],
+    ] as const) {
+      files.set("Notes/A.md", Buffer.from(content));
+      const cardinality = await submit(
+        edit(submissionKey, VERSION(content), old),
+      );
+      expect(cardinality.structuredContent).toMatchObject({
+        changeSet: {
+          state: "intent_not_applied",
+          failure: {
+            code: "exact_match_count_mismatch",
+            operationId: "edit-1",
+            actualOccurrences,
+          },
         },
-      },
-    });
+      });
+      expect(files.get("Notes/A.md")?.toString()).toBe(content);
+    }
+    files.set("Notes/A.md", Buffer.from("old old"));
 
     const conflict = await submit({
       ...createNote(),
