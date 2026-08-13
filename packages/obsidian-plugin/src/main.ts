@@ -14,6 +14,7 @@ import {
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
+import { contentVersion } from "./content-version.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import { createFileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
 import {
@@ -26,6 +27,8 @@ import {
   VaultPathChangeRequiredError,
   type PathChangeClassification,
 } from "./managed-vault-runtime.js";
+
+class FilePublishPreconditionError extends Error {}
 
 export default class VaultOperationBridgePlugin extends Plugin {
   #runtime: ManagedVaultBridgeRuntime | undefined;
@@ -92,11 +95,23 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 await mkdir(dirname(stagePath), { recursive: true });
                 await writeFile(stagePath, bytes);
               },
-              publishFile: async (stageId, path) => {
-                await rename(
-                  join(stagingDirectory, ...stageId.split("/")),
-                  join(basePath, ...path.split("/")),
-                );
+              publishFile: async (stageId, path, expectedCurrentVersion) => {
+                const stagePath = join(stagingDirectory, ...stageId.split("/"));
+                const replacementBytes = await readFile(stagePath);
+                const replacement = replacementBytes.toString("utf8");
+                try {
+                  await adapter.process(path, (current) => {
+                    if (contentVersion(Buffer.from(current, "utf8")) !== expectedCurrentVersion) {
+                      throw new FilePublishPreconditionError();
+                    }
+                    return replacement;
+                  });
+                } catch (error) {
+                  if (error instanceof FilePublishPreconditionError) return false;
+                  throw error;
+                }
+                await unlink(stagePath);
+                return true;
               },
               discardPreparedFile: async (stageId) => {
                 try {

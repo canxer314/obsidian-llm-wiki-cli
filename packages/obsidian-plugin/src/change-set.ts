@@ -124,7 +124,11 @@ export interface ChangeSetExecutionAdapter {
   removeDirectory(path: string): Promise<void>;
   readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
   prepareFile?(stageId: string, bytes: Uint8Array): Promise<void>;
-  publishFile?(stageId: string, path: string): Promise<void>;
+  publishFile?(
+    stageId: string,
+    path: string,
+    expectedCurrentVersion: string,
+  ): Promise<boolean>;
   discardPreparedFile?(stageId: string): Promise<void>;
   publishSearchSnapshot(): Promise<void>;
   close?(): Promise<void>;
@@ -913,6 +917,33 @@ export class ChangeSetService {
     await this.#options.runtimeState?.blockWritesForUnproven(entry.changeSetId);
   }
 
+  async #rejectPreparedWithoutMutation(
+    entry: ChangeSetRegistryEntry,
+    frame: RecoveryJournalFrame,
+    failure: ChangeSetFailure,
+  ): Promise<void> {
+    const execution = this.#options.execution;
+    if (execution === undefined) throw new Error("Change Set executor is unavailable");
+    for (const file of frame.files ?? []) {
+      await execution.discardPreparedFile?.(file.stageId);
+    }
+    for (const directory of frame.directories) {
+      if (directory.stageId !== undefined) {
+        await execution.discardPreparedDirectory(directory.stageId);
+      }
+    }
+    await execution.persistRecoveryFrame({ ...frame, phase: "ROLLED_BACK" });
+    await this.#updateEntry(entry.changeSetId, (current) => {
+      current.changeSet = {
+        changeSetId: current.changeSetId,
+        state: "intent_not_applied",
+        preview: frame.preview,
+        failure,
+      };
+      if (current.execution !== undefined) current.execution.phase = "terminal";
+    });
+  }
+
   async #restorePrepared(
     entry: ChangeSetRegistryEntry,
     frame: RecoveryJournalFrame,
@@ -949,7 +980,15 @@ export class ChangeSetService {
           throw new Error("third-party path state");
         }
         await execution.prepareFile!(file.stageId, Buffer.from(file.beforeBase64, "base64"));
-        await execution.publishFile!(file.stageId, file.path);
+        if (
+          !(await execution.publishFile!(
+            file.stageId,
+            file.path,
+            file.expectedAfterVersion,
+          ))
+        ) {
+          throw new Error("third-party path state");
+        }
         restoredFootprints += 1;
         await this.#crash(`during_rollback:${restoredFootprints}`);
       }
@@ -1155,6 +1194,30 @@ export class ChangeSetService {
         if (current.execution !== undefined) current.execution.phase = "executing";
       });
       await this.#crash("after_prepared");
+      let publicMutations = 0;
+      for (const file of plan.files) {
+        if (file.beforeVersion === file.expectedAfterVersion) continue;
+        await execution.prepareFile!(file.stageId, file.expectedAfter);
+      }
+      for (const [index, file] of plan.files.entries()) {
+        if (file.beforeVersion === file.expectedAfterVersion) continue;
+        const published = await execution.publishFile!(
+          file.stageId,
+          file.path,
+          file.beforeVersion,
+        );
+        if (!published) {
+          if (publicMutations === 0) {
+            await this.#rejectPreparedWithoutMutation(entry, frame, {
+              code: "stale_observation",
+            });
+            return;
+          }
+          throw new Error("third-party path state");
+        }
+        publicMutations += 1;
+        await this.#crash(`after_mutation:${index}`);
+      }
       for (const [index, directory] of plan.directories.entries()) {
         const stageId = frame.directories.find(
           (candidate) => candidate.path === directory,
@@ -1171,13 +1234,8 @@ export class ChangeSetService {
         };
         await execution.persistRecoveryFrame(frame);
         await execution.publishDirectory(stageId, directory);
-        await this.#crash(`after_mutation:${index}`);
-      }
-      for (const [index, file] of plan.files.entries()) {
-        if (file.beforeVersion === file.expectedAfterVersion) continue;
-        await execution.prepareFile!(file.stageId, file.expectedAfter);
-        await execution.publishFile!(file.stageId, file.path);
-        await this.#crash(`after_mutation:${plan.directories.length + index}`);
+        publicMutations += 1;
+        await this.#crash(`after_mutation:${plan.files.length + index}`);
       }
       await this.#proveFinalPaths(plan);
       await this.#crash("after_raw_verification");

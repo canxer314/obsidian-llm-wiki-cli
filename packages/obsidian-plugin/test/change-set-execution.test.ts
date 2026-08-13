@@ -113,12 +113,19 @@ class FrontmatterAdapter extends DirectoryAdapter {
     this.preparedFiles.set(stageId, Buffer.from(bytes));
   }
 
-  async publishFile(stageId: string, path: string): Promise<void> {
+  async publishFile(
+    stageId: string,
+    path: string,
+    expectedCurrentVersion: string,
+  ): Promise<boolean> {
+    const current = this.files.get(path);
+    if (current === undefined || VERSION(current) !== expectedCurrentVersion) return false;
     this.events.push(`write:${path}`);
     const bytes = this.preparedFiles.get(stageId);
     if (bytes === undefined) throw new Error("prepared file is missing");
     this.preparedFiles.delete(stageId);
     this.files.set(path, Buffer.from(bytes));
+    return true;
   }
 
   async discardPreparedFile(stageId: string): Promise<void> {
@@ -221,11 +228,12 @@ async function openRealFileExecution(root: string, publishSnapshot: () => void) 
         await mkdir(dirname(stagePath), { recursive: true });
         await writeFile(stagePath, bytes);
       },
-      publishFile: async (stageId, path) => {
-        await rename(
-          join(stagingRoot, ...stageId.split("/")),
-          join(root, ...path.split("/")),
-        );
+      publishFile: async (stageId, path, expectedCurrentVersion) => {
+        const targetPath = join(root, ...path.split("/"));
+        const current = await readFile(targetPath);
+        if (VERSION(current) !== expectedCurrentVersion) return false;
+        await rename(join(stagingRoot, ...stageId.split("/")), targetPath);
+        return true;
       },
       discardPreparedFile: async (stageId) => {
         await unlink(join(stagingRoot, ...stageId.split("/"))).catch(
@@ -311,6 +319,64 @@ describe("durable Frontmatter Change Set execution", () => {
       "journal:COMMITTED",
     ]);
   });
+  it("revalidates staged file before images before the first public mutation", async () => {
+    const store = new MemoryStore();
+    const adapter = new FrontmatterAdapter();
+    const original = Buffer.from("---\ntitle: Old\n---\nbody\n");
+    const thirdParty = Buffer.from("---\ntitle: Third party\n---\nbody\n");
+    adapter.files.set("Note.md", original);
+    const prepareFile = adapter.prepareFile.bind(adapter);
+    adapter.prepareFile = async (stageId, bytes) => {
+      await prepareFile(stageId, bytes);
+      adapter.files.set("Note.md", thirdParty);
+    };
+    const projector = createFileSystemChangeSetDataSource(".", {
+      exists: async () => false,
+      readBinary: async () => new ArrayBuffer(0),
+      stat: async () => null,
+    }).projectFrontmatter;
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: adapter.readBinary.bind(adapter),
+        pathKind: adapter.pathKind.bind(adapter),
+        isContained: async () => true,
+        projectFrontmatter: projector,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-prepublish-stale",
+    });
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "prepublish-stale",
+        operations: [
+          {
+            operationId: "directory-1",
+            kind: "create_directory",
+            path: "Archive",
+            ifExists: "reject",
+          },
+          ...editFrontmatter(VERSION(original)).operations,
+        ],
+      },
+      requestState,
+    );
+
+    expect(submitted).toMatchObject({
+      outcome: "registered",
+      changeSet: {
+        state: "intent_not_applied",
+        failure: { code: "stale_observation" },
+      },
+    });
+    expect(adapter.directories).toEqual(new Set());
+    expect(adapter.files.get("Note.md")).toEqual(thirdParty);
+    expect(adapter.events).not.toContain("mkdir:Archive");
+    expect(adapter.events).not.toContain("write:Note.md");
+    expect(adapter.frame?.phase).toBe("ROLLED_BACK");
+  });
+
   it("executes directory and Frontmatter effects in one shared proof path", async () => {
     const store = new MemoryStore();
     const adapter = new FrontmatterAdapter();
@@ -357,8 +423,8 @@ describe("durable Frontmatter Change Set execution", () => {
     const record = appliedRecord(submitted);
 
     expect(adapter.directories).toEqual(new Set(["Archive"]));
-    expect(adapter.events.indexOf("mkdir:Archive")).toBeLessThan(
-      adapter.events.indexOf("write:Note.md"),
+    expect(adapter.events.indexOf("write:Note.md")).toBeLessThan(
+      adapter.events.indexOf("mkdir:Archive"),
     );
     expect(record.requestedEffects).toEqual([
       { operationId: "directory-1", kind: "create_directory", outcome: "changed" },
@@ -744,6 +810,65 @@ describe("durable Frontmatter Change Set execution", () => {
       changeSet: { state: "intent_not_applied" },
     });
     await reopenedExecution.close?.();
+  });
+
+  it("does not overwrite a third-party write racing Frontmatter rollback", async () => {
+    const store = new MemoryStore();
+    const adapter = new FrontmatterAdapter();
+    const original = Buffer.from("---\ntitle: Old\n---\nbody\n");
+    const thirdParty = Buffer.from("---\ntitle: During rollback\n---\nbody\n");
+    adapter.files.set("Note.md", original);
+    const projector = createFileSystemChangeSetDataSource(".", {
+      exists: async () => false,
+      readBinary: async () => new ArrayBuffer(0),
+      stat: async () => null,
+    }).projectFrontmatter;
+    const dataSource = {
+      readBinary: adapter.readBinary.bind(adapter),
+      pathKind: adapter.pathKind.bind(adapter),
+      isContained: async () => true,
+      projectFrontmatter: projector,
+    };
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution: adapter,
+      createChangeSetId: () => "change-set-rollback-race",
+      crashInjector: (point) => {
+        if (point === "after_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(editFrontmatter(VERSION(original)), requestState),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    const prepareFile = adapter.prepareFile.bind(adapter);
+    adapter.prepareFile = async (stageId, bytes) => {
+      await prepareFile(stageId, bytes);
+      adapter.files.set("Note.md", thirdParty);
+    };
+    const blocked: string[] = [];
+
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution: adapter,
+      runtimeState: {
+        setQueue: () => undefined,
+        blockWritesForUnproven: (changeSetId) => {
+          blocked.push(changeSetId);
+        },
+      },
+    });
+
+    expect(adapter.files.get("Note.md")).toEqual(thirdParty);
+    expect(adapter.frame?.phase).toBe("FAILED");
+    expect(blocked).toEqual(["change-set-rollback-race"]);
+    await expect(
+      recovered.status({ changeSetId: "change-set-rollback-race" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "result_unproven" },
+    });
   });
 
   it("does not overwrite third-party bytes during Frontmatter recovery", async () => {

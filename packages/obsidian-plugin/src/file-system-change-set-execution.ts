@@ -24,7 +24,11 @@ export interface DirectoryExecutionHost {
   removeDirectory(path: string): Promise<void>;
   readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
   prepareFile?(stageId: string, bytes: Uint8Array): Promise<void>;
-  publishFile?(stageId: string, path: string): Promise<void>;
+  publishFile?(
+    stageId: string,
+    path: string,
+    expectedCurrentVersion: string,
+  ): Promise<boolean>;
   discardPreparedFile?(stageId: string): Promise<void>;
   publishSearchSnapshot(): Promise<void>;
 }
