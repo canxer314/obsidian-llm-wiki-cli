@@ -343,6 +343,54 @@ describe("note move reference projection", () => {
       .toBe("See [guide](renamed%20100%25.md) now\n");
   });
 
+  it("rejects the projection when a moved markdown target name contains a literal #", async () => {
+    const target = "# a#b\n";
+    const backlink = "See [guide](a%23b.md) now\n";
+    const manager = new SearchSnapshotManager({
+      listMarkdownPaths: async () => ["Notes/a#b.md", "Notes/Backlink.md"],
+      readBinary: async (path) => Buffer.from(
+        path === "Notes/a#b.md" ? target : backlink,
+      ),
+      semanticEvidence: async (path) => path === "Notes/a#b.md"
+        ? {
+            frontmatter: null,
+            tags: [],
+            headings: [{ heading: "a#b", level: 1 }],
+            references: [],
+            resolvedLinks: {},
+            unresolvedLinks: {},
+          }
+        : {
+            frontmatter: null,
+            tags: [],
+            headings: [],
+            references: [reference(
+              backlink,
+              "[guide](a%23b.md)",
+              "a%23b.md",
+              "Notes/a#b.md",
+              "markdown_inline_link",
+            )],
+            resolvedLinks: { "Notes/a#b.md": 1 },
+            unresolvedLinks: {},
+          },
+    });
+    await manager.rebuild();
+
+    const projection = await createMoveReferenceProjector(manager)({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/a#b.md",
+      destinationPath: "Archive/a#b.md",
+      targetVersion: version(target),
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target));
+
+    // A bare # in the rendered destination would start a fragment, silently
+    // corrupting the link, so the projection must reject instead (AC6).
+    expect(projection).toBeNull();
+  });
+
   it("rejects the projection instead of throwing when a target decodes outside the vault", async () => {
     const target = "# Target\n";
     const backlink = "See [g](../escape.md) now\n";

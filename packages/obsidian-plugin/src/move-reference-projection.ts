@@ -49,6 +49,14 @@ function decodeLinkpath(reference: SearchSnapshotReference, fileLinkpath: string
   }
 }
 
+// A literal "#" in the file portion of a target starts a fragment in every
+// registered profile, so a moved note whose destination name contains one
+// cannot be re-rendered without silently corrupting the link; reject the
+// projection instead of rewriting (issue #38 AC6: ambiguity rejects).
+function joinFileAndFragment(fileLinkpath: string, fragment: string): string | null {
+  return fileLinkpath.includes("#") ? null : fileLinkpath + fragment;
+}
+
 function resolvesUniquely(
   decodedLinkpath: string,
   candidates: readonly CanonicalReferenceCandidate[],
@@ -104,7 +112,7 @@ function renderedTarget(
     ? operation.destinationPath
     : sourceNote.path;
   if (resolvesUniquely(decoded, candidates, projectedSourcePath, operation.destinationPath)) {
-    return decoded + decodedFragment;
+    return joinFileAndFragment(decoded, decodedFragment);
   }
   const hadExplicitPath = decoded.includes("/");
   let nextFileLinkpath = relativeStyle
@@ -123,7 +131,7 @@ function renderedTarget(
   if (
     !resolvesUniquely(nextFileLinkpath, candidates, projectedSourcePath, operation.destinationPath)
   ) return null;
-  return nextFileLinkpath + decodedFragment;
+  return joinFileAndFragment(nextFileLinkpath, decodedFragment);
 }
 
 function projectNote(
