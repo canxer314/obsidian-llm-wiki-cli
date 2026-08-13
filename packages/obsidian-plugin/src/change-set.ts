@@ -17,6 +17,7 @@ import {
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 2;
 const LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
+export const RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 2;
 
 export interface ChangeSetExecutionState {
   phase: "queued" | "executing" | "terminal";
@@ -102,7 +103,7 @@ export interface ChangeSetPreflightDataSource {
 export type RecoveryJournalPhase = "PREPARED" | "COMMITTED" | "ROLLED_BACK" | "FAILED";
 
 export interface RecoveryJournalFrame {
-  schemaVersion: 1;
+  schemaVersion: 1 | typeof RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION;
   vaultId: string;
   changeSetId: string;
   enqueueSeq: number;
@@ -116,7 +117,23 @@ export interface RecoveryJournalFrame {
     identity?: string;
     stageId?: string;
   }[];
+  files?: readonly {
+    path: string;
+    before: "absent" | "file";
+    beforeBytesBase64?: string;
+    beforeIdentity?: string;
+    expectedAfterVersion: string;
+    identity?: string;
+    stageId?: string;
+  }[];
   finalPaths?: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"];
+}
+
+export interface SearchSnapshotTargetEvidence {
+  path: string;
+  contentVersion: string;
+  /** true: a create/edit must observe metadata for this exact version. */
+  requireSemanticMatch: boolean;
 }
 
 export interface ChangeSetExecutionAdapter {
@@ -128,7 +145,13 @@ export interface ChangeSetExecutionAdapter {
   publishDirectory(stageId: string, path: string): Promise<void>;
   discardPreparedDirectory(stageId: string): Promise<void>;
   removeDirectory(path: string): Promise<void>;
-  publishSearchSnapshot(): Promise<void>;
+  readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
+  fileIdentity?(path: string): Promise<string | null>;
+  prepareFile?(stageId: string, bytes: Uint8Array): Promise<string>;
+  publishFile?(stageId: string, path: string): Promise<void>;
+  discardPreparedFile?(stageId: string): Promise<void>;
+  removeFile?(path: string): Promise<void>;
+  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -212,6 +235,7 @@ function selectOperationalGate(
 }
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const utf8Encoder = new TextEncoder();
 const protectedRoots = [".git", ".obsidian", ".llm-wiki", ".trash"];
 
 function emptyState(): ChangeSetRegistryState {
@@ -412,15 +436,77 @@ function attachmentHash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function occurrenceCount(content: string, old: string): number {
-  if (old.length === 0) return content.length + 1;
-  let count = 0;
-  let index = 0;
-  while ((index = content.indexOf(old, index)) !== -1) {
-    count += 1;
-    index += old.length;
+function findSubarray(haystack: Uint8Array, needle: Uint8Array, fromIndex = 0): number {
+  if (needle.length === 0) return fromIndex <= haystack.length ? fromIndex : -1;
+  outer: for (let index = fromIndex; index <= haystack.length - needle.length; index += 1) {
+    for (let offset = 0; offset < needle.length; offset += 1) {
+      if (haystack[index + offset] !== needle[offset]) continue outer;
+    }
+    return index;
   }
-  return count;
+  return -1;
+}
+
+function findOccurrences(
+  content: Uint8Array,
+  old: Uint8Array,
+): { count: number; firstIndex: number } {
+  if (old.length === 0) return { count: content.length + 1, firstIndex: 0 };
+  let count = 0;
+  let firstIndex = -1;
+  let index = 0;
+  while ((index = findSubarray(content, old, index)) !== -1) {
+    if (firstIndex === -1) firstIndex = index;
+    count += 1;
+    index += 1;
+  }
+  return { count, firstIndex };
+}
+
+type BodyEditProjection =
+  | { outcome: "projected"; bytes: Uint8Array }
+  | { outcome: "invalid_utf8" }
+  | { outcome: "exact_match_count_mismatch"; actualOccurrences: number };
+
+function projectBodyBytes(
+  bytes: Uint8Array,
+  edit: Extract<ChangeSetOperation, { kind: "edit_body" }>["edit"],
+): BodyEditProjection {
+  try {
+    utf8Decoder.decode(bytes);
+  } catch {
+    return { outcome: "invalid_utf8" };
+  }
+  const hasBom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  const payload = bytes.subarray(hasBom ? 3 : 0);
+  if (edit.kind === "replace_whole") {
+    const replacement = utf8Encoder.encode(edit.replacement);
+    return {
+      outcome: "projected",
+      bytes: Uint8Array.from(
+        Buffer.concat([bytes.subarray(0, hasBom ? 3 : 0), replacement]),
+      ),
+    };
+  }
+  const old = utf8Encoder.encode(edit.old);
+  const occurrences = findOccurrences(payload, old);
+  if (occurrences.count !== 1) {
+    return {
+      outcome: "exact_match_count_mismatch",
+      actualOccurrences: occurrences.count,
+    };
+  }
+  const replacement = utf8Encoder.encode(edit.replacement);
+  return {
+    outcome: "projected",
+    bytes: Uint8Array.from(
+      Buffer.concat([
+        bytes.subarray(0, (hasBom ? 3 : 0) + occurrences.firstIndex),
+        replacement,
+        payload.subarray(occurrences.firstIndex + old.length),
+      ]),
+    ),
+  };
 }
 
 function parentPaths(path: string): string[] {
@@ -446,15 +532,31 @@ interface PreflightResult {
   accepted: boolean;
   failure?: ChangeSetFailure;
   preview?: Preview;
+  projectedBytes?: ReadonlyMap<string, Uint8Array | null>;
+}
+
+async function readBinary(
+  source: { readBinary(path: string): Promise<ArrayBuffer | Uint8Array | null> },
+  path: string,
+): Promise<Uint8Array | null> {
+  const value = await source.readBinary(path);
+  if (value === null) return null;
+  return Uint8Array.from(value instanceof Uint8Array ? value : new Uint8Array(value));
 }
 
 async function readBytes(
   dataSource: ChangeSetPreflightDataSource,
   path: string,
 ): Promise<Uint8Array | null> {
-  const value = await dataSource.readBinary(path);
-  if (value === null) return null;
-  return Uint8Array.from(value instanceof Uint8Array ? value : new Uint8Array(value));
+  return readBinary(dataSource, path);
+}
+
+async function readExecutionBytes(
+  execution: ChangeSetExecutionAdapter,
+  path: string,
+): Promise<Uint8Array | null> {
+  if (execution.readBinary === undefined) return null;
+  return readBinary(execution as Required<Pick<ChangeSetExecutionAdapter, "readBinary">>, path);
 }
 
 async function preflight(
@@ -591,30 +693,21 @@ async function preflight(
         contentVersion: operation.targetVersion,
       };
       if (operation.kind === "edit_body") {
-        let content: string;
-        try {
-          content = utf8Decoder.decode(bytes);
-        } catch {
+        const projected = projectBodyBytes(bytes, operation.edit);
+        if (projected.outcome === "invalid_utf8") {
           return { accepted: false, failure: { code: "stale_observation" } };
         }
-        if (operation.edit.kind === "replace_exact") {
-          const actualOccurrences = occurrenceCount(content, operation.edit.old);
-          if (actualOccurrences !== operation.edit.expectedOccurrences) {
-            return {
-              accepted: false,
-              failure: {
-                code: "exact_match_count_mismatch",
-                operationId: operation.operationId,
-                actualOccurrences,
-              },
-            };
-          }
+        if (projected.outcome === "exact_match_count_mismatch") {
+          return {
+            accepted: false,
+            failure: {
+              code: "exact_match_count_mismatch",
+              operationId: operation.operationId,
+              actualOccurrences: projected.actualOccurrences,
+            },
+          };
         }
-        const projectedContent =
-          operation.edit.kind === "replace_whole"
-            ? operation.edit.replacement
-            : content.replace(operation.edit.old, operation.edit.replacement);
-        const finalBytes = Buffer.from(projectedContent);
+        const finalBytes = projected.bytes;
         const finalState = {
           kind: "markdown" as const,
           contentVersion: contentVersion(finalBytes),
@@ -777,6 +870,7 @@ async function preflight(
         .sort(([left], [right]) => compareCodeUnits(left, right))
         .map(([path, state]) => ({ path, ...state })),
     },
+    projectedBytes,
   };
 }
 
@@ -812,6 +906,7 @@ export class ChangeSetService {
     try {
       await service.#recover();
     } catch (error) {
+      if (error instanceof InjectedChangeSetCrash) throw error;
       recoveryBlocked = true;
       service.#recoveryBlocked = true;
       const unfinished = service.#state.entries.filter(
@@ -832,14 +927,19 @@ export class ChangeSetService {
     await this.#options.crashInjector?.(point);
   }
 
-  #directoryPlan(
-    entry: ChangeSetRegistryEntry,
-  ): { input: ChangeSetSubmitInput; preview: Preview; directories: string[] } | null {
+  #mutationPlan(entry: ChangeSetRegistryEntry): {
+    input: ChangeSetSubmitInput;
+    preview: Preview;
+    directories: string[];
+  } | null {
     if (
       entry.execution === undefined ||
       entry.changeSet.state !== "in_progress" ||
       entry.changeSet.preview === undefined ||
-      entry.execution.input.operations.some(({ kind }) => kind !== "create_directory")
+      entry.execution.input.operations.some(
+        ({ kind }) =>
+          kind !== "create_directory" && kind !== "create_note" && kind !== "edit_body",
+      )
     ) {
       return null;
     }
@@ -917,6 +1017,59 @@ export class ChangeSetService {
     if (execution === undefined) return false;
     let rolledBackDurable = false;
     try {
+      for (const file of [...(frame.files ?? [])].reverse()) {
+        const current = await execution.pathKind(file.path);
+        const currentIdentity =
+          current === "file" ? await execution.fileIdentity?.(file.path) : null;
+        const currentBytes =
+          current === "file" ? await readExecutionBytes(execution, file.path) : null;
+        const currentVersion =
+          currentBytes === null ? null : contentVersion(currentBytes);
+        const beforeBytes =
+          file.beforeBytesBase64 === undefined
+            ? null
+            : Buffer.from(file.beforeBytesBase64, "base64");
+        if (current === null) {
+          if (file.stageId !== undefined) {
+            await execution.discardPreparedFile?.(file.stageId);
+          }
+          if (file.before === "file") throw new Error("original file disappeared");
+          continue;
+        }
+        if (
+          current === "file" &&
+          file.before === "file" &&
+          beforeBytes !== null &&
+          currentBytes !== null &&
+          Buffer.from(currentBytes).equals(beforeBytes)
+        ) {
+          if (file.stageId !== undefined) {
+            await execution.discardPreparedFile?.(file.stageId);
+          }
+          continue;
+        }
+        if (
+          current !== "file" ||
+          file.identity === undefined ||
+          currentIdentity !== file.identity ||
+          currentVersion !== file.expectedAfterVersion
+        ) {
+          throw new Error("third-party path state");
+        }
+        if (file.before === "absent") {
+          await execution.removeFile?.(file.path);
+        } else {
+          if (beforeBytes === null || execution.prepareFile === undefined || execution.publishFile === undefined) {
+            throw new Error("file rollback evidence is incomplete");
+          }
+          const rollbackStageId = `${file.stageId ?? entry.changeSetId}/rollback`;
+          await execution.discardPreparedFile?.(rollbackStageId);
+          await execution.prepareFile(rollbackStageId, beforeBytes);
+          await this.#crash(`recovery_after_file_prepared:${file.path}`);
+          await execution.publishFile(rollbackStageId, file.path);
+          await this.#crash(`recovery_after_file_published:${file.path}`);
+        }
+      }
       for (const directory of [...frame.directories].reverse()) {
         const current = await execution.pathKind(directory.path);
         if (current === null) {
@@ -933,6 +1086,22 @@ export class ChangeSetService {
           throw new Error("third-party path state");
         }
         await execution.removeDirectory(directory.path);
+      }
+      for (const file of frame.files ?? []) {
+        const kind = await execution.pathKind(file.path);
+        if (file.before === "absent") {
+          if (kind !== null) throw new Error("before state was not restored");
+          continue;
+        }
+        const bytes = await readExecutionBytes(execution, file.path);
+        if (
+          kind !== "file" ||
+          bytes === null ||
+          file.beforeBytesBase64 === undefined ||
+          !Buffer.from(bytes).equals(Buffer.from(file.beforeBytesBase64, "base64"))
+        ) {
+          throw new Error("before state was not restored");
+        }
       }
       for (const directory of frame.directories) {
         if ((await execution.pathKind(directory.path)) !== null) {
@@ -952,6 +1121,7 @@ export class ChangeSetService {
       });
       return true;
     } catch (error) {
+      if (error instanceof InjectedChangeSetCrash) throw error;
       if (rolledBackDurable) throw error;
       try {
         await execution.persistRecoveryFrame({ ...frame, phase: "FAILED" });
@@ -994,15 +1164,15 @@ export class ChangeSetService {
       return;
     }
     if (frame.phase === "COMMITTED" && entry.changeSet.state === "in_progress") {
+      if (frame.finalPaths === undefined) {
+        await this.#markUnproven(entry);
+        return;
+      }
       await this.#updateEntry(entry.changeSetId, (current) => {
         current.changeSet = this.#appliedRecord(
           current,
           frame.preview,
-          frame.finalPaths ?? frame.preview.paths.map(({ path, projectedOutcome }) => ({
-            path,
-            outcome: projectedOutcome,
-            finalState: { kind: "directory" },
-          })),
+          frame.finalPaths!,
         );
         if (current.execution !== undefined) current.execution.phase = "terminal";
       });
@@ -1033,7 +1203,7 @@ export class ChangeSetService {
       .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
     for (const entry of queued) {
       if (this.#dequeuePaused) break;
-      await this.#executeDirectory(entry.changeSetId);
+      await this.#executeMutation(entry.changeSetId);
     }
   }
 
@@ -1133,7 +1303,7 @@ export class ChangeSetService {
     };
   }
 
-  async #executeDirectory(changeSetId: string): Promise<void> {
+  async #executeMutation(changeSetId: string): Promise<void> {
     const execution = this.#options.execution;
     if (execution === undefined) return;
     const entry = this.#state.entries.find((candidate) => candidate.changeSetId === changeSetId);
@@ -1144,7 +1314,7 @@ export class ChangeSetService {
       )
       .sort((left, right) => left.enqueueSeq - right.enqueueSeq)[0];
     if (head?.changeSetId !== entry.changeSetId) return;
-    const plan = this.#directoryPlan(entry);
+    const plan = this.#mutationPlan(entry);
     if (plan === null) return;
     this.#currentExecutionId = entry.changeSetId;
     this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
@@ -1163,8 +1333,39 @@ export class ChangeSetService {
       this.#options.runtimeState?.setQueue(this.#queueState(null));
       return;
     }
+    const projectedMarkdown = plan.preview.paths.filter(
+      ({ projectedFinalState }) => projectedFinalState.kind === "markdown",
+    );
+    const changedOperationIds = new Set(
+      plan.preview.requestedEffects
+        .filter(({ projectedOutcome }) => projectedOutcome === "changed")
+        .map(({ operationId }) => operationId),
+    );
+    const projectedFiles = projectedMarkdown.filter(
+      ({ path, projectedOutcome }) =>
+        projectedOutcome === "changed" ||
+        plan.input.operations.some(
+          (operation) =>
+            "path" in operation &&
+            operation.path === path &&
+            changedOperationIds.has(operation.operationId),
+        ),
+    );
+    if (projectedMarkdown.length > 0 && execution.readBinary === undefined) {
+      throw new Error("Change Set execution adapter cannot prove final file bytes");
+    }
+    if (
+      projectedFiles.length > 0 &&
+      (execution.fileIdentity === undefined ||
+        execution.prepareFile === undefined ||
+        execution.publishFile === undefined ||
+        execution.discardPreparedFile === undefined ||
+        execution.removeFile === undefined)
+    ) {
+      throw new Error("Change Set execution adapter does not support files");
+    }
     let frame: RecoveryJournalFrame = {
-      schemaVersion: 1,
+      schemaVersion: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
       vaultId: this.#options.vaultId ?? "vault",
       changeSetId: entry.changeSetId,
       enqueueSeq: entry.enqueueSeq,
@@ -1175,8 +1376,46 @@ export class ChangeSetService {
         path,
         before: "absent",
         expectedAfter: "directory",
-        stageId: `${entry.changeSetId}/${index}`,
+        stageId: `${entry.changeSetId}/directory/${index}`,
       })),
+      files: await Promise.all(
+        projectedFiles.map(async ({ path, preState, projectedFinalState }, index) => {
+          if (projectedFinalState.kind !== "markdown") {
+            throw new Error("Projected file evidence is invalid");
+          }
+          const beforeBytes =
+            preState.kind === "markdown"
+              ? await readBytes(this.#options.dataSource, path)
+              : null;
+          const beforeIdentity =
+            preState.kind === "markdown"
+              ? await execution.fileIdentity?.(path)
+              : null;
+          if (
+            (preState.kind === "markdown" &&
+              (beforeBytes === null ||
+                beforeIdentity === null ||
+                beforeIdentity === undefined ||
+                contentVersion(beforeBytes) !== preState.contentVersion)) ||
+            (preState.kind === "absent" &&
+              (beforeBytes !== null || (await execution.pathKind(path)) !== null))
+          ) {
+            throw new Error("File pre-state evidence changed after locked preflight");
+          }
+          return {
+            path,
+            before: preState.kind === "markdown" ? ("file" as const) : ("absent" as const),
+            ...(beforeBytes === null
+              ? {}
+              : { beforeBytesBase64: Buffer.from(beforeBytes).toString("base64") }),
+            ...(beforeIdentity === null || beforeIdentity === undefined
+              ? {}
+              : { beforeIdentity }),
+            expectedAfterVersion: projectedFinalState.contentVersion,
+            stageId: `${entry.changeSetId}/file/${index}`,
+          };
+        }),
+      ),
     };
     await this.#crash("before_prepared");
     await execution.persistRecoveryFrame(frame);
@@ -1186,7 +1425,25 @@ export class ChangeSetService {
         if (current.execution !== undefined) current.execution.phase = "executing";
       });
       await this.#crash("after_prepared");
+      const preparedFiles = [] as NonNullable<RecoveryJournalFrame["files"]>[number][];
+      for (const file of frame.files ?? []) {
+        const projected = checked.projectedBytes?.get(file.path);
+        if (projected === undefined || projected === null) {
+          throw new Error("Projected file bytes are missing");
+        }
+        const stageId = file.stageId;
+        if (stageId === undefined) throw new Error("File staging identity is missing");
+        const identity = await execution.prepareFile!(stageId, projected);
+        preparedFiles.push({ ...file, identity });
+      }
+      if (preparedFiles.length > 0) {
+        frame = { ...frame, files: preparedFiles };
+        await execution.persistRecoveryFrame(frame);
+      }
       for (const [index, directory] of plan.directories.entries()) {
+        if ((await execution.pathKind(directory)) !== null) {
+          throw new Error("Directory absence changed before mutation");
+        }
         const stageId = frame.directories.find(
           (candidate) => candidate.path === directory,
         )?.stageId;
@@ -1204,24 +1461,75 @@ export class ChangeSetService {
         await execution.publishDirectory(stageId, directory);
         await this.#crash(`after_mutation:${index}`);
       }
+      for (const [index, file] of (frame.files ?? []).entries()) {
+        const currentBytes = await readExecutionBytes(execution, file.path);
+        const currentIdentity = await execution.fileIdentity?.(file.path);
+        if (
+          (file.before === "absent" &&
+            (currentBytes !== null || (await execution.pathKind(file.path)) !== null)) ||
+          (file.before === "file" &&
+            (currentBytes === null ||
+              file.beforeBytesBase64 === undefined ||
+              !Buffer.from(currentBytes).equals(
+                Buffer.from(file.beforeBytesBase64, "base64"),
+              ) ||
+              currentIdentity !== file.beforeIdentity))
+        ) {
+          throw new Error("File pre-state changed before mutation");
+        }
+        const stageId = file.stageId;
+        if (stageId === undefined) throw new Error("File staging identity is missing");
+        await execution.publishFile!(stageId, file.path);
+        await this.#crash(`after_file_mutation:${index}`);
+      }
       for (const directory of plan.directories) {
         if ((await execution.pathKind(directory)) !== "directory") {
           throw new Error("Final directory evidence did not match");
         }
       }
-      await this.#crash("after_raw_verification");
-      await execution.publishSearchSnapshot();
-      const finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"] = [];
-      for (const path of plan.preview.paths.map(({ path }) => path)) {
-        if ((await execution.pathKind(path)) !== "directory") {
-          throw new Error("Final directory evidence changed during the success barrier");
+      for (const file of frame.files ?? []) {
+        const bytes = await readExecutionBytes(execution, file.path);
+        if (bytes === null || contentVersion(bytes) !== file.expectedAfterVersion) {
+          throw new Error("Final file evidence did not match");
         }
-        const projected = plan.preview.paths.find((candidate) => candidate.path === path);
-        if (projected === undefined) throw new Error("Final path evidence is incomplete");
+      }
+      await this.#crash("after_raw_verification");
+      await execution.publishSearchSnapshot(
+        projectedMarkdown.map(({ path, projectedOutcome, projectedFinalState }) => {
+          if (projectedFinalState.kind !== "markdown") {
+            throw new Error("Projected snapshot evidence is invalid");
+          }
+          return {
+            path,
+            contentVersion: projectedFinalState.contentVersion,
+            requireSemanticMatch: projectedOutcome === "changed",
+          };
+        }),
+      );
+      const finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"] = [];
+      for (const projected of plan.preview.paths) {
+        const path = projected.path;
+        const state = projected.projectedFinalState;
+        if (state.kind === "directory") {
+          if ((await execution.pathKind(path)) !== "directory") {
+            throw new Error("Final directory evidence changed during the success barrier");
+          }
+        } else if (state.kind === "markdown") {
+          const bytes = await readExecutionBytes(execution, path);
+          if (bytes === null || contentVersion(bytes) !== state.contentVersion) {
+            throw new Error("Final file evidence changed during the success barrier");
+          }
+        } else if (state.kind === "absent") {
+          if ((await execution.pathKind(path)) !== null) {
+            throw new Error("Final absent evidence changed during the success barrier");
+          }
+        } else {
+          throw new Error("Final evidence kind is unsupported by this Change Set");
+        }
         finalPaths.push({
           path,
           outcome: projected.projectedOutcome,
-          finalState: { kind: "directory" },
+          finalState: state,
         });
       }
       await this.#crash("after_snapshot");
@@ -1328,7 +1636,7 @@ export class ChangeSetService {
     await this.#withWriteLease(async () => {
       await this.#recover();
       if (!this.#recoveryBlocked && !this.#dequeuePaused) {
-        await this.#executeDirectory(registered.changeSet.changeSetId);
+        await this.#executeMutation(registered.changeSet.changeSetId);
       }
     });
     return this.#serialize(() => {
@@ -1425,7 +1733,9 @@ export class ChangeSetService {
       ...(historicalGate === undefined ? {} : { historicalGate }),
       ...(changeSet.state === "in_progress" &&
       changeSet.preview !== undefined &&
-      input.operations.every(({ kind }) => kind === "create_directory")
+      input.operations.every(({ kind }) =>
+        kind === "create_directory" || kind === "create_note" || kind === "edit_body"
+      )
         ? {
             execution: {
               phase: "queued" as const,

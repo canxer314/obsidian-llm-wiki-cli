@@ -1,10 +1,12 @@
 import { mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION } from "./change-set.js";
 import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
   RecoveryJournalFrame,
+  SearchSnapshotTargetEvidence,
 } from "./change-set.js";
 import {
   RecoveryJournalIncompatibleError,
@@ -15,19 +17,27 @@ import {
 
 export const DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY = 8 * 1024 * 1024;
 
-export interface DirectoryExecutionHost {
+export interface ChangeSetExecutionHost {
   pathKind(path: string): Promise<ChangeSetPathKind | null>;
   directoryIdentity(path: string): Promise<string | null>;
   prepareDirectory(stageId: string): Promise<string>;
   publishDirectory(stageId: string, path: string): Promise<void>;
   discardPreparedDirectory(stageId: string): Promise<void>;
   removeDirectory(path: string): Promise<void>;
-  publishSearchSnapshot(): Promise<void>;
+  readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
+  fileIdentity?(path: string): Promise<string | null>;
+  prepareFile?(stageId: string, bytes: Uint8Array): Promise<string>;
+  publishFile?(stageId: string, path: string): Promise<void>;
+  discardPreparedFile?(stageId: string): Promise<void>;
+  removeFile?(path: string): Promise<void>;
+  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
 }
+
+export type DirectoryExecutionHost = ChangeSetExecutionHost;
 
 export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
-  host: DirectoryExecutionHost;
+  host: ChangeSetExecutionHost;
   slotCapacity?: number;
 }
 
@@ -39,14 +49,15 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   if (
     typeof frame.schemaVersion === "number" &&
     Number.isInteger(frame.schemaVersion) &&
-    frame.schemaVersion > 1
+    frame.schemaVersion > RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION
   ) {
     throw new RecoveryJournalIncompatibleError(
       "Recovery Journal payload schema is not supported",
     );
   }
   if (
-    frame.schemaVersion !== 1 ||
+    (frame.schemaVersion !== 1 &&
+      frame.schemaVersion !== RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION) ||
     typeof frame.vaultId !== "string" ||
     frame.vaultId.length === 0 ||
     typeof frame.changeSetId !== "string" ||
@@ -55,6 +66,9 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
     typeof frame.input !== "object" ||
     frame.input === null ||
     !Array.isArray(frame.directories) ||
+    (frame.schemaVersion === 1 && frame.files !== undefined) ||
+    (frame.schemaVersion === RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION &&
+      !Array.isArray(frame.files)) ||
     typeof frame.preview !== "object" ||
     frame.preview === null
   ) {
@@ -113,6 +127,14 @@ export async function createFileSystemChangeSetExecutionAdapter(
     publishDirectory: options.host.publishDirectory,
     discardPreparedDirectory: options.host.discardPreparedDirectory,
     removeDirectory: options.host.removeDirectory,
+    ...(options.host.readBinary === undefined ? {} : { readBinary: options.host.readBinary }),
+    ...(options.host.fileIdentity === undefined ? {} : { fileIdentity: options.host.fileIdentity }),
+    ...(options.host.prepareFile === undefined ? {} : { prepareFile: options.host.prepareFile }),
+    ...(options.host.publishFile === undefined ? {} : { publishFile: options.host.publishFile }),
+    ...(options.host.discardPreparedFile === undefined
+      ? {}
+      : { discardPreparedFile: options.host.discardPreparedFile }),
+    ...(options.host.removeFile === undefined ? {} : { removeFile: options.host.removeFile }),
     publishSearchSnapshot: options.host.publishSearchSnapshot,
     close: () => handle.close(),
   };

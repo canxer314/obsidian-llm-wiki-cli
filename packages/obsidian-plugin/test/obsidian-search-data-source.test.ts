@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +9,7 @@ import {
 } from "../src/index.js";
 
 import {
+  ObsidianSemanticVersionTracker,
   enumerateCanonicalReferenceTargets,
   isRegisteredSubpathResult,
 } from "../src/obsidian-search-data-source.js";
@@ -14,6 +17,67 @@ import {
 const position = (start: number, end: number) => ({
   start: { line: 0, col: start, offset: start },
   end: { line: 0, col: end, offset: end },
+});
+
+describe("Obsidian semantic Content Version evidence", () => {
+  const byteVersion = (bytes: Uint8Array) =>
+    createHash("sha256").update(bytes).digest("hex");
+  const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+  const utf8 = (text: string) => new TextEncoder().encode(text);
+
+  it("matches parsed text to raw bytes with and without a BOM", () => {
+    const tracker = new ObsidianSemanticVersionTracker();
+    expect(tracker.matches("Note.md", utf8("body"))).toBe(false);
+
+    tracker.observe("Note.md", "body");
+    expect(tracker.matches("Note.md", utf8("body"))).toBe(true);
+    expect(tracker.matches("Note.md", Buffer.concat([BOM, utf8("body")]))).toBe(true);
+    expect(tracker.matches("Note.md", utf8("other"))).toBe(false);
+  });
+
+  it("rejects a late stale observation after a newer one", () => {
+    const tracker = new ObsidianSemanticVersionTracker();
+    tracker.observe("Note.md", "v2");
+    expect(tracker.matches("Note.md", utf8("v2"))).toBe(true);
+    tracker.observe("Note.md", "v1");
+    expect(tracker.matches("Note.md", utf8("v2"))).toBe(false);
+    expect(tracker.matches("Note.md", utf8("v1"))).toBe(true);
+  });
+
+  it("tracks rename and forgets delete", () => {
+    const tracker = new ObsidianSemanticVersionTracker();
+    tracker.observe("Old.md", "body");
+    tracker.rename("Old.md", "New.md");
+    expect(tracker.matches("Old.md", utf8("body"))).toBe(false);
+    expect(tracker.matches("New.md", utf8("body"))).toBe(true);
+    tracker.remove("New.md");
+    expect(tracker.matches("New.md", utf8("body"))).toBe(false);
+  });
+
+  it("reports the byte Content Version through the search data source", async () => {
+    const tracker = new ObsidianSemanticVersionTracker();
+    tracker.observe("Bom.md", "with bom");
+    const bytes = Buffer.concat([BOM, utf8("with bom")]);
+    const dataSource = createObsidianSearchDataSource({
+      markdownFiles: () => [{ path: "Bom.md" }],
+      readBinary: async () => bytes,
+      fileCache: () => ({}),
+      semanticContentMatches: (path, current) =>
+        tracker.matches(path, current instanceof Uint8Array ? current : new Uint8Array(current)),
+      resolveLink: () => null,
+      candidatePaths: () => [],
+      validSubpath: () => false,
+      resolvedLinks: () => ({}),
+      unresolvedLinks: () => ({}),
+      parseFrontmatter: () => null,
+      allTags: () => [],
+    });
+    const snapshots = new SearchSnapshotManager(dataSource);
+    await snapshots.rebuild();
+    const note = snapshots.current()?.notes[0];
+    expect(note?.contentVersion).toBe(`sha256:${byteVersion(bytes)}`);
+    expect(note?.semanticContentVersion).toBe(`sha256:${byteVersion(bytes)}`);
+  });
 });
 
 describe("installed Obsidian reference profiles", () => {
