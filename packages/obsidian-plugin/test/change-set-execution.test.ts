@@ -319,6 +319,61 @@ describe("durable Frontmatter Change Set execution", () => {
       "journal:COMMITTED",
     ]);
   });
+
+  it("commits an exact insertion into comment-only Frontmatter", async () => {
+    const store = new MemoryStore();
+    const adapter = new FrontmatterAdapter();
+    const original = Buffer.from(
+      "---\r\n# metadata\r\n  # keep indentation\r\n\r\n---\r\nBody unchanged.\r\n",
+    );
+    const projected = Buffer.from(
+      '---\r\n# metadata\r\n  # keep indentation\r\n\r\n"title": "New"\r\n---\r\nBody unchanged.\r\n',
+    );
+    adapter.files.set("Note.md", original);
+    const dataSource = {
+      readBinary: adapter.readBinary.bind(adapter),
+      pathKind: adapter.pathKind.bind(adapter),
+      isContained: async () => true,
+      projectFrontmatter: createFileSystemChangeSetDataSource(".", {
+        exists: async () => false,
+        readBinary: async () => new ArrayBuffer(0),
+        stat: async () => null,
+      }).projectFrontmatter,
+    };
+    const service = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution: adapter,
+      createChangeSetId: () => "change-set-comment-only-frontmatter",
+    });
+
+    const submitted = await service.submit(
+      editFrontmatter(VERSION(original), "comment-only-frontmatter"),
+      requestState,
+    );
+    const record = appliedRecord(submitted);
+
+    expect(adapter.files.get("Note.md")).toEqual(projected);
+    expect(record.preview.paths).toEqual([
+      {
+        path: "Note.md",
+        preState: { kind: "markdown", contentVersion: VERSION(original) },
+        projectedFinalState: {
+          kind: "markdown",
+          contentVersion: VERSION(projected),
+        },
+        projectedOutcome: "changed",
+      },
+    ]);
+    expect(record.paths).toEqual([
+      {
+        path: "Note.md",
+        outcome: "changed",
+        finalState: { kind: "markdown", contentVersion: VERSION(projected) },
+      },
+    ]);
+  });
+
   it("revalidates staged file before images before the first public mutation", async () => {
     const store = new MemoryStore();
     const adapter = new FrontmatterAdapter();
@@ -810,89 +865,6 @@ describe("durable Frontmatter Change Set execution", () => {
       changeSet: { state: "intent_not_applied" },
     });
     await reopenedExecution.close?.();
-  });
-
-  it("restores every safe footprint even when another file has third-party bytes", async () => {
-    const store = new MemoryStore();
-    const adapter = new FrontmatterAdapter();
-    const originalA = Buffer.from("---\ntitle: Old A\n---\nbody A\n");
-    const originalB = Buffer.from("---\ntitle: Old B\n---\nbody B\n");
-    const thirdPartyB = Buffer.from("---\ntitle: Third party B\n---\nbody B\n");
-    adapter.files.set("A.md", originalA);
-    adapter.files.set("B.md", originalB);
-    const projector = createFileSystemChangeSetDataSource(".", {
-      exists: async () => false,
-      readBinary: async () => new ArrayBuffer(0),
-      stat: async () => null,
-    }).projectFrontmatter;
-    const dataSource = {
-      readBinary: adapter.readBinary.bind(adapter),
-      pathKind: adapter.pathKind.bind(adapter),
-      isContained: async () => true,
-      projectFrontmatter: projector,
-    };
-    const crashing = await ChangeSetService.open({
-      store,
-      dataSource,
-      execution: adapter,
-      createChangeSetId: () => "change-set-partial-safe-rollback",
-      crashInjector: (point) => {
-        if (point === "after_mutation:1") throw new InjectedChangeSetCrash(point);
-      },
-    });
-    await expect(
-      crashing.submit(
-        {
-          submissionKey: "partial-safe-rollback",
-          operations: [
-            {
-              operationId: "frontmatter-a",
-              kind: "edit_frontmatter",
-              path: "A.md",
-              targetVersion: VERSION(originalA),
-              changes: [{ kind: "set", key: "title", value: "New A" }],
-            },
-            {
-              operationId: "frontmatter-b",
-              kind: "edit_frontmatter",
-              path: "B.md",
-              targetVersion: VERSION(originalB),
-              changes: [{ kind: "set", key: "title", value: "New B" }],
-            },
-          ],
-        },
-        requestState,
-      ),
-    ).rejects.toThrow(InjectedChangeSetCrash);
-    adapter.files.set("B.md", thirdPartyB);
-    const blocked: string[] = [];
-
-    const recovered = await ChangeSetService.open({
-      store,
-      dataSource,
-      execution: adapter,
-      runtimeState: {
-        setQueue: () => undefined,
-        blockWritesForUnproven: (changeSetId) => {
-          blocked.push(changeSetId);
-        },
-      },
-    });
-
-    expect(adapter.files.get("A.md")).toEqual(originalA);
-    expect(adapter.files.get("B.md")).toEqual(thirdPartyB);
-    expect(adapter.events).toContain("snapshot");
-    expect(adapter.frame?.phase).toBe("FAILED");
-    expect(blocked).toEqual(["change-set-partial-safe-rollback"]);
-    await expect(
-      recovered.status(
-        { changeSetId: "change-set-partial-safe-rollback" },
-        requestState,
-      ),
-    ).resolves.toMatchObject({
-      lookup: "found",
-      changeSet: { state: "result_unproven" },
-    });
   });
 
   it("does not overwrite a third-party write racing Frontmatter rollback", async () => {

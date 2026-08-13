@@ -117,6 +117,12 @@ function lineEndingAt(source: string, offset: number): number {
   return offset;
 }
 
+function containsOnlyCommentsAndWhitespace(source: string, newline: string): boolean {
+  return source
+    .split(newline)
+    .every((line) => /^[\t ]*(?:#.*)?$/.test(line));
+}
+
 function renderValue(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -142,7 +148,9 @@ export function projectFrontmatter(
   if (
     document.errors.length > 0 ||
     document.warnings.length > 0 ||
-    (document.contents === null ? source.length !== 0 : !isMap(document.contents))
+    (document.contents === null
+      ? !containsOnlyCommentsAndWhitespace(source, envelope.newline)
+      : !isMap(document.contents))
   ) {
     return null;
   }

@@ -20,6 +20,14 @@
     "projected": "﻿---\nquoted: 'keep'\nflow: [one, \"two\"]\nblock:\n  - three\n  - four\nliteral: |\n  unchanged\n\"new\": {\"enabled\":true,\"tags\":[\"a\",\"b\"]}\n\"count\": null\n---\nBody without normalization.\n"
   },
   {
+    "name": "adds a field to comment-only Frontmatter without changing surrounding bytes",
+    "original": "---\r\n# metadata\r\n  # keep indentation\r\n\r\n---\r\nBody unchanged.\r\n",
+    "changes": [
+      { "kind": "set", "key": "ready", "value": true }
+    ],
+    "projected": "---\r\n# metadata\r\n  # keep indentation\r\n\r\n\"ready\": true\r\n---\r\nBody unchanged.\r\n"
+  },
+  {
     "name": "typed round trip restores original numeric representation",
     "original": "---\ncount: 1.0 # exact comment\n---\nbody\n",
     "changes": [
