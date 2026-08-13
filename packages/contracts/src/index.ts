@@ -711,7 +711,7 @@ const moveAttachmentOperationSchema = z
     expectedSha256: attachmentSha256Schema,
   })
   .strict();
-const trashOperationSchema = z
+const markdownTrashOperationSchema = z
   .object({
     ...operationIdentitySchema,
     kind: z.literal("trash"),
@@ -719,8 +719,20 @@ const trashOperationSchema = z
     targetVersion: contentVersionSchema,
   })
   .strict();
+const attachmentTrashOperationSchema = z
+  .object({
+    ...operationIdentitySchema,
+    kind: z.literal("trash"),
+    path: canonicalVaultPathSchema,
+    expectedSha256: attachmentSha256Schema,
+  })
+  .strict();
+const trashOperationSchema = z.union([
+  markdownTrashOperationSchema,
+  attachmentTrashOperationSchema,
+]);
 
-const changeSetOperationSchema = z.discriminatedUnion("kind", [
+const changeSetOperationSchema = z.union([
   createDirectoryOperationSchema,
   createNoteOperationSchema,
   editBodyOperationSchema,

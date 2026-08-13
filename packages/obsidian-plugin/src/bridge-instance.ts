@@ -151,7 +151,7 @@ function projectObservedHealth(
       plugin: PLUGIN_VERSION,
       protocol: PROTOCOL_VERSION,
       persistentStateSchema: 2,
-      recoveryJournalSchema: 1,
+      recoveryJournalSchema: 2,
     },
     listener: { address: LOOPBACK_ADDRESS, port },
     readiness: {

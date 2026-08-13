@@ -10,6 +10,7 @@ export {
 export {
   CHANGE_SET_RECORD_RETENTION_MS,
   CHANGE_SET_REGISTRY_SCHEMA_VERSION,
+  RECOVERY_JOURNAL_SCHEMA_VERSION,
   ChangeSetService,
   fingerprintChangeSetRequest,
   type FrontmatterChange,
@@ -33,9 +34,16 @@ export {
 } from "./change-set.js";
 export {
   DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
+  CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS,
+  createChangeSetSemanticEvidenceTracker,
   createFileSystemChangeSetExecutionAdapter,
+  createNodeFileSystemChangeSetHost,
+  type ChangeSetExecutionHost,
+  type ChangeSetSemanticEvidenceTracker,
+  type ChangeSetSemanticEvidenceTrackerOptions,
   type DirectoryExecutionHost,
   type FileSystemChangeSetExecutionOptions,
+  type NodeFileSystemChangeSetHostOptions,
 } from "./file-system-change-set-execution.js";
 export { createRegistrationCommand } from "./registration-command.js";
 export {

@@ -51,6 +51,27 @@ describe("vault_change_set_submit v1 contract", () => {
     ).toThrow();
   });
 
+  it("keeps Markdown and attachment trash evidence distinct", () => {
+    const attachmentTrash = {
+      submissionKey: "trash-attachment-key",
+      operations: [{
+        operationId: "trash-attachment",
+        kind: "trash",
+        path: "assets/image.bin",
+        expectedSha256: "b".repeat(64),
+      }],
+    };
+
+    expect(parseChangeSetSubmitInput(attachmentTrash)).toEqual(attachmentTrash);
+    expect(() => parseChangeSetSubmitInput({
+      ...attachmentTrash,
+      operations: [{
+        ...attachmentTrash.operations[0],
+        targetVersion: VERSION,
+      }],
+    })).toThrow();
+  });
+
   it("accepts registered, conflict, and preflight rejection results without generic errors", () => {
     expect(
       parseChangeSetSubmitResult({

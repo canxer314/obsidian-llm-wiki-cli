@@ -1,9 +1,32 @@
-import { mkdir, open } from "node:fs/promises";
-import { dirname } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 
+import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
+
+import { RECOVERY_JOURNAL_SCHEMA_VERSION } from "./change-set.js";
 import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
+  ChangeSetSemanticEvidenceRequest,
   RecoveryJournalFrame,
 } from "./change-set.js";
 import {
@@ -13,21 +36,364 @@ import {
 } from "./recovery-journal.js";
 
 export const DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY = 8 * 1024 * 1024;
+export const CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS = 5_000;
 
-export interface DirectoryExecutionHost {
+type VaultMutationEvent = ChangeSetSemanticEvidenceRequest["requiredEvents"][number];
+
+export interface ChangeSetSemanticEvidenceTracker {
+  begin(request: ChangeSetSemanticEvidenceRequest): void;
+  record(event: VaultMutationEvent): void;
+  await(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
+}
+
+export interface ChangeSetSemanticEvidenceTrackerOptions {
+  publishSuccessorSearchSnapshot(): Promise<void>;
+  deadlineMs?: number;
+  now?: () => number;
+  delay?: (milliseconds: number) => Promise<void>;
+}
+
+function semanticRequestsMatch(
+  left: ChangeSetSemanticEvidenceRequest,
+  right: ChangeSetSemanticEvidenceRequest,
+): boolean {
+  return (
+    left.mode === right.mode &&
+    left.hiddenTrash === right.hiddenTrash &&
+    JSON.stringify(left.operations) === JSON.stringify(right.operations) &&
+    JSON.stringify(left.publicPaths) === JSON.stringify(right.publicPaths)
+  );
+}
+
+export function createChangeSetSemanticEvidenceTracker(
+  options: ChangeSetSemanticEvidenceTrackerOptions,
+): ChangeSetSemanticEvidenceTracker {
+  let active: ChangeSetSemanticEvidenceRequest | null = null;
+  let events: VaultMutationEvent[] = [];
+  const now = options.now ?? Date.now;
+  const delay = options.delay ?? ((milliseconds) =>
+    new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const expectedEvents = (request: ChangeSetSemanticEvidenceRequest): number =>
+    request.requiredEvents.length;
+  const hasEvent = (expected: VaultMutationEvent): boolean =>
+    events.some((event) => JSON.stringify(event) === JSON.stringify(expected));
+  return {
+    begin(request) {
+      active = structuredClone(request);
+      events = [];
+    },
+    record(event) {
+      if (active !== null) events.push(event);
+    },
+    async await(request) {
+      if (active === null || !semanticRequestsMatch(active, request)) {
+        throw new Error("Change Set semantic evidence baseline is unavailable");
+      }
+      const deadline = now() +
+        (options.deadlineMs ?? CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS);
+      const required = expectedEvents(request);
+      while (
+        events.length < required ||
+        request.requiredEvents.some((expected) => !hasEvent(expected))
+      ) {
+        if (now() >= deadline) {
+          active = null;
+          throw new Error("Change Set semantic evidence timed out");
+        }
+        await delay(Math.min(10, Math.max(0, deadline - now())));
+      }
+      try {
+        const remaining = deadline - now();
+        if (remaining <= 0) throw new Error("Change Set semantic evidence timed out");
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          options.publishSuccessorSearchSnapshot(),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error("Change Set semantic evidence timed out")),
+              remaining,
+            );
+          }),
+        ]).finally(() => {
+          active = null;
+          if (timeout !== undefined) clearTimeout(timeout);
+        });
+      } finally {
+        active = null;
+      }
+    },
+  };
+}
+
+export interface ChangeSetExecutionHost {
   pathKind(path: string): Promise<ChangeSetPathKind | null>;
   directoryIdentity(path: string): Promise<string | null>;
   prepareDirectory(stageId: string): Promise<string>;
   publishDirectory(stageId: string, path: string): Promise<void>;
   discardPreparedDirectory(stageId: string): Promise<void>;
   removeDirectory(path: string): Promise<void>;
+  readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
+  prepareFile?(stageId: string, bytes: Uint8Array): Promise<void>;
+  publishFile?(stageId: string, path: string): Promise<void>;
+  discardPreparedFile?(stageId: string): Promise<void>;
+  moveFile?(sourcePath: string, destinationPath: string): Promise<void>;
+  removeFile?(path: string): Promise<void>;
+  moveToTrash?(path: string, trashId: string): Promise<void>;
+  restoreFromTrash?(trashId: string, path: string): Promise<void>;
+  discardTrash?(trashId: string): Promise<void>;
+  readTrash?(trashId: string): Promise<ArrayBuffer | Uint8Array | null>;
+  beginSemanticEvidence?: ChangeSetExecutionAdapter["beginSemanticEvidence"];
+  awaitSemanticEvidence?: ChangeSetExecutionAdapter["awaitSemanticEvidence"];
+  semanticEvidencePublishesSnapshot?: boolean;
   publishSearchSnapshot(): Promise<void>;
+}
+
+export type DirectoryExecutionHost = ChangeSetExecutionHost;
+
+export interface NodeFileSystemChangeSetHostOptions {
+  basePath: string;
+  stateDirectory: string;
+  publishFile?(stageId: string, path: string): Promise<void>;
+  moveFile?(sourcePath: string, destinationPath: string): Promise<void>;
+  removeFile?(path: string): Promise<void>;
+  moveToTrash?(path: string, trashId: string): Promise<void>;
+  restoreFromTrash?(
+    trashId: string,
+    path: string,
+    bytes: Uint8Array,
+  ): Promise<void>;
+  beginSemanticEvidence?: NonNullable<ChangeSetExecutionAdapter["beginSemanticEvidence"]>;
+  awaitSemanticEvidence: NonNullable<ChangeSetExecutionAdapter["awaitSemanticEvidence"]>;
+  semanticEvidencePublishesSnapshot?: boolean;
+  publishSearchSnapshot(): Promise<void>;
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const relativePath = relative(root, candidate);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+export async function createNodeFileSystemChangeSetHost(
+  options: NodeFileSystemChangeSetHostOptions,
+): Promise<ChangeSetExecutionHost> {
+  const root = await realpath(options.basePath);
+  const statePath = resolve(options.stateDirectory);
+  if (!isWithin(root, statePath)) {
+    throw new Error("Bridge private state escaped Vault containment");
+  }
+  await mkdir(statePath, { recursive: true });
+  const privateRoot = await realpath(statePath);
+  if (!isWithin(root, privateRoot)) {
+    throw new Error("Bridge private state escaped Vault containment");
+  }
+  const stagingDirectory = join(privateRoot, "staging");
+  const managedTrashDirectory = join(privateRoot, "trash");
+  const publicPath = (path: string): string => resolve(options.basePath, ...path.split("/"));
+  const stagePath = (stageId: string): string =>
+    join(stagingDirectory, ...stageId.split("/"));
+  const trashPath = (trashId: string): string =>
+    join(managedTrashDirectory, ...trashId.split("/"));
+  const assertPrivateContained = async (path: string): Promise<string> => {
+    if (!isWithin(privateRoot, path)) {
+      throw new Error("Bridge private path escaped containment");
+    }
+    let nearest = path;
+    while (nearest !== privateRoot) {
+      try {
+        nearest = await realpath(nearest);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        nearest = dirname(nearest);
+      }
+    }
+    if (!isWithin(privateRoot, nearest)) {
+      throw new Error("Bridge private path escaped containment");
+    }
+    return path;
+  };
+  const assertContained = async (
+    path: string,
+    mode: "existing" | "destination",
+  ): Promise<string> => {
+    const absolute = publicPath(path);
+    if (!isWithin(root, absolute)) throw new Error("Vault path escaped containment");
+    const inspected = mode === "destination" ? dirname(absolute) : absolute;
+    const nearest = await realpath(inspected).catch(async (error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return realpath(dirname(inspected));
+    });
+    if (!isWithin(root, nearest)) throw new Error("Vault path escaped containment");
+    if (mode === "existing" && (await lstat(absolute)).isSymbolicLink()) {
+      throw new Error("Symbolic links cannot be mutated through Change Sets");
+    }
+    return absolute;
+  };
+  return {
+    pathKind: async (path) => {
+      try {
+        const value = await lstat(await assertContained(path, "existing"));
+        if (value.isSymbolicLink()) return null;
+        return value.isDirectory() ? "directory" : value.isFile() ? "file" : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    directoryIdentity: async (path) => {
+      try {
+        const value = await stat(await assertContained(path, "existing"));
+        return value.isDirectory() ? `${value.dev}:${value.ino}:${value.birthtimeMs}` : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    prepareDirectory: async (stageId) => {
+      const path = await assertPrivateContained(stagePath(stageId));
+      await mkdir(path, { recursive: true });
+      const value = await stat(path);
+      return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
+    },
+    publishDirectory: async (stageId, path) => {
+      await rename(
+        await assertPrivateContained(stagePath(stageId)),
+        await assertContained(path, "destination"),
+      );
+    },
+    discardPreparedDirectory: async (stageId) => {
+      await rmdir(await assertPrivateContained(stagePath(stageId))).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    },
+    removeDirectory: async (path) => rmdir(await assertContained(path, "existing")),
+    readBinary: async (path) => {
+      try {
+        return await readFile(await assertContained(path, "existing"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    prepareFile: async (stageId, bytes) => {
+      const path = await assertPrivateContained(stagePath(stageId));
+      await mkdir(dirname(path), { recursive: true });
+      const handle = await open(path, "wx");
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    },
+    publishFile: async (stageId, path) => {
+      const source = await assertPrivateContained(stagePath(stageId));
+      const destination = await assertContained(path, "destination");
+      if (options.publishFile !== undefined) {
+        await options.publishFile(stageId, path);
+        return;
+      }
+      await link(source, destination);
+      await unlink(source);
+    },
+    discardPreparedFile: async (stageId) =>
+      rm(await assertPrivateContained(stagePath(stageId)), { force: true }),
+    moveFile: async (sourcePath, destinationPath) => {
+      const source = await assertContained(sourcePath, "existing");
+      const destination = await assertContained(destinationPath, "destination");
+      if (options.moveFile !== undefined) {
+        await options.moveFile(sourcePath, destinationPath);
+        return;
+      }
+      await link(source, destination);
+      await unlink(source);
+    },
+    removeFile: async (path) => {
+      const source = await assertContained(path, "existing");
+      if (options.removeFile !== undefined) {
+        await options.removeFile(path);
+        return;
+      }
+      await unlink(source);
+    },
+    moveToTrash: async (path, trashId) => {
+      const source = await assertContained(path, "existing");
+      const destination = await assertPrivateContained(trashPath(trashId));
+      await mkdir(dirname(destination), { recursive: true });
+      await link(source, destination);
+      if (options.moveToTrash !== undefined) {
+        await options.moveToTrash(path, trashId);
+      } else if (options.removeFile !== undefined) {
+        await options.removeFile(path);
+      } else {
+        await unlink(source);
+      }
+    },
+    restoreFromTrash: async (trashId, path) => {
+      const source = await assertPrivateContained(trashPath(trashId));
+      const destination = await assertContained(path, "destination");
+      if (options.restoreFromTrash !== undefined) {
+        const bytes = Uint8Array.from(await readFile(source));
+        await options.restoreFromTrash(trashId, path, bytes);
+        await rm(source, { force: true });
+        return;
+      }
+      await link(source, destination);
+      await unlink(source);
+    },
+    discardTrash: async (trashId) =>
+      rm(await assertPrivateContained(trashPath(trashId)), { force: true }),
+    readTrash: async (trashId) => {
+      try {
+        return await readFile(await assertPrivateContained(trashPath(trashId)));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    beginSemanticEvidence: options.beginSemanticEvidence,
+    awaitSemanticEvidence: options.awaitSemanticEvidence,
+    semanticEvidencePublishesSnapshot: options.semanticEvidencePublishesSnapshot,
+    publishSearchSnapshot: options.publishSearchSnapshot,
+  };
 }
 
 export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
-  host: DirectoryExecutionHost;
+  host: ChangeSetExecutionHost;
   slotCapacity?: number;
+}
+
+function isPrivateId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    !value.includes("\\") &&
+    !value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  );
+}
+
+function isRecoveryState(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  if (state.kind === "absent") return Object.keys(state).length === 1;
+  if (typeof state.bytesBase64 !== "string") return false;
+  const decoded = Buffer.from(state.bytesBase64, "base64");
+  if (decoded.toString("base64") !== state.bytesBase64) return false;
+  if (state.kind === "attachment") {
+    return (
+      typeof state.sha256 === "string" &&
+      /^[0-9a-f]{64}$/u.test(state.sha256) &&
+      createHash("sha256").update(decoded).digest("hex") === state.sha256
+    );
+  }
+  return (
+    state.kind === "markdown" &&
+    typeof state.contentVersion === "string" &&
+    /^sha256:[0-9a-f]{64}$/u.test(state.contentVersion) &&
+    `sha256:${createHash("sha256").update(decoded).digest("hex")}` ===
+      state.contentVersion
+  );
 }
 
 function parseFrame(value: unknown): RecoveryJournalFrame {
@@ -36,7 +402,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   }
   const frame = value as Partial<RecoveryJournalFrame>;
   if (
-    frame.schemaVersion !== 1 ||
+    ![1, RECOVERY_JOURNAL_SCHEMA_VERSION].includes(frame.schemaVersion ?? 0) ||
     typeof frame.vaultId !== "string" ||
     frame.vaultId.length === 0 ||
     typeof frame.changeSetId !== "string" ||
@@ -47,6 +413,73 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
     !Array.isArray(frame.directories) ||
     typeof frame.preview !== "object" ||
     frame.preview === null
+  ) {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  if (
+    frame.schemaVersion === 1 &&
+    (frame.files !== undefined || frame.mutations !== undefined)
+  ) {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  try {
+    parseChangeSetSubmitInput(frame.input);
+  } catch {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  if (
+    frame.directories.some(
+      (directory) =>
+        typeof directory !== "object" ||
+        directory === null ||
+        typeof directory.path !== "string" ||
+        directory.before !== "absent" ||
+        directory.expectedAfter !== "directory" ||
+        (directory.stageId !== undefined && !isPrivateId(directory.stageId)),
+    ) ||
+    (frame.files !== undefined &&
+      (!Array.isArray(frame.files) ||
+        frame.files.some(
+          (file) =>
+            typeof file !== "object" ||
+            file === null ||
+            typeof file.path !== "string" ||
+            !isRecoveryState(file.before) ||
+            !isRecoveryState(file.expectedAfter) ||
+            (file.stageId !== undefined && !isPrivateId(file.stageId)) ||
+            (file.trashId !== undefined && !isPrivateId(file.trashId)),
+        ))) ||
+    (frame.mutations !== undefined &&
+      (!Array.isArray(frame.mutations) ||
+        frame.mutations.some((mutation) => {
+          if (typeof mutation !== "object" || mutation === null) return true;
+          if (
+            typeof mutation.operationId !== "string" ||
+            !["copy_attachment", "move_attachment", "trash"].includes(mutation.kind)
+          ) return true;
+          if (mutation.kind === "trash") {
+            return (
+              typeof mutation.path !== "string" ||
+              !isPrivateId(mutation.trashId) ||
+              !isRecoveryState(mutation.before) ||
+              !isRecoveryState(mutation.expectedAfter)
+            );
+          }
+          return (
+            typeof mutation.sourcePath !== "string" ||
+            typeof mutation.destinationPath !== "string" ||
+            (mutation.kind === "copy_attachment" &&
+              (!isPrivateId(mutation.stageId) ||
+                !isRecoveryState(mutation.sourceState) ||
+                !isRecoveryState(mutation.destinationBefore) ||
+                !isRecoveryState(mutation.destinationAfter))) ||
+            (mutation.kind === "move_attachment" &&
+              (!isRecoveryState(mutation.sourceBefore) ||
+                !isRecoveryState(mutation.sourceAfter) ||
+                !isRecoveryState(mutation.destinationBefore) ||
+                !isRecoveryState(mutation.destinationAfter)))
+          );
+        })))
   ) {
     throw new Error("Recovery Journal payload is corrupt or incompatible");
   }
@@ -94,6 +527,33 @@ export async function createFileSystemChangeSetExecutionAdapter(
     publishDirectory: options.host.publishDirectory,
     discardPreparedDirectory: options.host.discardPreparedDirectory,
     removeDirectory: options.host.removeDirectory,
+    ...(options.host.readBinary === undefined ? {} : { readBinary: options.host.readBinary }),
+    ...(options.host.prepareFile === undefined ? {} : { prepareFile: options.host.prepareFile }),
+    ...(options.host.publishFile === undefined ? {} : { publishFile: options.host.publishFile }),
+    ...(options.host.discardPreparedFile === undefined
+      ? {}
+      : { discardPreparedFile: options.host.discardPreparedFile }),
+    ...(options.host.moveFile === undefined ? {} : { moveFile: options.host.moveFile }),
+    ...(options.host.removeFile === undefined ? {} : { removeFile: options.host.removeFile }),
+    ...(options.host.moveToTrash === undefined
+      ? {}
+      : { moveToTrash: options.host.moveToTrash }),
+    ...(options.host.restoreFromTrash === undefined
+      ? {}
+      : { restoreFromTrash: options.host.restoreFromTrash }),
+    ...(options.host.discardTrash === undefined
+      ? {}
+      : { discardTrash: options.host.discardTrash }),
+    ...(options.host.readTrash === undefined ? {} : { readTrash: options.host.readTrash }),
+    ...(options.host.beginSemanticEvidence === undefined
+      ? {}
+      : { beginSemanticEvidence: options.host.beginSemanticEvidence }),
+    ...(options.host.awaitSemanticEvidence === undefined
+      ? {}
+      : { awaitSemanticEvidence: options.host.awaitSemanticEvidence }),
+    ...(options.host.semanticEvidencePublishesSnapshot === undefined
+      ? {}
+      : { semanticEvidencePublishesSnapshot: options.host.semanticEvidencePublishesSnapshot }),
     publishSearchSnapshot: options.host.publishSearchSnapshot,
     close: () => handle.close(),
   };
