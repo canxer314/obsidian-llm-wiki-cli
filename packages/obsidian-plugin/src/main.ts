@@ -17,6 +17,7 @@ import { createBridgeInstance } from "./bridge-instance.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import { createFileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
 import {
+  ObsidianSemanticVersionTracker,
   createObsidianSearchDataSource,
   enumerateCanonicalReferenceTargets,
   isRegisteredSubpathResult,
@@ -59,6 +60,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       }
     };
     let runtime!: ManagedVaultBridgeRuntime;
+    const semanticVersions = new ObsidianSemanticVersionTracker();
     const changeSetExecution =
       adapter instanceof FileSystemAdapter
         ? await createFileSystemChangeSetExecutionAdapter({
@@ -107,8 +109,8 @@ export default class VaultOperationBridgePlugin extends Plugin {
               removeFile: async (path) => {
                 await unlink(vaultPath(path));
               },
-              publishSearchSnapshot: async () => {
-                await runtime.publishSuccessorSearchSnapshot();
+              publishSearchSnapshot: async (targets) => {
+                await runtime.publishSuccessorSearchSnapshot(targets);
               },
             },
           })
@@ -151,6 +153,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
           const file = this.app.vault.getFileByPath(path);
           return file === null ? null : this.app.metadataCache.getFileCache(file);
         },
+        semanticContentMatches: (path, bytes) => semanticVersions.matches(path, bytes),
         resolveLink: (target, sourcePath) =>
           this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path ?? null,
         candidatePaths: (target, sourcePath) => {
@@ -232,18 +235,32 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const scheduleMarkdownRefresh = (file: unknown): void => {
       if (file instanceof TFile && file.extension === "md") scheduleRefresh();
     };
-    this.registerEvent(this.app.metadataCache.on("changed", scheduleMarkdownRefresh));
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file, data) => {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.observe(file.path, data);
+          scheduleRefresh();
+        }
+      }),
+    );
     this.registerEvent(this.app.metadataCache.on("resolve", scheduleMarkdownRefresh));
     this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
     this.registerEvent(this.app.vault.on("create", scheduleMarkdownRefresh));
     this.registerEvent(this.app.vault.on("modify", scheduleMarkdownRefresh));
-    this.registerEvent(this.app.vault.on("delete", scheduleMarkdownRefresh));
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.remove(file.path);
+          scheduleRefresh();
+        }
+      }),
+    );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        if (
-          (file instanceof TFile && file.extension === "md") ||
-          oldPath.endsWith(".md")
-        ) {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.rename(oldPath, file.path);
+          scheduleRefresh();
+        } else if (oldPath.endsWith(".md")) {
           scheduleRefresh();
         }
       }),

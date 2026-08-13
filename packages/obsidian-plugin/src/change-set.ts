@@ -113,6 +113,13 @@ export interface RecoveryJournalFrame {
   finalPaths?: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"];
 }
 
+export interface SearchSnapshotTargetEvidence {
+  path: string;
+  contentVersion: string;
+  /** true: a create/edit must observe metadata for this exact version. */
+  requireSemanticMatch: boolean;
+}
+
 export interface ChangeSetExecutionAdapter {
   loadRecoveryFrame(): Promise<RecoveryJournalFrame | null>;
   persistRecoveryFrame(frame: RecoveryJournalFrame): Promise<void>;
@@ -128,7 +135,7 @@ export interface ChangeSetExecutionAdapter {
   publishFile?(stageId: string, path: string): Promise<void>;
   discardPreparedFile?(stageId: string): Promise<void>;
   removeFile?(path: string): Promise<void>;
-  publishSearchSnapshot(): Promise<void>;
+  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -370,7 +377,7 @@ function findOccurrences(
   while ((index = findSubarray(content, old, index)) !== -1) {
     if (firstIndex === -1) firstIndex = index;
     count += 1;
-    index += old.length;
+    index += 1;
   }
   return { count, firstIndex };
 }
@@ -1304,7 +1311,18 @@ export class ChangeSetService {
         }
       }
       await this.#crash("after_raw_verification");
-      await execution.publishSearchSnapshot();
+      await execution.publishSearchSnapshot(
+        projectedMarkdown.map(({ path, projectedOutcome, projectedFinalState }) => {
+          if (projectedFinalState.kind !== "markdown") {
+            throw new Error("Projected snapshot evidence is invalid");
+          }
+          return {
+            path,
+            contentVersion: projectedFinalState.contentVersion,
+            requireSemanticMatch: projectedOutcome === "changed",
+          };
+        }),
+      );
       const finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"] = [];
       for (const projected of plan.preview.paths) {
         const path = projected.path;

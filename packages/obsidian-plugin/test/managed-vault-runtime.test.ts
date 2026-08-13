@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -752,6 +754,139 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
 
     expect(captured?.searchSnapshotReadiness?.()).toBe("unavailable");
     expect(bridge.start).toHaveBeenCalledOnce();
+    await runtime.unload();
+  });
+
+  it("rejects a successor snapshot until target semantic evidence matches final bytes", async () => {
+    const version = (content: string) =>
+      `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    let paths = ["note.md"];
+    let content = "old";
+    let semanticVersion = version("old");
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => paths,
+        readBinary: async () => new TextEncoder().encode(content),
+        semanticEvidence: async () => ({
+          contentVersion: semanticVersion,
+          frontmatter: null,
+          tags: [],
+          headings: [],
+          references: [],
+          resolvedLinks: {},
+          unresolvedLinks: {},
+        }),
+      },
+      successBarrierTimeoutMs: 1,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    content = "new";
+    await expect(
+      runtime.publishSuccessorSearchSnapshot([
+        { path: "note.md", contentVersion: version("new"), requireSemanticMatch: true },
+      ]),
+    ).rejects.toThrow(/evidence|Content Version/u);
+
+    semanticVersion = version("new");
+    await expect(
+      runtime.publishSuccessorSearchSnapshot([
+        { path: "note.md", contentVersion: version("new"), requireSemanticMatch: true },
+      ]),
+    ).resolves.toBeUndefined();
+
+    paths = [];
+    await expect(
+      runtime.publishSuccessorSearchSnapshot([
+        { path: "created.md", contentVersion: version("created"), requireSemanticMatch: true },
+      ]),
+    ).rejects.toThrow(/evidence|Content Version/u);
+    await runtime.unload();
+  });
+
+  it("waits for a delayed semantic event instead of committing on stale cache", async () => {
+    const version = (content: string) =>
+      `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    let content = "new";
+    let semanticVersion = version("old");
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["note.md"],
+        readBinary: async () => new TextEncoder().encode(content),
+        semanticEvidence: async () => ({
+          contentVersion: semanticVersion,
+          frontmatter: null,
+          tags: [],
+          headings: [],
+          references: [],
+          resolvedLinks: {},
+          unresolvedLinks: {},
+        }),
+      },
+      successBarrierTimeoutMs: 1_000,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    const publication = runtime.publishSuccessorSearchSnapshot([
+      { path: "note.md", contentVersion: version("new"), requireSemanticMatch: true },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    semanticVersion = version("new");
+    runtime.scheduleSearchSnapshotRefresh();
+
+    await expect(publication).resolves.toBeUndefined();
+    await runtime.unload();
+  });
+
+  it("tolerates an unchanged note without semantic observation but rejects a stale one", async () => {
+    const version = (content: string) =>
+      `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    let semanticVersion: string | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["note.md"],
+        readBinary: async () => new TextEncoder().encode("same"),
+        semanticEvidence: async () => ({
+          ...(semanticVersion === undefined ? {} : { contentVersion: semanticVersion }),
+          frontmatter: null,
+          tags: [],
+          headings: [],
+          references: [],
+          resolvedLinks: {},
+          unresolvedLinks: {},
+        }),
+      },
+      successBarrierTimeoutMs: 1_000,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    await expect(
+      runtime.publishSuccessorSearchSnapshot([
+        { path: "note.md", contentVersion: version("same"), requireSemanticMatch: false },
+      ]),
+    ).resolves.toBeUndefined();
+
+    semanticVersion = version("older");
+    await expect(
+      runtime.publishSuccessorSearchSnapshot([
+        { path: "note.md", contentVersion: version("same"), requireSemanticMatch: false },
+      ]),
+    ).rejects.toThrow(/evidence|Content Version/u);
     await runtime.unload();
   });
 

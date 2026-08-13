@@ -1159,12 +1159,14 @@ describe("public Change Set MCP tools", () => {
       changeSet: { state: "intent_not_applied", failure: { code: "stale_observation" } },
     });
 
-    for (const [submissionKey, old, actualOccurrences] of [
-      ["count-zero", "missing", 0],
-      ["count-multiple", "old", 2],
+    for (const [submissionKey, content, old, actualOccurrences] of [
+      ["count-zero", "old old", "missing", 0],
+      ["count-multiple", "old old", "old", 2],
+      ["count-overlapping", "aaa", "aa", 2],
     ] as const) {
+      files.set("Notes/A.md", Buffer.from(content));
       const cardinality = await submit(
-        edit(submissionKey, VERSION("old old"), old),
+        edit(submissionKey, VERSION(content), old),
       );
       expect(cardinality.structuredContent).toMatchObject({
         changeSet: {
@@ -1176,7 +1178,9 @@ describe("public Change Set MCP tools", () => {
           },
         },
       });
+      expect(files.get("Notes/A.md")?.toString()).toBe(content);
     }
+    files.set("Notes/A.md", Buffer.from("old old"));
 
     const conflict = await submit({
       ...createNote(),

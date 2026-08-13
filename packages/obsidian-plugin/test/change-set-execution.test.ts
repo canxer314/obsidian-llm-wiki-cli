@@ -995,6 +995,112 @@ describe("durable Markdown Change Set execution", () => {
     expect(adapter.events).toContain("write:Notes/RoundTrip.md");
   });
 
+  it("rejects overlapping exact matches without mutating the file", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Overlap.md", Buffer.from("aaa"));
+    adapter.fileIdentities.set("Notes/Overlap.md", "overlap-file");
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-overlap",
+    });
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "overlap-key",
+        operations: [
+          {
+            operationId: "overlap-1",
+            kind: "edit_body",
+            path: "Notes/Overlap.md",
+            targetVersion: `sha256:${createHash("sha256").update("aaa").digest("hex")}`,
+            edit: {
+              kind: "replace_exact",
+              old: "aa",
+              replacement: "x",
+              expectedOccurrences: 1,
+            },
+          },
+        ],
+      },
+      requestState,
+    );
+
+    expect(submitted).toMatchObject({
+      outcome: "registered",
+      changeSet: {
+        state: "intent_not_applied",
+        failure: {
+          code: "exact_match_count_mismatch",
+          operationId: "overlap-1",
+          actualOccurrences: 2,
+        },
+      },
+    });
+    expect(Buffer.from(adapter.files.get("Notes/Overlap.md") ?? []).toString()).toBe("aaa");
+    expect(adapter.events.some((event) => event.startsWith("write:"))).toBe(false);
+  });
+
+  it("rolls back instead of committing when target semantic evidence never converges", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Stale.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/Stale.md", "stale-before");
+    adapter.publishSearchSnapshot = async (targets) => {
+      if (targets !== undefined) {
+        expect(targets).toEqual([
+          {
+            path: "Notes/Stale.md",
+            contentVersion: `sha256:${createHash("sha256").update("after").digest("hex")}`,
+            requireSemanticMatch: true,
+          },
+        ]);
+      }
+      throw new Error("Successor Search Snapshot target evidence did not match");
+    };
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-stale-semantic",
+    });
+
+    const submitted = await service.submit(
+      {
+        submissionKey: "stale-semantic-key",
+        operations: [
+          {
+            operationId: "edit-stale",
+            kind: "edit_body",
+            path: "Notes/Stale.md",
+            targetVersion: `sha256:${createHash("sha256").update("before").digest("hex")}`,
+            edit: { kind: "replace_whole", replacement: "after" },
+          },
+        ],
+      },
+      requestState,
+    );
+
+    expect(submitted).toMatchObject({
+      outcome: "registered",
+      changeSet: { state: "result_unproven" },
+    });
+    expect(Buffer.from(adapter.files.get("Notes/Stale.md") ?? []).toString()).toBe("before");
+    expect(adapter.frame?.phase).toBe("FAILED");
+  });
+
   it("preserves BOM, CRLF, Unicode, and untouched bytes around an exact replacement", async () => {
     const store = new MemoryStore();
     const adapter = new DirectoryAdapter();

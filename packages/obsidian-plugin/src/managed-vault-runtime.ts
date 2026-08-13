@@ -6,6 +6,7 @@ import {
   type ChangeSetExecutionAdapter,
   type ChangeSetPreflightDataSource,
   type ChangeSetRegistryState,
+  type SearchSnapshotTargetEvidence,
 } from "./change-set.js";
 import type {
   BridgeDiscoverService,
@@ -79,6 +80,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
   changeSetExecution?: ChangeSetExecutionAdapter;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
+  successBarrierTimeoutMs?: number;
 }
 
 function emptyChangeSetState(): ChangeSetRegistryState {
@@ -148,6 +150,7 @@ export class ManagedVaultBridgeRuntime {
   #pendingPathChange: PathChangeEvidence | undefined;
   #snapshots: SearchSnapshotManager | undefined;
   #snapshotRefresh: SearchSnapshotRefreshCoordinator | undefined;
+  #snapshotSignals: Array<() => void> = [];
 
   constructor(options: ManagedVaultBridgeRuntimeOptions) {
     this.#options = options;
@@ -171,21 +174,62 @@ export class ManagedVaultBridgeRuntime {
     await snapshots.rebuild();
   }
 
-  async publishSuccessorSearchSnapshot(): Promise<void> {
+  async publishSuccessorSearchSnapshot(
+    targets: readonly SearchSnapshotTargetEvidence[] = [],
+  ): Promise<void> {
     const snapshots = this.#snapshots;
     const refresh = this.#snapshotRefresh;
     if (snapshots === undefined || refresh === undefined) {
       throw new Error("Search Snapshot publisher is unavailable");
     }
+    const matches = (): boolean => {
+      if (snapshots.readiness !== "ready") return false;
+      const notes = new Map(
+        snapshots.current()?.notes.map((note) => [note.path, note]) ?? [],
+      );
+      return targets.every(({ path, contentVersion, requireSemanticMatch }) => {
+        const note = notes.get(path);
+        if (note?.contentVersion !== contentVersion) return false;
+        // A semantic observation for a different version is stale/late and fails.
+        // For a changed note, absence of any observation is not yet proof.
+        if (requireSemanticMatch === true) {
+          return note.semanticContentVersion === contentVersion;
+        }
+        if (
+          note.semanticContentVersion !== undefined &&
+          note.semanticContentVersion !== contentVersion
+        ) return false;
+        return true;
+      });
+    };
+    const deadline = Date.now() + (this.#options.successBarrierTimeoutMs ?? 5_000);
     refresh.schedule();
-    await refresh.whenIdle();
-    if (snapshots.readiness !== "ready") {
-      throw new Error("Successor Search Snapshot publication failed");
+    while (true) {
+      try {
+        await refresh.whenIdle();
+      } catch {
+        // A failed build leaves readiness unavailable; the barrier keeps waiting
+        // for a later host event until the deadline rather than failing open.
+      }
+      if (matches()) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error("Successor Search Snapshot target evidence did not match");
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, remaining);
+        timer.unref?.();
+        this.#snapshotSignals.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
     }
   }
 
   scheduleSearchSnapshotRefresh(): void {
     this.#snapshotRefresh?.schedule();
+    for (const signal of this.#snapshotSignals.splice(0)) signal();
   }
 
   async #saveSettings(settings: PersistedBridgeSettings): Promise<void> {

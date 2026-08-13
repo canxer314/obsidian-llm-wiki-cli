@@ -33,6 +33,7 @@ export interface HostReferenceEvidence {
 }
 
 export interface SearchSnapshotSemanticEvidence {
+  contentVersion?: string;
   frontmatter: Record<string, unknown> | null;
   tags: string[];
   headings: Array<{ heading: string; level: number }>;
@@ -62,6 +63,7 @@ export interface SearchSnapshotNote {
   readonly bytes: Uint8Array;
   readonly content: string;
   readonly contentVersion: string;
+  readonly semanticContentVersion?: string;
   readonly sizeBytes: number;
   readonly frontmatter: Readonly<Record<string, unknown>> | null;
   readonly tags: readonly string[];
@@ -274,6 +276,7 @@ async function freezeNote(
   const source = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
   const capturedBytes = Uint8Array.from(source);
   const content = decoder.decode(capturedBytes);
+  const contentVersion = `sha256:${createHash("sha256").update(capturedBytes).digest("hex")}`;
   const rawSemantic = dataSource.semanticEvidence === undefined
     ? undefined
     : await dataSource.semanticEvidence(path);
@@ -285,6 +288,7 @@ async function freezeNote(
     content,
     rawSemantic,
   );
+  const semanticContentVersion = rawSemantic?.contentVersion;
   const note = {
     path,
     filename: path.slice(path.lastIndexOf("/") + 1),
@@ -292,7 +296,10 @@ async function freezeNote(
       return Uint8Array.from(capturedBytes);
     },
     content,
-    contentVersion: `sha256:${createHash("sha256").update(capturedBytes).digest("hex")}`,
+    contentVersion,
+    ...(semanticContentVersion === undefined
+      ? {}
+      : { semanticContentVersion }),
     sizeBytes: capturedBytes.byteLength,
     ...semantic,
   };

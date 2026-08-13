@@ -6,6 +6,7 @@ import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
   RecoveryJournalFrame,
+  SearchSnapshotTargetEvidence,
 } from "./change-set.js";
 import {
   openRecoveryJournal,
@@ -28,7 +29,7 @@ export interface ChangeSetExecutionHost {
   publishFile?(stageId: string, path: string): Promise<void>;
   discardPreparedFile?(stageId: string): Promise<void>;
   removeFile?(path: string): Promise<void>;
-  publishSearchSnapshot(): Promise<void>;
+  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
 }
 
 export type DirectoryExecutionHost = ChangeSetExecutionHost;
