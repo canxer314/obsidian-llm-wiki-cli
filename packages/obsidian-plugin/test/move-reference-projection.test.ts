@@ -391,6 +391,140 @@ describe("note move reference projection", () => {
     expect(projection).toBeNull();
   });
 
+  it("rejects the projection when a moved markdown target fragment keeps a reserved escape", async () => {
+    const target = "# C#-sharp\n";
+    const backlink = "See [guide](Notes/Note.md#C%23-sharp) now\n";
+    const manager = new SearchSnapshotManager({
+      listMarkdownPaths: async () => ["Notes/Note.md", "Notes/Backlink.md"],
+      readBinary: async (path) => Buffer.from(
+        path === "Notes/Note.md" ? target : backlink,
+      ),
+      semanticEvidence: async (path) => path === "Notes/Note.md"
+        ? {
+            frontmatter: null,
+            tags: [],
+            headings: [{ heading: "C#-sharp", level: 1 }],
+            references: [],
+            resolvedLinks: {},
+            unresolvedLinks: {},
+          }
+        : {
+            frontmatter: null,
+            tags: [],
+            headings: [],
+            references: [reference(
+              backlink,
+              "[guide](Notes/Note.md#C%23-sharp)",
+              "Notes/Note.md#C%23-sharp",
+              "Notes/Note.md",
+              "markdown_inline_link",
+            )],
+            resolvedLinks: { "Notes/Note.md": 1 },
+            unresolvedLinks: {},
+          },
+    });
+    await manager.rebuild();
+
+    const projection = await createMoveReferenceProjector(manager)({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/Note.md",
+      destinationPath: "Archive/Note.md",
+      targetVersion: version(target),
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target));
+
+    // decodeURI leaves %23 intact but the renderer escapes % as %25, so the
+    // rewritten anchor would double-encode into a dead link; reject (AC6).
+    expect(projection).toBeNull();
+  });
+
+  it("preserves the original bytes of a wrapped target that still resolves after the move", async () => {
+    const target = "# a b\n";
+    const backlink = "See [guide](<a%20b.md>) now\n";
+    const manager = new SearchSnapshotManager({
+      listMarkdownPaths: async () => ["Notes/a b.md", "Notes/Backlink.md"],
+      readBinary: async (path) => Buffer.from(
+        path === "Notes/a b.md" ? target : backlink,
+      ),
+      semanticEvidence: async (path) => path === "Notes/a b.md"
+        ? {
+            frontmatter: null,
+            tags: [],
+            headings: [{ heading: "a b", level: 1 }],
+            references: [],
+            resolvedLinks: {},
+            unresolvedLinks: {},
+          }
+        : {
+            frontmatter: null,
+            tags: [],
+            headings: [],
+            references: [reference(
+              backlink,
+              "[guide](<a%20b.md>)",
+              "a%20b.md",
+              "Notes/a b.md",
+              "markdown_inline_link",
+            )],
+            resolvedLinks: { "Notes/a b.md": 1 },
+            unresolvedLinks: {},
+          },
+    });
+    await manager.rebuild();
+
+    const projection = await createMoveReferenceProjector(manager)({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/a b.md",
+      destinationPath: "Archive/a b.md",
+      targetVersion: version(target),
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target));
+
+    // The shortest-form target still uniquely resolves, so nothing is
+    // rewritten and the original encoding style must survive untouched (AC3).
+    expect(Buffer.from(projection!.derivedEffects[0]!.projectedBytes).toString())
+      .toBe(backlink);
+  });
+
+  it("preserves a fragment-only markdown self-reference when the note moves", async () => {
+    const target = "# C#-sharp\nSee [guide](#C%23-sharp) now\n";
+    const manager = new SearchSnapshotManager({
+      listMarkdownPaths: async () => ["Notes/Note.md"],
+      readBinary: async () => Buffer.from(target),
+      semanticEvidence: async () => ({
+        frontmatter: null,
+        tags: [],
+        headings: [{ heading: "C#-sharp", level: 1 }],
+        references: [reference(
+          target,
+          "[guide](#C%23-sharp)",
+          "#C%23-sharp",
+          "Notes/Note.md",
+          "markdown_inline_link",
+        )],
+        resolvedLinks: { "Notes/Note.md": 1 },
+        unresolvedLinks: {},
+      }),
+    });
+    await manager.rebuild();
+
+    const projection = await createMoveReferenceProjector(manager)({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/Note.md",
+      destinationPath: "Archive/Note.md",
+      targetVersion: version(target),
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target));
+
+    // The anchor lives in the moved note itself, so the original bytes still
+    // resolve and must be carried over untouched instead of being re-encoded.
+    expect(Buffer.from(projection!.derivedEffects[0]!.projectedBytes).toString())
+      .toBe(target);
+  });
+
   it("rejects the projection instead of throwing when a target decodes outside the vault", async () => {
     const target = "# Target\n";
     const backlink = "See [g](../escape.md) now\n";

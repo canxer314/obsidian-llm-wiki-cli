@@ -306,6 +306,12 @@ export function renderRegisteredReference(
   if (parsed === null || parsed.profile !== profile) {
     throw new Error("Original reference does not match its registered profile");
   }
+  // An unchanged target is spliced back byte-for-byte so the original
+  // encoding style survives (issue #38 AC3); re-encoding is only safe when
+  // the target was actually rewritten.
+  if (target === original.slice(parsed.destinationStart, parsed.destinationEnd)) {
+    return original;
+  }
   const renderedTarget = parsed.wrapped
     ? target
     : target.replaceAll("%", "%25").replaceAll(" ", "%20");

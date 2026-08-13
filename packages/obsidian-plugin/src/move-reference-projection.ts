@@ -57,6 +57,25 @@ function joinFileAndFragment(fileLinkpath: string, fragment: string): string | n
   return fileLinkpath.includes("#") ? null : fileLinkpath + fragment;
 }
 
+// A rewritten markdown target is re-encoded by the renderer, which escapes
+// every "%" as "%25". A fragment therefore only survives a rewrite when
+// decoding it fully agrees with decodeURI: a reserved escape such as %23 (a
+// heading containing "#") would otherwise be double-encoded into a dead
+// anchor. Reject the projection instead of rewriting (issue #38 AC6).
+function decodeFragmentForRewrite(
+  reference: SearchSnapshotReference,
+  fragment: string,
+): string | null {
+  const decoded = decodeLinkpath(reference, fragment);
+  if (decoded === null) return null;
+  if (reference.profile === "wikilink" || reference.profile === "embed") return decoded;
+  try {
+    return decodeURIComponent(fragment) === decoded ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolvesUniquely(
   decodedLinkpath: string,
   candidates: readonly CanonicalReferenceCandidate[],
@@ -90,16 +109,15 @@ function renderedTarget(
 ): string | null {
   const { fileLinkpath, fragment } = splitFragment(reference.target);
   if (fileLinkpath === "") {
-    return sourceNote.path === operation.sourcePath
-      ? decodeLinkpath(reference, fragment)
-      : null;
+    // A fragment-only target points inside the note holding it, so a move
+    // leaves it resolving exactly as before; keep the original bytes rather
+    // than decoding and re-encoding them.
+    return sourceNote.path === operation.sourcePath ? fragment : null;
   }
   // Probes run on decoded linkpaths so decoding happens exactly once, here;
   // the renderer re-encodes markdown destinations when splicing them back.
   const decoded = decodeLinkpath(reference, fileLinkpath);
   if (decoded === null) return null;
-  const decodedFragment = decodeLinkpath(reference, fragment);
-  if (decodedFragment === null) return null;
   const keptExtension = decoded.endsWith(".md");
   const relativeStyle = decoded.startsWith("./") || decoded.startsWith("../");
   const destinationWithoutExtension = operation.destinationPath.slice(0, -3);
@@ -112,8 +130,13 @@ function renderedTarget(
     ? operation.destinationPath
     : sourceNote.path;
   if (resolvesUniquely(decoded, candidates, projectedSourcePath, operation.destinationPath)) {
-    return joinFileAndFragment(decoded, decodedFragment);
+    // The unchanged target still resolves to the destination, so nothing is
+    // rewritten; hand the renderer the raw bytes to preserve the original
+    // encoding style (AC3).
+    return reference.target;
   }
+  const decodedFragment = decodeFragmentForRewrite(reference, fragment);
+  if (decodedFragment === null) return null;
   const hadExplicitPath = decoded.includes("/");
   let nextFileLinkpath = relativeStyle
     ? posix.relative(posix.dirname(projectedSourcePath), destination)
