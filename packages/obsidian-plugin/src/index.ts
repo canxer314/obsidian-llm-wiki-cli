@@ -73,7 +73,9 @@ export {
 } from "./release-lifecycle.js";
 export {
   atomicReplaceReleaseDirectory,
+  removeReleaseManagedFiles,
   type AtomicReleaseDirectoryReplacement,
+  type ReleaseFileOperations,
 } from "./node-release-files.js";
 export {
   RUN_MAINTENANCE_COMMAND_ID,
