@@ -471,6 +471,35 @@ export class ManagedVaultBridgeRuntime {
     await bridge.runMaintenance(operation);
   }
 
+  /**
+   * Production maintenance entry for the Primary Operator (spec §9.2).
+   * The host supplies `replaceValidatedBundle` because release-file
+   * replacement is environment-specific; state migration and the health
+   * recheck are production responsibilities of this runtime and fail
+   * closed. A successful run remains maintenance-paused until
+   * `resumeWrites()` is invoked explicitly.
+   */
+  async runOperatorMaintenance(
+    replaceValidatedBundle: () => void | Promise<void>,
+  ): Promise<void> {
+    await this.runMaintenance({
+      replaceValidatedBundle,
+      migrateState: async () => {
+        const settings = this.#settings;
+        if (settings === undefined) {
+          throw new Error("Managed Vault Bridge is not loaded");
+        }
+        const validated = parsePersistedSettings(settings);
+        if (validated === null) {
+          throw new Error("Persisted Bridge state failed fail-closed maintenance validation");
+        }
+        await this.#saveSettings(validated.settings);
+        this.#settings = validated.settings;
+      },
+      recheckHealth: () => this.refreshSearchSnapshot(),
+    });
+  }
+
   async resumeWrites(): Promise<void> {
     const bridge = this.#bridge;
     if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");

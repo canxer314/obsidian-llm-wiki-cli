@@ -51,6 +51,13 @@ export {
   type PersistedBridgeSettings,
 } from "./managed-vault-runtime.js";
 export {
+  RUN_MAINTENANCE_COMMAND_ID,
+  assertValidatedInstalledBundle,
+  registerRunMaintenanceCommand,
+  type InstalledBundleProbe,
+  type MaintenanceCommandRegistry,
+} from "./maintenance-operation.js";
+export {
   MAXIMUM_LOGICAL_EXACT_READ_BYTES,
   performVaultRead,
   type VaultReadDataSource,

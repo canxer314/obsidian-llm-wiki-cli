@@ -17,6 +17,11 @@ import { createBridgeInstance } from "./bridge-instance.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import { createFileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
 import {
+  assertValidatedInstalledBundle,
+  registerRunMaintenanceCommand,
+  type InstalledBundleProbe,
+} from "./maintenance-operation.js";
+import {
   createObsidianSearchDataSource,
   enumerateCanonicalReferenceTargets,
   isRegisteredSubpathResult,
@@ -268,6 +273,24 @@ export default class VaultOperationBridgePlugin extends Plugin {
       id: "resume-managed-vault-writes",
       name: "Resume Managed Vault writes",
       callback: () => runtime.resumeWrites(),
+    });
+    const pluginDirectory =
+      this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    const bundleProbe: InstalledBundleProbe | undefined =
+      adapter instanceof FileSystemAdapter
+        ? {
+            readManifest: async () =>
+              JSON.parse(await adapter.read(`${pluginDirectory}/manifest.json`)) as unknown,
+            hasEntryPoint: () => adapter.exists(`${pluginDirectory}/main.js`),
+          }
+        : undefined;
+    registerRunMaintenanceCommand(this, async () => {
+      if (bundleProbe === undefined) {
+        throw new Error("Validated bundle probing requires a file-system Vault adapter");
+      }
+      await runtime.runOperatorMaintenance(() =>
+        assertValidatedInstalledBundle(bundleProbe, this.manifest.id),
+      );
     });
     this.addCommand({
       id: "copy-claude-code-mcp-registration",

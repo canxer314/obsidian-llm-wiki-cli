@@ -7,6 +7,7 @@ import {
   createBridgeInstance,
   type BridgeInstance,
 } from "../src/bridge-instance.js";
+import { assertValidatedInstalledBundle } from "../src/maintenance-operation.js";
 import {
   ManagedVaultBridgeRuntime,
   type ManagedVaultBridgeRuntimeOptions,
@@ -1006,6 +1007,263 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     );
     expect(bridge.registrationCommand).toHaveBeenCalledWith("alpha");
 
+    await runtime.unload();
+  });
+
+  it("runs production maintenance and remains paused until an explicit resume", async () => {
+    let stored: PersistedBridgeSettings | undefined;
+    let snapshotReads = 0;
+    let bridge: BridgeInstance | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => structuredClone(stored),
+        save: async (settings: PersistedBridgeSettings) => {
+          stored = structuredClone(settings);
+        },
+      },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["note.md"],
+        readBinary: async () => {
+          snapshotReads += 1;
+          return new TextEncoder().encode("needle");
+        },
+      },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      createBridge: (options) => {
+        bridge = createBridgeInstance({ ...options, port: 0 });
+        return bridge;
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+    const readsAfterLoad = snapshotReads;
+
+    const replaceValidatedBundle = vi.fn(async () => undefined);
+    await runtime.runOperatorMaintenance(replaceValidatedBundle);
+
+    expect(replaceValidatedBundle).toHaveBeenCalledOnce();
+    expect(snapshotReads).toBe(readsAfterLoad + 1);
+    expect(stored?.changeSets?.writeMode).toBe("maintenance_paused");
+    expect(stored?.changeSets?.lifecycle).toEqual({
+      upgrade: "succeeded",
+      migration: "succeeded",
+    });
+
+    const client = new Client({ name: "maintenance-test", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(bridge!.endpoint, {
+        requestInit: { headers: { "X-Expected-Vault-ID": "vault-a" } },
+      }),
+    );
+    try {
+      const pausedHealth = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(pausedHealth).toMatchObject({
+        isError: false,
+        structuredContent: {
+          write: { gate: "open", state: "paused", pauseSource: "maintenance" },
+          effectiveGate: { code: "writes_paused" },
+          lifecycle: { upgrade: "succeeded", migration: "succeeded" },
+          operatorAction: "resume_writes",
+        },
+      });
+      const blocked = await client.callTool({
+        name: "vault_change_set_submit",
+        arguments: {
+          submissionKey: "maintenance-key",
+          operations: [
+            {
+              operationId: "mkdir-1",
+              kind: "create_directory",
+              path: "Blocked",
+              ifExists: "reject",
+            },
+          ],
+        },
+      });
+      expect(blocked).toMatchObject({
+        isError: true,
+        structuredContent: {
+          outcome: "operationally_blocked",
+          gate: { code: "writes_paused" },
+        },
+      });
+      expect(stored?.changeSets?.entries ?? []).toHaveLength(0);
+
+      await runtime.resumeWrites();
+      const resumedHealth = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(resumedHealth).toMatchObject({
+        structuredContent: {
+          write: { gate: "open", state: "writable", pauseSource: null },
+          effectiveGate: null,
+        },
+      });
+      expect(stored?.changeSets?.writeMode).toBeUndefined();
+    } finally {
+      await client.close();
+      await runtime.unload();
+    }
+  });
+
+  it("fails closed when the validated bundle rejects during production maintenance", async () => {
+    let stored: PersistedBridgeSettings | undefined;
+    let bridge: BridgeInstance | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => structuredClone(stored),
+        save: async (settings: PersistedBridgeSettings) => {
+          stored = structuredClone(settings);
+        },
+      },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      createBridge: (options) => {
+        bridge = createBridgeInstance({ ...options, port: 0 });
+        return bridge;
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    await expect(
+      runtime.runOperatorMaintenance(() =>
+        assertValidatedInstalledBundle(
+          {
+            readManifest: async () => ({ id: "llm-wiki-vault-bridge", version: "0.0.0" }),
+            hasEntryPoint: async () => true,
+          },
+          "llm-wiki-vault-bridge",
+        ),
+      ),
+    ).rejects.toThrow("version does not match");
+
+    expect(stored?.changeSets?.writeMode).toBe("maintenance_failed");
+    expect(stored?.changeSets?.lifecycle).toEqual({
+      upgrade: "failed",
+      migration: "failed",
+    });
+
+    const client = new Client({ name: "maintenance-test", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(bridge!.endpoint, {
+        requestInit: { headers: { "X-Expected-Vault-ID": "vault-a" } },
+      }),
+    );
+    try {
+      const health = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(health).toMatchObject({
+        isError: false,
+        structuredContent: {
+          write: { gate: "blocked", state: "paused", pauseSource: "maintenance" },
+          lifecycle: { upgrade: "failed", migration: "failed" },
+          overall: "blocked",
+          effectiveGate: { code: "upgrade_in_progress" },
+          operatorAction: "finish_upgrade",
+        },
+      });
+      expect(
+        (health.structuredContent as { reasonCodes: string[] }).reasonCodes,
+      ).toContain("upgrade_failed");
+      const blocked = await client.callTool({
+        name: "vault_change_set_submit",
+        arguments: {
+          submissionKey: "failed-maintenance-key",
+          operations: [
+            {
+              operationId: "mkdir-1",
+              kind: "create_directory",
+              path: "Blocked",
+              ifExists: "reject",
+            },
+          ],
+        },
+      });
+      expect(blocked).toMatchObject({
+        isError: true,
+        structuredContent: {
+          outcome: "operationally_blocked",
+          gate: { code: "upgrade_in_progress" },
+        },
+      });
+      await expect(runtime.resumeWrites()).rejects.toThrow();
+    } finally {
+      await client.close();
+      await runtime.unload();
+    }
+  });
+
+  it("validates the bundle before migrating persisted state during maintenance", async () => {
+    let stored: PersistedBridgeSettings | undefined;
+    const events: string[] = [];
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => structuredClone(stored),
+        save: async (settings: PersistedBridgeSettings) => {
+          events.push("persist");
+          stored = structuredClone(settings);
+        },
+      },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      createBridge: (options) => fakeBridge(options.port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+    events.length = 0;
+
+    await runtime.runOperatorMaintenance(async () => {
+      events.push("bundle");
+    });
+
+    expect(events).toEqual(["bundle", "persist"]);
+    expect(stored).toEqual(runtime.persistedSettings);
+    await runtime.unload();
+  });
+
+  it("fails closed when maintenance state migration cannot persist", async () => {
+    let stored: PersistedBridgeSettings | undefined;
+    let failSaves = false;
+    const bridge = fakeBridge(27123);
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () => structuredClone(stored),
+        save: async (settings: PersistedBridgeSettings) => {
+          if (failSaves) throw new Error("disk full");
+          stored = structuredClone(settings);
+        },
+      },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      createBridge: () => bridge,
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+    failSaves = true;
+
+    await expect(
+      runtime.runOperatorMaintenance(async () => undefined),
+    ).rejects.toThrow("disk full");
+    expect(bridge.resumeWrites).not.toHaveBeenCalled();
     await runtime.unload();
   });
 });
