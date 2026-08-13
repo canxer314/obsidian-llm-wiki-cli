@@ -17,7 +17,8 @@ import {
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 2;
 const LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
-export const RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 2;
+export const RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 3;
+const LEGACY_RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 2;
 
 export interface ChangeSetExecutionState {
   phase: "queued" | "executing" | "terminal";
@@ -154,10 +155,15 @@ export type RecoveryMutation =
       before: RecoveryFileState;
       expectedAfter: RecoveryFileState;
       trashId: string;
+      /** Durable incoming-reference state captured before the public path disappears. */
+      referencedBefore?: boolean;
     };
 
 export interface RecoveryJournalFrame {
-  schemaVersion: 1 | typeof RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION;
+  schemaVersion:
+    | 1
+    | typeof LEGACY_RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION
+    | typeof RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION;
   vaultId: string;
   changeSetId: string;
   enqueueSeq: number;
@@ -186,6 +192,10 @@ export interface ChangeSetSemanticEvidenceRequest {
   readonly publicPaths: readonly string[];
   readonly hiddenTrash: boolean;
   readonly requiredEvents: readonly ChangeSetSemanticEvent[];
+  readonly referenceBaselines?: readonly {
+    readonly path: string;
+    readonly referenced: boolean;
+  }[];
 }
 
 export interface SearchSnapshotTargetEvidence {
@@ -215,6 +225,7 @@ export interface ChangeSetExecutionAdapter {
   restoreFromTrash?(trashId: string, path: string): Promise<void>;
   discardTrash?(trashId: string): Promise<void>;
   readTrash?(trashId: string): Promise<ArrayBuffer | Uint8Array | null>;
+  referenced?(path: string): Promise<boolean>;
   beginSemanticEvidence?(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
   awaitSemanticEvidence?(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
   readonly semanticEvidencePublishesSnapshot?: boolean;
@@ -846,7 +857,13 @@ const EXECUTABLE_OPERATION_KINDS: readonly ChangeSetOperation["kind"][] = [
 ];
 
 function recoveryMutationsEqual(left: RecoveryMutation, right: RecoveryMutation): boolean {
-  return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+  const withoutReferenceBaseline = (mutation: RecoveryMutation): RecoveryMutation => {
+    if (mutation.kind !== "trash") return mutation;
+    const { referencedBefore: _referencedBefore, ...rest } = mutation;
+    return rest;
+  };
+  return JSON.stringify(canonicalize(withoutReferenceBaseline(left))) ===
+    JSON.stringify(canonicalize(withoutReferenceBaseline(right)));
 }
 
 
@@ -1554,6 +1571,11 @@ export class ChangeSetService {
         publicPaths: frame.preview.paths.map(({ path }) => path),
         hiddenTrash: frame.input.operations.some(({ kind }) => kind === "trash"),
         requiredEvents: [],
+        referenceBaselines: (frame.mutations ?? []).flatMap((mutation) =>
+          mutation.kind === "trash" && typeof mutation.referencedBefore === "boolean"
+            ? [{ path: mutation.path, referenced: mutation.referencedBefore }]
+            : []
+        ),
       };
       const actions: (() => Promise<void>)[] = [];
       for (const mutation of [...(frame.mutations ?? [])].reverse()) {
@@ -2041,7 +2063,7 @@ export class ChangeSetService {
         }),
     );
     const mutationStates = new Map(files.map(({ path, before }) => [path, before]));
-    const mutations: RecoveryMutation[] = [];
+    let mutations: RecoveryMutation[] = [];
     plan.input.operations.forEach((operation, operationIndex) => {
       if (!isMutationOperation(operation)) return;
       mutations.push(
@@ -2053,6 +2075,28 @@ export class ChangeSetService {
         ),
       );
     });
+    const trashMutations = mutations.filter(
+      (mutation): mutation is Extract<RecoveryMutation, { kind: "trash" }> =>
+        mutation.kind === "trash",
+    );
+    if (trashMutations.length > 0) {
+      const readReferenceState = execution.referenced?.bind(execution);
+      if (readReferenceState === undefined) {
+        throw new Error("Managed trash reference evidence is unavailable");
+      }
+      const withReferenceBaselines = await Promise.all(
+        trashMutations.map(async (mutation) => ({
+          ...mutation,
+          referencedBefore: await readReferenceState(mutation.path),
+        })),
+      );
+      const byOperationId = new Map(
+        withReferenceBaselines.map((mutation) => [mutation.operationId, mutation]),
+      );
+      mutations = mutations.map(
+        (mutation) => byOperationId.get(mutation.operationId) ?? mutation,
+      );
+    }
     let frame: RecoveryJournalFrame = {
       schemaVersion: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
       vaultId: this.#options.vaultId ?? "vault",

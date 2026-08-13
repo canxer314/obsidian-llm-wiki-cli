@@ -79,7 +79,8 @@ function semanticRequestsMatch(
     left.mode === right.mode &&
     left.hiddenTrash === right.hiddenTrash &&
     JSON.stringify(left.operations) === JSON.stringify(right.operations) &&
-    JSON.stringify(left.publicPaths) === JSON.stringify(right.publicPaths)
+    JSON.stringify(left.publicPaths) === JSON.stringify(right.publicPaths) &&
+    JSON.stringify(left.referenceBaselines) === JSON.stringify(right.referenceBaselines)
   );
 }
 
@@ -108,10 +109,17 @@ export function createChangeSetSemanticEvidenceTracker(
         if ("targetVersion" in operation && (await probes.cacheVisible(operation.path))) {
           return false;
         }
-      } else if (
-        "targetVersion" in operation && !(await probes.cacheVisible(operation.path))
-      ) {
-        return false;
+      } else {
+        const baseline = request.referenceBaselines?.find(
+          ({ path }) => path === operation.path,
+        );
+        if (
+          baseline === undefined ||
+          ("targetVersion" in operation && !(await probes.cacheVisible(operation.path))) ||
+          (await probes.referenced(operation.path)) !== baseline.referenced
+        ) {
+          return false;
+        }
       }
     }
     return true;
@@ -183,6 +191,7 @@ export interface ChangeSetExecutionHost {
   restoreFromTrash?(trashId: string, path: string): Promise<void>;
   discardTrash?(trashId: string): Promise<void>;
   readTrash?(trashId: string): Promise<ArrayBuffer | Uint8Array | null>;
+  referenced?(path: string): Promise<boolean>;
   beginSemanticEvidence?: ChangeSetExecutionAdapter["beginSemanticEvidence"];
   awaitSemanticEvidence?: ChangeSetExecutionAdapter["awaitSemanticEvidence"];
   semanticEvidencePublishesSnapshot?: boolean;
@@ -203,6 +212,7 @@ export interface NodeFileSystemChangeSetHostOptions {
     path: string,
     bytes: Uint8Array,
   ): Promise<void>;
+  referenced?(path: string): Promise<boolean>;
   beginSemanticEvidence?: NonNullable<ChangeSetExecutionAdapter["beginSemanticEvidence"]>;
   awaitSemanticEvidence: NonNullable<ChangeSetExecutionAdapter["awaitSemanticEvidence"]>;
   semanticEvidencePublishesSnapshot?: boolean;
@@ -403,6 +413,7 @@ export async function createNodeFileSystemChangeSetHost(
         throw error;
       }
     },
+    ...(options.referenced === undefined ? {} : { referenced: options.referenced }),
     beginSemanticEvidence: options.beginSemanticEvidence,
     awaitSemanticEvidence: options.awaitSemanticEvidence,
     semanticEvidencePublishesSnapshot: options.semanticEvidencePublishesSnapshot,
@@ -464,6 +475,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   }
   if (
     (frame.schemaVersion !== 1 &&
+      frame.schemaVersion !== 2 &&
       frame.schemaVersion !== RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION) ||
     typeof frame.vaultId !== "string" ||
     frame.vaultId.length === 0 ||
@@ -474,8 +486,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
     frame.input === null ||
     !Array.isArray(frame.directories) ||
     (frame.schemaVersion === 1 && frame.files !== undefined) ||
-    (frame.schemaVersion === RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION &&
-      !Array.isArray(frame.files)) ||
+    (frame.schemaVersion !== 1 && !Array.isArray(frame.files)) ||
     typeof frame.preview !== "object" ||
     frame.preview === null
   ) {
@@ -529,7 +540,11 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
               typeof mutation.path !== "string" ||
               !isPrivateId(mutation.trashId) ||
               !isRecoveryState(mutation.before) ||
-              !isRecoveryState(mutation.expectedAfter)
+              !isRecoveryState(mutation.expectedAfter) ||
+              (frame.schemaVersion === RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION &&
+                typeof mutation.referencedBefore !== "boolean") ||
+              (mutation.referencedBefore !== undefined &&
+                typeof mutation.referencedBefore !== "boolean")
             );
           }
           return (
@@ -622,6 +637,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
       ? {}
       : { discardTrash: options.host.discardTrash }),
     ...(options.host.readTrash === undefined ? {} : { readTrash: options.host.readTrash }),
+    ...(options.host.referenced === undefined ? {} : { referenced: options.host.referenced }),
     ...(options.host.beginSemanticEvidence === undefined
       ? {}
       : { beginSemanticEvidence: options.host.beginSemanticEvidence }),

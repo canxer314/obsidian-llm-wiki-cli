@@ -254,6 +254,7 @@ describe("Change Set semantic evidence tracker", () => {
       publicPaths: ["Note.md"],
       hiddenTrash: true,
       requiredEvents: [],
+      referenceBaselines: [{ path: "Note.md", referenced: false }],
     };
 
     tracker.begin(evidence);
@@ -261,6 +262,165 @@ describe("Change Set semantic evidence tracker", () => {
 
     expect(reindexed).toBe(true);
     expect(published).toEqual(["snapshot"]);
+  });
+
+  it("waits for restored Markdown references after its cache is visible", async () => {
+    let now = 0;
+    let referencesRestored = false;
+    const published: string[] = [];
+    const tracker = createChangeSetSemanticEvidenceTracker({
+      deadlineMs: 5_000,
+      now: () => now,
+      delay: async (milliseconds) => {
+        now += milliseconds;
+        referencesRestored = true;
+      },
+      probes: {
+        cacheVisible: async () => true,
+        referenced: async () => referencesRestored,
+      },
+      publishSuccessorSearchSnapshot: async () => {
+        published.push("snapshot");
+      },
+    });
+    const evidence = {
+      mode: "restore" as const,
+      operations: [{
+        operationId: "trash-1",
+        kind: "trash" as const,
+        path: "Note.md",
+        targetVersion: `sha256:${"a".repeat(64)}`,
+      }],
+      publicPaths: ["Note.md"],
+      hiddenTrash: true,
+      requiredEvents: [],
+      referenceBaselines: [{ path: "Note.md", referenced: true }],
+    };
+
+    tracker.begin(evidence);
+    await tracker.await(evidence);
+
+    expect(now).toBeGreaterThan(0);
+    expect(published).toEqual(["snapshot"]);
+  });
+
+  it("restores an attachment after its previous reference state converges", async () => {
+    let now = 0;
+    let referenced = false;
+    const seen: string[] = [];
+    const tracker = createChangeSetSemanticEvidenceTracker({
+      deadlineMs: 5_000,
+      now: () => now,
+      delay: async (milliseconds) => {
+        now += milliseconds;
+        referenced = true;
+      },
+      probes: {
+        cacheVisible: async (path) => {
+          seen.push(`cache:${path}`);
+          return false;
+        },
+        referenced: async (path) => {
+          seen.push(`refs:${path}`);
+          return referenced;
+        },
+      },
+      publishSuccessorSearchSnapshot: async () => undefined,
+    });
+    const evidence = {
+      mode: "restore" as const,
+      operations: [{
+        operationId: "trash-1",
+        kind: "trash" as const,
+        path: "assets/image.png",
+        expectedSha256: "b".repeat(64),
+      }],
+      publicPaths: ["assets/image.png"],
+      hiddenTrash: true,
+      requiredEvents: [],
+      referenceBaselines: [{ path: "assets/image.png", referenced: true }],
+    };
+
+    tracker.begin(evidence);
+    await tracker.await(evidence);
+
+    expect(now).toBeGreaterThan(0);
+    expect(seen).not.toContain("cache:assets/image.png");
+  });
+
+  it("accepts an originally unreferenced attachment without requiring a reference", async () => {
+    const seen: string[] = [];
+    const tracker = createChangeSetSemanticEvidenceTracker({
+      probes: {
+        cacheVisible: async (path) => {
+          seen.push(`cache:${path}`);
+          return false;
+        },
+        referenced: async (path) => {
+          seen.push(`refs:${path}`);
+          return false;
+        },
+      },
+      publishSuccessorSearchSnapshot: async () => undefined,
+    });
+    const evidence = {
+      mode: "restore" as const,
+      operations: [{
+        operationId: "trash-1",
+        kind: "trash" as const,
+        path: "assets/image.png",
+        expectedSha256: "b".repeat(64),
+      }],
+      publicPaths: ["assets/image.png"],
+      hiddenTrash: true,
+      requiredEvents: [],
+      referenceBaselines: [{ path: "assets/image.png", referenced: false }],
+    };
+
+    tracker.begin(evidence);
+    await tracker.await(evidence);
+
+    expect(seen).toEqual(["refs:assets/image.png"]);
+  });
+
+  it("fails closed when restored references miss the evidence deadline", async () => {
+    let now = 0;
+    let snapshots = 0;
+    const tracker = createChangeSetSemanticEvidenceTracker({
+      deadlineMs: 5_000,
+      now: () => now,
+      delay: async (milliseconds) => {
+        now += milliseconds;
+      },
+      probes: {
+        cacheVisible: async () => true,
+        referenced: async () => false,
+      },
+      publishSuccessorSearchSnapshot: async () => {
+        snapshots += 1;
+      },
+    });
+    const evidence = {
+      mode: "restore" as const,
+      operations: [{
+        operationId: "trash-1",
+        kind: "trash" as const,
+        path: "Note.md",
+        targetVersion: `sha256:${"a".repeat(64)}`,
+      }],
+      publicPaths: ["Note.md"],
+      hiddenTrash: true,
+      requiredEvents: [],
+      referenceBaselines: [{ path: "Note.md", referenced: true }],
+    };
+
+    tracker.begin(evidence);
+    await expect(tracker.await(evidence)).rejects.toThrow(
+      "Change Set semantic evidence timed out",
+    );
+
+    expect(now).toBe(5_000);
+    expect(snapshots).toBe(0);
   });
 
   it("probes references but not the Markdown cache for attachment trash", async () => {

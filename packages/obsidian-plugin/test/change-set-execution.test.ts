@@ -230,12 +230,14 @@ class FileAdapter extends DirectoryAdapter {
   readonly files = new Map<string, Uint8Array>();
   readonly stagedFiles = new Map<string, Uint8Array>();
   readonly managedTrash = new Map<string, Uint8Array>();
+  readonly references = new Map<string, boolean>();
   readonly evidenceRequests: {
     readonly mode: "apply" | "restore";
     readonly operations: readonly unknown[];
     readonly publicPaths: readonly string[];
     readonly hiddenTrash: boolean;
     readonly requiredEvents: readonly unknown[];
+    readonly referenceBaselines?: readonly { path: string; referenced: boolean }[];
   }[] = [];
 
   override async pathKind(path: string): Promise<"directory" | "file" | null> {
@@ -313,12 +315,18 @@ class FileAdapter extends DirectoryAdapter {
     return bytes === undefined ? null : Uint8Array.from(bytes);
   }
 
+  async referenced(path: string): Promise<boolean> {
+    this.events.push(`references:${path}`);
+    return this.references.get(path) ?? false;
+  }
+
   async awaitSemanticEvidence(request: {
     readonly mode: "apply" | "restore";
     readonly operations: readonly unknown[];
     readonly publicPaths: readonly string[];
     readonly hiddenTrash: boolean;
     readonly requiredEvents: readonly unknown[];
+    readonly referenceBaselines?: readonly { path: string; referenced: boolean }[];
   }): Promise<void> {
     this.evidenceRequests.push(request);
     this.events.push(`evidence:${request.publicPaths.join(",")}`);
@@ -329,6 +337,7 @@ async function createRealFileExecution(root: string) {
   const host = await createNodeFileSystemChangeSetHost({
     basePath: root,
     stateDirectory: join(root, ".llm-wiki"),
+    referenced: async () => false,
     awaitSemanticEvidence: async () => undefined,
     publishSearchSnapshot: async () => undefined,
   });
@@ -2581,6 +2590,44 @@ describe("durable attachment and managed-trash Change Set execution", () => {
     expect(adapter.frame?.phase).toBe("ROLLED_BACK");
   });
 
+  it("fails closed before managed trash when reference evidence is unavailable", async () => {
+    const bytes = Buffer.from("# Keep me\n");
+    const targetVersion = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const store = new MemoryStore();
+    const adapter = new FileAdapter();
+    adapter.files.set("Keep.md", bytes);
+    adapter.referenced = undefined as never;
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-missing-reference-evidence",
+    });
+
+    await expect(
+      service.submit(
+        {
+          submissionKey: "missing-reference-evidence-key",
+          operations: [{
+            operationId: "trash-without-reference-evidence",
+            kind: "trash",
+            path: "Keep.md",
+            targetVersion,
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow("Managed trash reference evidence is unavailable");
+
+    expect(adapter.files.get("Keep.md")).toEqual(bytes);
+    expect(adapter.events).not.toContain("trash:Keep.md");
+    expect(adapter.frame).toBeNull();
+  });
+
   it("retains committed managed trash privately so the operation remains reversible", async () => {
     const bytes = Buffer.from("# Clean me\n");
     const targetVersion = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -2723,6 +2770,13 @@ describe("durable attachment and managed-trash Change Set execution", () => {
       finalState: { kind: "absent" },
     }]);
     expect([...adapter.managedTrash.values()]).toEqual([bytes]);
+    expect(adapter.frame?.mutations).toEqual([
+      expect.objectContaining({
+        kind: "trash",
+        path: "assets/private.bin",
+        referencedBefore: false,
+      }),
+    ]);
     expect(JSON.stringify(result)).not.toContain("contentVersion");
   });
 
@@ -2733,6 +2787,7 @@ describe("durable attachment and managed-trash Change Set execution", () => {
     const adapter = new FileAdapter();
     adapter.directories.add("assets");
     adapter.files.set("assets/restore.bin", bytes);
+    adapter.references.set("assets/restore.bin", true);
     const dataSource = {
       readBinary: (path: string) => adapter.readBinary(path),
       pathKind: (path: string) => adapter.pathKind(path),
@@ -2762,11 +2817,28 @@ describe("durable attachment and managed-trash Change Set execution", () => {
       ),
     ).rejects.toThrow(InjectedChangeSetCrash);
     expect([...adapter.managedTrash.values()]).toEqual([bytes]);
+    expect(adapter.frame?.mutations).toEqual([
+      expect.objectContaining({
+        kind: "trash",
+        path: "assets/restore.bin",
+        referencedBefore: true,
+      }),
+    ]);
+    expect(adapter.events.indexOf("references:assets/restore.bin")).toBeLessThan(
+      adapter.events.indexOf("journal:PREPARED"),
+    );
+    expect(adapter.events.indexOf("journal:PREPARED")).toBeLessThan(
+      adapter.events.indexOf("trash:assets/restore.bin"),
+    );
 
     const recovered = await ChangeSetService.open({ store, dataSource, execution: adapter });
 
     expect(adapter.files.get("assets/restore.bin")).toEqual(bytes);
     expect(adapter.managedTrash.size).toBe(0);
+    expect(adapter.evidenceRequests.at(-1)).toMatchObject({
+      mode: "restore",
+      referenceBaselines: [{ path: "assets/restore.bin", referenced: true }],
+    });
     await expect(
       recovered.status({ changeSetId: "change-set-trash-attachment-crash" }, requestState),
     ).resolves.toMatchObject({ lookup: "found", changeSet: { state: "intent_not_applied" } });
