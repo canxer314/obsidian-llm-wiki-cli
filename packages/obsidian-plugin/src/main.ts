@@ -17,11 +17,17 @@ import { createBridgeInstance } from "./bridge-instance.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import { createFileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
 import {
+  assertValidatedInstalledBundle,
+  registerRunMaintenanceCommand,
+  type InstalledBundleProbe,
+} from "./maintenance-operation.js";
+import {
   ObsidianSemanticVersionTracker,
   createObsidianSearchDataSource,
   enumerateCanonicalReferenceTargets,
   isRegisteredSubpathResult,
 } from "./obsidian-search-data-source.js";
+import { RecoveryJournalIncompatibleError } from "./recovery-journal.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -60,6 +66,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       }
     };
     let runtime!: ManagedVaultBridgeRuntime;
+    let incompatibleState = false;
     const semanticVersions = new ObsidianSemanticVersionTracker();
     const changeSetExecution =
       adapter instanceof FileSystemAdapter
@@ -113,6 +120,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 await runtime.publishSuccessorSearchSnapshot(targets);
               },
             },
+          }).catch((error: unknown) => {
+            if (!(error instanceof RecoveryJournalIncompatibleError)) throw error;
+            incompatibleState = true;
+            return undefined;
           })
         : undefined;
     runtime = new ManagedVaultBridgeRuntime({
@@ -226,6 +237,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       },
       changeSetDataSource,
       changeSetExecution,
+      incompatibleState,
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;
@@ -291,6 +303,34 @@ export default class VaultOperationBridgePlugin extends Plugin {
     };
     addPathClassificationCommand("move", "move");
     addPathClassificationCommand("copy", "copy");
+    this.addCommand({
+      id: "pause-managed-vault-writes",
+      name: "Pause Managed Vault writes",
+      callback: () => runtime.pauseWrites(),
+    });
+    this.addCommand({
+      id: "resume-managed-vault-writes",
+      name: "Resume Managed Vault writes",
+      callback: () => runtime.resumeWrites(),
+    });
+    const pluginDirectory =
+      this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    const bundleProbe: InstalledBundleProbe | undefined =
+      adapter instanceof FileSystemAdapter
+        ? {
+            readManifest: async () =>
+              JSON.parse(await adapter.read(`${pluginDirectory}/manifest.json`)) as unknown,
+            hasEntryPoint: () => adapter.exists(`${pluginDirectory}/main.js`),
+          }
+        : undefined;
+    registerRunMaintenanceCommand(this, async () => {
+      if (bundleProbe === undefined) {
+        throw new Error("Validated bundle probing requires a file-system Vault adapter");
+      }
+      await runtime.runOperatorMaintenance(() =>
+        assertValidatedInstalledBundle(bundleProbe, this.manifest.id),
+      );
+    });
     this.addCommand({
       id: "copy-claude-code-mcp-registration",
       name: "Copy Claude Code MCP registration command",

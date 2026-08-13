@@ -44,6 +44,319 @@ async function connect(endpoint: URL, expectedVaultId?: string): Promise<Client>
 }
 
 describe("Bridge Instance over loopback Streamable HTTP", () => {
+  it("projects the fixed gate precedence consistently across all six tools", async () => {
+    const health = healthState("vault-a", "Alpha");
+    health.effectiveGate = { code: "upgrade_in_progress" };
+    health.recovery = { state: "blocked" };
+    health.write = { gate: "blocked", state: "paused", pauseSource: "maintenance" };
+    const bridge = createBridgeInstance({
+      port: 0,
+      health,
+      discoverService: {
+        execute: async () => {
+          throw new Error("blocked discovery must not execute");
+        },
+        releaseClient: () => undefined,
+      },
+      readDataSource: {
+        readBinary: async () => {
+          throw new Error("blocked read must not execute");
+        },
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+      changeSets: {
+        store: {
+          load: async () => undefined,
+          save: async () => undefined,
+        },
+        dataSource: {
+          readBinary: async () => {
+            throw new Error("blocked submit must not read");
+          },
+          pathKind: async () => {
+            throw new Error("blocked submit must not inspect paths");
+          },
+          isContained: async () => {
+            throw new Error("blocked submit must not inspect containment");
+          },
+        },
+        createChangeSetId: () => "blocked-change-set",
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const calls = await Promise.all([
+        client.callTool({ name: "vault_health", arguments: {} }),
+        client.callTool({
+          name: "vault_discover",
+          arguments: {
+            query: { text: { literal: "blocked", caseSensitive: true } },
+            projection: { matches: false },
+            order: { by: "path", direction: "asc" },
+            page: { maxItems: 10, continuation: null },
+          },
+        }),
+        client.callTool({
+          name: "vault_read",
+          arguments: { items: [{ kind: "exact", path: "Note.md" }] },
+        }),
+        client.callTool({
+          name: "vault_continue",
+          arguments: { continuation: "uninspected" },
+        }),
+        client.callTool({
+          name: "vault_change_set_submit",
+          arguments: {
+            submissionKey: "blocked-key",
+            operations: [
+              {
+                operationId: "mkdir-1",
+                kind: "create_directory",
+                path: "Blocked",
+                ifExists: "reject",
+              },
+            ],
+          },
+        }),
+        client.callTool({
+          name: "vault_change_set_status",
+          arguments: { submissionKey: "blocked-key" },
+        }),
+      ]);
+
+      expect(calls[0]).toMatchObject({
+        isError: false,
+        structuredContent: { effectiveGate: { code: "recovery_blocked" } },
+      });
+      for (const result of calls.slice(1, 4)) {
+        expect(result).toMatchObject({
+          isError: true,
+          structuredContent: {
+            outcome: "operationally_blocked",
+            gate: { code: "recovery_blocked" },
+          },
+        });
+      }
+      expect(calls[4]).toMatchObject({
+        isError: true,
+        structuredContent: {
+          outcome: "registered",
+          changeSet: { state: "intent_not_applied" },
+          gate: { code: "recovery_blocked" },
+        },
+      });
+      expect(calls[5]).toMatchObject({
+        isError: false,
+        structuredContent: { lookup: "found" },
+      });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("keeps manual pause and maintenance local while observational tools remain available", async () => {
+    const health = healthState("vault-a", "Alpha");
+    const bridge = createBridgeInstance({
+      port: 0,
+      health,
+      discoverService: {
+        execute: async () => ({ outcome: "results", items: [], continuation: null }),
+        releaseClient: () => undefined,
+      },
+      readDataSource: {
+        readBinary: async () => null,
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+      changeSets: {
+        store: { load: async () => undefined, save: async () => undefined },
+        dataSource: {
+          readBinary: async () => null,
+          pathKind: async () => null,
+          isContained: async () => true,
+        },
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      await bridge.pauseWrites();
+      const pausedHealth = await client.callTool({ name: "vault_health", arguments: {} });
+      const pausedRead = await client.callTool({
+        name: "vault_read",
+        arguments: { items: [{ kind: "metadata", path: "Missing.md" }] },
+      });
+      const pausedStatus = await client.callTool({
+        name: "vault_change_set_status",
+        arguments: { submissionKey: "unknown" },
+      });
+      const pausedSubmit = await client.callTool({
+        name: "vault_change_set_submit",
+        arguments: {
+          submissionKey: "paused-key",
+          operations: [
+            {
+              operationId: "mkdir-1",
+              kind: "create_directory",
+              path: "Paused",
+              ifExists: "reject",
+            },
+          ],
+        },
+      });
+
+      expect(pausedHealth).toMatchObject({
+        isError: false,
+        structuredContent: {
+          write: { state: "paused", pauseSource: "manual" },
+          effectiveGate: { code: "writes_paused" },
+        },
+      });
+      expect(pausedRead.isError).toBe(false);
+      expect(pausedStatus.isError).toBe(false);
+      expect(pausedSubmit).toMatchObject({
+        isError: true,
+        structuredContent: {
+          outcome: "operationally_blocked",
+          gate: { code: "writes_paused" },
+        },
+      });
+
+      const maintenanceSteps: string[] = [];
+      await expect(
+        bridge.runMaintenance({
+          replaceValidatedBundle: () => {
+            maintenanceSteps.push("replace");
+          },
+          migrateState: () => {
+            maintenanceSteps.push("migrate");
+            throw new Error("migration failed");
+          },
+          recheckHealth: () => {
+            maintenanceSteps.push("health");
+          },
+        }),
+      ).rejects.toThrow("migration failed");
+      expect(maintenanceSteps).toEqual(["replace", "migrate"]);
+      const failedHealth = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(failedHealth).toMatchObject({
+        isError: false,
+        structuredContent: {
+          write: { gate: "blocked", state: "paused", pauseSource: "maintenance" },
+          lifecycle: { upgrade: "failed", migration: "failed" },
+          overall: "blocked",
+          effectiveGate: { code: "upgrade_in_progress" },
+        },
+      });
+      await expect(bridge.resumeWrites()).rejects.toThrow();
+      await expect(bridge.pauseWrites()).rejects.toThrow();
+      const stillFailed = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(stillFailed).toMatchObject({
+        structuredContent: {
+          write: { gate: "blocked", pauseSource: "maintenance" },
+          effectiveGate: { code: "upgrade_in_progress" },
+        },
+      });
+
+      await bridge.runMaintenance({
+        replaceValidatedBundle: () => {
+          maintenanceSteps.push("replace");
+        },
+        migrateState: () => {
+          maintenanceSteps.push("migrate");
+        },
+        recheckHealth: () => {
+          maintenanceSteps.push("health");
+        },
+      });
+      const maintainedHealth = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(maintenanceSteps).toEqual([
+        "replace",
+        "migrate",
+        "replace",
+        "migrate",
+        "health",
+      ]);
+      expect(maintainedHealth).toMatchObject({
+        isError: false,
+        structuredContent: {
+          write: { gate: "open", state: "paused", pauseSource: "maintenance" },
+          effectiveGate: { code: "writes_paused" },
+          lifecycle: { upgrade: "succeeded", migration: "succeeded" },
+          overall: "healthy",
+          reasonCodes: [],
+        },
+      });
+
+      await bridge.resumeWrites();
+      const resumedHealth = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(resumedHealth).toMatchObject({
+        structuredContent: {
+          write: { state: "writable", pauseSource: null },
+          effectiveGate: null,
+        },
+      });
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it("preserves a recovery safety block raised during maintenance health recheck", async () => {
+    const health = healthState("vault-a", "Alpha");
+    const bridge = createBridgeInstance({
+      port: 0,
+      health,
+      changeSets: {
+        store: { load: async () => undefined, save: async () => undefined },
+        dataSource: {
+          readBinary: async () => null,
+          pathKind: async () => null,
+          isContained: async () => true,
+        },
+      },
+    });
+    await bridge.start();
+
+    try {
+      await bridge.runMaintenance({
+        replaceValidatedBundle: () => undefined,
+        migrateState: () => undefined,
+        recheckHealth: () => {
+          health.recovery = { state: "blocked" };
+          health.write = { gate: "blocked", state: "paused", pauseSource: null };
+          health.effectiveGate = { code: "recovery_blocked" };
+          health.overall = "blocked";
+          health.reasonCodes = ["recovery_blocked"];
+          health.operatorAction = "review_recovery";
+        },
+      });
+
+      const client = await connect(bridge.endpoint, "vault-a");
+      const observed = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(observed).toMatchObject({
+        isError: false,
+        structuredContent: {
+          recovery: { state: "blocked" },
+          write: { gate: "blocked", pauseSource: null },
+          effectiveGate: { code: "recovery_blocked" },
+          overall: "blocked",
+          reasonCodes: ["recovery_blocked"],
+          operatorAction: "review_recovery",
+        },
+      });
+      await expect(bridge.resumeWrites()).rejects.toThrow();
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   it("serves trustworthy health only when initialization and tool entry identities match", async () => {
     const bridge = createBridgeInstance({
       port: 0,
@@ -114,6 +427,109 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
     }
   });
 
+  it("never reads or binds Change Set state for an incompatible connection", async () => {
+    let loads = 0;
+    let saves = 0;
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      peerProtocol: {
+        protocol: "2.0",
+        supported: { major: 2, minimumMinor: 0, maximumMinor: 0 },
+      },
+      readDataSource: {
+        readBinary: async () => {
+          throw new Error("incompatible read must not inspect content");
+        },
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+      changeSets: {
+        store: {
+          load: async () => {
+            loads += 1;
+            throw new Error("incompatible connection must not load the registry");
+          },
+          save: async () => {
+            saves += 1;
+          },
+        },
+        dataSource: {
+          readBinary: async () => {
+            throw new Error("incompatible submit must not inspect content");
+          },
+          pathKind: async () => {
+            throw new Error("incompatible submit must not inspect paths");
+          },
+          isContained: async () => {
+            throw new Error("incompatible submit must not inspect containment");
+          },
+        },
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const tools = await client.listTools();
+      expect(tools.tools.map(({ name }) => name)).toContain("vault_change_set_submit");
+      expect(tools.tools.map(({ name }) => name)).toContain("vault_change_set_status");
+      const malformedTools = [
+        ["vault_discover", { query: null }],
+        ["vault_read", { items: "bad" }],
+        ["vault_continue", { continuation: 42 }],
+      ] as const;
+      for (const [name, arguments_] of malformedTools) {
+        const blocked = await client.callTool({ name, arguments: arguments_ });
+        expect(blocked).toMatchObject({
+          isError: true,
+          structuredContent: {
+            outcome: "operationally_blocked",
+            gate: { code: "incompatible_protocol" },
+          },
+        });
+      }
+      const submit = await client.callTool({
+        name: "vault_change_set_submit",
+        arguments: {
+          submissionKey: "uninspected-key",
+          operations: [
+            {
+              operationId: "mkdir-1",
+              kind: "create_directory",
+              path: "Uninspected",
+              ifExists: "reject",
+            },
+          ],
+        },
+      });
+      const status = await client.callTool({
+        name: "vault_change_set_status",
+        arguments: { submissionKey: "uninspected-key" },
+      });
+
+      expect(submit).toMatchObject({
+        isError: true,
+        structuredContent: {
+          outcome: "operationally_blocked",
+          gate: { code: "incompatible_protocol" },
+        },
+      });
+      expect(status).toMatchObject({
+        isError: true,
+        structuredContent: {
+          lookup: "operationally_blocked",
+          gate: { code: "incompatible_protocol" },
+        },
+      });
+      expect(loads).toBe(0);
+      expect(saves).toBe(0);
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   it("derives the minimal incompatible health projection from protocol participants", async () => {
     const bridge = createBridgeInstance({
       port: 0,
@@ -127,6 +543,15 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
 
     try {
       const client = await connect(bridge.endpoint, "vault-a");
+      const tools = await client.listTools();
+      expect(tools.tools.map(({ name }) => name).sort()).toEqual([
+        "vault_change_set_status",
+        "vault_change_set_submit",
+        "vault_continue",
+        "vault_discover",
+        "vault_health",
+        "vault_read",
+      ]);
       const result = await client.callTool({ name: "vault_health", arguments: {} });
       expect(result.isError).toBe(false);
       expect(result.structuredContent).toEqual({

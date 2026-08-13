@@ -9,6 +9,7 @@ import type {
   SearchSnapshotTargetEvidence,
 } from "./change-set.js";
 import {
+  RecoveryJournalIncompatibleError,
   openRecoveryJournal,
   type RecoveryJournal,
   type RecoveryJournalJson,
@@ -45,6 +46,15 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
     throw new Error("Recovery Journal payload is corrupt or incompatible");
   }
   const frame = value as Partial<RecoveryJournalFrame>;
+  if (
+    typeof frame.schemaVersion === "number" &&
+    Number.isInteger(frame.schemaVersion) &&
+    frame.schemaVersion > RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION
+  ) {
+    throw new RecoveryJournalIncompatibleError(
+      "Recovery Journal payload schema is not supported",
+    );
+  }
   if (
     (frame.schemaVersion !== 1 &&
       frame.schemaVersion !== RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION) ||
@@ -85,6 +95,15 @@ export async function createFileSystemChangeSetExecutionAdapter(
   } catch (error) {
     await handle.close();
     throw error;
+  }
+  try {
+    const recovered = await journal.recover();
+    if (recovered !== undefined) parseFrame(recovered.payload);
+  } catch (error) {
+    if (error instanceof RecoveryJournalIncompatibleError) {
+      await handle.close();
+      throw error;
+    }
   }
   return {
     loadRecoveryFrame: async () => {
