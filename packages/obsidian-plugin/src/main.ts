@@ -21,6 +21,7 @@ import {
   enumerateCanonicalReferenceTargets,
   isRegisteredSubpathResult,
 } from "./obsidian-search-data-source.js";
+import { RecoveryJournalIncompatibleError } from "./recovery-journal.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -44,6 +45,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const stagingDirectory = join(stateDirectory, "staging");
     let runtime!: ManagedVaultBridgeRuntime;
+    let incompatibleState = false;
     const changeSetExecution =
       adapter instanceof FileSystemAdapter
         ? await createFileSystemChangeSetExecutionAdapter({
@@ -89,6 +91,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 await runtime.publishSuccessorSearchSnapshot();
               },
             },
+          }).catch((error: unknown) => {
+            if (!(error instanceof RecoveryJournalIncompatibleError)) throw error;
+            incompatibleState = true;
+            return undefined;
           })
         : undefined;
     runtime = new ManagedVaultBridgeRuntime({
@@ -201,6 +207,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       },
       changeSetDataSource,
       changeSetExecution,
+      incompatibleState,
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;
@@ -252,6 +259,16 @@ export default class VaultOperationBridgePlugin extends Plugin {
     };
     addPathClassificationCommand("move", "move");
     addPathClassificationCommand("copy", "copy");
+    this.addCommand({
+      id: "pause-managed-vault-writes",
+      name: "Pause Managed Vault writes",
+      callback: () => runtime.pauseWrites(),
+    });
+    this.addCommand({
+      id: "resume-managed-vault-writes",
+      name: "Resume Managed Vault writes",
+      callback: () => runtime.resumeWrites(),
+    });
     this.addCommand({
       id: "copy-claude-code-mcp-registration",
       name: "Copy Claude Code MCP registration command",

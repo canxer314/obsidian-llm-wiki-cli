@@ -99,6 +99,7 @@ export interface BridgeInstanceOptions {
   port: number;
   health: BridgeHealthState;
   peerProtocol?: ProtocolParticipant;
+  incompatibleState?: boolean;
   authenticator?: BridgeRequestAuthenticator;
   readDataSource?: VaultReadDataSource;
   discoverService?: BridgeDiscoverService;
@@ -108,11 +109,20 @@ export interface BridgeInstanceOptions {
   continuationToken?: () => string;
 }
 
+export interface BridgeMaintenanceOperation {
+  replaceValidatedBundle(): void | Promise<void>;
+  migrateState(): void | Promise<void>;
+  recheckHealth(): void | Promise<void>;
+}
+
 export interface BridgeInstance {
   readonly endpoint: URL;
   readonly port: number;
   start(): Promise<void>;
   stop(): Promise<void>;
+  pauseWrites(): Promise<void>;
+  runMaintenance(operation: BridgeMaintenanceOperation): Promise<void>;
+  resumeWrites(): Promise<void>;
   registrationCommand(serverName?: string): string;
 }
 
@@ -121,6 +131,7 @@ function projectObservedHealth(
   port: number,
   searchSnapshotReadiness?: () => "ready" | "building" | "unavailable",
 ): HealthResult {
+  const effectiveGate = projectEffectiveGate(state);
   const snapshotReadiness = searchSnapshotReadiness?.() ?? state.readiness.searchSnapshot;
   const dynamicSnapshotState = searchSnapshotReadiness !== undefined;
   const snapshotNotReady = dynamicSnapshotState && snapshotReadiness !== "ready";
@@ -166,7 +177,7 @@ function projectObservedHealth(
     write: state.write,
     queue: state.queue,
     lifecycle: state.lifecycle,
-    effectiveGate: state.effectiveGate,
+    effectiveGate,
     overall:
       snapshotNotReady && state.overall === "healthy" ? "degraded" : state.overall,
     reasonCodes: snapshotNotReady
@@ -309,7 +320,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
           description: "Observe this Managed Vault's Bridge health evidence.",
           inputSchema: healthInputSchema,
         },
-        ...(options.discoverService === undefined
+        ...(options.discoverService === undefined &&
+        options.incompatibleState !== true &&
+        sessionState.incompatibleHealth === undefined
           ? []
           : [
               {
@@ -319,7 +332,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
                 inputSchema: discoverToolInputSchema,
               },
             ]),
-        ...(options.readDataSource === undefined
+        ...(options.readDataSource === undefined &&
+        options.incompatibleState !== true &&
+        sessionState.incompatibleHealth === undefined
           ? []
           : [
               {
@@ -334,7 +349,9 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
                 inputSchema: continueToolInputSchema,
               },
             ]),
-        ...(changeSetService === undefined
+        ...(options.changeSets === undefined &&
+        options.incompatibleState !== true &&
+        sessionState.incompatibleHealth === undefined
           ? []
           : [
               {
@@ -368,6 +385,45 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
 
       const incompatibleGate = sessionState.incompatibleHealth?.gate;
       if (incompatibleGate !== undefined) {
+        if (request.params.name === "vault_discover") {
+          const result = parseDiscoverResult({
+            outcome: "operationally_blocked",
+            gate: incompatibleGate,
+          });
+          return {
+            content: [
+              { type: "text" as const, text: serializeDiscoverCompatibilityText(result) },
+            ],
+            structuredContent: result,
+            isError: true,
+          };
+        }
+        if (request.params.name === "vault_read") {
+          const result = parseReadResult({
+            outcome: "operationally_blocked",
+            gate: incompatibleGate,
+          });
+          return {
+            content: [
+              { type: "text" as const, text: serializeReadCompatibilityText(result) },
+            ],
+            structuredContent: result,
+            isError: true,
+          };
+        }
+        if (request.params.name === "vault_continue") {
+          const result = parseContinueResult({
+            outcome: "operationally_blocked",
+            gate: incompatibleGate,
+          });
+          return {
+            content: [
+              { type: "text" as const, text: serializeContinueCompatibilityText(result) },
+            ],
+            structuredContent: result,
+            isError: true,
+          };
+        }
         if (request.params.name === "vault_change_set_status") {
           const result = parseChangeSetStatusResult({
             lookup: "operationally_blocked",
@@ -594,8 +650,13 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         clientId?: string;
         incompatibleHealth?: Extract<HealthResult, { outcome: "incompatible" }>;
       } = {};
-      if (options.peerProtocol !== undefined && !protocolsOverlap(options.peerProtocol)) {
-        sessionState.incompatibleHealth = projectIncompatibleHealth(options.peerProtocol);
+      if (
+        options.incompatibleState === true ||
+        (options.peerProtocol !== undefined && !protocolsOverlap(options.peerProtocol))
+      ) {
+        sessionState.incompatibleHealth = projectIncompatibleHealth(
+          options.peerProtocol ?? LOCAL_PROTOCOL,
+        );
       }
       const server = createMcpServer(sessionState);
       transport.onclose = () => {
@@ -637,7 +698,11 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
     },
     async start() {
       if (httpServer !== undefined) throw new Error("Bridge Instance already started");
-      if (options.changeSets !== undefined) {
+      if (
+        options.changeSets !== undefined &&
+        options.incompatibleState !== true &&
+        (options.peerProtocol === undefined || protocolsOverlap(options.peerProtocol))
+      ) {
         const runtimeState = options.changeSets.runtimeState ?? {
           setQueue: (queue: BridgeHealthState["queue"]) => {
             options.health.queue = queue;
@@ -700,6 +765,111 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
+    },
+    async pauseWrites() {
+      const service = changeSetService;
+      if (service === undefined) throw new Error("Change Set service is unavailable");
+      await service.pause({
+        started: () => {
+          options.health.write = {
+            gate: options.health.write.gate,
+            state: "pausing",
+            pauseSource: "manual",
+          };
+          options.health.effectiveGate = { code: "writes_paused" };
+          options.health.operatorAction = "resume_writes";
+        },
+        completed: () => {
+          if (
+            options.health.recovery.state === "blocked" ||
+            options.health.write.gate === "blocked"
+          ) {
+            return;
+          }
+          options.health.write = {
+            gate: "open",
+            state: "paused",
+            pauseSource: "manual",
+          };
+        },
+      });
+    },
+    async runMaintenance(operation) {
+      const service = changeSetService;
+      if (service === undefined) throw new Error("Change Set service is unavailable");
+      let retryingFailedUpgrade = false;
+      let safetyBlocked = false;
+      await service.runMaintenance(
+        async () => {
+          await operation.replaceValidatedBundle();
+          await operation.migrateState();
+          await operation.recheckHealth();
+        },
+        {
+          started: () => {
+            retryingFailedUpgrade = options.health.reasonCodes.includes("upgrade_failed");
+            safetyBlocked =
+              options.health.write.gate === "blocked" && !retryingFailedUpgrade;
+            options.health.write = {
+              gate: safetyBlocked ? "blocked" : "open",
+              state: "pausing",
+              pauseSource: "maintenance",
+            };
+            options.health.effectiveGate = { code: "upgrade_in_progress" };
+            options.health.operatorAction = "finish_upgrade";
+          },
+          failed: () => {
+            options.health.effectiveGate = { code: "upgrade_in_progress" };
+            options.health.write = {
+              gate: "blocked",
+              state: "paused",
+              pauseSource: "maintenance",
+            };
+            options.health.lifecycle.upgrade = "failed";
+            options.health.lifecycle.migration = "failed";
+            options.health.overall = "blocked";
+            options.health.reasonCodes = [
+              ...new Set([...options.health.reasonCodes, "upgrade_failed"]),
+            ];
+          },
+          completed: () => {
+            const recoveryBlocked = options.health.recovery.state === "blocked";
+            options.health.write = {
+              gate: recoveryBlocked || safetyBlocked ? "blocked" : "open",
+              state: "paused",
+              pauseSource: recoveryBlocked ? null : "maintenance",
+            };
+            if (!recoveryBlocked) {
+              options.health.effectiveGate = { code: "writes_paused" };
+              options.health.reasonCodes = options.health.reasonCodes.filter(
+                (code) => code !== "upgrade_failed",
+              );
+              if (retryingFailedUpgrade && !safetyBlocked) {
+                options.health.overall = "healthy";
+              }
+              options.health.operatorAction = "resume_writes";
+            }
+            options.health.lifecycle.upgrade = "succeeded";
+            options.health.lifecycle.migration = "succeeded";
+          },
+        },
+      );
+    },
+    async resumeWrites() {
+      const service = changeSetService;
+      if (service === undefined) throw new Error("Change Set service is unavailable");
+      await service.resume(
+        () => {
+          if (options.health.write.gate === "blocked") {
+            throw new Error("Writes cannot resume while the safety gate is blocked");
+          }
+        },
+        () => {
+          options.health.write = { gate: "open", state: "writable", pauseSource: null };
+          options.health.effectiveGate = null;
+          options.health.operatorAction = "none";
+        },
+      );
     },
     registrationCommand(serverName) {
       return createRegistrationCommand(options.health.vault.id, port, serverName);

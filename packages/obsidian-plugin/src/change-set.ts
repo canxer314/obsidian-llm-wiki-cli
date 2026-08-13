@@ -15,7 +15,8 @@ import {
 } from "@llm-wiki/vault-contracts";
 
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
-export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
+export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 2;
+const LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
 
 export interface ChangeSetExecutionState {
   phase: "queued" | "executing" | "terminal";
@@ -39,11 +40,26 @@ export interface ChangeSetRegistryTombstone {
   changeSetId: string;
 }
 
+export type ChangeSetWriteMode =
+  | "manual_paused"
+  | "maintenance_pending"
+  | "maintenance_paused"
+  | "maintenance_failed";
+
+export interface PersistedChangeSetLifecycle {
+  upgrade: "succeeded" | "failed";
+  migration: "succeeded" | "failed";
+}
+
 export interface ChangeSetRegistryState {
-  schemaVersion: typeof CHANGE_SET_REGISTRY_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION
+    | typeof CHANGE_SET_REGISTRY_SCHEMA_VERSION;
   nextEnqueueSeq: number;
   entries: ChangeSetRegistryEntry[];
   tombstones: ChangeSetRegistryTombstone[];
+  writeMode?: ChangeSetWriteMode;
+  lifecycle?: PersistedChangeSetLifecycle;
 }
 
 export interface ChangeSetRegistryStore {
@@ -152,9 +168,47 @@ export interface ChangeSetGate {
     | "incompatible_protocol";
 }
 
+function gateForWriteMode(mode: ChangeSetWriteMode | undefined): ChangeSetGate | null {
+  if (mode === undefined) return null;
+  return {
+    code:
+      mode === "maintenance_pending" || mode === "maintenance_failed"
+        ? "upgrade_in_progress"
+        : "writes_paused",
+  };
+}
+
+export interface ChangeSetPauseObserver {
+  started(): void;
+  completed(): void;
+}
+
+export interface ChangeSetMaintenanceObserver {
+  started(): void;
+  failed(): void;
+  completed(): void;
+}
+
 export interface ChangeSetRequestState {
   vault: VaultState;
   effectiveGate: ChangeSetGate | null;
+}
+
+const OPERATIONAL_GATE_PRECEDENCE: readonly ChangeSetGate["code"][] = [
+  "incompatible_protocol",
+  "recovery_blocked",
+  "recovery_in_progress",
+  "upgrade_in_progress",
+  "writes_paused",
+];
+
+function selectOperationalGate(
+  ...gates: readonly (ChangeSetGate | null)[]
+): ChangeSetGate | null {
+  const code = OPERATIONAL_GATE_PRECEDENCE.find((candidate) =>
+    gates.some((gate) => gate?.code === candidate),
+  );
+  return code === undefined ? null : { code };
 }
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -179,8 +233,9 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
     throw new Error("Change Set registry is corrupt or incompatible");
   }
   const state = value as Partial<ChangeSetRegistryState>;
+  const isLegacy = state.schemaVersion === LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION;
   if (
-    state.schemaVersion !== CHANGE_SET_REGISTRY_SCHEMA_VERSION ||
+    (!isLegacy && state.schemaVersion !== CHANGE_SET_REGISTRY_SCHEMA_VERSION) ||
     !Number.isInteger(state.nextEnqueueSeq) ||
     (state.nextEnqueueSeq ?? 0) < 1 ||
     !Array.isArray(state.entries) ||
@@ -259,11 +314,37 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
     submissionKeys.add(record.submissionKey);
     changeSetIds.add(record.changeSetId);
   }
+  const writeMode = state.writeMode;
+  if (
+    (isLegacy && writeMode !== undefined) ||
+    (writeMode !== undefined &&
+      ![
+        "manual_paused",
+        "maintenance_pending",
+        "maintenance_paused",
+        "maintenance_failed",
+      ].includes(writeMode))
+  ) {
+    throw new Error("Change Set registry is corrupt or incompatible");
+  }
+  const lifecycle = state.lifecycle;
+  if (
+    (isLegacy && lifecycle !== undefined) ||
+    (lifecycle !== undefined &&
+      (typeof lifecycle !== "object" ||
+        lifecycle === null ||
+        !["succeeded", "failed"].includes(lifecycle.upgrade) ||
+        !["succeeded", "failed"].includes(lifecycle.migration)))
+  ) {
+    throw new Error("Change Set registry is corrupt or incompatible");
+  }
   return {
     schemaVersion: CHANGE_SET_REGISTRY_SCHEMA_VERSION,
     nextEnqueueSeq: state.nextEnqueueSeq!,
     entries,
     tombstones,
+    ...(writeMode === undefined ? {} : { writeMode }),
+    ...(lifecycle === undefined ? {} : { lifecycle }),
   };
 }
 
@@ -707,7 +788,11 @@ export class ChangeSetService {
   #state: ChangeSetRegistryState;
   #operationTail: Promise<void> = Promise.resolve();
   #writeTail: Promise<void> = Promise.resolve();
+  #controlTail: Promise<void> = Promise.resolve();
   #recoveryBlocked = false;
+  #dequeuePaused = false;
+  #admissionGate: ChangeSetGate | null = null;
+  #currentExecutionId: string | null = null;
 
   private constructor(options: ChangeSetServiceOptions, state: ChangeSetRegistryState) {
     this.#options = {
@@ -716,6 +801,8 @@ export class ChangeSetService {
       createChangeSetId: options.createChangeSetId ?? randomUUID,
     };
     this.#state = state;
+    this.#dequeuePaused = state.writeMode !== undefined;
+    this.#admissionGate = gateForWriteMode(state.writeMode);
   }
 
   static async open(options: ChangeSetServiceOptions): Promise<ChangeSetService> {
@@ -737,6 +824,7 @@ export class ChangeSetService {
       if (options.runtimeState === undefined) throw error;
     }
     if (!recoveryBlocked) await service.#resumeQueue();
+    options.runtimeState?.setQueue(service.#queueState(null));
     return service;
   }
 
@@ -933,11 +1021,116 @@ export class ChangeSetService {
   }
 
   async #resumeQueue(): Promise<void> {
-    if (this.#options.execution === undefined || this.#recoveryBlocked) return;
+    if (
+      this.#options.execution === undefined ||
+      this.#recoveryBlocked ||
+      this.#dequeuePaused
+    ) {
+      return;
+    }
     const queued = [...this.#state.entries]
       .filter((entry) => entry.execution?.phase !== "terminal")
       .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
-    for (const entry of queued) await this.#executeDirectory(entry.changeSetId);
+    for (const entry of queued) {
+      if (this.#dequeuePaused) break;
+      await this.#executeDirectory(entry.changeSetId);
+    }
+  }
+
+  async #setWriteMode(
+    mode: ChangeSetWriteMode | undefined,
+    lifecycle?: PersistedChangeSetLifecycle,
+  ): Promise<void> {
+    await this.#serialize(async () => {
+      const nextState = structuredClone(this.#state);
+      if (mode === undefined) delete nextState.writeMode;
+      else nextState.writeMode = mode;
+      if (lifecycle !== undefined) nextState.lifecycle = lifecycle;
+      await this.#save(nextState);
+      this.#dequeuePaused = mode !== undefined;
+      this.#admissionGate = gateForWriteMode(mode);
+    });
+  }
+
+  async pause(observer?: ChangeSetPauseObserver): Promise<void> {
+    await this.#withControlLease(async () => {
+      if (
+        this.#state.writeMode === "maintenance_pending" ||
+        this.#state.writeMode === "maintenance_failed" ||
+        this.#state.writeMode === "maintenance_paused"
+      ) {
+        throw new Error("Maintenance must resume before manual pause can replace it");
+      }
+      await this.#setWriteMode("manual_paused");
+      observer?.started();
+      await this.#withWriteLease(async () => undefined);
+      observer?.completed();
+    });
+  }
+
+  async runMaintenance(
+    migrate: () => void | Promise<void>,
+    observer: ChangeSetMaintenanceObserver,
+  ): Promise<void> {
+    await this.#withControlLease(async () => {
+      await this.#setWriteMode("maintenance_pending");
+      observer.started();
+      await this.#withWriteLease(async () => {
+        try {
+          await migrate();
+        } catch (error) {
+          await this.#setWriteMode("maintenance_failed", {
+            upgrade: "failed",
+            migration: "failed",
+          });
+          observer.failed();
+          throw error;
+        }
+        await this.#setWriteMode("maintenance_paused", {
+          upgrade: "succeeded",
+          migration: "succeeded",
+        });
+        observer.completed();
+      });
+    });
+  }
+
+  async resume(
+    assertSafe?: () => void,
+    onAdmissionOpened?: () => void,
+  ): Promise<void> {
+    await this.#withControlLease(() =>
+      this.#withWriteLease(async () => {
+        assertSafe?.();
+        await this.#serialize(async () => {
+          if (this.#admissionGate?.code === "upgrade_in_progress") {
+            throw new Error("Maintenance has not completed and writes remain blocked");
+          }
+          const nextState = structuredClone(this.#state);
+          delete nextState.writeMode;
+          await this.#save(nextState);
+          this.#dequeuePaused = false;
+          this.#admissionGate = null;
+        });
+        onAdmissionOpened?.();
+        await this.#resumeQueue();
+      }),
+    );
+  }
+
+  #queueState(currentExecutionId: string | null): {
+    currentExecutionId: string | null;
+    length: number;
+    headChangeSetId: string | null;
+  } {
+    const pending = this.#state.entries
+      .filter(({ execution }) => execution !== undefined && execution.phase !== "terminal")
+      .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
+    return {
+      currentExecutionId,
+      length: pending.length,
+      headChangeSetId: pending[0]?.changeSetId ?? null,
+    };
   }
 
   async #executeDirectory(changeSetId: string): Promise<void> {
@@ -953,13 +1146,8 @@ export class ChangeSetService {
     if (head?.changeSetId !== entry.changeSetId) return;
     const plan = this.#directoryPlan(entry);
     if (plan === null) return;
-    this.#options.runtimeState?.setQueue({
-      currentExecutionId: entry.changeSetId,
-      length: this.#state.entries.filter(
-        ({ execution }) => execution !== undefined && execution.phase !== "terminal",
-      ).length,
-      headChangeSetId: entry.changeSetId,
-    });
+    this.#currentExecutionId = entry.changeSetId;
+    this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
     const checked = await preflight(this.#options.dataSource, plan.input);
     if (!checked.accepted || JSON.stringify(checked.preview) !== JSON.stringify(plan.preview)) {
       await this.#updateEntry(entry.changeSetId, (current) => {
@@ -971,11 +1159,8 @@ export class ChangeSetService {
         };
         if (current.execution !== undefined) current.execution.phase = "terminal";
       });
-      this.#options.runtimeState?.setQueue({
-        currentExecutionId: null,
-        length: 0,
-        headChangeSetId: null,
-      });
+      this.#currentExecutionId = null;
+      this.#options.runtimeState?.setQueue(this.#queueState(null));
       return;
     }
     let frame: RecoveryJournalFrame = {
@@ -1055,11 +1240,22 @@ export class ChangeSetService {
       if (error instanceof InjectedChangeSetCrash || committedDurable) throw error;
       await this.#restorePrepared(entry, frame);
     } finally {
-      this.#options.runtimeState?.setQueue({
-        currentExecutionId: null,
-        length: 0,
-        headChangeSetId: null,
-      });
+      this.#currentExecutionId = null;
+      this.#options.runtimeState?.setQueue(this.#queueState(null));
+    }
+  }
+
+  async #withControlLease<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#controlTail;
+    let release!: () => void;
+    this.#controlTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
     }
   }
 
@@ -1094,6 +1290,7 @@ export class ChangeSetService {
   async #save(nextState: ChangeSetRegistryState): Promise<void> {
     await this.#options.store.save(nextState);
     this.#state = nextState;
+    this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
   }
 
   async #expireRecords(): Promise<void> {
@@ -1130,7 +1327,7 @@ export class ChangeSetService {
     }
     await this.#withWriteLease(async () => {
       await this.#recover();
-      if (!this.#recoveryBlocked) {
+      if (!this.#recoveryBlocked && !this.#dequeuePaused) {
         await this.#executeDirectory(registered.changeSet.changeSetId);
       }
     });
@@ -1185,7 +1382,10 @@ export class ChangeSetService {
       return parseChangeSetSubmitResult({ outcome: "submission_key_conflict" });
     }
 
-    const gate = requestState.effectiveGate;
+    const gate = selectOperationalGate(
+      this.#admissionGate,
+      requestState.effectiveGate,
+    );
     if (
       gate !== null &&
       ["writes_paused", "upgrade_in_progress", "recovery_in_progress"].includes(

@@ -18,6 +18,7 @@ export {
   type ChangeSetExecutionAdapter,
   type ChangeSetExecutionState,
   type ChangeSetRuntimeStatePort,
+  type ChangeSetWriteMode,
   type RecoveryJournalFrame,
   type RecoveryJournalPhase,
   InjectedChangeSetCrash,

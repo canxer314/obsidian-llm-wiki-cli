@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, rename, rm, rmdir, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rename, rm, rmdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ChangeSetRecord } from "@llm-wiki/vault-contracts";
 
@@ -13,8 +13,13 @@ import {
   type ChangeSetExecutionAdapter,
   type ChangeSetRegistryState,
   type ChangeSetRegistryStore,
+  type ChangeSetRuntimeStatePort,
   type RecoveryJournalFrame,
 } from "../src/index.js";
+import {
+  RecoveryJournalIncompatibleError,
+  openRecoveryJournal,
+} from "../src/recovery-journal.js";
 
 class MemoryStore implements ChangeSetRegistryStore {
   state: ChangeSetRegistryState | undefined;
@@ -87,6 +92,27 @@ class DirectoryAdapter implements ChangeSetExecutionAdapter {
 
   async publishSearchSnapshot(): Promise<void> {
     this.events.push("snapshot");
+  }
+}
+
+class RecordingRuntimeState implements ChangeSetRuntimeStatePort {
+  queue = {
+    currentExecutionId: null as string | null,
+    length: 0,
+    headChangeSetId: null as string | null,
+  };
+  blocked: string[] = [];
+
+  setQueue(state: {
+    currentExecutionId: string | null;
+    length: number;
+    headChangeSetId: string | null;
+  }): void {
+    this.queue = state;
+  }
+
+  blockWritesForUnproven(changeSetId: string): void {
+    this.blocked.push(changeSetId);
   }
 }
 
@@ -218,12 +244,319 @@ describe("durable create-directory Change Set execution", () => {
     ]);
   });
 
+  it("drains only the current Change Set while paused and resumes retained FIFO work", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const originalPublishDirectory = adapter.publishDirectory.bind(adapter);
+    adapter.publishDirectory = async (stageId, path) => {
+      if (path === "First") {
+        firstStarted();
+        await firstBlocked;
+      }
+      await originalPublishDirectory(stageId, path);
+    };
+    let nextId = 0;
+    const runtimeState = new RecordingRuntimeState();
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: async () => null,
+        pathKind: async (path) => (adapter.directories.has(path) ? "directory" : null),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState,
+      createChangeSetId: () => `change-set-${++nextId}`,
+    });
+
+    const first = service.submit(createDirectory("first-key", "First"), requestState);
+    await firstStartedPromise;
+    const second = service.submit(createDirectory("second-key", "Second"), requestState);
+    const paused = service.pause();
+    releaseFirst();
+
+    await Promise.all([first, second, paused]);
+    expect(adapter.directories).toEqual(new Set(["First"]));
+    expect(store.state?.entries.map(({ execution }) => execution?.phase)).toEqual([
+      "terminal",
+      "queued",
+    ]);
+    expect(runtimeState.queue).toEqual({
+      currentExecutionId: null,
+      length: 1,
+      headChangeSetId: "change-set-2",
+    });
+
+    const blocked = await service.submit(
+      createDirectory("blocked-key", "Blocked"),
+      requestState,
+    );
+    expect(blocked).toEqual({
+      outcome: "operationally_blocked",
+      gate: { code: "writes_paused" },
+    });
+    expect(store.state?.entries).toHaveLength(2);
+
+    const restarted = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: async () => null,
+        pathKind: async (path) => (adapter.directories.has(path) ? "directory" : null),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState,
+      createChangeSetId: () => `change-set-${++nextId}`,
+    });
+    expect(adapter.directories).toEqual(new Set(["First"]));
+    expect(
+      await restarted.submit(createDirectory("restart-blocked", "RestartBlocked"), requestState),
+    ).toEqual({
+      outcome: "operationally_blocked",
+      gate: { code: "writes_paused" },
+    });
+
+    await restarted.resume();
+    expect(adapter.directories).toEqual(new Set(["First", "Second"]));
+    expect(adapter.events.filter((event) => event.startsWith("mkdir:"))).toEqual([
+      "mkdir:First",
+      "mkdir:Second",
+    ]);
+  });
+
+  it("keeps gate, queue, and maintenance state isolated across two Vault services", async () => {
+    const alphaStore = new MemoryStore();
+    const alphaAdapter = new DirectoryAdapter();
+    const betaStore = new MemoryStore();
+    const betaAdapter = new DirectoryAdapter();
+    const makeService = (
+      adapter: DirectoryAdapter,
+      store: MemoryStore,
+      ids: () => string,
+    ) =>
+      ChangeSetService.open({
+        store,
+        dataSource: {
+          readBinary: async () => null,
+          pathKind: async (path) => (adapter.directories.has(path) ? "directory" : null),
+          isContained: async () => true,
+        },
+        execution: adapter,
+        createChangeSetId: ids,
+      });
+    let alphaId = 0;
+    let betaId = 0;
+    const alpha = await makeService(alphaAdapter, alphaStore, () => `alpha-${++alphaId}`);
+    const beta = await makeService(betaAdapter, betaStore, () => `beta-${++betaId}`);
+
+    await alpha.runMaintenance(async () => undefined, {
+      started: () => undefined,
+      failed: () => undefined,
+      completed: () => undefined,
+    });
+    expect(
+      await alpha.submit(createDirectory("alpha-paused", "AlphaPaused"), requestState),
+    ).toEqual({
+      outcome: "operationally_blocked",
+      gate: { code: "writes_paused" },
+    });
+    const betaApplied = await beta.submit(
+      createDirectory("beta-queued", "Beta"),
+      requestState,
+    );
+    expect(appliedRecord(betaApplied).changeSetId).toBe("beta-1");
+    expect(betaAdapter.directories).toEqual(new Set(["Beta"]));
+    expect(alphaAdapter.directories).toEqual(new Set());
+    expect(alphaStore.state?.entries ?? []).toHaveLength(0);
+
+    await alpha.resume();
+    const alphaApplied = await alpha.submit(
+      createDirectory("alpha-resumed", "Alpha"),
+      requestState,
+    );
+    expect(appliedRecord(alphaApplied).changeSetId).toBe("alpha-1");
+    expect(alphaAdapter.directories).toEqual(new Set(["Alpha"]));
+    expect(betaAdapter.directories).toEqual(new Set(["Beta"]));
+  });
+
+  it("fails closed through maintenance until an explicit resume", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    let nextId = 0;
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: async () => null,
+        pathKind: async (path) => (adapter.directories.has(path) ? "directory" : null),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => `change-set-${++nextId}`,
+    });
+
+    await service.runMaintenance(
+      async () => {
+        expect(
+          await service.submit(createDirectory("recovery-key", "RecoveryBlocked"), {
+            vault: { writeGate: "blocked", writeState: "paused" },
+            effectiveGate: { code: "recovery_blocked" },
+          }),
+        ).toMatchObject({
+          outcome: "registered",
+          changeSet: { state: "intent_not_applied" },
+          gate: { code: "recovery_blocked" },
+        });
+        expect(
+          await service.submit(
+            createDirectory("upgrade-key", "DuringUpgrade"),
+            requestState,
+          ),
+        ).toEqual({
+          outcome: "operationally_blocked",
+          gate: { code: "upgrade_in_progress" },
+        });
+      },
+      {
+        started: () => undefined,
+        failed: () => undefined,
+        completed: () => undefined,
+      },
+    );
+    expect(store.state?.writeMode).toBe("maintenance_paused");
+    expect(store.state?.lifecycle).toEqual({
+      upgrade: "succeeded",
+      migration: "succeeded",
+    });
+    expect(
+      await service.submit(createDirectory("paused-key", "StillPaused"), requestState),
+    ).toEqual({
+      outcome: "operationally_blocked",
+      gate: { code: "writes_paused" },
+    });
+    expect(store.state?.entries ?? []).toHaveLength(1);
+
+    await service.resume();
+    await service.submit(createDirectory("resumed-key", "Resumed"), requestState);
+    expect(adapter.directories).toEqual(new Set(["Resumed"]));
+  });
+
+  it("closes admission before maintenance waits for the current Change Set", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    let releaseCurrent!: () => void;
+    let currentStarted!: () => void;
+    const currentStartedPromise = new Promise<void>((resolve) => {
+      currentStarted = resolve;
+    });
+    const currentBlocked = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    const originalPublishDirectory = adapter.publishDirectory.bind(adapter);
+    adapter.publishDirectory = async (stageId, path) => {
+      currentStarted();
+      await currentBlocked;
+      await originalPublishDirectory(stageId, path);
+    };
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: async () => null,
+        pathKind: async (path) => (adapter.directories.has(path) ? "directory" : null),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-current",
+    });
+    const current = service.submit(createDirectory("current-key", "Current"), requestState);
+    await currentStartedPromise;
+    const maintenance = service.runMaintenance(async () => undefined, {
+      started: () => undefined,
+      failed: () => undefined,
+      completed: () => undefined,
+    });
+    await vi.waitFor(() => expect(store.state?.writeMode).toBe("maintenance_pending"));
+
+    expect(
+      await service.submit(createDirectory("blocked-key", "Blocked"), requestState),
+    ).toEqual({
+      outcome: "operationally_blocked",
+      gate: { code: "upgrade_in_progress" },
+    });
+    expect(store.state?.entries).toHaveLength(1);
+
+    releaseCurrent();
+    await Promise.all([current, maintenance]);
+    expect(store.state?.writeMode).toBe("maintenance_paused");
+  });
+
+  it("serializes maintenance and resume across the whole migration", async () => {
+    const service = await ChangeSetService.open({
+      store: new MemoryStore(),
+      dataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const observer = {
+      started: () => undefined,
+      failed: () => undefined,
+      completed: () => undefined,
+    };
+
+    const first = service.runMaintenance(async () => {
+      events.push("first:start");
+      firstStarted();
+      await firstBlocked;
+      events.push("first:end");
+    }, observer);
+    await firstStartedPromise;
+    const second = service.runMaintenance(async () => {
+      events.push("second:start");
+      events.push("second:end");
+    }, observer);
+    const resumed = service.resume(undefined, () => {
+      events.push("resume");
+    });
+    await Promise.resolve();
+    expect(events).toEqual(["first:start"]);
+
+    releaseFirst();
+    await Promise.all([first, second, resumed]);
+    expect(events).toEqual([
+      "first:start",
+      "first:end",
+      "second:start",
+      "second:end",
+      "resume",
+    ]);
+  });
+
   it("executes concurrent submissions in persisted FIFO order under one write lease", async () => {
     const store = new MemoryStore();
     const adapter = new DirectoryAdapter();
     let activeMutations = 0;
     let maximumActiveMutations = 0;
     let secondAdmissionObserved = false;
+    let observedQueue: RecordingRuntimeState["queue"] | undefined;
+    const runtimeState = new RecordingRuntimeState();
     const originalPublishDirectory = adapter.publishDirectory.bind(adapter);
     adapter.publishDirectory = async (stageId, path) => {
       activeMutations += 1;
@@ -231,6 +564,7 @@ describe("durable create-directory Change Set execution", () => {
       if (path === "First") {
         await new Promise((resolve) => setTimeout(resolve, 5));
         secondAdmissionObserved = store.state?.entries.length === 2;
+        observedQueue = structuredClone(runtimeState.queue);
       } else {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
@@ -246,6 +580,7 @@ describe("durable create-directory Change Set execution", () => {
         isContained: async () => true,
       },
       execution: adapter,
+      runtimeState,
       createChangeSetId: () => `change-set-${++nextId}`,
     });
 
@@ -258,6 +593,11 @@ describe("durable create-directory Change Set execution", () => {
     expect(appliedRecord(second).changeSetId).toBe("change-set-2");
     expect(maximumActiveMutations).toBe(1);
     expect(secondAdmissionObserved).toBe(true);
+    expect(observedQueue).toEqual({
+      currentExecutionId: "change-set-1",
+      length: 2,
+      headChangeSetId: "change-set-1",
+    });
     expect(adapter.events.filter((event) => event.startsWith("mkdir:"))).toEqual([
       "mkdir:First",
       "mkdir:Second",
@@ -404,6 +744,36 @@ describe("durable create-directory Change Set execution", () => {
       "snapshot",
       "journal:ROLLED_BACK",
     ]);
+  });
+
+  it("classifies a future Recovery Journal payload schema before composition", async () => {
+    const root = await mkdtemp(join(tmpdir(), "change-set-incompatible-"));
+    temporaryRoots.push(root);
+    const journalPath = join(root, ".llm-wiki", "recovery-journal.bin");
+    await mkdir(join(root, ".llm-wiki"), { recursive: true });
+    const handle = await open(journalPath, "w+");
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 4096 });
+    await journal.write({
+      phase: "PREPARED",
+      payload: { schemaVersion: 2 },
+    });
+    await handle.close();
+
+    await expect(
+      createFileSystemChangeSetExecutionAdapter({
+        journalPath,
+        slotCapacity: 4096,
+        host: {
+          pathKind: async () => null,
+          directoryIdentity: async () => null,
+          prepareDirectory: async () => "directory",
+          publishDirectory: async () => undefined,
+          discardPreparedDirectory: async () => undefined,
+          removeDirectory: async () => undefined,
+          publishSearchSnapshot: async () => undefined,
+        },
+      }),
+    ).rejects.toThrow(RecoveryJournalIncompatibleError);
   });
 
   it("restores a prepared real-filesystem journal before new writes after restart", async () => {
