@@ -1,5 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 
+import type { StandardDiagnosticBundle } from "./operator-diagnostics.js";
+
 import {
   CHANGE_SET_REGISTRY_SCHEMA_VERSION,
   parseChangeSetRegistryState,
@@ -538,6 +540,21 @@ export class ManagedVaultBridgeRuntime {
       },
       recheckHealth: () => this.refreshSearchSnapshot(),
     });
+  }
+
+  async createStandardDiagnosticBundle(
+    generatedAt = new Date().toISOString(),
+    correlationSalt = randomUUID(),
+  ): Promise<StandardDiagnosticBundle> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    return bridge.createStandardDiagnosticBundle({ generatedAt, correlationSalt });
+  }
+
+  async acceptTrustedRecoveryBaseline(): Promise<void> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    await bridge.acceptTrustedRecoveryBaseline(() => this.refreshSearchSnapshot());
   }
 
   async resumeWrites(): Promise<void> {

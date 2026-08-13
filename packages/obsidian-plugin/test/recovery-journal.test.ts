@@ -26,6 +26,18 @@ afterEach(async () => {
 });
 
 describe("recovery journal", () => {
+  it("clears only journal frames while preserving a valid durable journal", async () => {
+    const { handle } = await journalFile();
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 1024 });
+    await journal.write({ phase: "FAILED", payload: { private: "before-image" } });
+    await journal.clear();
+    await expect(journal.recover()).resolves.toBeUndefined();
+    await expect(
+      journal.write({ phase: "ROLLED_BACK", payload: { state: "resolved" } }),
+    ).resolves.toMatchObject({ sequence: 1, phase: "ROLLED_BACK" });
+    await handle.close();
+  });
+
   it("round-trips a committed record with complete before/after JSON", async () => {
     const { handle } = await journalFile();
     const journal = await openRecoveryJournal(handle, { slotCapacity: 1024 });

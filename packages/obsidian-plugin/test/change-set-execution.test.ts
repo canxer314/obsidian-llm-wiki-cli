@@ -73,6 +73,11 @@ class DirectoryAdapter implements ChangeSetExecutionAdapter {
     this.frame = structuredClone(frame);
   }
 
+  async clearRecoveryFrame(): Promise<void> {
+    this.events.push("journal:clear");
+    this.frame = null;
+  }
+
   async pathKind(path: string): Promise<"directory" | "file" | null> {
     this.events.push(`inspect:${path}`);
     return this.directories.has(path)
@@ -931,6 +936,80 @@ describe("durable Markdown Change Set execution", () => {
       lookup: "found",
       changeSet: { state: "result_unproven" },
     });
+
+    let baselineRechecks = 0;
+    await recovered.acceptTrustedRecoveryBaseline(async () => {
+      baselineRechecks += 1;
+      await adapter.publishSearchSnapshot();
+    });
+    expect(baselineRechecks).toBe(1);
+    expect(adapter.frame).toBeNull();
+    expect(store.state).toMatchObject({
+      writeMode: "manual_paused",
+      recovery: { state: "none" },
+      entries: [{ changeSet: { state: "result_unproven" } }],
+    });
+    await recovered.resume();
+    expect(store.state?.writeMode).toBeUndefined();
+  });
+
+  it("keeps recovery blocked when the trusted baseline recheck fails", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.frame = {
+      schemaVersion: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
+      vaultId: "vault",
+      changeSetId: "change-set-unproven",
+      enqueueSeq: 1,
+      phase: "FAILED",
+      input: createDirectory("unproven-key"),
+      preview: { requestedEffects: [], derivedEffects: [], paths: [] },
+      directories: [],
+      files: [],
+      mutations: [],
+    };
+    store.state = {
+      schemaVersion: 2,
+      nextEnqueueSeq: 2,
+      entries: [
+        {
+          submissionKey: "unproven-key",
+          fingerprint: "sha256:fd3b44f2487ea93c9298ba2b879777d7283c1da208b1dfb8671b0579dbfde924",
+          changeSetId: "change-set-unproven",
+          enqueueSeq: 1,
+          acceptedAt: 0,
+          expiresAt: 7 * 24 * 60 * 60 * 1_000,
+          execution: { phase: "terminal", input: createDirectory("unproven-key") },
+          changeSet: { changeSetId: "change-set-unproven", state: "result_unproven" },
+        },
+      ],
+      tombstones: [],
+    };
+    // Use the canonical fingerprint rather than coupling this test to its literal encoding.
+    store.state.entries[0]!.fingerprint = createHash("sha256")
+      .update(JSON.stringify({ operations: createDirectory("unproven-key").operations }))
+      .digest("hex");
+    store.state.entries[0]!.fingerprint = `sha256:${store.state.entries[0]!.fingerprint}`;
+
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState: new RecordingRuntimeState(),
+    });
+    await expect(
+      service.acceptTrustedRecoveryBaseline(async () => {
+        throw new Error("baseline scan failed");
+      }),
+    ).rejects.toThrow("baseline scan failed");
+    expect(adapter.frame?.phase).toBe("FAILED");
+    expect(store.state?.writeMode).toBeUndefined();
+    expect(store.state?.recovery).toEqual({ state: "blocked" });
+    await expect(service.resume()).rejects.toThrow(/Recovery/u);
   });
 
   it("revalidates target versions, absence, and Read Dependencies under the write lease", async () => {

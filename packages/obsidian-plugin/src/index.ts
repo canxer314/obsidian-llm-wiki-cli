@@ -46,6 +46,14 @@ export {
   type FileSystemChangeSetExecutionOptions,
   type NodeFileSystemChangeSetHostOptions,
 } from "./file-system-change-set-execution.js";
+export {
+  createContentInclusiveDiagnosticData,
+  createStandardDiagnosticBundle,
+  type ContentInclusiveDiagnosticAuthorization,
+  type ContentInclusiveDiagnosticData,
+  type StandardDiagnosticBundle,
+  type StandardDiagnosticSource,
+} from "./operator-diagnostics.js";
 export { createRegistrationCommand } from "./registration-command.js";
 export {
   ManagedVaultBridgeRuntime,

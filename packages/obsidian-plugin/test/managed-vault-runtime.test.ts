@@ -28,6 +28,31 @@ function fakeBridge(port: number): BridgeInstance {
       await operation.migrateState();
       await operation.recheckHealth();
     }),
+    acceptTrustedRecoveryBaseline: vi.fn(async (recheck) => recheck()),
+    createStandardDiagnosticBundle: vi.fn(async () => ({
+      format: "llm-wiki-standard-diagnostics-v1",
+      generatedAt: "2026-08-13T00:00:00.000Z",
+      versions: {
+        bridge: "0.1.0",
+        plugin: "0.1.0",
+        protocol: "1.0",
+        persistentStateSchema: 2,
+        recoveryJournalSchema: 2,
+      },
+      health: { overall: "healthy", reasonCodes: [], operatorAction: "none" },
+      listenerTimeline: [],
+      queueTimeline: [],
+      lifecycle: {
+        startup: "ready",
+        upgrade: "not_run",
+        migration: "not_run",
+        recovery: "not_run",
+      },
+      journal: { state: "absent", checksum: "unavailable" },
+      logs: [],
+      stacks: [],
+      checksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    })),
     resumeWrites: vi.fn(async () => undefined),
     registrationCommand: vi.fn(
       () =>

@@ -44,6 +44,10 @@ import {
   RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   type ChangeSetServiceOptions,
 } from "./change-set.js";
+import {
+  createStandardDiagnosticBundle,
+  type StandardDiagnosticBundle,
+} from "./operator-diagnostics.js";
 import { rejectRequest, verifyRequestPolicy } from "./request-policy.js";
 import { createRegistrationCommand } from "./registration-command.js";
 import { performVaultRead, type VaultReadDataSource } from "./vault-read.js";
@@ -123,6 +127,13 @@ export interface BridgeInstance {
   stop(): Promise<void>;
   pauseWrites(): Promise<void>;
   runMaintenance(operation: BridgeMaintenanceOperation): Promise<void>;
+  acceptTrustedRecoveryBaseline(
+    recheckTrustedBaseline: () => void | Promise<void>,
+  ): Promise<void>;
+  createStandardDiagnosticBundle(options: {
+    generatedAt: string;
+    correlationSalt: string;
+  }): Promise<StandardDiagnosticBundle>;
   resumeWrites(): Promise<void>;
   registrationCommand(serverName?: string): string;
 }
@@ -855,6 +866,71 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
           },
         },
       );
+    },
+    async acceptTrustedRecoveryBaseline(recheckTrustedBaseline) {
+      const service = changeSetService;
+      if (service === undefined) throw new Error("Change Set service is unavailable");
+      await service.acceptTrustedRecoveryBaseline(recheckTrustedBaseline);
+      options.health.recovery = { state: "none" };
+      options.health.write = { gate: "open", state: "paused", pauseSource: "manual" };
+      options.health.effectiveGate = { code: "writes_paused" };
+      options.health.overall = "degraded";
+      options.health.reasonCodes = [
+        ...new Set([
+          ...options.health.reasonCodes.filter((code) => code !== "recovery_blocked"),
+          "writes_paused",
+        ]),
+      ];
+      options.health.lifecycle.recovery = "succeeded";
+      options.health.operatorAction = "resume_writes";
+    },
+    async createStandardDiagnosticBundle({ generatedAt, correlationSalt }) {
+      const frame = await options.changeSets?.execution?.loadRecoveryFrame().catch(() => null);
+      return createStandardDiagnosticBundle({
+        generatedAt,
+        correlationSalt,
+        versions: {
+          bridge: BRIDGE_VERSION,
+          plugin: PLUGIN_VERSION,
+          protocol: PROTOCOL_VERSION,
+          persistentStateSchema: 2,
+          recoveryJournalSchema: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
+        },
+        health: {
+          overall: options.health.overall,
+          reasonCodes: options.health.reasonCodes,
+          operatorAction: options.health.operatorAction,
+        },
+        listenerTimeline: [
+          {
+            at: generatedAt,
+            state: httpServer === undefined ? "stopped" : "listening",
+            listenerId: `${LOOPBACK_ADDRESS}:${port}`,
+          },
+        ],
+        queueTimeline: [
+          {
+            at: generatedAt,
+            state: options.health.write.state,
+            queueLength: options.health.queue.length,
+            ...(options.health.queue.headChangeSetId === null
+              ? {}
+              : { changeSetId: options.health.queue.headChangeSetId }),
+          },
+        ],
+        lifecycle: structuredClone(options.health.lifecycle),
+        journal:
+          frame === null || frame === undefined
+            ? { state: "absent", checksum: "unavailable" }
+            : {
+                state: "readable",
+                phase: frame.phase,
+                checksum: "valid",
+                changeSetId: frame.changeSetId,
+              },
+        logs: [],
+        stacks: [],
+      });
     },
     async resumeWrites() {
       const service = changeSetService;

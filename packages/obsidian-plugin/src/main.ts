@@ -312,6 +312,19 @@ export default class VaultOperationBridgePlugin extends Plugin {
       callback: () => runtime.pauseWrites(),
     });
     this.addCommand({
+      id: "copy-standard-managed-vault-diagnostics",
+      name: "Copy standard Managed Vault diagnostics",
+      callback: async () => {
+        const bundle = await runtime.createStandardDiagnosticBundle();
+        await navigator.clipboard.writeText(`${JSON.stringify(bundle, null, 2)}\n`);
+      },
+    });
+    this.addCommand({
+      id: "accept-trusted-managed-vault-recovery-baseline",
+      name: "Accept trusted Managed Vault recovery baseline",
+      callback: () => runtime.acceptTrustedRecoveryBaseline(),
+    });
+    this.addCommand({
       id: "resume-managed-vault-writes",
       name: "Resume Managed Vault writes",
       callback: () => runtime.resumeWrites(),
