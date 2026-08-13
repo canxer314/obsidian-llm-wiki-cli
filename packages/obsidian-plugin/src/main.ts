@@ -61,6 +61,16 @@ export default class VaultOperationBridgePlugin extends Plugin {
       publishSuccessorSearchSnapshot: async () => {
         await runtime.publishSuccessorSearchSnapshot();
       },
+      probes: {
+        cacheVisible: async (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          return file !== null && this.app.metadataCache.getFileCache(file) !== null;
+        },
+        referenced: async (path) =>
+          Object.values(this.app.metadataCache.resolvedLinks).some(
+            (targets) => targets[path] !== undefined,
+          ),
+      },
     });
     const changeSetExecution =
       adapter instanceof FileSystemAdapter

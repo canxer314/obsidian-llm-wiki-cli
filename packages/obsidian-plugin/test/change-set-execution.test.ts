@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   readFile,
   rename,
   rm,
@@ -35,6 +36,7 @@ import {
   RecoveryJournalIncompatibleError,
   openRecoveryJournal,
 } from "../src/recovery-journal.js";
+import { createFileSystemChangeSetDataSource } from "../src/file-system-change-set-data-source.js";
 
 class MemoryStore implements ChangeSetRegistryStore {
   state: ChangeSetRegistryState | undefined;
@@ -175,6 +177,23 @@ class RecordingRuntimeState implements ChangeSetRuntimeStatePort {
 
 const temporaryRoots: string[] = [];
 
+// Windows only permits file symlinks with developer mode or elevation, so
+// file-symlink coverage skips cleanly where the filesystem refuses them.
+async function probeFileSymlinkSupport(): Promise<boolean> {
+  const probe = await mkdtemp(join(tmpdir(), "file-symlink-capability-"));
+  try {
+    const target = join(probe, "target.bin");
+    await writeFile(target, "x");
+    await symlink(target, join(probe, "link.bin"), "file");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(probe, { recursive: true, force: true });
+  }
+}
+const fileSymlinkSupported = await probeFileSymlinkSupport();
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -241,6 +260,7 @@ class FileAdapter extends DirectoryAdapter {
     if (bytes === undefined) throw new Error("prepared file is missing");
     this.events.push(`publish-file:${path}`);
     this.files.set(path, bytes);
+    this.fileIdentities.set(path, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
     this.stagedFiles.delete(stageId);
   }
 
@@ -251,6 +271,7 @@ class FileAdapter extends DirectoryAdapter {
   async removeFile(path: string): Promise<void> {
     this.events.push(`remove-file:${path}`);
     this.files.delete(path);
+    this.fileIdentities.delete(path);
   }
 
   async moveFile(sourcePath: string, destinationPath: string): Promise<void> {
@@ -345,6 +366,18 @@ async function fileSystemIdentity(root: string, path: string): Promise<string | 
     return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function listFiles(directory: string): Promise<string[]> {
+  try {
+    const entries = await readdir(directory, { recursive: true, withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
 }
@@ -3001,6 +3034,734 @@ describe("durable attachment and managed-trash Change Set execution", () => {
     );
   });
 
+  it.skipIf(!fileSymlinkSupported)(
+    "rejects file symlinks at the production mutation boundary",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "attachment-file-symlink-"));
+      temporaryRoots.push(root);
+      const outside = await mkdtemp(join(tmpdir(), "attachment-symlink-outside-"));
+      temporaryRoots.push(outside);
+      await mkdir(join(root, "assets"));
+      const bytes = Uint8Array.from([4, 5, 6]);
+      await writeFile(join(outside, "outside.bin"), bytes);
+      await symlink(join(outside, "outside.bin"), join(root, "assets", "link.bin"), "file");
+      const host = await createNodeFileSystemChangeSetHost({
+        basePath: root,
+        stateDirectory: join(root, ".llm-wiki"),
+        awaitSemanticEvidence: async () => undefined,
+        publishSearchSnapshot: async () => undefined,
+      });
+
+      await expect(host.readBinary?.("assets/link.bin")).rejects.toThrow(
+        "Symbolic links cannot be mutated through Change Sets",
+      );
+      await expect(host.removeFile?.("assets/link.bin")).rejects.toThrow(
+        "Symbolic links cannot be mutated through Change Sets",
+      );
+      await expect(host.pathKind("assets/link.bin")).rejects.toThrow(
+        "Symbolic links cannot be mutated through Change Sets",
+      );
+      await expect(readFile(join(outside, "outside.bin"))).resolves.toEqual(
+        Buffer.from(bytes),
+      );
+    },
+  );
+
+  it("rejects end-to-end escapes through copy, move, and trash submission", async () => {
+    const root = await mkdtemp(join(tmpdir(), "attachment-e2e-escape-"));
+    temporaryRoots.push(root);
+    const outside = await mkdtemp(join(tmpdir(), "attachment-e2e-outside-"));
+    temporaryRoots.push(outside);
+    await mkdir(join(root, "assets"));
+    const bytes = Uint8Array.from([8, 8, 8]);
+    const outsideBytes = Uint8Array.from([6, 6, 6]);
+    await writeFile(join(root, "assets", "source.bin"), bytes);
+    await writeFile(join(outside, "outside.bin"), outsideBytes);
+    await symlink(outside, join(root, "assets", "escape"), "junction");
+    const host = await createNodeFileSystemChangeSetHost({
+      basePath: root,
+      stateDirectory: join(root, ".llm-wiki"),
+      awaitSemanticEvidence: async () => undefined,
+      publishSearchSnapshot: async () => undefined,
+    });
+    const execution = await createFileSystemChangeSetExecutionAdapter({
+      journalPath: join(root, ".llm-wiki", "recovery-journal.bin"),
+      slotCapacity: 16 * 1024,
+      host,
+    });
+    const vaultAdapter = {
+      exists: async (path: string) =>
+        (await stat(join(root, ...path.split("/"))).catch(() => null)) !== null,
+      readBinary: (path: string) => readFile(join(root, ...path.split("/"))),
+      stat: async (path: string) => {
+        try {
+          const value = await stat(join(root, ...path.split("/")));
+          return { type: value.isDirectory() ? ("folder" as const) : ("file" as const) };
+        } catch {
+          return null;
+        }
+      },
+    };
+    const dataSource = createFileSystemChangeSetDataSource(root, vaultAdapter);
+    const store = new MemoryStore();
+    const service = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution,
+      vaultId: "escape-vault",
+    });
+    const digest = (content: Uint8Array) =>
+      createHash("sha256").update(content).digest("hex");
+    const cases = [
+      {
+        key: "escape-copy",
+        operation: {
+          operationId: "escape-copy",
+          kind: "copy_attachment" as const,
+          sourcePath: "assets/source.bin",
+          destinationPath: "assets/escape/copied.bin",
+          expectedSha256: digest(bytes),
+        },
+      },
+      {
+        key: "escape-move",
+        operation: {
+          operationId: "escape-move",
+          kind: "move_attachment" as const,
+          sourcePath: "assets/escape/outside.bin",
+          destinationPath: "assets/moved.bin",
+          expectedSha256: digest(outsideBytes),
+        },
+      },
+      {
+        key: "escape-trash",
+        operation: {
+          operationId: "escape-trash",
+          kind: "trash" as const,
+          path: "assets/escape/outside.bin",
+          expectedSha256: digest(outsideBytes),
+        },
+      },
+    ];
+
+    for (const { key, operation } of cases) {
+      const result = await service.submit(
+        { submissionKey: key, operations: [operation] },
+        requestState,
+      );
+      expect(result).toMatchObject({
+        outcome: "registered",
+        changeSet: {
+          state: "intent_not_applied",
+          failure: { code: "path_conflict" },
+        },
+      });
+    }
+
+    expect(await readFile(join(outside, "outside.bin"))).toEqual(
+      Buffer.from(outsideBytes),
+    );
+    await expect(stat(join(outside, "copied.bin"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await readFile(join(root, "assets", "source.bin"))).toEqual(Buffer.from(bytes));
+    await execution.close?.();
+  });
+
+  it.skipIf(!fileSymlinkSupported)(
+    "rejects end-to-end copy, move, and trash submission through a file symlink",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trash-file-symlink-"));
+      temporaryRoots.push(root);
+      const outside = await mkdtemp(join(tmpdir(), "trash-symlink-outside-"));
+      temporaryRoots.push(outside);
+      await mkdir(join(root, "assets"));
+      const outsideBytes = Uint8Array.from([3, 2, 1]);
+      await writeFile(join(outside, "outside.bin"), outsideBytes);
+      await symlink(join(outside, "outside.bin"), join(root, "link.bin"), "file");
+      const host = await createNodeFileSystemChangeSetHost({
+        basePath: root,
+        stateDirectory: join(root, ".llm-wiki"),
+        awaitSemanticEvidence: async () => undefined,
+        publishSearchSnapshot: async () => undefined,
+      });
+      const execution = await createFileSystemChangeSetExecutionAdapter({
+        journalPath: join(root, ".llm-wiki", "recovery-journal.bin"),
+        slotCapacity: 16 * 1024,
+        host,
+      });
+      const vaultAdapter = {
+        exists: async (path: string) =>
+          (await stat(join(root, ...path.split("/"))).catch(() => null)) !== null,
+        readBinary: (path: string) => readFile(join(root, ...path.split("/"))),
+        stat: async (path: string) => {
+          try {
+            const value = await stat(join(root, ...path.split("/")));
+            return { type: value.isDirectory() ? ("folder" as const) : ("file" as const) };
+          } catch {
+            return null;
+          }
+        },
+      };
+      const store = new MemoryStore();
+      const service = await ChangeSetService.open({
+        store,
+        dataSource: createFileSystemChangeSetDataSource(root, vaultAdapter),
+        execution,
+        vaultId: "escape-vault",
+      });
+      const outsideSha256 = createHash("sha256").update(outsideBytes).digest("hex");
+      const cases = [
+        {
+          key: "escape-file-symlink-copy",
+          operation: {
+            operationId: "escape-file-symlink-copy",
+            kind: "copy_attachment" as const,
+            sourcePath: "link.bin",
+            destinationPath: "assets/copied.bin",
+            expectedSha256: outsideSha256,
+          },
+        },
+        {
+          key: "escape-file-symlink-move",
+          operation: {
+            operationId: "escape-file-symlink-move",
+            kind: "move_attachment" as const,
+            sourcePath: "link.bin",
+            destinationPath: "assets/moved.bin",
+            expectedSha256: outsideSha256,
+          },
+        },
+        {
+          key: "escape-file-symlink-trash",
+          operation: {
+            operationId: "escape-file-symlink-trash",
+            kind: "trash" as const,
+            path: "link.bin",
+            expectedSha256: outsideSha256,
+          },
+        },
+      ];
+
+      for (const { key, operation } of cases) {
+        const result = await service.submit(
+          { submissionKey: key, operations: [operation] },
+          requestState,
+        );
+        expect(result).toMatchObject({
+          outcome: "registered",
+          changeSet: {
+            state: "intent_not_applied",
+            failure: { code: "path_conflict" },
+          },
+        });
+      }
+
+      expect(await readFile(join(outside, "outside.bin"))).toEqual(
+        Buffer.from(outsideBytes),
+      );
+      await expect(stat(join(root, "assets", "copied.bin"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(stat(join(root, "assets", "moved.bin"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await execution.close?.();
+    },
+  );
+
+  it("fails closed on an on-disk journal frame that is valid but mismatches the registry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "real-journal-mismatch-"));
+    temporaryRoots.push(root);
+    const store = new MemoryStore();
+    const first = await createRealFileExecution(root);
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: first.dataSource,
+      execution: first.execution,
+      vaultId: "real-journal-mismatch-vault",
+      createChangeSetId: () => "change-set-journal-mismatch",
+      crashInjector: (point) => {
+        if (point === "before_prepared") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    const input = {
+      submissionKey: "journal-mismatch-key",
+      operations: [{
+        operationId: "mkdir-1",
+        kind: "create_directory" as const,
+        path: "Projects/Alpha",
+        ifExists: "reject" as const,
+      }],
+    };
+    await expect(crashing.submit(input, requestState)).rejects.toThrow(
+      InjectedChangeSetCrash,
+    );
+    await first.execution.close?.();
+
+    // Rewrite the journal on disk through the real frame writer: the frame
+    // carries a fresh valid checksum and parses cleanly, but its enqueueSeq
+    // does not match the Change Set registry entry.
+    const journalPath = join(root, ".llm-wiki", "recovery-journal.bin");
+    const handle = await open(journalPath, "r+");
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 16 * 1024 });
+    await journal.write({
+      phase: "PREPARED",
+      payload: {
+        schemaVersion: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
+        vaultId: "real-journal-mismatch-vault",
+        changeSetId: "change-set-journal-mismatch",
+        enqueueSeq: 999,
+        phase: "PREPARED",
+        input,
+        preview: { requestedEffects: [], derivedEffects: [], paths: [] },
+        directories: [],
+        files: [],
+      },
+    });
+    await handle.close();
+    const blocked: string[] = [];
+
+    const second = await createRealFileExecution(root);
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: second.dataSource,
+      execution: second.execution,
+      vaultId: "real-journal-mismatch-vault",
+      runtimeState: {
+        setQueue: () => undefined,
+        blockWritesForUnproven: (changeSetId) => blocked.push(changeSetId),
+      },
+    });
+
+    expect(blocked).toEqual(["change-set-journal-mismatch"]);
+    await expect(
+      recovered.status({ changeSetId: "change-set-journal-mismatch" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "result_unproven" },
+    });
+    await second.execution.close?.();
+  });
+
+  it("recovers a legacy v1 COMMITTED frame with final-path evidence as applied", async () => {
+    const root = await mkdtemp(join(tmpdir(), "real-v1-committed-"));
+    temporaryRoots.push(root);
+    const store = new MemoryStore();
+    const first = await createRealFileExecution(root);
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: first.dataSource,
+      execution: first.execution,
+      vaultId: "real-v1-committed-vault",
+      createChangeSetId: () => "change-set-v1-committed",
+      crashInjector: (point) => {
+        if (point === "before_prepared") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "v1-committed-key",
+          operations: [{
+            operationId: "mkdir-1",
+            kind: "create_directory" as const,
+            path: "Projects/Alpha",
+            ifExists: "reject" as const,
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    await first.execution.close?.();
+
+    const entry = store.state?.entries[0];
+    if (
+      entry === undefined ||
+      entry.execution === undefined ||
+      entry.changeSet.state !== "in_progress" ||
+      entry.changeSet.preview === undefined
+    ) {
+      throw new Error("expected a queued in-progress registry entry");
+    }
+    const preview = entry.changeSet.preview;
+    // The v1 (directory-only) writer always journaled finalPaths on COMMITTED,
+    // so a well-formed legacy frame still converges to intent_applied.
+    const journalPath = join(root, ".llm-wiki", "recovery-journal.bin");
+    const handle = await open(journalPath, "r+");
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 16 * 1024 });
+    await journal.write({
+      phase: "COMMITTED",
+      payload: {
+        schemaVersion: 1,
+        vaultId: "real-v1-committed-vault",
+        changeSetId: "change-set-v1-committed",
+        enqueueSeq: entry.enqueueSeq,
+        phase: "COMMITTED",
+        input: entry.execution.input,
+        preview,
+        directories: [
+          { path: "Projects", before: "absent", expectedAfter: "directory" },
+          { path: "Projects/Alpha", before: "absent", expectedAfter: "directory" },
+        ],
+        finalPaths: preview.paths.map(({ path, projectedOutcome, projectedFinalState }) => ({
+          path,
+          outcome: projectedOutcome,
+          finalState: projectedFinalState,
+        })),
+      },
+    });
+    await handle.close();
+    const blocked: string[] = [];
+
+    const second = await createRealFileExecution(root);
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: second.dataSource,
+      execution: second.execution,
+      vaultId: "real-v1-committed-vault",
+      runtimeState: {
+        setQueue: () => undefined,
+        blockWritesForUnproven: (changeSetId) => blocked.push(changeSetId),
+      },
+    });
+
+    expect(blocked).toEqual([]);
+    await expect(
+      recovered.status({ changeSetId: "change-set-v1-committed" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "intent_applied" },
+    });
+    await second.execution.close?.();
+  });
+
+  it("fails closed on a legacy v1 COMMITTED frame without final-path evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "real-v1-unproven-"));
+    temporaryRoots.push(root);
+    const store = new MemoryStore();
+    const first = await createRealFileExecution(root);
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: first.dataSource,
+      execution: first.execution,
+      vaultId: "real-v1-unproven-vault",
+      createChangeSetId: () => "change-set-v1-unproven",
+      crashInjector: (point) => {
+        if (point === "before_prepared") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "v1-unproven-key",
+          operations: [{
+            operationId: "mkdir-1",
+            kind: "create_directory" as const,
+            path: "Projects/Alpha",
+            ifExists: "reject" as const,
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    await first.execution.close?.();
+
+    const entry = store.state?.entries[0];
+    if (
+      entry === undefined ||
+      entry.execution === undefined ||
+      entry.changeSet.state !== "in_progress" ||
+      entry.changeSet.preview === undefined
+    ) {
+      throw new Error("expected a queued in-progress registry entry");
+    }
+    // A COMMITTED frame without finalPaths can only come from a torn or
+    // corrupted write; the Bridge must not infer success from the preview.
+    const journalPath = join(root, ".llm-wiki", "recovery-journal.bin");
+    const handle = await open(journalPath, "r+");
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 16 * 1024 });
+    await journal.write({
+      phase: "COMMITTED",
+      payload: {
+        schemaVersion: 1,
+        vaultId: "real-v1-unproven-vault",
+        changeSetId: "change-set-v1-unproven",
+        enqueueSeq: entry.enqueueSeq,
+        phase: "COMMITTED",
+        input: entry.execution.input,
+        preview: entry.changeSet.preview,
+        directories: [
+          { path: "Projects", before: "absent", expectedAfter: "directory" },
+          { path: "Projects/Alpha", before: "absent", expectedAfter: "directory" },
+        ],
+      },
+    });
+    await handle.close();
+    const blocked: string[] = [];
+
+    const second = await createRealFileExecution(root);
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: second.dataSource,
+      execution: second.execution,
+      vaultId: "real-v1-unproven-vault",
+      runtimeState: {
+        setQueue: () => undefined,
+        blockWritesForUnproven: (changeSetId) => blocked.push(changeSetId),
+      },
+    });
+
+    expect(blocked).toEqual(["change-set-v1-unproven"]);
+    await expect(
+      recovered.status({ changeSetId: "change-set-v1-unproven" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "result_unproven" },
+    });
+    await second.execution.close?.();
+  });
+
+  it("rejects attachment collisions and protected locations on the real filesystem", async () => {
+    const root = await mkdtemp(join(tmpdir(), "real-collision-protected-"));
+    temporaryRoots.push(root);
+    const bytes = Uint8Array.from([1, 2, 3]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await mkdir(join(root, "assets"));
+    await mkdir(join(root, ".git"));
+    await mkdir(join(root, ".obsidian"));
+    await mkdir(join(root, ".trash"));
+    await writeFile(join(root, "assets", "source.bin"), bytes);
+    const existing = Uint8Array.from([9]);
+    await writeFile(join(root, "assets", "existing.bin"), existing);
+    for (const destinationPath of [
+      "assets/existing.bin",
+      ".git/object.bin",
+      ".obsidian/plugin.bin",
+      ".llm-wiki/private.bin",
+      ".trash/hidden.bin",
+    ]) {
+      const store = new MemoryStore();
+      const { execution, dataSource } = await createRealFileExecution(root);
+      const service = await ChangeSetService.open({
+        store,
+        dataSource,
+        execution,
+        createChangeSetId: () => `change-set-real-protected-${destinationPath}`,
+      });
+
+      const result = await service.submit(
+        {
+          submissionKey: `real-protected-${destinationPath}`,
+          operations: [{
+            operationId: "copy-protected",
+            kind: "copy_attachment",
+            sourcePath: "assets/source.bin",
+            destinationPath,
+            expectedSha256: sha256,
+          }],
+        },
+        requestState,
+      );
+
+      expect(result).toMatchObject({
+        outcome: "registered",
+        changeSet: {
+          state: "intent_not_applied",
+          failure: { code: "path_conflict", path: destinationPath },
+        },
+      });
+      await execution.close?.();
+    }
+    expect(await readFile(join(root, "assets", "existing.bin"))).toEqual(
+      Buffer.from(existing),
+    );
+    await expect(stat(join(root, ".git", "object.bin"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(stat(join(root, ".obsidian", "plugin.bin"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(stat(join(root, ".llm-wiki", "private.bin"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(stat(join(root, ".trash", "hidden.bin"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("blocks recovery rather than overwriting a third-party attachment on the real filesystem", async () => {
+    const root = await mkdtemp(join(tmpdir(), "real-third-party-"));
+    temporaryRoots.push(root);
+    await mkdir(join(root, "assets"));
+    const bytes = Uint8Array.from([1, 2, 3, 4]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await writeFile(join(root, "assets", "source.bin"), bytes);
+    const store = new MemoryStore();
+    const first = await createRealFileExecution(root);
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: first.dataSource,
+      execution: first.execution,
+      vaultId: "real-third-party-vault",
+      createChangeSetId: () => "change-set-real-third-party",
+      crashInjector: (point) => {
+        if (point === "after_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "real-third-party-key",
+          operations: [{
+            operationId: "copy-third-party",
+            kind: "copy_attachment",
+            sourcePath: "assets/source.bin",
+            destinationPath: "assets/copy.bin",
+            expectedSha256: sha256,
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    await first.execution.close?.();
+    const thirdParty = Uint8Array.from([9, 9, 9]);
+    await writeFile(join(root, "assets", "copy.bin"), thirdParty);
+    const blocked: string[] = [];
+
+    const second = await createRealFileExecution(root);
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: second.dataSource,
+      execution: second.execution,
+      vaultId: "real-third-party-vault",
+      runtimeState: {
+        setQueue: () => undefined,
+        blockWritesForUnproven: (changeSetId) => blocked.push(changeSetId),
+      },
+    });
+
+    expect(await readFile(join(root, "assets", "copy.bin"))).toEqual(
+      Buffer.from(thirdParty),
+    );
+    expect(blocked).toEqual(["change-set-real-third-party"]);
+    await expect(
+      recovered.status({ changeSetId: "change-set-real-third-party" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "result_unproven" },
+    });
+    await second.execution.close?.();
+  });
+
+  it("discards stale staging files when a crash recovery rolls back", async () => {
+    const root = await mkdtemp(join(tmpdir(), "real-staging-cleanup-"));
+    temporaryRoots.push(root);
+    const store = new MemoryStore();
+    const first = await createRealFileExecution(root);
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: first.dataSource,
+      execution: first.execution,
+      vaultId: "real-staging-cleanup-vault",
+      createChangeSetId: () => "change-set-staging-cleanup",
+      crashInjector: (point) => {
+        // The derived Notes directory is published; the staged note file is
+        // still waiting under the private staging tree.
+        if (point === "after_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "staging-cleanup-key",
+          operations: [{
+            operationId: "create-note",
+            kind: "create_note",
+            path: "Notes/New.md",
+            content: "# Discard me\n",
+            ifExists: "reject",
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    await first.execution.close?.();
+    expect((await listFiles(join(root, ".llm-wiki", "staging"))).length).toBeGreaterThan(0);
+
+    const second = await createRealFileExecution(root);
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: second.dataSource,
+      execution: second.execution,
+      vaultId: "real-staging-cleanup-vault",
+    });
+
+    expect(await listFiles(join(root, ".llm-wiki", "staging"))).toEqual([]);
+    expect(await fileSystemPathKind(root, "Notes")).toBe(null);
+    await expect(
+      recovered.status({ changeSetId: "change-set-staging-cleanup" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "intent_not_applied" },
+    });
+    await second.execution.close?.();
+  });
+
+  it("leaves no orphaned managed-trash entries after a crash recovery restores", async () => {
+    const root = await mkdtemp(join(tmpdir(), "real-trash-cleanup-"));
+    temporaryRoots.push(root);
+    const bytes = Buffer.from("# Restore me\r\n");
+    await writeFile(join(root, "Note.md"), bytes);
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const store = new MemoryStore();
+    const first = await createRealFileExecution(root);
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: first.dataSource,
+      execution: first.execution,
+      vaultId: "real-trash-cleanup-vault",
+      createChangeSetId: () => "change-set-trash-cleanup",
+      crashInjector: (point) => {
+        if (point === "after_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "trash-cleanup-key",
+          operations: [{
+            operationId: "trash-note",
+            kind: "trash",
+            path: "Note.md",
+            targetVersion: `sha256:${digest}`,
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    await first.execution.close?.();
+    expect((await listFiles(join(root, ".llm-wiki", "trash"))).length).toBeGreaterThan(0);
+
+    const second = await createRealFileExecution(root);
+    const recovered = await ChangeSetService.open({
+      store,
+      dataSource: second.dataSource,
+      execution: second.execution,
+      vaultId: "real-trash-cleanup-vault",
+    });
+
+    expect(await readFile(join(root, "Note.md"))).toEqual(bytes);
+    expect(await listFiles(join(root, ".llm-wiki", "trash"))).toEqual([]);
+    await expect(
+      recovered.status({ changeSetId: "change-set-trash-cleanup" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "intent_not_applied" },
+    });
+    await second.execution.close?.();
+  });
+
   it("rejects attachment collisions and every protected location before mutation", async () => {
     const bytes = Uint8Array.from([1, 2, 3]);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -3228,63 +3989,146 @@ describe("durable attachment and managed-trash Change Set execution", () => {
       });
     });
   }
-  it("rejects stale attachment SHA-256 evidence before any mutation", async () => {
-    const bytes = Uint8Array.from([1, 2, 3]);
-    const staleSha256 = "0".repeat(64);
-    const cases = [
-      {
-        operationId: "copy-stale",
-        kind: "copy_attachment" as const,
-        sourcePath: "assets/source.bin",
-        destinationPath: "assets/copy.bin",
-        expectedSha256: staleSha256,
-      },
-      {
-        operationId: "move-stale",
-        kind: "move_attachment" as const,
-        sourcePath: "assets/source.bin",
-        destinationPath: "assets/moved.bin",
-        expectedSha256: staleSha256,
-      },
-      {
-        operationId: "trash-stale",
-        kind: "trash" as const,
-        path: "assets/source.bin",
-        expectedSha256: staleSha256,
-      },
-    ];
-    for (const [index, operation] of cases.entries()) {
-      const store = new MemoryStore();
-      const adapter = new FileAdapter();
-      adapter.directories.add("assets");
-      adapter.files.set("assets/source.bin", bytes);
-      const service = await ChangeSetService.open({
-        store,
-        dataSource: {
-          readBinary: (path) => adapter.readBinary(path),
-          pathKind: (path) => adapter.pathKind(path),
-          isContained: async () => true,
-        },
-        execution: adapter,
-        createChangeSetId: () => `change-set-stale-sha256-${index}`,
-      });
 
-      const result = await service.submit(
-        { submissionKey: `stale-sha256-${index}`, operations: [operation] },
+  it("applies mixed Markdown and attachment operations in one Change Set", async () => {
+    const noteContent = "# Mixed\n";
+    const noteVersion =
+      `sha256:${createHash("sha256").update(noteContent).digest("hex")}` as const;
+    const bytes = Uint8Array.from([5, 4, 3, 2, 1, 0]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const store = new MemoryStore();
+    const adapter = new FileAdapter();
+    adapter.directories.add("Notes");
+    adapter.directories.add("assets");
+    adapter.files.set("assets/source.bin", bytes);
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-mixed",
+    });
+
+    const result = await service.submit(
+      {
+        submissionKey: "mixed-key",
+        operations: [
+          {
+            operationId: "create-note",
+            kind: "create_note",
+            path: "Notes/Mixed.md",
+            content: noteContent,
+            ifExists: "reject",
+          },
+          {
+            operationId: "copy-asset",
+            afterOperationId: "create-note",
+            kind: "copy_attachment",
+            sourcePath: "assets/source.bin",
+            destinationPath: "assets/copy.bin",
+            expectedSha256: sha256,
+          },
+        ],
+      },
+      requestState,
+    );
+    const record = appliedRecord(result);
+
+    expect(adapter.files.get("Notes/Mixed.md")).toEqual(
+      Uint8Array.from(Buffer.from(noteContent)),
+    );
+    expect(adapter.files.get("assets/copy.bin")).toEqual(bytes);
+    expect(adapter.files.get("assets/source.bin")).toEqual(bytes);
+    expect(record.paths).toContainEqual({
+      path: "Notes/Mixed.md",
+      outcome: "changed",
+      finalState: { kind: "markdown", contentVersion: noteVersion },
+    });
+    expect(record.paths).toContainEqual({
+      path: "assets/copy.bin",
+      outcome: "changed",
+      finalState: { kind: "attachment", sha256 },
+    });
+    expect(adapter.evidenceRequests).toHaveLength(1);
+    expect(adapter.evidenceRequests[0]).toMatchObject({
+      mode: "apply",
+      hiddenTrash: false,
+      requiredEvents: [{ kind: "create", path: "assets/copy.bin" }],
+    });
+    expect(adapter.events.indexOf("snapshot")).toBeGreaterThan(-1);
+    expect(adapter.events.at(-1)).toBe("journal:COMMITTED");
+  });
+
+  it("restores mixed Markdown and attachment state after a crash before commit", async () => {
+    const noteContent = "# Do not keep\n";
+    const bytes = Uint8Array.from([7, 7, 7, 7]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const store = new MemoryStore();
+    const adapter = new FileAdapter();
+    adapter.directories.add("Notes");
+    adapter.directories.add("assets");
+    adapter.files.set("assets/source.bin", bytes);
+    const dataSource = {
+      readBinary: (path: string) => adapter.readBinary(path),
+      pathKind: (path: string) => adapter.pathKind(path),
+      isContained: async () => true,
+    };
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource,
+      execution: adapter,
+      createChangeSetId: () => "change-set-mixed-crash",
+      crashInjector: (point) => {
+        // Crash right after the attachment copy is published; the staged note
+        // is already visible and the copy destination exists.
+        if (point === "after_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "mixed-crash-key",
+          operations: [
+            {
+              operationId: "create-note",
+              kind: "create_note",
+              path: "Notes/Mixed.md",
+              content: noteContent,
+              ifExists: "reject",
+            },
+            {
+              operationId: "copy-asset",
+              afterOperationId: "create-note",
+              kind: "copy_attachment",
+              sourcePath: "assets/source.bin",
+              destinationPath: "assets/copy.bin",
+              expectedSha256: sha256,
+            },
+          ],
+        },
         requestState,
-      );
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    expect(adapter.files.has("Notes/Mixed.md")).toBe(true);
+    expect(adapter.files.has("assets/copy.bin")).toBe(true);
 
-      expect(result).toMatchObject({
-        outcome: "registered",
-        changeSet: {
-          state: "intent_not_applied",
-          failure: { code: "stale_observation" },
-        },
-      });
-      expect(adapter.files.get("assets/source.bin")).toEqual(bytes);
-      expect(adapter.files.has("assets/copy.bin")).toBe(false);
-      expect(adapter.files.has("assets/moved.bin")).toBe(false);
-      expect(adapter.events.some((event) => event.startsWith("publish-file:"))).toBe(false);
-    }
+    const recovered = await ChangeSetService.open({ store, dataSource, execution: adapter });
+
+    expect(adapter.files.has("Notes/Mixed.md")).toBe(false);
+    expect(adapter.files.has("assets/copy.bin")).toBe(false);
+    expect(adapter.files.get("assets/source.bin")).toEqual(bytes);
+    expect(adapter.stagedFiles.size).toBe(0);
+    expect(adapter.managedTrash.size).toBe(0);
+    expect(adapter.frame?.phase).toBe("ROLLED_BACK");
+    await expect(
+      recovered.status({ changeSetId: "change-set-mixed-crash" }, requestState),
+    ).resolves.toMatchObject({
+      lookup: "found",
+      changeSet: { state: "intent_not_applied" },
+    });
   });
 });

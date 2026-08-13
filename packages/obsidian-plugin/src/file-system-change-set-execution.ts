@@ -48,8 +48,24 @@ export interface ChangeSetSemanticEvidenceTracker {
   await(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
 }
 
+/**
+ * Targeted postconditions that stand in for the generic Vault events hidden
+ * trash and restore never emit (spec A-38). Both probes are polled until the
+ * evidence deadline, so asynchronous metadata-cache updates may catch up
+ * while the barrier waits. A hidden-trash request evaluated without probes can never
+ * converge: raw path state alone does not prove the result, so the barrier
+ * fails closed at the deadline.
+ */
+export interface ChangeSetSemanticProbes {
+  /** True while Obsidian still serves a metadata-cache entry for the path. */
+  cacheVisible(path: string): Promise<boolean>;
+  /** True while any note's resolved references still point at the path. */
+  referenced(path: string): Promise<boolean>;
+}
+
 export interface ChangeSetSemanticEvidenceTrackerOptions {
   publishSuccessorSearchSnapshot(): Promise<void>;
+  probes?: ChangeSetSemanticProbes;
   deadlineMs?: number;
   now?: () => number;
   delay?: (milliseconds: number) => Promise<void>;
@@ -79,6 +95,27 @@ export function createChangeSetSemanticEvidenceTracker(
     request.requiredEvents.length;
   const hasEvent = (expected: VaultMutationEvent): boolean =>
     events.some((event) => JSON.stringify(event) === JSON.stringify(expected));
+  const probesSatisfied = async (
+    request: ChangeSetSemanticEvidenceRequest,
+  ): Promise<boolean> => {
+    if (!request.hiddenTrash) return true;
+    const probes = options.probes;
+    if (probes === undefined) return false;
+    for (const operation of request.operations) {
+      if (operation.kind !== "trash") continue;
+      if (request.mode === "apply") {
+        if (await probes.referenced(operation.path)) return false;
+        if ("targetVersion" in operation && (await probes.cacheVisible(operation.path))) {
+          return false;
+        }
+      } else if (
+        "targetVersion" in operation && !(await probes.cacheVisible(operation.path))
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
   return {
     begin(request) {
       active = structuredClone(request);
@@ -96,7 +133,8 @@ export function createChangeSetSemanticEvidenceTracker(
       const required = expectedEvents(request);
       while (
         events.length < required ||
-        request.requiredEvents.some((expected) => !hasEvent(expected))
+        request.requiredEvents.some((expected) => !hasEvent(expected)) ||
+        !(await probesSatisfied(request))
       ) {
         if (now() >= deadline) {
           active = null;
@@ -476,8 +514,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
             (file.beforeIdentity !== undefined &&
               typeof file.beforeIdentity !== "string") ||
             (file.identity !== undefined && typeof file.identity !== "string") ||
-            (file.stageId !== undefined && !isPrivateId(file.stageId)) ||
-            (file.trashId !== undefined && !isPrivateId(file.trashId)),
+            (file.stageId !== undefined && !isPrivateId(file.stageId)),
         ))) ||
     (frame.mutations !== undefined &&
       (!Array.isArray(frame.mutations) ||

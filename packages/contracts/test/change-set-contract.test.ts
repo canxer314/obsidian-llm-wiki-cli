@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createChangeSetStatusInputJsonSchema,
+  createChangeSetSubmitInputJsonSchema,
   parseChangeSetStatusInput,
   parseChangeSetStatusResult,
   parseChangeSetSubmitInput,
@@ -70,6 +71,40 @@ describe("vault_change_set_submit v1 contract", () => {
         targetVersion: VERSION,
       }],
     })).toThrow();
+  });
+
+  it("publishes the trash evidence split as a mutually exclusive oneOf", () => {
+    interface SchemaNode {
+      oneOf?: SchemaNode[];
+      anyOf?: SchemaNode[];
+      properties?: { kind?: { const?: string } };
+      [key: string]: unknown;
+    }
+    const trashSplits: SchemaNode[] = [];
+    const visit = (node: unknown): void => {
+      if (typeof node !== "object" || node === null) return;
+      if (Array.isArray(node)) {
+        for (const member of node) visit(member);
+        return;
+      }
+      const schema = node as SchemaNode;
+      const variants = schema.oneOf ?? schema.anyOf;
+      if (
+        variants !== undefined &&
+        variants.length === 2 &&
+        variants.every((variant) => variant.properties?.kind?.const === "trash")
+      ) {
+        trashSplits.push(schema);
+      }
+      for (const value of Object.values(schema)) visit(value);
+    };
+    visit(createChangeSetSubmitInputJsonSchema());
+
+    // Each variant forbids the other's evidence key, so the closed split must
+    // stay oneOf like every other mutually exclusive split in this contract.
+    expect(trashSplits).toHaveLength(1);
+    expect(trashSplits[0]!.anyOf).toBeUndefined();
+    expect(trashSplits[0]!.oneOf).toHaveLength(2);
   });
 
   it("accepts registered, conflict, and preflight rejection results without generic errors", () => {
