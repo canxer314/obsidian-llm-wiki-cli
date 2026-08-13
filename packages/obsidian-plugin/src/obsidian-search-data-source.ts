@@ -1,3 +1,5 @@
+import { posix } from "node:path";
+
 import { isCanonicalVaultPath } from "./canonical-vault-path.js";
 import type {
   HostReferenceEvidence,
@@ -149,10 +151,19 @@ export function enumerateCanonicalReferenceTargets(
   } catch {
     throw new Error("Registered reference has an invalid encoded target");
   }
+  const sourceRelative = path.startsWith("./") || path.startsWith("../");
+  if (sourceRelative) {
+    if (sourcePath === undefined || !isCanonicalVaultPath(sourcePath)) return [];
+    const resolved = posix.normalize(posix.join(posix.dirname(sourcePath), path));
+    if (!isCanonicalVaultPath(resolved)) {
+      throw new Error("Registered reference target is not canonical");
+    }
+    path = resolved;
+  }
   if (!isCanonicalVaultPath(path)) {
     throw new Error("Registered reference target is not canonical");
   }
-  const explicitPath = path.includes("/");
+  const explicitPath = sourceRelative || path.includes("/");
   const candidates = files.filter((file) => {
     if (!isCanonicalVaultPath(file.path)) return false;
     if (explicitPath) {
@@ -256,9 +267,14 @@ export function renderRegisteredReference(
   profile: RegisteredReferenceProfile,
   original: string,
   target: string,
+  targetKind: "note" | "attachment" = "attachment",
 ): string {
   if (target.length === 0) throw new Error("Reference target must not be empty");
-  if ((profile === "embed" || profile === "markdown_embed") && target.includes("#")) {
+  if (
+    targetKind === "attachment" &&
+    (profile === "embed" || profile === "markdown_embed") &&
+    target.includes("#")
+  ) {
     throw new Error("Registered attachment profiles reject literal # targets");
   }
   if (profile === "wikilink" || profile === "embed") {

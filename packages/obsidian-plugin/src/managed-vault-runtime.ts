@@ -12,11 +12,13 @@ import type {
   BridgeHealthState,
   BridgeInstance,
 } from "./bridge-instance.js";
+import { withMoveReferenceProjection } from "./move-reference-projection.js";
 import {
   SearchSnapshotManager,
   SearchSnapshotRefreshCoordinator,
   type SearchSnapshotDataSource,
 } from "./search-snapshot.js";
+import type { MoveSnapshotBarrier } from "./change-set.js";
 import { VaultDiscoverService } from "./vault-discover.js";
 import type { VaultReadDataSource } from "./vault-read.js";
 
@@ -171,7 +173,7 @@ export class ManagedVaultBridgeRuntime {
     await snapshots.rebuild();
   }
 
-  async publishSuccessorSearchSnapshot(): Promise<void> {
+  async publishSuccessorSearchSnapshot(barrier?: MoveSnapshotBarrier): Promise<void> {
     const snapshots = this.#snapshots;
     const refresh = this.#snapshotRefresh;
     if (snapshots === undefined || refresh === undefined) {
@@ -181,6 +183,26 @@ export class ManagedVaultBridgeRuntime {
     await refresh.whenIdle();
     if (snapshots.readiness !== "ready") {
       throw new Error("Successor Search Snapshot publication failed");
+    }
+    if (barrier !== undefined) {
+      const snapshot = snapshots.current();
+      const notes = new Map(snapshot?.notes.map((note) => [note.path, note]) ?? []);
+      if (
+        notes.has(barrier.absentPath) ||
+        notes.get(barrier.presentPath)?.contentVersion !== barrier.presentVersion
+      ) throw new Error("Successor Search Snapshot move evidence did not match");
+      for (const expected of barrier.closure) {
+        const note = notes.get(expected.path);
+        if (
+          note?.contentVersion !== expected.contentVersion ||
+          note.resolvedLinks[expected.resolvedPath] !== expected.referenceCount ||
+          Object.keys(note.resolvedLinks).some(
+            (path) =>
+              (path === barrier.presentPath || path === barrier.absentPath) &&
+              path !== expected.resolvedPath,
+          )
+        ) throw new Error("Successor Search Snapshot reference closure did not match");
+      }
     }
   }
 
@@ -360,7 +382,13 @@ export class ManagedVaultBridgeRuntime {
           ? undefined
           : {
               store: changeSetStore,
-              dataSource: this.#options.changeSetDataSource,
+              dataSource:
+                snapshots === undefined
+                  ? this.#options.changeSetDataSource
+                  : withMoveReferenceProjection(
+                      this.#options.changeSetDataSource,
+                      snapshots,
+                    ),
               execution: this.#options.changeSetExecution,
               vaultId: settings.vaultId,
             },

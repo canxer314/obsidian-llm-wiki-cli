@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -678,6 +680,77 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
       await client.close();
       await runtime.unload();
     }
+  });
+
+  it("derives note-move reference closure from the frozen Search Snapshot", async () => {
+    const target = "# Target\n";
+    const backlink = "See [[Target|alias]]\n";
+    const bytes = new Map([
+      ["Notes/Target.md", Buffer.from(target)],
+      ["Notes/Backlink.md", Buffer.from(backlink)],
+    ]);
+    const start = backlink.indexOf("[[Target|alias]]");
+    let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => [...bytes.keys()],
+        readBinary: async (path) => bytes.get(path) ?? null,
+        semanticEvidence: async (path) => path === "Notes/Backlink.md"
+          ? {
+              frontmatter: null,
+              tags: [],
+              headings: [],
+              references: [{
+                profile: "wikilink",
+                target: "Target",
+                resolvedPath: "Notes/Target.md",
+                original: "[[Target|alias]]",
+                position: {
+                  start: { line: 0, col: start, offset: start },
+                  end: { line: 0, col: start + 16, offset: start + 16 },
+                },
+              }],
+              resolvedLinks: { "Notes/Target.md": 1 },
+              unresolvedLinks: {},
+            }
+          : {
+              frontmatter: null,
+              tags: [],
+              headings: [{ heading: "Target", level: 1 }],
+              references: [],
+              resolvedLinks: {},
+              unresolvedLinks: {},
+            },
+      },
+      changeSetDataSource: {
+        readBinary: async (path) => bytes.get(path) ?? null,
+        pathKind: async (path) => path === "Notes" ? "directory" : bytes.has(path) ? "file" : null,
+        isContained: async () => true,
+      },
+      createBridge: (options) => {
+        captured = options;
+        return fakeBridge(27123);
+      },
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    const projectMove = captured?.changeSets?.dataSource.projectMove;
+    const projection = await projectMove?.({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/Target.md",
+      destinationPath: "Notes/Renamed.md",
+      targetVersion: `sha256:${createHash("sha256").update(target).digest("hex")}`,
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target));
+
+    expect(Buffer.from(projection!.derivedEffects[0]!.projectedBytes).toString())
+      .toBe("See [[Renamed|alias]]\n");
+    await runtime.unload();
   });
 
   it("reports healthy readiness when snapshots and durable mutation execution are ready", async () => {

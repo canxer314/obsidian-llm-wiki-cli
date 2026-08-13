@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
+  MoveSnapshotBarrier,
   RecoveryJournalFrame,
 } from "./change-set.js";
 import {
@@ -21,13 +22,82 @@ export interface DirectoryExecutionHost {
   publishDirectory(stageId: string, path: string): Promise<void>;
   discardPreparedDirectory(stageId: string): Promise<void>;
   removeDirectory(path: string): Promise<void>;
-  publishSearchSnapshot(): Promise<void>;
+  readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
+  writeBinary?(path: string, bytes: Uint8Array): Promise<void>;
+  removeFile?(path: string): Promise<void>;
+  moveFile?(sourcePath: string, destinationPath: string): Promise<void>;
+  publishSearchSnapshot(barrier?: MoveSnapshotBarrier): Promise<void>;
 }
 
 export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
   host: DirectoryExecutionHost;
   slotCapacity?: number;
+}
+
+function parseBase64(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    Buffer.from(value, "base64").toString("base64") !== value
+  ) throw new Error("Recovery Journal payload is corrupt or incompatible");
+  return value;
+}
+
+function parseFileState(value: unknown): { kind: "absent" } | { kind: "file"; bytesBase64: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  const state = value as Record<string, unknown>;
+  if (state.kind === "absent" && Object.keys(state).join(",") === "kind") {
+    return { kind: "absent" };
+  }
+  if (
+    state.kind === "file" &&
+    Object.keys(state).sort().join(",") === "bytesBase64,kind"
+  ) return { kind: "file", bytesBase64: parseBase64(state.bytesBase64) };
+  throw new Error("Recovery Journal payload is corrupt or incompatible");
+}
+
+function parseBarrier(value: unknown): MoveSnapshotBarrier | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  const barrier = value as Record<string, unknown>;
+  if (
+    typeof barrier.presentPath !== "string" || barrier.presentPath.length === 0 ||
+    typeof barrier.absentPath !== "string" || barrier.absentPath.length === 0 ||
+    typeof barrier.presentVersion !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(barrier.presentVersion) ||
+    !Array.isArray(barrier.closure)
+  ) throw new Error("Recovery Journal payload is corrupt or incompatible");
+  const paths = new Set<string>();
+  const closure = barrier.closure.map((raw: unknown) => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error("Recovery Journal payload is corrupt or incompatible");
+    }
+    const item = raw as Record<string, unknown>;
+    if (
+      typeof item.path !== "string" || item.path.length === 0 || paths.has(item.path) ||
+      typeof item.contentVersion !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(item.contentVersion) ||
+      typeof item.resolvedPath !== "string" || item.resolvedPath.length === 0 ||
+      !Number.isInteger(item.referenceCount) || (item.referenceCount as number) < 1
+    ) throw new Error("Recovery Journal payload is corrupt or incompatible");
+    paths.add(item.path);
+    return {
+      path: item.path,
+      contentVersion: item.contentVersion,
+      resolvedPath: item.resolvedPath,
+      referenceCount: item.referenceCount as number,
+    };
+  });
+  return {
+    presentPath: barrier.presentPath,
+    absentPath: barrier.absentPath,
+    presentVersion: barrier.presentVersion,
+    closure,
+  };
 }
 
 function parseFrame(value: unknown): RecoveryJournalFrame {
@@ -50,7 +120,47 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   ) {
     throw new Error("Recovery Journal payload is corrupt or incompatible");
   }
-  return structuredClone(value) as RecoveryJournalFrame;
+  if (frame.files !== undefined && !Array.isArray(frame.files)) {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  const files = frame.files === undefined
+    ? undefined
+    : frame.files.map((raw) => {
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+          throw new Error("Recovery Journal payload is corrupt or incompatible");
+        }
+        const file = raw as unknown as Record<string, unknown>;
+        if (typeof file.path !== "string" || file.path.length === 0) {
+          throw new Error("Recovery Journal payload is corrupt or incompatible");
+        }
+        return {
+          path: file.path,
+          before: parseFileState(file.before),
+          expectedAfter: parseFileState(file.expectedAfter),
+          ...(file.intermediate === undefined
+            ? {}
+            : {
+                intermediate: Array.isArray(file.intermediate)
+                  ? file.intermediate.map(parseFileState)
+                  : (() => {
+                      throw new Error("Recovery Journal payload is corrupt or incompatible");
+                    })(),
+              }),
+        };
+      });
+  if (files !== undefined && new Set(files.map(({ path }) => path)).size !== files.length) {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  return {
+    ...structuredClone(value) as RecoveryJournalFrame,
+    ...(files === undefined ? {} : { files }),
+    ...(frame.successBarrier === undefined
+      ? {}
+      : { successBarrier: parseBarrier(frame.successBarrier) }),
+    ...(frame.rollbackBarrier === undefined
+      ? {}
+      : { rollbackBarrier: parseBarrier(frame.rollbackBarrier) }),
+  };
 }
 
 export async function createFileSystemChangeSetExecutionAdapter(
@@ -94,6 +204,10 @@ export async function createFileSystemChangeSetExecutionAdapter(
     publishDirectory: options.host.publishDirectory,
     discardPreparedDirectory: options.host.discardPreparedDirectory,
     removeDirectory: options.host.removeDirectory,
+    ...(options.host.readBinary === undefined ? {} : { readBinary: options.host.readBinary }),
+    ...(options.host.writeBinary === undefined ? {} : { writeBinary: options.host.writeBinary }),
+    ...(options.host.removeFile === undefined ? {} : { removeFile: options.host.removeFile }),
+    ...(options.host.moveFile === undefined ? {} : { moveFile: options.host.moveFile }),
     publishSearchSnapshot: options.host.publishSearchSnapshot,
     close: () => handle.close(),
   };

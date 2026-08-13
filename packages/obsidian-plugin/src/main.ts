@@ -76,6 +76,13 @@ export default class VaultOperationBridgePlugin extends Plugin {
                   join(stagingDirectory, ...stageId.split("/")),
                   join(basePath, ...path.split("/")),
                 );
+                const deadline = Date.now() + 5_000;
+                while (this.app.vault.getFolderByPath(path) === null) {
+                  if (Date.now() >= deadline) {
+                    throw new Error("Published directory did not enter the Vault index");
+                  }
+                  await new Promise((resolve) => setTimeout(resolve, 10));
+                }
               },
               discardPreparedDirectory: async (stageId) => {
                 try {
@@ -85,8 +92,29 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 }
               },
               removeDirectory: (path) => adapter.rmdir(path, false),
-              publishSearchSnapshot: async () => {
-                await runtime.publishSuccessorSearchSnapshot();
+              readBinary: async (path) =>
+                (await adapter.exists(path)) ? adapter.readBinary(path) : null,
+              writeBinary: async (path, bytes) => {
+                const copy = Uint8Array.from(bytes);
+                const file = this.app.vault.getFileByPath(path);
+                if (file === null) {
+                  await this.app.vault.createBinary(path, copy.buffer);
+                } else {
+                  await this.app.vault.modifyBinary(file, copy.buffer);
+                }
+              },
+              removeFile: async (path) => {
+                const file = this.app.vault.getAbstractFileByPath(path);
+                if (file === null) throw new Error("File removal target disappeared");
+                await this.app.vault.delete(file, true);
+              },
+              moveFile: async (sourcePath, destinationPath) => {
+                const file = this.app.vault.getAbstractFileByPath(sourcePath);
+                if (file === null) throw new Error("File move source disappeared");
+                await this.app.vault.rename(file, destinationPath);
+              },
+              publishSearchSnapshot: async (barrier) => {
+                await runtime.publishSuccessorSearchSnapshot(barrier);
               },
             },
           })

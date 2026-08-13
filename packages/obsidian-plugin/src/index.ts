@@ -12,13 +12,18 @@ export {
   CHANGE_SET_REGISTRY_SCHEMA_VERSION,
   ChangeSetService,
   fingerprintChangeSetRequest,
+  type BoundMoveDerivedEffect,
+  type BoundMoveProjection,
   type FrontmatterChange,
   type MoveDerivedProjection,
   type MoveProjection,
+  type MoveSnapshotBarrier,
   type ChangeSetExecutionAdapter,
   type ChangeSetExecutionState,
   type ChangeSetRuntimeStatePort,
   type RecoveryJournalFrame,
+  type RecoveryFileFootprint,
+  type RecoveryFileState,
   type RecoveryJournalPhase,
   InjectedChangeSetCrash,
   type ChangeSetGate,
@@ -38,6 +43,11 @@ export {
   type FileSystemChangeSetExecutionOptions,
 } from "./file-system-change-set-execution.js";
 export { createRegistrationCommand } from "./registration-command.js";
+export {
+  createMoveReferenceProjector,
+  withMoveReferenceProjection,
+  type MoveReferenceSnapshotSource,
+} from "./move-reference-projection.js";
 export {
   ManagedVaultBridgeRuntime,
   PERSISTENT_STATE_SCHEMA_VERSION,

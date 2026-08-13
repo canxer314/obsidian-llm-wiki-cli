@@ -156,6 +156,8 @@ describe("installed Obsidian reference profiles", () => {
     expect(enumerateCanonicalReferenceTargets("Area/Plan", files)).toEqual([
       "Area/Plan.md",
     ]);
+    expect(enumerateCanonicalReferenceTargets("../Area/Plan", files, "Projects/Source.md"))
+      .toEqual(["Area/Plan.md"]);
     expect(enumerateCanonicalReferenceTargets("", files, "Area/Plan.md")).toEqual([
       "Area/Plan.md",
     ]);
