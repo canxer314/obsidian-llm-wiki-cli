@@ -15,8 +15,9 @@ import {
 } from "@llm-wiki/vault-contracts";
 
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
-export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
-export const RECOVERY_JOURNAL_SCHEMA_VERSION = 2;
+export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 2;
+const LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
+export const RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 2;
 
 export interface ChangeSetExecutionState {
   phase: "queued" | "executing" | "terminal";
@@ -40,11 +41,26 @@ export interface ChangeSetRegistryTombstone {
   changeSetId: string;
 }
 
+export type ChangeSetWriteMode =
+  | "manual_paused"
+  | "maintenance_pending"
+  | "maintenance_paused"
+  | "maintenance_failed";
+
+export interface PersistedChangeSetLifecycle {
+  upgrade: "succeeded" | "failed";
+  migration: "succeeded" | "failed";
+}
+
 export interface ChangeSetRegistryState {
-  schemaVersion: typeof CHANGE_SET_REGISTRY_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION
+    | typeof CHANGE_SET_REGISTRY_SCHEMA_VERSION;
   nextEnqueueSeq: number;
   entries: ChangeSetRegistryEntry[];
   tombstones: ChangeSetRegistryTombstone[];
+  writeMode?: ChangeSetWriteMode;
+  lifecycle?: PersistedChangeSetLifecycle;
 }
 
 export interface ChangeSetRegistryStore {
@@ -103,6 +119,10 @@ export interface RecoveryFileFootprint {
   path: string;
   before: RecoveryFileState;
   expectedAfter: RecoveryFileState;
+  /** Inode-level identity of the pre-state file (Markdown durable evidence). */
+  beforeIdentity?: string;
+  /** Inode-level identity captured right after staging (Markdown durable evidence). */
+  identity?: string;
   stageId?: string;
   trashId?: string;
 }
@@ -138,7 +158,7 @@ export type RecoveryMutation =
     };
 
 export interface RecoveryJournalFrame {
-  schemaVersion: 1 | typeof RECOVERY_JOURNAL_SCHEMA_VERSION;
+  schemaVersion: 1 | typeof RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION;
   vaultId: string;
   changeSetId: string;
   enqueueSeq: number;
@@ -169,6 +189,13 @@ export interface ChangeSetSemanticEvidenceRequest {
   readonly requiredEvents: readonly ChangeSetSemanticEvent[];
 }
 
+export interface SearchSnapshotTargetEvidence {
+  path: string;
+  contentVersion: string;
+  /** true: a create/edit must observe metadata for this exact version. */
+  requireSemanticMatch: boolean;
+}
+
 export interface ChangeSetExecutionAdapter {
   loadRecoveryFrame(): Promise<RecoveryJournalFrame | null>;
   persistRecoveryFrame(frame: RecoveryJournalFrame): Promise<void>;
@@ -179,7 +206,8 @@ export interface ChangeSetExecutionAdapter {
   discardPreparedDirectory(stageId: string): Promise<void>;
   removeDirectory(path: string): Promise<void>;
   readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
-  prepareFile?(stageId: string, bytes: Uint8Array): Promise<void>;
+  fileIdentity?(path: string): Promise<string | null>;
+  prepareFile?(stageId: string, bytes: Uint8Array): Promise<string>;
   publishFile?(stageId: string, path: string): Promise<void>;
   discardPreparedFile?(stageId: string): Promise<void>;
   moveFile?(sourcePath: string, destinationPath: string): Promise<void>;
@@ -191,7 +219,7 @@ export interface ChangeSetExecutionAdapter {
   beginSemanticEvidence?(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
   awaitSemanticEvidence?(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
   readonly semanticEvidencePublishesSnapshot?: boolean;
-  publishSearchSnapshot(): Promise<void>;
+  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -231,12 +259,51 @@ export interface ChangeSetGate {
     | "incompatible_protocol";
 }
 
+function gateForWriteMode(mode: ChangeSetWriteMode | undefined): ChangeSetGate | null {
+  if (mode === undefined) return null;
+  return {
+    code:
+      mode === "maintenance_pending" || mode === "maintenance_failed"
+        ? "upgrade_in_progress"
+        : "writes_paused",
+  };
+}
+
+export interface ChangeSetPauseObserver {
+  started(): void;
+  completed(): void;
+}
+
+export interface ChangeSetMaintenanceObserver {
+  started(): void;
+  failed(): void;
+  completed(): void;
+}
+
 export interface ChangeSetRequestState {
   vault: VaultState;
   effectiveGate: ChangeSetGate | null;
 }
 
+const OPERATIONAL_GATE_PRECEDENCE: readonly ChangeSetGate["code"][] = [
+  "incompatible_protocol",
+  "recovery_blocked",
+  "recovery_in_progress",
+  "upgrade_in_progress",
+  "writes_paused",
+];
+
+function selectOperationalGate(
+  ...gates: readonly (ChangeSetGate | null)[]
+): ChangeSetGate | null {
+  const code = OPERATIONAL_GATE_PRECEDENCE.find((candidate) =>
+    gates.some((gate) => gate?.code === candidate),
+  );
+  return code === undefined ? null : { code };
+}
+
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const utf8Encoder = new TextEncoder();
 
 /**
  * Name of the Bridge-private state directory inside the Vault. main.ts places
@@ -267,8 +334,9 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
     throw new Error("Change Set registry is corrupt or incompatible");
   }
   const state = value as Partial<ChangeSetRegistryState>;
+  const isLegacy = state.schemaVersion === LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION;
   if (
-    state.schemaVersion !== CHANGE_SET_REGISTRY_SCHEMA_VERSION ||
+    (!isLegacy && state.schemaVersion !== CHANGE_SET_REGISTRY_SCHEMA_VERSION) ||
     !Number.isInteger(state.nextEnqueueSeq) ||
     (state.nextEnqueueSeq ?? 0) < 1 ||
     !Array.isArray(state.entries) ||
@@ -347,11 +415,37 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
     submissionKeys.add(record.submissionKey);
     changeSetIds.add(record.changeSetId);
   }
+  const writeMode = state.writeMode;
+  if (
+    (isLegacy && writeMode !== undefined) ||
+    (writeMode !== undefined &&
+      ![
+        "manual_paused",
+        "maintenance_pending",
+        "maintenance_paused",
+        "maintenance_failed",
+      ].includes(writeMode))
+  ) {
+    throw new Error("Change Set registry is corrupt or incompatible");
+  }
+  const lifecycle = state.lifecycle;
+  if (
+    (isLegacy && lifecycle !== undefined) ||
+    (lifecycle !== undefined &&
+      (typeof lifecycle !== "object" ||
+        lifecycle === null ||
+        !["succeeded", "failed"].includes(lifecycle.upgrade) ||
+        !["succeeded", "failed"].includes(lifecycle.migration)))
+  ) {
+    throw new Error("Change Set registry is corrupt or incompatible");
+  }
   return {
     schemaVersion: CHANGE_SET_REGISTRY_SCHEMA_VERSION,
     nextEnqueueSeq: state.nextEnqueueSeq!,
     entries,
     tombstones,
+    ...(writeMode === undefined ? {} : { writeMode }),
+    ...(lifecycle === undefined ? {} : { lifecycle }),
   };
 }
 
@@ -423,15 +517,6 @@ function recoveryBytes(state: RecoveryFileState): Uint8Array | null {
   return state.kind === "absent" ? null : Buffer.from(state.bytesBase64, "base64");
 }
 
-async function readExecutionBytes(
-  execution: ChangeSetExecutionAdapter,
-  path: string,
-): Promise<Uint8Array | null> {
-  const value = await execution.readBinary?.(path);
-  if (value === undefined || value === null) return null;
-  return Uint8Array.from(value instanceof Uint8Array ? value : new Uint8Array(value));
-}
-
 function bytesMatchState(bytes: Uint8Array | null, state: RecoveryFileState): boolean {
   if (state.kind === "absent") return bytes === null;
   if (bytes === null) return false;
@@ -460,6 +545,79 @@ function occurrenceCount(content: string, old: string): number {
     index += old.length;
   }
   return count;
+}
+
+function findSubarray(haystack: Uint8Array, needle: Uint8Array, fromIndex = 0): number {
+  if (needle.length === 0) return fromIndex <= haystack.length ? fromIndex : -1;
+  outer: for (let index = fromIndex; index <= haystack.length - needle.length; index += 1) {
+    for (let offset = 0; offset < needle.length; offset += 1) {
+      if (haystack[index + offset] !== needle[offset]) continue outer;
+    }
+    return index;
+  }
+  return -1;
+}
+
+function findOccurrences(
+  content: Uint8Array,
+  old: Uint8Array,
+): { count: number; firstIndex: number } {
+  if (old.length === 0) return { count: content.length + 1, firstIndex: 0 };
+  let count = 0;
+  let firstIndex = -1;
+  let index = 0;
+  while ((index = findSubarray(content, old, index)) !== -1) {
+    if (firstIndex === -1) firstIndex = index;
+    count += 1;
+    index += 1;
+  }
+  return { count, firstIndex };
+}
+
+type BodyEditProjection =
+  | { outcome: "projected"; bytes: Uint8Array }
+  | { outcome: "invalid_utf8" }
+  | { outcome: "exact_match_count_mismatch"; actualOccurrences: number };
+
+function projectBodyBytes(
+  bytes: Uint8Array,
+  edit: Extract<ChangeSetOperation, { kind: "edit_body" }>["edit"],
+): BodyEditProjection {
+  try {
+    utf8Decoder.decode(bytes);
+  } catch {
+    return { outcome: "invalid_utf8" };
+  }
+  const hasBom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  const payload = bytes.subarray(hasBom ? 3 : 0);
+  if (edit.kind === "replace_whole") {
+    const replacement = utf8Encoder.encode(edit.replacement);
+    return {
+      outcome: "projected",
+      bytes: Uint8Array.from(
+        Buffer.concat([bytes.subarray(0, hasBom ? 3 : 0), replacement]),
+      ),
+    };
+  }
+  const old = utf8Encoder.encode(edit.old);
+  const occurrences = findOccurrences(payload, old);
+  if (occurrences.count !== 1) {
+    return {
+      outcome: "exact_match_count_mismatch",
+      actualOccurrences: occurrences.count,
+    };
+  }
+  const replacement = utf8Encoder.encode(edit.replacement);
+  return {
+    outcome: "projected",
+    bytes: Uint8Array.from(
+      Buffer.concat([
+        bytes.subarray(0, (hasBom ? 3 : 0) + occurrences.firstIndex),
+        replacement,
+        payload.subarray(occurrences.firstIndex + old.length),
+      ]),
+    ),
+  };
 }
 
 function parentPaths(path: string): string[] {
@@ -548,6 +706,13 @@ function recoveryPlanMatchesFrame(frame: RecoveryJournalFrame): boolean {
   let mutationIndex = 0;
   for (const [operationIndex, operation] of frame.input.operations.entries()) {
     if (operation.kind === "create_directory") continue;
+    if (operation.kind === "create_note" || operation.kind === "edit_body") {
+      // Markdown mutations are journaled as file footprints, not RecoveryMutations.
+      const footprint = files.find(({ path }) => path === operation.path);
+      if (footprint === undefined) return false;
+      states.set(operation.path, footprint.expectedAfter);
+      continue;
+    }
     const mutation = mutations[mutationIndex++];
     if (mutation === undefined || mutation.operationId !== operation.operationId) return false;
     if (operation.kind === "copy_attachment") {
@@ -557,7 +722,7 @@ function recoveryPlanMatchesFrame(frame: RecoveryJournalFrame): boolean {
         mutation.kind !== operation.kind ||
         mutation.sourcePath !== operation.sourcePath ||
         mutation.destinationPath !== operation.destinationPath ||
-        mutation.stageId !== `${frame.changeSetId}/file/${operationIndex}` ||
+        mutation.stageId !== `${frame.changeSetId}/attachment/${operationIndex}` ||
         source?.kind !== "attachment" ||
         source.sha256 !== operation.expectedSha256 ||
         !recoveryStatesEqual(mutation.sourceState, source) ||
@@ -612,13 +777,28 @@ function recoveryPlanMatchesFrame(frame: RecoveryJournalFrame): boolean {
     recoveryStatesEqual(states.get(path), expectedAfter));
 }
 
+async function readBinary(
+  source: { readBinary(path: string): Promise<ArrayBuffer | Uint8Array | null> },
+  path: string,
+): Promise<Uint8Array | null> {
+  const value = await source.readBinary(path);
+  if (value === null) return null;
+  return Uint8Array.from(value instanceof Uint8Array ? value : new Uint8Array(value));
+}
+
 async function readBytes(
   dataSource: ChangeSetPreflightDataSource,
   path: string,
 ): Promise<Uint8Array | null> {
-  const value = await dataSource.readBinary(path);
-  if (value === null) return null;
-  return Uint8Array.from(value instanceof Uint8Array ? value : new Uint8Array(value));
+  return readBinary(dataSource, path);
+}
+
+async function readExecutionBytes(
+  execution: ChangeSetExecutionAdapter,
+  path: string,
+): Promise<Uint8Array | null> {
+  if (execution.readBinary === undefined) return null;
+  return readBinary(execution as Required<Pick<ChangeSetExecutionAdapter, "readBinary">>, path);
 }
 
 async function preflight(
@@ -757,30 +937,21 @@ async function preflight(
         contentVersion: operation.targetVersion,
       };
       if (operation.kind === "edit_body") {
-        let content: string;
-        try {
-          content = utf8Decoder.decode(bytes);
-        } catch {
+        const projected = projectBodyBytes(bytes, operation.edit);
+        if (projected.outcome === "invalid_utf8") {
           return { accepted: false, failure: { code: "stale_observation" } };
         }
-        if (operation.edit.kind === "replace_exact") {
-          const actualOccurrences = occurrenceCount(content, operation.edit.old);
-          if (actualOccurrences !== operation.edit.expectedOccurrences) {
-            return {
-              accepted: false,
-              failure: {
-                code: "exact_match_count_mismatch",
-                operationId: operation.operationId,
-                actualOccurrences,
-              },
-            };
-          }
+        if (projected.outcome === "exact_match_count_mismatch") {
+          return {
+            accepted: false,
+            failure: {
+              code: "exact_match_count_mismatch",
+              operationId: operation.operationId,
+              actualOccurrences: projected.actualOccurrences,
+            },
+          };
         }
-        const projectedContent =
-          operation.edit.kind === "replace_whole"
-            ? operation.edit.replacement
-            : content.replace(operation.edit.old, operation.edit.replacement);
-        const finalBytes = Buffer.from(projectedContent);
+        const finalBytes = projected.bytes;
         const finalState = {
           kind: "markdown" as const,
           contentVersion: contentVersion(finalBytes),
@@ -969,7 +1140,11 @@ export class ChangeSetService {
   #state: ChangeSetRegistryState;
   #operationTail: Promise<void> = Promise.resolve();
   #writeTail: Promise<void> = Promise.resolve();
+  #controlTail: Promise<void> = Promise.resolve();
   #recoveryBlocked = false;
+  #dequeuePaused = false;
+  #admissionGate: ChangeSetGate | null = null;
+  #currentExecutionId: string | null = null;
 
   private constructor(options: ChangeSetServiceOptions, state: ChangeSetRegistryState) {
     this.#options = {
@@ -978,6 +1153,8 @@ export class ChangeSetService {
       createChangeSetId: options.createChangeSetId ?? randomUUID,
     };
     this.#state = state;
+    this.#dequeuePaused = state.writeMode !== undefined;
+    this.#admissionGate = gateForWriteMode(state.writeMode);
   }
 
   static async open(options: ChangeSetServiceOptions): Promise<ChangeSetService> {
@@ -987,6 +1164,7 @@ export class ChangeSetService {
     try {
       await service.#recover();
     } catch (error) {
+      if (error instanceof InjectedChangeSetCrash) throw error;
       recoveryBlocked = true;
       service.#recoveryBlocked = true;
       const unfinished = service.#state.entries.filter(
@@ -999,6 +1177,7 @@ export class ChangeSetService {
       if (options.runtimeState === undefined) throw error;
     }
     if (!recoveryBlocked) await service.#resumeQueue();
+    options.runtimeState?.setQueue(service.#queueState(null));
     return service;
   }
 
@@ -1006,9 +1185,11 @@ export class ChangeSetService {
     await this.#options.crashInjector?.(point);
   }
 
-  #mutationPlan(
-    entry: ChangeSetRegistryEntry,
-  ): { input: ChangeSetSubmitInput; preview: Preview; directories: string[] } | null {
+  #mutationPlan(entry: ChangeSetRegistryEntry): {
+    input: ChangeSetSubmitInput;
+    preview: Preview;
+    directories: string[];
+  } | null {
     if (
       entry.execution === undefined ||
       entry.changeSet.state !== "in_progress" ||
@@ -1016,6 +1197,8 @@ export class ChangeSetService {
       entry.execution.input.operations.some(
         ({ kind }) =>
           kind !== "create_directory" &&
+          kind !== "create_note" &&
+          kind !== "edit_body" &&
           kind !== "copy_attachment" &&
           kind !== "move_attachment" &&
           kind !== "trash",
@@ -1226,6 +1409,54 @@ export class ChangeSetService {
           throw new Error("third-party path state");
         }
       }
+      // Markdown files are journaled as staged footprints rather than
+      // RecoveryMutations; restore them in reverse order. Entries without a
+      // stageId are evidence-only (never staged or published).
+      for (const file of [...(frame.files ?? [])].reverse()) {
+        if (file.stageId === undefined) continue;
+        const current = await execution.pathKind(file.path);
+        const currentIdentity =
+          current === "file" ? await execution.fileIdentity?.(file.path) : null;
+        const currentBytes =
+          current === "file" ? await readExecutionBytes(execution, file.path) : null;
+        const beforeBytes = recoveryBytes(file.before);
+        if (current === null) {
+          await execution.discardPreparedFile?.(file.stageId);
+          if (file.before.kind !== "absent") throw new Error("original file disappeared");
+          continue;
+        }
+        if (
+          current === "file" &&
+          file.before.kind !== "absent" &&
+          beforeBytes !== null &&
+          currentBytes !== null &&
+          Buffer.from(currentBytes).equals(beforeBytes)
+        ) {
+          await execution.discardPreparedFile?.(file.stageId);
+          continue;
+        }
+        if (
+          current !== "file" ||
+          file.identity === undefined ||
+          currentIdentity !== file.identity ||
+          !bytesMatchState(currentBytes, file.expectedAfter)
+        ) {
+          throw new Error("third-party path state");
+        }
+        if (file.before.kind === "absent") {
+          await execution.removeFile?.(file.path);
+        } else {
+          if (beforeBytes === null || execution.prepareFile === undefined || execution.publishFile === undefined) {
+            throw new Error("file rollback evidence is incomplete");
+          }
+          const rollbackStageId = `${file.stageId}/rollback`;
+          await execution.discardPreparedFile?.(rollbackStageId);
+          await execution.prepareFile(rollbackStageId, beforeBytes);
+          await this.#crash(`recovery_after_file_prepared:${file.path}`);
+          await execution.publishFile(rollbackStageId, file.path);
+          await this.#crash(`recovery_after_file_published:${file.path}`);
+        }
+      }
       const directoryActions: (() => Promise<void>)[] = [];
       for (const directory of [...frame.directories].reverse()) {
         const current = await execution.pathKind(directory.path);
@@ -1389,11 +1620,116 @@ export class ChangeSetService {
   }
 
   async #resumeQueue(): Promise<void> {
-    if (this.#options.execution === undefined || this.#recoveryBlocked) return;
+    if (
+      this.#options.execution === undefined ||
+      this.#recoveryBlocked ||
+      this.#dequeuePaused
+    ) {
+      return;
+    }
     const queued = [...this.#state.entries]
       .filter((entry) => entry.execution?.phase !== "terminal")
       .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
-    for (const entry of queued) await this.#executeMutation(entry.changeSetId);
+    for (const entry of queued) {
+      if (this.#dequeuePaused) break;
+      await this.#executeMutation(entry.changeSetId);
+    }
+  }
+
+  async #setWriteMode(
+    mode: ChangeSetWriteMode | undefined,
+    lifecycle?: PersistedChangeSetLifecycle,
+  ): Promise<void> {
+    await this.#serialize(async () => {
+      const nextState = structuredClone(this.#state);
+      if (mode === undefined) delete nextState.writeMode;
+      else nextState.writeMode = mode;
+      if (lifecycle !== undefined) nextState.lifecycle = lifecycle;
+      await this.#save(nextState);
+      this.#dequeuePaused = mode !== undefined;
+      this.#admissionGate = gateForWriteMode(mode);
+    });
+  }
+
+  async pause(observer?: ChangeSetPauseObserver): Promise<void> {
+    await this.#withControlLease(async () => {
+      if (
+        this.#state.writeMode === "maintenance_pending" ||
+        this.#state.writeMode === "maintenance_failed" ||
+        this.#state.writeMode === "maintenance_paused"
+      ) {
+        throw new Error("Maintenance must resume before manual pause can replace it");
+      }
+      await this.#setWriteMode("manual_paused");
+      observer?.started();
+      await this.#withWriteLease(async () => undefined);
+      observer?.completed();
+    });
+  }
+
+  async runMaintenance(
+    migrate: () => void | Promise<void>,
+    observer: ChangeSetMaintenanceObserver,
+  ): Promise<void> {
+    await this.#withControlLease(async () => {
+      await this.#setWriteMode("maintenance_pending");
+      observer.started();
+      await this.#withWriteLease(async () => {
+        try {
+          await migrate();
+        } catch (error) {
+          await this.#setWriteMode("maintenance_failed", {
+            upgrade: "failed",
+            migration: "failed",
+          });
+          observer.failed();
+          throw error;
+        }
+        await this.#setWriteMode("maintenance_paused", {
+          upgrade: "succeeded",
+          migration: "succeeded",
+        });
+        observer.completed();
+      });
+    });
+  }
+
+  async resume(
+    assertSafe?: () => void,
+    onAdmissionOpened?: () => void,
+  ): Promise<void> {
+    await this.#withControlLease(() =>
+      this.#withWriteLease(async () => {
+        assertSafe?.();
+        await this.#serialize(async () => {
+          if (this.#admissionGate?.code === "upgrade_in_progress") {
+            throw new Error("Maintenance has not completed and writes remain blocked");
+          }
+          const nextState = structuredClone(this.#state);
+          delete nextState.writeMode;
+          await this.#save(nextState);
+          this.#dequeuePaused = false;
+          this.#admissionGate = null;
+        });
+        onAdmissionOpened?.();
+        await this.#resumeQueue();
+      }),
+    );
+  }
+
+  #queueState(currentExecutionId: string | null): {
+    currentExecutionId: string | null;
+    length: number;
+    headChangeSetId: string | null;
+  } {
+    const pending = this.#state.entries
+      .filter(({ execution }) => execution !== undefined && execution.phase !== "terminal")
+      .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
+    return {
+      currentExecutionId,
+      length: pending.length,
+      headChangeSetId: pending[0]?.changeSetId ?? null,
+    };
   }
 
   async #executeMutation(changeSetId: string): Promise<void> {
@@ -1409,13 +1745,8 @@ export class ChangeSetService {
     if (head?.changeSetId !== entry.changeSetId) return;
     const plan = this.#mutationPlan(entry);
     if (plan === null) return;
-    this.#options.runtimeState?.setQueue({
-      currentExecutionId: entry.changeSetId,
-      length: this.#state.entries.filter(
-        ({ execution }) => execution !== undefined && execution.phase !== "terminal",
-      ).length,
-      headChangeSetId: entry.changeSetId,
-    });
+    this.#currentExecutionId = entry.changeSetId;
+    this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
     const checked = await preflight(this.#options.dataSource, plan.input);
     if (!checked.accepted || JSON.stringify(checked.preview) !== JSON.stringify(plan.preview)) {
       await this.#updateEntry(entry.changeSetId, (current) => {
@@ -1427,19 +1758,52 @@ export class ChangeSetService {
         };
         if (current.execution !== undefined) current.execution.phase = "terminal";
       });
-      this.#options.runtimeState?.setQueue({
-        currentExecutionId: null,
-        length: 0,
-        headChangeSetId: null,
-      });
+      this.#currentExecutionId = null;
+      this.#options.runtimeState?.setQueue(this.#queueState(null));
       return;
     }
     const operationKinds = plan.input.operations.map(({ kind }) => kind);
+    const projectedMarkdown = plan.preview.paths.filter(
+      ({ projectedFinalState }) => projectedFinalState.kind === "markdown",
+    );
+    const changedOperationIds = new Set(
+      plan.preview.requestedEffects
+        .filter(({ projectedOutcome }) => projectedOutcome === "changed")
+        .map(({ operationId }) => operationId),
+    );
+    const projectedFiles = projectedMarkdown.filter(
+      ({ path, projectedOutcome }) =>
+        projectedOutcome === "changed" ||
+        plan.input.operations.some(
+          (operation) =>
+            "path" in operation &&
+            operation.path === path &&
+            changedOperationIds.has(operation.operationId),
+        ),
+    );
+    const stagedPaths = new Set(projectedFiles.map(({ path }) => path));
+    const hasSemanticOperations = operationKinds.some(
+      (kind) =>
+        kind === "copy_attachment" || kind === "move_attachment" || kind === "trash",
+    );
     if (
-      operationKinds.some((kind) => kind !== "create_directory") &&
-      (execution.readBinary === undefined || execution.awaitSemanticEvidence === undefined)
+      (projectedMarkdown.length > 0 || hasSemanticOperations) &&
+      execution.readBinary === undefined
     ) {
+      throw new Error("Change Set execution adapter cannot prove final file bytes");
+    }
+    if (hasSemanticOperations && execution.awaitSemanticEvidence === undefined) {
       throw new Error("Change Set execution adapter does not support file evidence");
+    }
+    if (
+      projectedFiles.length > 0 &&
+      (execution.fileIdentity === undefined ||
+        execution.prepareFile === undefined ||
+        execution.publishFile === undefined ||
+        execution.discardPreparedFile === undefined ||
+        execution.removeFile === undefined)
+    ) {
+      throw new Error("Change Set execution adapter does not support files");
     }
     if (
       operationKinds.includes("copy_attachment") &&
@@ -1474,22 +1838,62 @@ export class ChangeSetService {
         ? { kind: "attachment", sha256: state.sha256, bytesBase64 }
         : { kind: "markdown", contentVersion: state.contentVersion, bytesBase64 };
     };
-    const files: RecoveryFileFootprint[] = plan.preview.paths
-      .filter(
-        ({ preState, projectedFinalState }) =>
-          preState.kind !== "directory" && projectedFinalState.kind !== "directory",
-      )
-      .map(({ path, preState, projectedFinalState }) => {
-        const beforeBytes = checked.observedBytes?.get(path);
-        const expectedBytes = checked.projectedBytes?.has(path)
-          ? checked.projectedBytes.get(path)
-          : beforeBytes;
-        return {
-          path,
-          before: fileState(preState, beforeBytes),
-          expectedAfter: fileState(projectedFinalState, expectedBytes),
-        };
-      });
+    const files: RecoveryFileFootprint[] = await Promise.all(
+      plan.preview.paths
+        .filter(
+          ({ preState, projectedFinalState }) =>
+            preState.kind !== "directory" && projectedFinalState.kind !== "directory",
+        )
+        .map(async ({ path, preState, projectedFinalState }) => {
+          const beforeBytes = checked.observedBytes?.get(path);
+          const expectedBytes = checked.projectedBytes?.has(path)
+            ? checked.projectedBytes.get(path)
+            : beforeBytes;
+          const footprint: RecoveryFileFootprint = {
+            path,
+            before: fileState(preState, beforeBytes),
+            expectedAfter: fileState(projectedFinalState, expectedBytes),
+          };
+          const stagedIndex = projectedFiles.findIndex((candidate) => candidate.path === path);
+          if (stagedIndex === -1) return footprint;
+          // Staged Markdown files carry fresh pre-state bytes and inode identity
+          // so recovery can prove the published file is the one this Change Set
+          // wrote and can restore exact before bytes after a crash.
+          const freshBytes =
+            preState.kind === "markdown"
+              ? await readBytes(this.#options.dataSource, path)
+              : null;
+          const beforeIdentity =
+            preState.kind === "markdown" ? await execution.fileIdentity?.(path) : null;
+          if (
+            (preState.kind === "markdown" &&
+              (freshBytes === null ||
+                beforeIdentity === null ||
+                beforeIdentity === undefined ||
+                contentVersion(freshBytes) !== preState.contentVersion)) ||
+            (preState.kind === "absent" &&
+              (freshBytes !== null || (await execution.pathKind(path)) !== null))
+          ) {
+            throw new Error("File pre-state evidence changed after locked preflight");
+          }
+          return {
+            path,
+            before:
+              preState.kind === "markdown" && freshBytes !== null
+                ? {
+                    kind: "markdown" as const,
+                    contentVersion: preState.contentVersion,
+                    bytesBase64: Buffer.from(freshBytes).toString("base64"),
+                  }
+                : footprint.before,
+            expectedAfter: footprint.expectedAfter,
+            ...(beforeIdentity === null || beforeIdentity === undefined
+              ? {}
+              : { beforeIdentity }),
+            stageId: `${entry.changeSetId}/file/${stagedIndex}`,
+          };
+        }),
+    );
     const mutationStates = new Map(files.map(({ path, before }) => [path, before]));
     const mutations: RecoveryMutation[] = plan.input.operations.flatMap(
       (operation, index): RecoveryMutation[] => {
@@ -1511,7 +1915,7 @@ export class ChangeSetService {
             destinationPath: operation.destinationPath,
             destinationBefore,
             destinationAfter: sourceState,
-            stageId: `${entry.changeSetId}/file/${index}`,
+            stageId: `${entry.changeSetId}/attachment/${index}`,
           }];
         }
         if (operation.kind === "move_attachment") {
@@ -1557,7 +1961,7 @@ export class ChangeSetService {
       },
     );
     let frame: RecoveryJournalFrame = {
-      schemaVersion: RECOVERY_JOURNAL_SCHEMA_VERSION,
+      schemaVersion: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
       vaultId: this.#options.vaultId ?? "vault",
       changeSetId: entry.changeSetId,
       enqueueSeq: entry.enqueueSeq,
@@ -1570,7 +1974,7 @@ export class ChangeSetService {
         expectedAfter: "directory",
         stageId: `${entry.changeSetId}/directory/${index}`,
       })),
-      ...(files.length === 0 ? {} : { files }),
+      files,
       ...(mutations.length === 0 ? {} : { mutations }),
     };
     await this.#crash("before_prepared");
@@ -1600,9 +2004,33 @@ export class ChangeSetService {
         hiddenTrash: operationKinds.includes("trash"),
         requiredEvents,
       };
+      // Stage Markdown files first so their post-staging identities are
+      // journaled before any mutation becomes visible.
+      const preparedByPath = new Map<string, RecoveryFileFootprint>();
+      for (const file of frame.files ?? []) {
+        if (file.stageId === undefined) continue;
+        const projected = checked.projectedBytes?.get(file.path);
+        if (projected === undefined || projected === null) {
+          throw new Error("Projected file bytes are missing");
+        }
+        const identity = await execution.prepareFile!(file.stageId, projected);
+        preparedByPath.set(file.path, { ...file, identity });
+      }
+      if (preparedByPath.size > 0) {
+        frame = {
+          ...frame,
+          files: (frame.files ?? []).map(
+            (candidate) => preparedByPath.get(candidate.path) ?? candidate,
+          ),
+        };
+        await execution.persistRecoveryFrame(frame);
+      }
       await execution.beginSemanticEvidence?.(semanticRequest);
       let mutationIndex = 0;
       for (const directory of plan.directories) {
+        if ((await execution.pathKind(directory)) !== null) {
+          throw new Error("Directory absence changed before mutation");
+        }
         const stageId = frame.directories.find(
           (candidate) => candidate.path === directory,
         )?.stageId;
@@ -1617,6 +2045,24 @@ export class ChangeSetService {
         await execution.persistRecoveryFrame(frame);
         await execution.publishDirectory(stageId, directory);
         await this.#crash(`after_mutation:${mutationIndex++}`);
+      }
+      let stagedPublishIndex = 0;
+      for (const file of frame.files ?? []) {
+        if (file.stageId === undefined) continue;
+        const currentBytes = await readExecutionBytes(execution, file.path);
+        const currentIdentity = await execution.fileIdentity?.(file.path);
+        if (
+          (file.before.kind === "absent" &&
+            (currentBytes !== null || (await execution.pathKind(file.path)) !== null)) ||
+          (file.before.kind !== "absent" &&
+            (currentBytes === null ||
+              !bytesMatchState(currentBytes, file.before) ||
+              currentIdentity !== file.beforeIdentity))
+        ) {
+          throw new Error("File pre-state changed before mutation");
+        }
+        await execution.publishFile!(file.stageId, file.path);
+        await this.#crash(`after_file_mutation:${stagedPublishIndex++}`);
       }
       for (const mutation of mutations) {
         if (mutation.kind === "copy_attachment") {
@@ -1658,26 +2104,42 @@ export class ChangeSetService {
         }
       }
       await this.#crash("after_raw_verification");
-      await execution.awaitSemanticEvidence?.(semanticRequest);
-      await this.#crash("after_semantic_evidence");
-      if (execution.semanticEvidencePublishesSnapshot !== true) {
-        await execution.publishSearchSnapshot();
-      }
-      for (const mutation of mutations) {
-        if (mutation.kind !== "trash") continue;
-        const trashBytes = await execution.readTrash?.(mutation.trashId);
-        if (
-          trashBytes === undefined ||
-          trashBytes === null ||
-          !bytesMatchState(
-            Uint8Array.from(
-              trashBytes instanceof Uint8Array ? trashBytes : new Uint8Array(trashBytes),
-            ),
-            mutation.before,
-          )
-        ) {
-          throw new Error("Managed trash evidence changed during the success barrier");
+      const snapshotTargets: SearchSnapshotTargetEvidence[] = projectedMarkdown.map(
+        ({ path, projectedOutcome, projectedFinalState }) => {
+          if (projectedFinalState.kind !== "markdown") {
+            throw new Error("Projected snapshot evidence is invalid");
+          }
+          return {
+            path,
+            contentVersion: projectedFinalState.contentVersion,
+            requireSemanticMatch: projectedOutcome === "changed",
+          };
+        },
+      );
+      if (hasSemanticOperations) {
+        await execution.awaitSemanticEvidence?.(semanticRequest);
+        await this.#crash("after_semantic_evidence");
+        if (execution.semanticEvidencePublishesSnapshot !== true) {
+          await execution.publishSearchSnapshot(snapshotTargets);
         }
+        for (const mutation of mutations) {
+          if (mutation.kind !== "trash") continue;
+          const trashBytes = await execution.readTrash?.(mutation.trashId);
+          if (
+            trashBytes === undefined ||
+            trashBytes === null ||
+            !bytesMatchState(
+              Uint8Array.from(
+                trashBytes instanceof Uint8Array ? trashBytes : new Uint8Array(trashBytes),
+              ),
+              mutation.before,
+            )
+          ) {
+            throw new Error("Managed trash evidence changed during the success barrier");
+          }
+        }
+      } else {
+        await execution.publishSearchSnapshot(snapshotTargets);
       }
       const finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"] = [];
       for (const projected of plan.preview.paths) {
@@ -1716,11 +2178,22 @@ export class ChangeSetService {
       if (error instanceof InjectedChangeSetCrash || committedDurable) throw error;
       await this.#restorePrepared(entry, frame);
     } finally {
-      this.#options.runtimeState?.setQueue({
-        currentExecutionId: null,
-        length: 0,
-        headChangeSetId: null,
-      });
+      this.#currentExecutionId = null;
+      this.#options.runtimeState?.setQueue(this.#queueState(null));
+    }
+  }
+
+  async #withControlLease<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#controlTail;
+    let release!: () => void;
+    this.#controlTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
     }
   }
 
@@ -1755,6 +2228,7 @@ export class ChangeSetService {
   async #save(nextState: ChangeSetRegistryState): Promise<void> {
     await this.#options.store.save(nextState);
     this.#state = nextState;
+    this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
   }
 
   async #expireRecords(): Promise<void> {
@@ -1791,7 +2265,7 @@ export class ChangeSetService {
     }
     await this.#withWriteLease(async () => {
       await this.#recover();
-      if (!this.#recoveryBlocked) {
+      if (!this.#recoveryBlocked && !this.#dequeuePaused) {
         await this.#executeMutation(registered.changeSet.changeSetId);
       }
     });
@@ -1846,7 +2320,10 @@ export class ChangeSetService {
       return parseChangeSetSubmitResult({ outcome: "submission_key_conflict" });
     }
 
-    const gate = requestState.effectiveGate;
+    const gate = selectOperationalGate(
+      this.#admissionGate,
+      requestState.effectiveGate,
+    );
     if (
       gate !== null &&
       ["writes_paused", "upgrade_in_progress", "recovery_in_progress"].includes(
@@ -1889,6 +2366,8 @@ export class ChangeSetService {
       input.operations.every(
         ({ kind }) =>
           kind === "create_directory" ||
+          kind === "create_note" ||
+          kind === "edit_body" ||
           kind === "copy_attachment" ||
           kind === "move_attachment" ||
           kind === "trash",

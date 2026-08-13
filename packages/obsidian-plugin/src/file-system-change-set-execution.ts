@@ -22,14 +22,16 @@ import {
 
 import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
 
-import { RECOVERY_JOURNAL_SCHEMA_VERSION } from "./change-set.js";
+import { RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION } from "./change-set.js";
 import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
   ChangeSetSemanticEvidenceRequest,
   RecoveryJournalFrame,
+  SearchSnapshotTargetEvidence,
 } from "./change-set.js";
 import {
+  RecoveryJournalIncompatibleError,
   openRecoveryJournal,
   type RecoveryJournal,
   type RecoveryJournalJson,
@@ -133,7 +135,8 @@ export interface ChangeSetExecutionHost {
   discardPreparedDirectory(stageId: string): Promise<void>;
   removeDirectory(path: string): Promise<void>;
   readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
-  prepareFile?(stageId: string, bytes: Uint8Array): Promise<void>;
+  fileIdentity?(path: string): Promise<string | null>;
+  prepareFile?(stageId: string, bytes: Uint8Array): Promise<string>;
   publishFile?(stageId: string, path: string): Promise<void>;
   discardPreparedFile?(stageId: string): Promise<void>;
   moveFile?(sourcePath: string, destinationPath: string): Promise<void>;
@@ -145,7 +148,7 @@ export interface ChangeSetExecutionHost {
   beginSemanticEvidence?: ChangeSetExecutionAdapter["beginSemanticEvidence"];
   awaitSemanticEvidence?: ChangeSetExecutionAdapter["awaitSemanticEvidence"];
   semanticEvidencePublishesSnapshot?: boolean;
-  publishSearchSnapshot(): Promise<void>;
+  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
 }
 
 export type DirectoryExecutionHost = ChangeSetExecutionHost;
@@ -165,7 +168,7 @@ export interface NodeFileSystemChangeSetHostOptions {
   beginSemanticEvidence?: NonNullable<ChangeSetExecutionAdapter["beginSemanticEvidence"]>;
   awaitSemanticEvidence: NonNullable<ChangeSetExecutionAdapter["awaitSemanticEvidence"]>;
   semanticEvidencePublishesSnapshot?: boolean;
-  publishSearchSnapshot(): Promise<void>;
+  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -275,6 +278,15 @@ export async function createNodeFileSystemChangeSetHost(
         throw error;
       }
     },
+    fileIdentity: async (path) => {
+      try {
+        const value = await stat(await assertContained(path, "existing"));
+        return value.isFile() ? `${value.dev}:${value.ino}:${value.birthtimeMs}` : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
     prepareFile: async (stageId, bytes) => {
       const path = await assertPrivateContained(stagePath(stageId));
       await mkdir(dirname(path), { recursive: true });
@@ -285,6 +297,8 @@ export async function createNodeFileSystemChangeSetHost(
       } finally {
         await handle.close();
       }
+      const value = await stat(path);
+      return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
     },
     publishFile: async (stageId, path) => {
       const source = await assertPrivateContained(stagePath(stageId));
@@ -402,7 +416,17 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   }
   const frame = value as Partial<RecoveryJournalFrame>;
   if (
-    ![1, RECOVERY_JOURNAL_SCHEMA_VERSION].includes(frame.schemaVersion ?? 0) ||
+    typeof frame.schemaVersion === "number" &&
+    Number.isInteger(frame.schemaVersion) &&
+    frame.schemaVersion > RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION
+  ) {
+    throw new RecoveryJournalIncompatibleError(
+      "Recovery Journal payload schema is not supported",
+    );
+  }
+  if (
+    (frame.schemaVersion !== 1 &&
+      frame.schemaVersion !== RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION) ||
     typeof frame.vaultId !== "string" ||
     frame.vaultId.length === 0 ||
     typeof frame.changeSetId !== "string" ||
@@ -411,6 +435,9 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
     typeof frame.input !== "object" ||
     frame.input === null ||
     !Array.isArray(frame.directories) ||
+    (frame.schemaVersion === 1 && frame.files !== undefined) ||
+    (frame.schemaVersion === RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION &&
+      !Array.isArray(frame.files)) ||
     typeof frame.preview !== "object" ||
     frame.preview === null
   ) {
@@ -446,6 +473,9 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
             typeof file.path !== "string" ||
             !isRecoveryState(file.before) ||
             !isRecoveryState(file.expectedAfter) ||
+            (file.beforeIdentity !== undefined &&
+              typeof file.beforeIdentity !== "string") ||
+            (file.identity !== undefined && typeof file.identity !== "string") ||
             (file.stageId !== undefined && !isPrivateId(file.stageId)) ||
             (file.trashId !== undefined && !isPrivateId(file.trashId)),
         ))) ||
@@ -505,6 +535,15 @@ export async function createFileSystemChangeSetExecutionAdapter(
     await handle.close();
     throw error;
   }
+  try {
+    const recovered = await journal.recover();
+    if (recovered !== undefined) parseFrame(recovered.payload);
+  } catch (error) {
+    if (error instanceof RecoveryJournalIncompatibleError) {
+      await handle.close();
+      throw error;
+    }
+  }
   return {
     loadRecoveryFrame: async () => {
       const record = await journal.recover();
@@ -528,6 +567,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
     discardPreparedDirectory: options.host.discardPreparedDirectory,
     removeDirectory: options.host.removeDirectory,
     ...(options.host.readBinary === undefined ? {} : { readBinary: options.host.readBinary }),
+    ...(options.host.fileIdentity === undefined ? {} : { fileIdentity: options.host.fileIdentity }),
     ...(options.host.prepareFile === undefined ? {} : { prepareFile: options.host.prepareFile }),
     ...(options.host.publishFile === undefined ? {} : { publishFile: options.host.publishFile }),
     ...(options.host.discardPreparedFile === undefined

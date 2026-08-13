@@ -10,7 +10,7 @@ export {
 export {
   CHANGE_SET_RECORD_RETENTION_MS,
   CHANGE_SET_REGISTRY_SCHEMA_VERSION,
-  RECOVERY_JOURNAL_SCHEMA_VERSION,
+  RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   ChangeSetService,
   fingerprintChangeSetRequest,
   type FrontmatterChange,
@@ -19,6 +19,7 @@ export {
   type ChangeSetExecutionAdapter,
   type ChangeSetExecutionState,
   type ChangeSetRuntimeStatePort,
+  type ChangeSetWriteMode,
   type RecoveryJournalFrame,
   type RecoveryJournalPhase,
   InjectedChangeSetCrash,
@@ -57,6 +58,13 @@ export {
   type PathChangeEvidence,
   type PersistedBridgeSettings,
 } from "./managed-vault-runtime.js";
+export {
+  RUN_MAINTENANCE_COMMAND_ID,
+  assertValidatedInstalledBundle,
+  registerRunMaintenanceCommand,
+  type InstalledBundleProbe,
+  type MaintenanceCommandRegistry,
+} from "./maintenance-operation.js";
 export {
   MAXIMUM_LOGICAL_EXACT_READ_BYTES,
   performVaultRead,

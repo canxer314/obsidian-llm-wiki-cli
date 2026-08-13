@@ -6,11 +6,13 @@ import {
   type ChangeSetExecutionAdapter,
   type ChangeSetPreflightDataSource,
   type ChangeSetRegistryState,
+  type SearchSnapshotTargetEvidence,
 } from "./change-set.js";
 import type {
   BridgeDiscoverService,
   BridgeHealthState,
   BridgeInstance,
+  BridgeMaintenanceOperation,
 } from "./bridge-instance.js";
 import {
   SearchSnapshotManager,
@@ -72,13 +74,16 @@ export interface ManagedVaultBridgeRuntimeOptions {
       execution?: ChangeSetExecutionAdapter;
       vaultId?: string;
     };
+    incompatibleState?: boolean;
   }): BridgeInstance;
   readDataSource?: VaultReadDataSource;
   searchDataSource?: SearchSnapshotDataSource;
   changeSetDataSource?: ChangeSetPreflightDataSource;
   changeSetExecution?: ChangeSetExecutionAdapter;
+  incompatibleState?: boolean;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
+  successBarrierTimeoutMs?: number;
 }
 
 function emptyChangeSetState(): ChangeSetRegistryState {
@@ -134,6 +139,48 @@ function parsePersistedSettings(value: unknown): {
   };
 }
 
+function parsePersistedEnvelope(
+  value: unknown,
+  forceRestricted = false,
+): PersistedBridgeSettings | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const settings = value as Record<string, unknown>;
+  const schemaIncompatible =
+    typeof settings.schemaVersion === "number" &&
+    Number.isInteger(settings.schemaVersion) &&
+    settings.schemaVersion > PERSISTENT_STATE_SCHEMA_VERSION;
+  const changeSets = schemaIncompatible ? undefined : settings.changeSets;
+  const registrySchema =
+    typeof changeSets === "object" && changeSets !== null && !Array.isArray(changeSets)
+      ? (changeSets as Record<string, unknown>).schemaVersion
+      : undefined;
+  const registryIncompatible =
+    settings.schemaVersion === PERSISTENT_STATE_SCHEMA_VERSION &&
+    typeof registrySchema === "number" &&
+    Number.isInteger(registrySchema) &&
+    registrySchema > CHANGE_SET_REGISTRY_SCHEMA_VERSION;
+  if (
+    (!forceRestricted && !schemaIncompatible && !registryIncompatible) ||
+    typeof settings.vaultId !== "string" ||
+    settings.vaultId.length === 0 ||
+    typeof settings.port !== "number" ||
+    !Number.isInteger(settings.port) ||
+    settings.port < 1 ||
+    settings.port > 65_535 ||
+    typeof settings.diagnosticPath !== "string" ||
+    settings.diagnosticPath.length === 0
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: PERSISTENT_STATE_SCHEMA_VERSION,
+    vaultId: settings.vaultId,
+    port: settings.port,
+    diagnosticPath: settings.diagnosticPath,
+    changeSets: emptyChangeSetState(),
+  };
+}
+
 export class VaultPathChangeRequiredError extends Error {
   constructor(readonly evidence: PathChangeEvidence) {
     super("Vault path change classification required before Bridge startup");
@@ -148,6 +195,7 @@ export class ManagedVaultBridgeRuntime {
   #pendingPathChange: PathChangeEvidence | undefined;
   #snapshots: SearchSnapshotManager | undefined;
   #snapshotRefresh: SearchSnapshotRefreshCoordinator | undefined;
+  #snapshotSignals: Array<() => void> = [];
 
   constructor(options: ManagedVaultBridgeRuntimeOptions) {
     this.#options = options;
@@ -171,21 +219,62 @@ export class ManagedVaultBridgeRuntime {
     await snapshots.rebuild();
   }
 
-  async publishSuccessorSearchSnapshot(): Promise<void> {
+  async publishSuccessorSearchSnapshot(
+    targets: readonly SearchSnapshotTargetEvidence[] = [],
+  ): Promise<void> {
     const snapshots = this.#snapshots;
     const refresh = this.#snapshotRefresh;
     if (snapshots === undefined || refresh === undefined) {
       throw new Error("Search Snapshot publisher is unavailable");
     }
+    const matches = (): boolean => {
+      if (snapshots.readiness !== "ready") return false;
+      const notes = new Map(
+        snapshots.current()?.notes.map((note) => [note.path, note]) ?? [],
+      );
+      return targets.every(({ path, contentVersion, requireSemanticMatch }) => {
+        const note = notes.get(path);
+        if (note?.contentVersion !== contentVersion) return false;
+        // A semantic observation for a different version is stale/late and fails.
+        // For a changed note, absence of any observation is not yet proof.
+        if (requireSemanticMatch === true) {
+          return note.semanticContentVersion === contentVersion;
+        }
+        if (
+          note.semanticContentVersion !== undefined &&
+          note.semanticContentVersion !== contentVersion
+        ) return false;
+        return true;
+      });
+    };
+    const deadline = Date.now() + (this.#options.successBarrierTimeoutMs ?? 5_000);
     refresh.schedule();
-    await refresh.whenIdle();
-    if (snapshots.readiness !== "ready") {
-      throw new Error("Successor Search Snapshot publication failed");
+    while (true) {
+      try {
+        await refresh.whenIdle();
+      } catch {
+        // A failed build leaves readiness unavailable; the barrier keeps waiting
+        // for a later host event until the deadline rather than failing open.
+      }
+      if (matches()) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error("Successor Search Snapshot target evidence did not match");
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, remaining);
+        timer.unref?.();
+        this.#snapshotSignals.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
     }
   }
 
   scheduleSearchSnapshotRefresh(): void {
     this.#snapshotRefresh?.schedule();
+    for (const signal of this.#snapshotSignals.splice(0)) signal();
   }
 
   async #saveSettings(settings: PersistedBridgeSettings): Promise<void> {
@@ -239,11 +328,23 @@ export class ManagedVaultBridgeRuntime {
     const recoverySettings = await this.#options.settings.loadRecovery?.();
     const recoveredPrimary = recoverySettings !== undefined && recoverySettings !== null;
     const rawSettings = recoveredPrimary ? recoverySettings : primarySettings;
-    const parsed = parsePersistedSettings(rawSettings);
-    if (rawSettings !== undefined && rawSettings !== null && parsed === null) {
+    const parsed = this.#options.incompatibleState === true
+      ? null
+      : parsePersistedSettings(rawSettings);
+    const incompatibleEnvelope =
+      parsed === null
+        ? parsePersistedEnvelope(rawSettings, this.#options.incompatibleState === true)
+        : null;
+    if (
+      rawSettings !== undefined &&
+      rawSettings !== null &&
+      parsed === null &&
+      incompatibleEnvelope === null
+    ) {
       throw new Error("Persisted Bridge settings are incompatible or invalid");
     }
-    const loaded = parsed?.settings ?? null;
+    const restricted = incompatibleEnvelope !== null || this.#options.incompatibleState === true;
+    const loaded = parsed?.settings ?? incompatibleEnvelope;
     if (loaded !== null && loaded.diagnosticPath !== this.#options.vault.path) {
       this.#settings = loaded;
       this.#pendingPathChange = {
@@ -264,18 +365,18 @@ export class ManagedVaultBridgeRuntime {
 
     const hasRecoveryStore = this.#options.settings.saveRecovery !== undefined;
     if (
-      loaded === null ||
-      recoveredPrimary ||
-      (parsed?.migrated === true && hasRecoveryStore)
+      (loaded === null ||
+        (!restricted &&
+          (recoveredPrimary || (parsed?.migrated === true && hasRecoveryStore))))
     ) {
       await this.#saveSettings(settings);
     }
-    if (hasRecoveryStore && !recoveredPrimary && loaded !== null) {
+    if (hasRecoveryStore && !recoveredPrimary && loaded !== null && !restricted) {
       await this.#options.settings.saveRecovery?.(settings);
     }
 
     const snapshots =
-      this.#options.searchDataSource === undefined
+      restricted || this.#options.searchDataSource === undefined
         ? undefined
         : new SearchSnapshotManager(this.#options.searchDataSource);
     this.#snapshots = snapshots;
@@ -298,6 +399,14 @@ export class ManagedVaultBridgeRuntime {
         this.#settings = settings;
       },
     };
+    const persistedWriteMode = restricted ? undefined : settings.changeSets?.writeMode;
+    const writeUnavailable = this.#options.changeSetDataSource === undefined;
+    const persistedPaused = persistedWriteMode !== undefined;
+    const persistedLifecycle = restricted ? undefined : settings.changeSets?.lifecycle;
+    const maintenancePaused = persistedWriteMode === "maintenance_paused";
+    const maintenanceFailed = persistedWriteMode === "maintenance_failed";
+    const maintenancePending =
+      persistedWriteMode === "maintenance_pending" || maintenanceFailed;
     const bridge = this.#options.createBridge({
       port: settings.port,
       health: {
@@ -313,50 +422,69 @@ export class ManagedVaultBridgeRuntime {
         },
         recovery: { state: "none" },
         write:
-          this.#options.changeSetDataSource === undefined
-            ? { gate: "blocked", state: "paused", pauseSource: "maintenance" }
+          writeUnavailable || persistedPaused
+            ? {
+                gate: writeUnavailable || maintenanceFailed ? "blocked" : "open",
+                state: "paused",
+                pauseSource:
+                  writeUnavailable || maintenancePaused || maintenancePending
+                    ? "maintenance"
+                    : "manual",
+              }
             : { gate: "open", state: "writable", pauseSource: null },
         queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
         lifecycle: {
           startup: "ready",
-          upgrade: "not_run",
-          migration: "not_run",
+          upgrade: persistedLifecycle?.upgrade ?? "not_run",
+          migration: persistedLifecycle?.migration ?? "not_run",
           recovery: "not_run",
         },
         effectiveGate:
-          this.#options.changeSetDataSource === undefined
-            ? { code: "writes_paused" }
+          writeUnavailable || persistedPaused
+            ? { code: maintenancePending ? "upgrade_in_progress" : "writes_paused" }
             : null,
         overall:
-          this.#options.changeSetDataSource === undefined
+          writeUnavailable || maintenancePending
             ? "blocked"
-            : snapshots?.readiness === "ready" &&
-                this.#options.changeSetExecution !== undefined
-              ? "healthy"
-              : "degraded",
+            : persistedPaused
+              ? "degraded"
+              : snapshots?.readiness === "ready" &&
+                  this.#options.changeSetExecution !== undefined
+                ? "healthy"
+                : "degraded",
         reasonCodes:
-          snapshots?.readiness !== "ready"
-            ? ["content_tools_not_ready"]
-            : this.#options.changeSetDataSource === undefined
-              ? ["writes_paused"]
-              : this.#options.changeSetExecution === undefined
-                ? ["mutation_executor_not_ready"]
-                : [],
+          maintenanceFailed
+            ? ["upgrade_failed"]
+            : snapshots?.readiness !== "ready"
+              ? ["content_tools_not_ready"]
+              : writeUnavailable
+                ? ["writes_paused"]
+                : maintenancePending
+                  ? ["upgrade_in_progress"]
+                  : persistedPaused
+                    ? ["writes_paused"]
+                    : this.#options.changeSetExecution === undefined
+                      ? ["mutation_executor_not_ready"]
+                      : [],
         operatorAction:
-          snapshots?.readiness !== "ready"
-            ? "finish_initialization"
-            : this.#options.changeSetDataSource === undefined
-              ? "resume_writes"
-              : this.#options.changeSetExecution === undefined
-                ? "wait_for_readiness"
-                : "none",
+          maintenanceFailed
+            ? "finish_upgrade"
+            : snapshots?.readiness !== "ready"
+              ? "finish_initialization"
+              : writeUnavailable || persistedPaused
+                ? maintenancePending
+                  ? "finish_upgrade"
+                  : "resume_writes"
+                : this.#options.changeSetExecution === undefined
+                  ? "wait_for_readiness"
+                  : "none",
       },
-      readDataSource: this.#options.readDataSource,
+      readDataSource: restricted ? undefined : this.#options.readDataSource,
       discoverService: snapshots === undefined ? undefined : new VaultDiscoverService(snapshots),
       searchSnapshotReadiness:
         snapshots === undefined ? undefined : () => snapshots.readiness,
       changeSets:
-        this.#options.changeSetDataSource === undefined
+        restricted || this.#options.changeSetDataSource === undefined
           ? undefined
           : {
               store: changeSetStore,
@@ -364,6 +492,7 @@ export class ManagedVaultBridgeRuntime {
               execution: this.#options.changeSetExecution,
               vaultId: settings.vaultId,
             },
+      incompatibleState: restricted,
     });
 
     await bridge.start();
@@ -372,6 +501,49 @@ export class ManagedVaultBridgeRuntime {
     }
     this.#settings = settings;
     this.#bridge = bridge;
+  }
+
+  async pauseWrites(): Promise<void> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    await bridge.pauseWrites();
+  }
+
+  async runMaintenance(operation: BridgeMaintenanceOperation): Promise<void> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    await bridge.runMaintenance(operation);
+  }
+
+  /**
+   * Production maintenance entry for the Primary Operator (spec §9.2).
+   * The host supplies `replaceValidatedBundle` because release-file
+   * replacement is environment-specific; state migration and the health
+   * recheck are production responsibilities of this runtime and fail
+   * closed. A successful run remains maintenance-paused until
+   * `resumeWrites()` is invoked explicitly.
+   */
+  async runOperatorMaintenance(
+    replaceValidatedBundle: () => void | Promise<void>,
+  ): Promise<void> {
+    await this.runMaintenance({
+      replaceValidatedBundle,
+      migrateState: async () => {
+        const validated = parsePersistedSettings(this.#settings);
+        if (validated === null) {
+          throw new Error("Persisted Bridge state failed fail-closed maintenance validation");
+        }
+        await this.#saveSettings(validated.settings);
+        this.#settings = validated.settings;
+      },
+      recheckHealth: () => this.refreshSearchSnapshot(),
+    });
+  }
+
+  async resumeWrites(): Promise<void> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    await bridge.resumeWrites();
   }
 
   async unload(): Promise<void> {

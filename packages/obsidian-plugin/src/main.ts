@@ -22,10 +22,17 @@ import {
   createNodeFileSystemChangeSetHost,
 } from "./file-system-change-set-execution.js";
 import {
+  assertValidatedInstalledBundle,
+  registerRunMaintenanceCommand,
+  type InstalledBundleProbe,
+} from "./maintenance-operation.js";
+import {
+  ObsidianSemanticVersionTracker,
   createObsidianSearchDataSource,
   enumerateCanonicalReferenceTargets,
   isRegisteredSubpathResult,
 } from "./obsidian-search-data-source.js";
+import { RecoveryJournalIncompatibleError } from "./recovery-journal.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -48,6 +55,8 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     let runtime!: ManagedVaultBridgeRuntime;
+    let incompatibleState = false;
+    const semanticVersions = new ObsidianSemanticVersionTracker();
     const semanticEvidence = createChangeSetSemanticEvidenceTracker({
       publishSuccessorSearchSnapshot: async () => {
         await runtime.publishSuccessorSearchSnapshot();
@@ -61,15 +70,16 @@ export default class VaultOperationBridgePlugin extends Plugin {
               basePath,
               stateDirectory,
               publishFile: async (stageId, path) => {
-                const bytes = await readFile(
-                  join(stateDirectory, "staging", ...stageId.split("/")),
-                );
+                const stagedPath = join(stateDirectory, "staging", ...stageId.split("/"));
+                const bytes = await readFile(stagedPath);
                 const exactBytes = Uint8Array.from(bytes);
-                await this.app.vault.createBinary(path, exactBytes.buffer);
-                await rm(
-                  join(stateDirectory, "staging", ...stageId.split("/")),
-                  { force: true },
-                );
+                const existing = this.app.vault.getFileByPath(path);
+                if (existing === null) {
+                  await this.app.vault.createBinary(path, exactBytes.buffer);
+                } else {
+                  await this.app.vault.modifyBinary(existing, exactBytes.buffer);
+                }
+                await rm(stagedPath, { force: true });
               },
               moveFile: async (sourcePath, destinationPath) => {
                 const source = this.app.vault.getFileByPath(sourcePath);
@@ -104,10 +114,14 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 await semanticEvidence.await(request);
               },
               semanticEvidencePublishesSnapshot: true,
-              publishSearchSnapshot: async () => {
-                await runtime.publishSuccessorSearchSnapshot();
+              publishSearchSnapshot: async (targets) => {
+                await runtime.publishSuccessorSearchSnapshot(targets);
               },
             }),
+          }).catch((error: unknown) => {
+            if (!(error instanceof RecoveryJournalIncompatibleError)) throw error;
+            incompatibleState = true;
+            return undefined;
           })
         : undefined;
     runtime = new ManagedVaultBridgeRuntime({
@@ -148,6 +162,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
           const file = this.app.vault.getFileByPath(path);
           return file === null ? null : this.app.metadataCache.getFileCache(file);
         },
+        semanticContentMatches: (path, bytes) => semanticVersions.matches(path, bytes),
         resolveLink: (target, sourcePath) =>
           this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path ?? null,
         candidatePaths: (target, sourcePath) => {
@@ -220,6 +235,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       },
       changeSetDataSource,
       changeSetExecution,
+      incompatibleState,
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;
@@ -229,7 +245,14 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const scheduleMarkdownRefresh = (file: unknown): void => {
       if (file instanceof TFile && file.extension === "md") scheduleRefresh();
     };
-    this.registerEvent(this.app.metadataCache.on("changed", scheduleMarkdownRefresh));
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file, data) => {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.observe(file.path, data);
+          scheduleRefresh();
+        }
+      }),
+    );
     this.registerEvent(this.app.metadataCache.on("resolve", scheduleMarkdownRefresh));
     this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
     this.registerEvent(this.app.vault.on("create", (file) => {
@@ -237,17 +260,22 @@ export default class VaultOperationBridgePlugin extends Plugin {
       scheduleMarkdownRefresh(file);
     }));
     this.registerEvent(this.app.vault.on("modify", scheduleMarkdownRefresh));
-    this.registerEvent(this.app.vault.on("delete", (file) => {
-      semanticEvidence.record({ kind: "delete", path: file.path });
-      scheduleMarkdownRefresh(file);
-    }));
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        semanticEvidence.record({ kind: "delete", path: file.path });
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.remove(file.path);
+          scheduleRefresh();
+        }
+      }),
+    );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         semanticEvidence.record({ kind: "rename", oldPath, path: file.path });
-        if (
-          (file instanceof TFile && file.extension === "md") ||
-          oldPath.endsWith(".md")
-        ) {
+        if (file instanceof TFile && file.extension === "md") {
+          semanticVersions.rename(oldPath, file.path);
+          scheduleRefresh();
+        } else if (oldPath.endsWith(".md")) {
           scheduleRefresh();
         }
       }),
@@ -278,6 +306,34 @@ export default class VaultOperationBridgePlugin extends Plugin {
     };
     addPathClassificationCommand("move", "move");
     addPathClassificationCommand("copy", "copy");
+    this.addCommand({
+      id: "pause-managed-vault-writes",
+      name: "Pause Managed Vault writes",
+      callback: () => runtime.pauseWrites(),
+    });
+    this.addCommand({
+      id: "resume-managed-vault-writes",
+      name: "Resume Managed Vault writes",
+      callback: () => runtime.resumeWrites(),
+    });
+    const pluginDirectory =
+      this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    const bundleProbe: InstalledBundleProbe | undefined =
+      adapter instanceof FileSystemAdapter
+        ? {
+            readManifest: async () =>
+              JSON.parse(await adapter.read(`${pluginDirectory}/manifest.json`)) as unknown,
+            hasEntryPoint: () => adapter.exists(`${pluginDirectory}/main.js`),
+          }
+        : undefined;
+    registerRunMaintenanceCommand(this, async () => {
+      if (bundleProbe === undefined) {
+        throw new Error("Validated bundle probing requires a file-system Vault adapter");
+      }
+      await runtime.runOperatorMaintenance(() =>
+        assertValidatedInstalledBundle(bundleProbe, this.manifest.id),
+      );
+    });
     this.addCommand({
       id: "copy-claude-code-mcp-registration",
       name: "Copy Claude Code MCP registration command",
