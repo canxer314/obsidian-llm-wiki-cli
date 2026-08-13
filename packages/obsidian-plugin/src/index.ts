@@ -59,6 +59,23 @@ export {
   type PersistedBridgeSettings,
 } from "./managed-vault-runtime.js";
 export {
+  RELEASE_MANAGED_FILES,
+  ReleaseLifecycleManager,
+  type InstallationInspection,
+  type InstallationLifecycleState,
+  type OperationalStateInspection,
+  type OperatorMaintenanceRuntime,
+  type ReleaseLifecycleHost,
+  type ReleaseTargetPreflight,
+  type StagedReleaseBundle,
+  type StagedReleaseFile,
+  type UninstallResult,
+} from "./release-lifecycle.js";
+export {
+  atomicReplaceReleaseDirectory,
+  type AtomicReleaseDirectoryReplacement,
+} from "./node-release-files.js";
+export {
   RUN_MAINTENANCE_COMMAND_ID,
   assertValidatedInstalledBundle,
   registerRunMaintenanceCommand,

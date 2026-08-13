@@ -121,11 +121,11 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
             ],
           },
         }),
-        client.callTool({
-          name: "vault_change_set_status",
-          arguments: { submissionKey: "blocked-key" },
-        }),
       ]);
+      const status = await client.callTool({
+        name: "vault_change_set_status",
+        arguments: { submissionKey: "blocked-key" },
+      });
 
       expect(calls[0]).toMatchObject({
         isError: false,
@@ -148,7 +148,7 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
           gate: { code: "recovery_blocked" },
         },
       });
-      expect(calls[5]).toMatchObject({
+      expect(status).toMatchObject({
         isError: false,
         structuredContent: { lookup: "found" },
       });
