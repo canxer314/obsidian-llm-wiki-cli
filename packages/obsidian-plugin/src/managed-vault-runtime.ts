@@ -485,11 +485,7 @@ export class ManagedVaultBridgeRuntime {
     await this.runMaintenance({
       replaceValidatedBundle,
       migrateState: async () => {
-        const settings = this.#settings;
-        if (settings === undefined) {
-          throw new Error("Managed Vault Bridge is not loaded");
-        }
-        const validated = parsePersistedSettings(settings);
+        const validated = parsePersistedSettings(this.#settings);
         if (validated === null) {
           throw new Error("Persisted Bridge state failed fail-closed maintenance validation");
         }

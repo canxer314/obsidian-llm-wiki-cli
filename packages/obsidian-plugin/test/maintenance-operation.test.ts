@@ -76,8 +76,8 @@ describe("Run Managed Vault maintenance command", () => {
     );
 
     expect(commands).toHaveLength(1);
-    expect(commands[0]?.id).toBe(RUN_MAINTENANCE_COMMAND_ID);
     expect(commands[0]?.id).toBe("run-managed-vault-maintenance");
+    expect(RUN_MAINTENANCE_COMMAND_ID).toBe(commands[0]?.id);
     expect(commands[0]?.name).toBe("Run Managed Vault maintenance");
     expect(run).not.toHaveBeenCalled();
     await commands[0]?.callback();
