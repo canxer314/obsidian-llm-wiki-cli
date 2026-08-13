@@ -114,8 +114,8 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 await semanticEvidence.await(request);
               },
               semanticEvidencePublishesSnapshot: true,
-              publishSearchSnapshot: async (targets) => {
-                await runtime.publishSuccessorSearchSnapshot(targets);
+              publishSearchSnapshot: async (targets, moveBarrier) => {
+                await runtime.publishSuccessorSearchSnapshot(targets, moveBarrier);
               },
             }),
           }).catch((error: unknown) => {

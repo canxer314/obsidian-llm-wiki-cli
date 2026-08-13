@@ -19,9 +19,23 @@ export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 2;
 const LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
 export const RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 2;
 
+export interface BoundMoveDerivedEffect {
+  operationId: string;
+  path: string;
+  targetVersion: string;
+  projectedBytesBase64: string;
+  referenceCount?: number;
+}
+
+export interface BoundMoveProjection {
+  operationId: string;
+  derivedEffects: BoundMoveDerivedEffect[];
+}
+
 export interface ChangeSetExecutionState {
   phase: "queued" | "executing" | "terminal";
   input: ChangeSetSubmitInput;
+  boundMoves?: BoundMoveProjection[];
 }
 
 export interface ChangeSetRegistryEntry {
@@ -80,6 +94,7 @@ export interface MoveDerivedProjection {
   path: string;
   targetVersion: string;
   projectedBytes: ArrayBuffer | Uint8Array;
+  referenceCount?: number;
 }
 
 export interface MoveProjection {
@@ -149,6 +164,19 @@ export type RecoveryMutation =
       destinationAfter: RecoveryFileState;
     }
   | {
+      // Markdown note move: the rename itself plus the evidence needed to
+      // restore the source content when the move rewrote self-references.
+      kind: "move";
+      operationId: string;
+      sourcePath: string;
+      sourceBefore: RecoveryFileState;
+      sourceAfter: RecoveryFileState;
+      destinationPath: string;
+      destinationBefore: RecoveryFileState;
+      destinationAfter: RecoveryFileState;
+      stageId: string;
+    }
+  | {
       kind: "trash";
       operationId: string;
       path: string;
@@ -174,7 +202,27 @@ export interface RecoveryJournalFrame {
   }[];
   files?: readonly RecoveryFileFootprint[];
   mutations?: readonly RecoveryMutation[];
+  successBarrier?: MoveSnapshotBarrier;
+  rollbackBarrier?: MoveSnapshotBarrier;
   finalPaths?: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"];
+}
+
+/**
+ * Success-barrier evidence for a note move: after the mutation the successor
+ * Search Snapshot must show `presentPath` at `presentVersion`, must not show
+ * `absentPath`, and every closure note must resolve its references to
+ * `resolvedPath` exactly `referenceCount` times (issue #38).
+ */
+export interface MoveSnapshotBarrier {
+  presentPath: string;
+  absentPath: string;
+  presentVersion: string;
+  closure: readonly {
+    path: string;
+    contentVersion: string;
+    resolvedPath: string;
+    referenceCount: number;
+  }[];
 }
 
 export type ChangeSetSemanticEvent =
@@ -219,7 +267,10 @@ export interface ChangeSetExecutionAdapter {
   beginSemanticEvidence?(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
   awaitSemanticEvidence?(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
   readonly semanticEvidencePublishesSnapshot?: boolean;
-  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
+  publishSearchSnapshot(
+    targets?: readonly SearchSnapshotTargetEvidence[],
+    moveBarrier?: MoveSnapshotBarrier,
+  ): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -328,6 +379,54 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function parseBoundMoves(value: unknown): BoundMoveProjection[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error("Change Set registry is corrupt or incompatible");
+  }
+  return value.map((rawMove: unknown) => {
+    if (
+      typeof rawMove !== "object" || rawMove === null
+    ) throw new Error("Change Set registry is corrupt or incompatible");
+    const move = rawMove as Record<string, unknown>;
+    if (
+      !isNonEmptyString(move.operationId) ||
+      !Array.isArray(move.derivedEffects)
+    ) throw new Error("Change Set registry is corrupt or incompatible");
+    return {
+      operationId: move.operationId,
+      derivedEffects: move.derivedEffects.map((rawEffect: unknown) => {
+        if (
+          typeof rawEffect !== "object" || rawEffect === null
+        ) throw new Error("Change Set registry is corrupt or incompatible");
+        const effect = rawEffect as Record<string, unknown>;
+        if (
+          !isNonEmptyString(effect.operationId) ||
+          !isNonEmptyString(effect.path) ||
+          typeof effect.targetVersion !== "string" ||
+          !/^sha256:[0-9a-f]{64}$/u.test(effect.targetVersion) ||
+          typeof effect.projectedBytesBase64 !== "string" ||
+          Buffer.from(effect.projectedBytesBase64, "base64").toString("base64") !==
+            effect.projectedBytesBase64 ||
+          (
+            effect.referenceCount !== undefined &&
+            (!Number.isInteger(effect.referenceCount) || (effect.referenceCount as number) < 1)
+          )
+        ) throw new Error("Change Set registry is corrupt or incompatible");
+        return {
+          operationId: effect.operationId,
+          path: effect.path,
+          targetVersion: effect.targetVersion,
+          projectedBytesBase64: effect.projectedBytesBase64,
+          ...(effect.referenceCount === undefined
+            ? {}
+            : { referenceCount: effect.referenceCount as number }),
+        };
+      }),
+    };
+  });
+}
+
 export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistryState {
   if (value === undefined) return emptyState();
   if (typeof value !== "object" || Array.isArray(value)) {
@@ -376,6 +475,9 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
       execution = {
         phase: entry.execution.phase as ChangeSetExecutionState["phase"],
         input: parseChangeSetSubmitInput(entry.execution.input),
+        ...(entry.execution.boundMoves === undefined
+          ? {}
+          : { boundMoves: parseBoundMoves(entry.execution.boundMoves) }),
       };
     }
     return {
@@ -513,6 +615,52 @@ function attachmentHash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function bindMoveProjection(
+  operationId: string,
+  projection: MoveProjection,
+): BoundMoveProjection {
+  return {
+    operationId,
+    derivedEffects: projection.derivedEffects.map((effect) => ({
+      operationId: effect.operationId,
+      path: effect.path,
+      targetVersion: effect.targetVersion,
+      projectedBytesBase64: Buffer.from(
+        effect.projectedBytes instanceof Uint8Array
+          ? effect.projectedBytes
+          : new Uint8Array(effect.projectedBytes),
+      ).toString("base64"),
+      ...(effect.referenceCount === undefined ? {} : { referenceCount: effect.referenceCount }),
+    })),
+  };
+}
+
+function unbindMoveProjection(bound: BoundMoveProjection): MoveProjection {
+  return {
+    derivedEffects: bound.derivedEffects.map((effect) => ({
+      operationId: effect.operationId,
+      path: effect.path,
+      targetVersion: effect.targetVersion,
+      projectedBytes: Buffer.from(effect.projectedBytesBase64, "base64"),
+      ...(effect.referenceCount === undefined ? {} : { referenceCount: effect.referenceCount }),
+    })),
+  };
+}
+
+function recoveryFileState(
+  state: Preview["paths"][number]["preState"],
+  bytes: Uint8Array | null | undefined,
+): RecoveryFileState {
+  if (state.kind === "absent") return { kind: "absent" };
+  if (state.kind === "directory" || bytes === null || bytes === undefined) {
+    throw new Error("Recovery file evidence is incomplete");
+  }
+  const bytesBase64 = Buffer.from(bytes).toString("base64");
+  return state.kind === "attachment"
+    ? { kind: "attachment", sha256: state.sha256, bytesBase64 }
+    : { kind: "markdown", contentVersion: state.contentVersion, bytesBase64 };
+}
+
 function recoveryBytes(state: RecoveryFileState): Uint8Array | null {
   return state.kind === "absent" ? null : Buffer.from(state.bytesBase64, "base64");
 }
@@ -645,6 +793,7 @@ interface PreflightResult {
   preview?: Preview;
   observedBytes?: ReadonlyMap<string, Uint8Array | null>;
   projectedBytes?: ReadonlyMap<string, Uint8Array | null>;
+  boundMoves?: BoundMoveProjection[];
 }
 
 function recoveryStatesEqual(
@@ -711,6 +860,44 @@ function recoveryPlanMatchesFrame(frame: RecoveryJournalFrame): boolean {
       const footprint = files.find(({ path }) => path === operation.path);
       if (footprint === undefined) return false;
       states.set(operation.path, footprint.expectedAfter);
+      continue;
+    }
+    if (operation.kind === "move") {
+      // A note move journals the rename as a RecoveryMutation and its
+      // reference rewrites as ordinary Markdown file footprints.
+      const mutation = mutations[mutationIndex++];
+      const source = states.get(operation.sourcePath);
+      const destination = states.get(operation.destinationPath);
+      const absent = { kind: "absent" } as const;
+      if (
+        mutation === undefined ||
+        mutation.operationId !== operation.operationId ||
+        mutation.kind !== "move" ||
+        mutation.sourcePath !== operation.sourcePath ||
+        mutation.destinationPath !== operation.destinationPath ||
+        mutation.stageId !== `${frame.changeSetId}/move/${operationIndex}` ||
+        source?.kind !== "markdown" ||
+        source.contentVersion !== operation.targetVersion ||
+        !recoveryStatesEqual(mutation.sourceBefore, source) ||
+        !recoveryStatesEqual(mutation.sourceAfter, absent) ||
+        !recoveryStatesEqual(mutation.destinationBefore, destination) ||
+        mutation.destinationAfter.kind !== "markdown" ||
+        frame.successBarrier === undefined ||
+        frame.rollbackBarrier === undefined ||
+        frame.successBarrier.presentPath !== operation.destinationPath ||
+        frame.successBarrier.absentPath !== operation.sourcePath ||
+        frame.rollbackBarrier.presentPath !== operation.sourcePath ||
+        frame.rollbackBarrier.absentPath !== operation.destinationPath
+      ) return false;
+      states.set(operation.sourcePath, absent);
+      states.set(operation.destinationPath, mutation.destinationAfter);
+      for (const file of files) {
+        if (
+          file.path === operation.sourcePath ||
+          file.path === operation.destinationPath
+        ) continue;
+        states.set(file.path, file.expectedAfter);
+      }
       continue;
     }
     const mutation = mutations[mutationIndex++];
@@ -804,8 +991,9 @@ async function readExecutionBytes(
 async function preflight(
   dataSource: ChangeSetPreflightDataSource,
   input: ChangeSetSubmitInput,
+  boundMoves: readonly BoundMoveProjection[] = [],
 ): Promise<PreflightResult> {
-  for (const operation of input.operations) {
+  const nextBoundMoves: BoundMoveProjection[] = [];  for (const operation of input.operations) {
     for (const path of operationPaths(operation)) {
       if (protectedPath(path) || !(await dataSource.isContained(path))) {
         return { accepted: false,
@@ -1013,8 +1201,27 @@ async function preflight(
           },
         };
       }
-      const projection = await dataSource.projectMove?.(operation, sourceBytes);
+      const bound = boundMoves.find(
+        (candidate) => candidate.operationId === operation.operationId,
+      );
+      let projection: MoveProjection | null | undefined;
+      if (bound === undefined) {
+        projection = await dataSource.projectMove?.(operation, sourceBytes);
+      } else {
+        // The projection bound at submission is authoritative: recompute it
+        // and reject the whole Change Set when the Vault drifted (issue #38
+        // AC6), rather than silently executing a stale reference closure.
+        const current = await dataSource.projectMove?.(operation, sourceBytes);
+        if (
+          current === undefined ||
+          current === null ||
+          JSON.stringify(bindMoveProjection(operation.operationId, current)) !==
+            JSON.stringify(bound)
+        ) return { accepted: false, failure: { code: "stale_observation" } };
+        projection = unbindMoveProjection(bound);
+      }
       if (projection === undefined || projection === null) return { accepted: false };
+      nextBoundMoves.push(bound ?? bindMoveProjection(operation.operationId, projection));
       const effectIds = new Set<string>();
       const ordered = [...projection.derivedEffects].sort((left, right) => {
         const byPath = compareCodeUnits(left.path, right.path);
@@ -1129,6 +1336,7 @@ async function preflight(
     },
     observedBytes,
     projectedBytes,
+    ...(nextBoundMoves.length === 0 ? {} : { boundMoves: nextBoundMoves }),
   };
 }
 
@@ -1376,6 +1584,83 @@ export class ChangeSetService {
           }
           throw new Error("third-party path state");
         }
+        if (mutation.kind === "move") {
+          // Unlike an attachment move, the note content itself may have been
+          // rewritten before the rename (self-references), so the source can
+          // legitimately hold the destination bytes at crash time.
+          const sourceBefore = await executionPathMatches(
+            execution,
+            mutation.sourcePath,
+            mutation.sourceBefore,
+          );
+          const sourceMoved = await executionPathMatches(
+            execution,
+            mutation.sourcePath,
+            mutation.destinationAfter,
+          );
+          const sourceAfter = await executionPathMatches(
+            execution,
+            mutation.sourcePath,
+            mutation.sourceAfter,
+          );
+          const destinationBefore = await executionPathMatches(
+            execution,
+            mutation.destinationPath,
+            mutation.destinationBefore,
+          );
+          const destinationAfter = await executionPathMatches(
+            execution,
+            mutation.destinationPath,
+            mutation.destinationAfter,
+          );
+          const restoreSourceContent = async (): Promise<void> => {
+            if (recoveryStatesEqual(mutation.sourceBefore, mutation.destinationAfter)) return;
+            if (sourceBefore) return;
+            const beforeBytes = recoveryBytes(mutation.sourceBefore);
+            if (
+              beforeBytes === null ||
+              execution.prepareFile === undefined ||
+              execution.publishFile === undefined
+            ) {
+              throw new Error("file rollback evidence is incomplete");
+            }
+            const rollbackStageId = `${mutation.stageId}/rollback`;
+            await execution.discardPreparedFile?.(rollbackStageId);
+            await execution.prepareFile(rollbackStageId, beforeBytes);
+            await execution.publishFile(rollbackStageId, mutation.sourcePath);
+          };
+          const discardStaged = async (): Promise<void> => {
+            await execution.discardPreparedFile?.(mutation.stageId);
+          };
+          if (destinationBefore && !destinationAfter && (sourceBefore || sourceMoved)) {
+            // The rename never happened (or was fully rolled back already).
+            actions.push(async () => {
+              await discardStaged();
+              await restoreSourceContent();
+            });
+            continue;
+          }
+          if (sourceAfter && destinationAfter) {
+            if (execution.moveFile === undefined) throw new Error("File move is unavailable");
+            actions.push(async () => {
+              await execution.moveFile!(mutation.destinationPath, mutation.sourcePath);
+              await discardStaged();
+              await restoreSourceContent();
+            });
+            continue;
+          }
+          if ((sourceBefore || sourceMoved) && destinationAfter) {
+            // Crash inside the rename itself (linked but not unlinked).
+            if (execution.removeFile === undefined) throw new Error("File removal is unavailable");
+            actions.push(async () => {
+              await execution.removeFile!(mutation.destinationPath);
+              await discardStaged();
+              await restoreSourceContent();
+            });
+            continue;
+          }
+          throw new Error("third-party path state");
+        }
         const sourceBefore = await executionPathMatches(
           execution,
           mutation.path,
@@ -1496,8 +1781,11 @@ export class ChangeSetService {
       await this.#crash("after_rollback_verification");
       await execution.awaitSemanticEvidence?.(restoreEvidence);
       await this.#crash("after_rollback_evidence");
-      if (execution.semanticEvidencePublishesSnapshot !== true) {
-        await execution.publishSearchSnapshot();
+      if (
+        execution.semanticEvidencePublishesSnapshot !== true ||
+        frame.rollbackBarrier !== undefined
+      ) {
+        await execution.publishSearchSnapshot(undefined, frame.rollbackBarrier);
       }
       await this.#crash("before_rolled_back");
       await execution.persistRecoveryFrame({ ...frame, phase: "ROLLED_BACK" });
@@ -1632,7 +1920,7 @@ export class ChangeSetService {
       .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
     for (const entry of queued) {
       if (this.#dequeuePaused) break;
-      await this.#executeMutation(entry.changeSetId);
+      await this.#executeEntry(entry.changeSetId);
     }
   }
 
@@ -1732,6 +2020,413 @@ export class ChangeSetService {
     };
   }
 
+  async #executeEntry(changeSetId: string): Promise<void> {
+    const entry = this.#state.entries.find((candidate) => candidate.changeSetId === changeSetId);
+    if (entry === undefined) return;
+    if (this.#mutationPlan(entry) !== null) {
+      await this.#executeMutation(changeSetId);
+      return;
+    }
+    if (
+      entry.execution?.input.operations.length === 1 &&
+      entry.execution.input.operations[0]?.kind === "move"
+    ) {
+      await this.#executeMove(changeSetId);
+    }
+  }
+
+  /**
+   * Durable execution of a single note move with its bound reference
+   * rewrites (issue #38). Reference rewrites are journaled as staged
+   * Markdown footprints exactly like #executeMutation; the rename itself is
+   * journaled as a `move` RecoveryMutation so a crash anywhere can be
+   * rolled back to the pre-move Vault state.
+   */
+  async #executeMove(changeSetId: string): Promise<void> {
+    const execution = this.#options.execution;
+    if (
+      execution?.readBinary === undefined ||
+      execution.fileIdentity === undefined ||
+      execution.prepareFile === undefined ||
+      execution.publishFile === undefined ||
+      execution.discardPreparedFile === undefined ||
+      execution.moveFile === undefined ||
+      execution.removeFile === undefined
+    ) return;
+    const entry = this.#state.entries.find((candidate) => candidate.changeSetId === changeSetId);
+    if (entry === undefined) return;
+    const head = this.#state.entries
+      .filter(
+        ({ execution }) => execution !== undefined && execution.phase !== "terminal",
+      )
+      .sort((left, right) => left.enqueueSeq - right.enqueueSeq)[0];
+    if (head?.changeSetId !== entry.changeSetId) return;
+    if (
+      entry.changeSet.state !== "in_progress" ||
+      entry.changeSet.preview === undefined ||
+      entry.execution === undefined
+    ) return;
+    const operation = entry.execution.input.operations[0];
+    if (operation?.kind !== "move") return;
+    const bound = entry.execution.boundMoves?.find(
+      (candidate) => candidate.operationId === operation.operationId,
+    );
+    if (bound === undefined) return;
+    const frozenPreview = entry.changeSet.preview;
+    this.#currentExecutionId = entry.changeSetId;
+    this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
+    const reject = async (failure?: ChangeSetFailure): Promise<void> => {
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        current.changeSet = {
+          changeSetId: current.changeSetId,
+          state: "intent_not_applied",
+          preview: frozenPreview,
+          ...(failure === undefined ? {} : { failure }),
+        };
+        if (current.execution !== undefined) current.execution.phase = "terminal";
+      });
+      this.#currentExecutionId = null;
+      this.#options.runtimeState?.setQueue(this.#queueState(null));
+    };
+    const checked = await preflight(
+      this.#options.dataSource,
+      entry.execution.input,
+      entry.execution.boundMoves,
+    );
+    if (!checked.accepted || JSON.stringify(checked.preview) !== JSON.stringify(frozenPreview)) {
+      await reject(checked.failure);
+      return;
+    }
+    const sourceBytes = checked.observedBytes?.get(operation.sourcePath) ?? null;
+    const movedBytes = checked.projectedBytes?.get(operation.destinationPath) ?? null;
+    if (sourceBytes === null || movedBytes === null) {
+      await reject({ code: "stale_observation" });
+      return;
+    }
+    // The source content changes only when the note references itself; in
+    // that case the rewritten bytes are staged under the mutation stage id
+    // and published over the source right before the rename.
+    const sourceChanged = !Buffer.from(sourceBytes).equals(Buffer.from(movedBytes));
+    const directories = frozenPreview.paths
+      .filter(
+        ({ preState, projectedFinalState }) =>
+          preState.kind === "absent" && projectedFinalState.kind === "directory",
+      )
+      .map(({ path }) => path)
+      .sort((left, right) => {
+        const depth = left.split("/").length - right.split("/").length;
+        return depth || compareCodeUnits(left, right);
+      });
+    const previewFiles = frozenPreview.paths.filter(
+      ({ preState, projectedFinalState }) =>
+        preState.kind !== "directory" && projectedFinalState.kind !== "directory",
+    );
+    const stagedPaths = new Set(
+      previewFiles
+        .filter(({ path, projectedOutcome, projectedFinalState }) => {
+          if (projectedOutcome !== "changed") return false;
+          // The destination is created by the rename, never staged.
+          if (path === operation.destinationPath) return false;
+          if (path === operation.sourcePath) return false;
+          return projectedFinalState.kind === "markdown";
+        })
+        .map(({ path }) => path),
+    );
+    const files: RecoveryFileFootprint[] = [];
+    let stagedIndex = 0;
+    for (const { path, preState, projectedFinalState } of previewFiles) {
+      const beforeBytes = checked.observedBytes?.get(path);
+      const expectedBytes = checked.projectedBytes?.has(path)
+        ? checked.projectedBytes.get(path)
+        : beforeBytes;
+      const footprint: RecoveryFileFootprint = {
+        path,
+        before: recoveryFileState(preState, beforeBytes),
+        expectedAfter: recoveryFileState(projectedFinalState, expectedBytes),
+      };
+      if (!stagedPaths.has(path)) {
+        files.push(footprint);
+        continue;
+      }
+      // Staged rewrites carry fresh pre-state bytes and inode identity so
+      // recovery can prove the published file is the one this Change Set
+      // wrote and can restore exact before bytes after a crash.
+      const freshBytes =
+        preState.kind === "markdown" ? await readBytes(this.#options.dataSource, path) : null;
+      const beforeIdentity =
+        preState.kind === "markdown" ? await execution.fileIdentity(path) : null;
+      if (
+        preState.kind !== "markdown" ||
+        freshBytes === null ||
+        beforeIdentity === null ||
+        beforeIdentity === undefined ||
+        contentVersion(freshBytes) !== preState.contentVersion
+      ) {
+        throw new Error("File pre-state evidence changed after locked preflight");
+      }
+      files.push({
+        path,
+        before: {
+          kind: "markdown",
+          contentVersion: preState.contentVersion,
+          bytesBase64: Buffer.from(freshBytes).toString("base64"),
+        },
+        expectedAfter: footprint.expectedAfter,
+        beforeIdentity,
+        stageId: `${entry.changeSetId}/file/${stagedIndex++}`,
+      });
+    }
+    // The source stays evidence-only even when its content is rewritten:
+    // the rename-back and the content restore are both driven by the move
+    // mutation during recovery.
+    const sourceFootprint = files.find(({ path }) => path === operation.sourcePath);
+    const destinationFootprint = files.find(({ path }) => path === operation.destinationPath);
+    if (sourceFootprint === undefined || destinationFootprint === undefined) {
+      throw new Error("Move recovery evidence is incomplete");
+    }
+    if (sourceChanged) {
+      const sourceIdentity = await execution.fileIdentity(operation.sourcePath);
+      const freshSource = await readBytes(this.#options.dataSource, operation.sourcePath);
+      if (
+        sourceIdentity === null ||
+        sourceIdentity === undefined ||
+        freshSource === null ||
+        contentVersion(freshSource) !== contentVersion(sourceBytes)
+      ) {
+        throw new Error("File pre-state evidence changed after locked preflight");
+      }
+      sourceFootprint.beforeIdentity = sourceIdentity;
+    }
+    if ((await execution.pathKind(operation.destinationPath)) !== null) {
+      throw new Error("File pre-state evidence changed after locked preflight");
+    }
+    const mutation: RecoveryMutation = {
+      kind: "move",
+      operationId: operation.operationId,
+      sourcePath: operation.sourcePath,
+      sourceBefore: sourceFootprint.before,
+      sourceAfter: { kind: "absent" },
+      destinationPath: operation.destinationPath,
+      destinationBefore: destinationFootprint.before,
+      destinationAfter: destinationFootprint.expectedAfter,
+      stageId: `${entry.changeSetId}/move/0`,
+    };
+    const successBarrier: MoveSnapshotBarrier = {
+      presentPath: operation.destinationPath,
+      absentPath: operation.sourcePath,
+      presentVersion: contentVersion(movedBytes),
+      closure: bound.derivedEffects
+        .filter((effect) => effect.referenceCount !== undefined)
+        .map((effect) => ({
+          path: effect.path === operation.sourcePath ? operation.destinationPath : effect.path,
+          contentVersion: contentVersion(
+            effect.path === operation.sourcePath
+              ? movedBytes
+              : Buffer.from(effect.projectedBytesBase64, "base64"),
+          ),
+          resolvedPath: operation.destinationPath,
+          referenceCount: effect.referenceCount!,
+        })),
+    };
+    const rollbackBarrier: MoveSnapshotBarrier = {
+      presentPath: operation.sourcePath,
+      absentPath: operation.destinationPath,
+      presentVersion: contentVersion(sourceBytes),
+      closure: bound.derivedEffects
+        .filter((effect) => effect.referenceCount !== undefined)
+        .map((effect) => {
+          const footprint = files.find(({ path }) => path === effect.path);
+          const bytes = footprint === undefined ? null : recoveryBytes(footprint.before);
+          if (bytes === null) throw new Error("Rollback closure bytes are incomplete");
+          return {
+            path: effect.path,
+            contentVersion: contentVersion(bytes),
+            resolvedPath: operation.sourcePath,
+            referenceCount: effect.referenceCount!,
+          };
+        }),
+    };
+    let frame: RecoveryJournalFrame = {
+      schemaVersion: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
+      vaultId: this.#options.vaultId ?? "vault",
+      changeSetId: entry.changeSetId,
+      enqueueSeq: entry.enqueueSeq,
+      phase: "PREPARED",
+      input: structuredClone(entry.execution.input),
+      preview: frozenPreview,
+      directories: directories.map((path, index) => ({
+        path,
+        before: "absent",
+        expectedAfter: "directory",
+        stageId: `${entry.changeSetId}/directory/${index}`,
+      })),
+      files,
+      mutations: [mutation],
+      successBarrier,
+      rollbackBarrier,
+    };
+    await this.#crash("before_prepared");
+    await execution.persistRecoveryFrame(frame);
+    let committedDurable = false;
+    try {
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        if (current.execution !== undefined) current.execution.phase = "executing";
+      });
+      await this.#crash("after_prepared");
+      const semanticRequest: ChangeSetSemanticEvidenceRequest = {
+        mode: "apply",
+        operations: entry.execution.input.operations,
+        publicPaths: frozenPreview.paths.map(({ path }) => path),
+        hiddenTrash: false,
+        requiredEvents: [
+          { kind: "rename", oldPath: operation.sourcePath, path: operation.destinationPath },
+        ],
+      };
+      // Stage Markdown rewrites first so their post-staging identities are
+      // journaled before any mutation becomes visible.
+      const preparedByPath = new Map<string, RecoveryFileFootprint>();
+      for (const file of frame.files ?? []) {
+        if (file.stageId === undefined) continue;
+        const projected = checked.projectedBytes?.get(file.path);
+        if (projected === undefined || projected === null) {
+          throw new Error("Projected file bytes are missing");
+        }
+        const identity = await execution.prepareFile(file.stageId, projected);
+        preparedByPath.set(file.path, { ...file, identity });
+      }
+      if (preparedByPath.size > 0) {
+        frame = {
+          ...frame,
+          files: (frame.files ?? []).map(
+            (candidate) => preparedByPath.get(candidate.path) ?? candidate,
+          ),
+        };
+        await execution.persistRecoveryFrame(frame);
+      }
+      if (sourceChanged) {
+        await execution.discardPreparedFile(mutation.stageId);
+        await execution.prepareFile(mutation.stageId, movedBytes);
+      }
+      await execution.beginSemanticEvidence?.(semanticRequest);
+      let mutationIndex = 0;
+      for (const directory of directories) {
+        if ((await execution.pathKind(directory)) !== null) {
+          throw new Error("Directory absence changed before mutation");
+        }
+        const stageId = frame.directories.find(
+          (candidate) => candidate.path === directory,
+        )?.stageId;
+        if (stageId === undefined) throw new Error("Directory staging identity is missing");
+        const identity = await execution.prepareDirectory(stageId);
+        frame = {
+          ...frame,
+          directories: frame.directories.map((candidate) =>
+            candidate.path === directory ? { ...candidate, identity, stageId } : candidate,
+          ),
+        };
+        await execution.persistRecoveryFrame(frame);
+        await execution.publishDirectory(stageId, directory);
+        await this.#crash(`after_mutation:${mutationIndex++}`);
+      }
+      let stagedPublishIndex = 0;
+      for (const file of frame.files ?? []) {
+        if (file.stageId === undefined) continue;
+        const currentBytes = await readExecutionBytes(execution, file.path);
+        const currentIdentity = await execution.fileIdentity(file.path);
+        if (
+          currentBytes === null ||
+          !bytesMatchState(currentBytes, file.before) ||
+          currentIdentity !== file.beforeIdentity
+        ) {
+          throw new Error("File pre-state changed before mutation");
+        }
+        await execution.publishFile(file.stageId, file.path);
+        await this.#crash(`after_file_mutation:${stagedPublishIndex++}`);
+      }
+      if (sourceChanged) {
+        const currentBytes = await readExecutionBytes(execution, operation.sourcePath);
+        const currentIdentity = await execution.fileIdentity(operation.sourcePath);
+        if (
+          currentBytes === null ||
+          !bytesMatchState(currentBytes, mutation.sourceBefore) ||
+          currentIdentity !== sourceFootprint.beforeIdentity
+        ) {
+          throw new Error("File pre-state changed before mutation");
+        }
+        await execution.publishFile(mutation.stageId, operation.sourcePath);
+        await this.#crash(`after_file_mutation:${stagedPublishIndex++}`);
+      }
+      if ((await execution.pathKind(operation.destinationPath)) !== null) {
+        throw new Error("File pre-state changed before mutation");
+      }
+      await execution.moveFile(operation.sourcePath, operation.destinationPath);
+      await this.#crash(`after_mutation:${mutationIndex++}`);
+      for (const directory of directories) {
+        if ((await execution.pathKind(directory)) !== "directory") {
+          throw new Error("Final directory evidence did not match");
+        }
+      }
+      for (const file of files) {
+        if (!(await executionPathMatches(execution, file.path, file.expectedAfter))) {
+          throw new Error("Final file evidence did not match");
+        }
+      }
+      await this.#crash("after_raw_verification");
+      const snapshotTargets: SearchSnapshotTargetEvidence[] = frozenPreview.paths
+        .filter(({ projectedFinalState }) => projectedFinalState.kind === "markdown")
+        .map(({ path, projectedOutcome, projectedFinalState }) => {
+          if (projectedFinalState.kind !== "markdown") {
+            throw new Error("Projected snapshot evidence is invalid");
+          }
+          return {
+            path,
+            contentVersion: projectedFinalState.contentVersion,
+            requireSemanticMatch: projectedOutcome === "changed",
+          };
+        });
+      await execution.awaitSemanticEvidence?.(semanticRequest);
+      await this.#crash("after_semantic_evidence");
+      // The move barrier always runs, even when the evidence tracker already
+      // published a snapshot: only it proves the reference closure resolved
+      // to the destination.
+      await execution.publishSearchSnapshot(snapshotTargets, frame.successBarrier);
+      for (const file of files) {
+        if (!(await executionPathMatches(execution, file.path, file.expectedAfter))) {
+          throw new Error("Final file evidence changed during the success barrier");
+        }
+      }
+      for (const directory of directories) {
+        if ((await execution.pathKind(directory)) !== "directory") {
+          throw new Error("Final directory evidence changed during the success barrier");
+        }
+      }
+      const finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"] =
+        frozenPreview.paths.map(({ path, projectedFinalState, projectedOutcome }) => ({
+          path,
+          outcome: projectedOutcome,
+          finalState: projectedFinalState,
+        }));
+      await this.#crash("after_snapshot");
+      await execution.persistRecoveryFrame({
+        ...frame,
+        phase: "COMMITTED",
+        finalPaths,
+      });
+      committedDurable = true;
+      await this.#crash("after_committed");
+      await this.#updateEntry(entry.changeSetId, (current) => {
+        current.changeSet = this.#appliedRecord(current, frozenPreview, finalPaths);
+        if (current.execution !== undefined) current.execution.phase = "terminal";
+      });
+    } catch (error) {
+      if (error instanceof InjectedChangeSetCrash || committedDurable) throw error;
+      await this.#restorePrepared(entry, frame);
+    } finally {
+      this.#currentExecutionId = null;
+      this.#options.runtimeState?.setQueue(this.#queueState(null));
+    }
+  }
+
   async #executeMutation(changeSetId: string): Promise<void> {
     const execution = this.#options.execution;
     if (execution === undefined) return;
@@ -1825,19 +2520,6 @@ export class ChangeSetService {
     ) {
       throw new Error("Change Set execution adapter does not support managed trash");
     }
-    const fileState = (
-      state: Preview["paths"][number]["preState"],
-      bytes: Uint8Array | null | undefined,
-    ): RecoveryFileState => {
-      if (state.kind === "absent") return { kind: "absent" };
-      if (state.kind === "directory" || bytes === null || bytes === undefined) {
-        throw new Error("Recovery file evidence is incomplete");
-      }
-      const bytesBase64 = Buffer.from(bytes).toString("base64");
-      return state.kind === "attachment"
-        ? { kind: "attachment", sha256: state.sha256, bytesBase64 }
-        : { kind: "markdown", contentVersion: state.contentVersion, bytesBase64 };
-    };
     const files: RecoveryFileFootprint[] = await Promise.all(
       plan.preview.paths
         .filter(
@@ -1851,8 +2533,8 @@ export class ChangeSetService {
             : beforeBytes;
           const footprint: RecoveryFileFootprint = {
             path,
-            before: fileState(preState, beforeBytes),
-            expectedAfter: fileState(projectedFinalState, expectedBytes),
+            before: recoveryFileState(preState, beforeBytes),
+            expectedAfter: recoveryFileState(projectedFinalState, expectedBytes),
           };
           const stagedIndex = projectedFiles.findIndex((candidate) => candidate.path === path);
           if (stagedIndex === -1) return footprint;
@@ -2072,6 +2754,9 @@ export class ChangeSetService {
           await execution.publishFile!(mutation.stageId, mutation.destinationPath);
         } else if (mutation.kind === "move_attachment") {
           await execution.moveFile!(mutation.sourcePath, mutation.destinationPath);
+        } else if (mutation.kind === "move") {
+          // Note moves execute through #executeMove, never the unified path.
+          throw new Error("Note move mutation reached the unified executor");
         } else {
           await execution.moveToTrash!(mutation.path, mutation.trashId);
         }
@@ -2266,7 +2951,7 @@ export class ChangeSetService {
     await this.#withWriteLease(async () => {
       await this.#recover();
       if (!this.#recoveryBlocked && !this.#dequeuePaused) {
-        await this.#executeMutation(registered.changeSet.changeSetId);
+        await this.#executeEntry(registered.changeSet.changeSetId);
       }
     });
     return this.#serialize(() => {
@@ -2336,11 +3021,13 @@ export class ChangeSetService {
     const changeSetId = this.#options.createChangeSetId();
     let changeSet: ChangeSetRecord;
     let historicalGate: ChangeSetGate | undefined;
+    let boundMoves: BoundMoveProjection[] | undefined;
     if (gate?.code === "recovery_blocked") {
       changeSet = { changeSetId, state: "intent_not_applied" };
       historicalGate = gate;
     } else {
       const checked = await preflight(this.#options.dataSource, input);
+      boundMoves = checked.boundMoves;
       changeSet = checked.accepted
         ? { changeSetId, state: "in_progress", preview: checked.preview }
         : {
@@ -2363,7 +3050,7 @@ export class ChangeSetService {
       ...(historicalGate === undefined ? {} : { historicalGate }),
       ...(changeSet.state === "in_progress" &&
       changeSet.preview !== undefined &&
-      input.operations.every(
+      (input.operations.every(
         ({ kind }) =>
           kind === "create_directory" ||
           kind === "create_note" ||
@@ -2371,11 +3058,15 @@ export class ChangeSetService {
           kind === "copy_attachment" ||
           kind === "move_attachment" ||
           kind === "trash",
-      )
+      ) ||
+        (input.operations.length === 1 &&
+          input.operations[0]?.kind === "move" &&
+          boundMoves?.length === 1))
         ? {
             execution: {
               phase: "queued" as const,
               input: structuredClone(input),
+              ...(boundMoves === undefined ? {} : { boundMoves }),
             },
           }
         : {}),

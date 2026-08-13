@@ -6,6 +6,7 @@ import {
   type ChangeSetExecutionAdapter,
   type ChangeSetPreflightDataSource,
   type ChangeSetRegistryState,
+  type MoveSnapshotBarrier,
   type SearchSnapshotTargetEvidence,
 } from "./change-set.js";
 import type {
@@ -14,6 +15,7 @@ import type {
   BridgeInstance,
   BridgeMaintenanceOperation,
 } from "./bridge-instance.js";
+import { withMoveReferenceProjection } from "./move-reference-projection.js";
 import {
   SearchSnapshotManager,
   SearchSnapshotRefreshCoordinator,
@@ -221,6 +223,7 @@ export class ManagedVaultBridgeRuntime {
 
   async publishSuccessorSearchSnapshot(
     targets: readonly SearchSnapshotTargetEvidence[] = [],
+    moveBarrier?: MoveSnapshotBarrier,
   ): Promise<void> {
     const snapshots = this.#snapshots;
     const refresh = this.#snapshotRefresh;
@@ -232,7 +235,7 @@ export class ManagedVaultBridgeRuntime {
       const notes = new Map(
         snapshots.current()?.notes.map((note) => [note.path, note]) ?? [],
       );
-      return targets.every(({ path, contentVersion, requireSemanticMatch }) => {
+      const targetsMatch = targets.every(({ path, contentVersion, requireSemanticMatch }) => {
         const note = notes.get(path);
         if (note?.contentVersion !== contentVersion) return false;
         // A semantic observation for a different version is stale/late and fails.
@@ -245,6 +248,26 @@ export class ManagedVaultBridgeRuntime {
           note.semanticContentVersion !== contentVersion
         ) return false;
         return true;
+      });
+      if (!targetsMatch) return false;
+      if (moveBarrier === undefined) return true;
+      // A note move additionally requires the rename to be visible and every
+      // closure note to resolve its references to the moved note (issue #38).
+      if (
+        notes.has(moveBarrier.absentPath) ||
+        notes.get(moveBarrier.presentPath)?.contentVersion !== moveBarrier.presentVersion
+      ) return false;
+      return moveBarrier.closure.every((expected) => {
+        const note = notes.get(expected.path);
+        return (
+          note?.contentVersion === expected.contentVersion &&
+          note.resolvedLinks[expected.resolvedPath] === expected.referenceCount &&
+          !Object.keys(note.resolvedLinks).some(
+            (path) =>
+              (path === moveBarrier.presentPath || path === moveBarrier.absentPath) &&
+              path !== expected.resolvedPath,
+          )
+        );
       });
     };
     const deadline = Date.now() + (this.#options.successBarrierTimeoutMs ?? 5_000);
@@ -488,7 +511,13 @@ export class ManagedVaultBridgeRuntime {
           ? undefined
           : {
               store: changeSetStore,
-              dataSource: this.#options.changeSetDataSource,
+              dataSource:
+                snapshots === undefined
+                  ? this.#options.changeSetDataSource
+                  : withMoveReferenceProjection(
+                      this.#options.changeSetDataSource,
+                      snapshots,
+                    ),
               execution: this.#options.changeSetExecution,
               vaultId: settings.vaultId,
             },

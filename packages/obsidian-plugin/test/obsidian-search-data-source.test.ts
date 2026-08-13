@@ -220,6 +220,8 @@ describe("installed Obsidian reference profiles", () => {
     expect(enumerateCanonicalReferenceTargets("Area/Plan", files)).toEqual([
       "Area/Plan.md",
     ]);
+    expect(enumerateCanonicalReferenceTargets("../Area/Plan", files, "Projects/Source.md"))
+      .toEqual(["Area/Plan.md"]);
     expect(enumerateCanonicalReferenceTargets("", files, "Area/Plan.md")).toEqual([
       "Area/Plan.md",
     ]);
@@ -344,6 +346,11 @@ describe("installed Obsidian reference profiles", () => {
       "[guide](old%20path.md \"title\")",
       "new path.md",
     )).toBe("[guide](new%20path.md \"title\")");
+    expect(renderRegisteredReference(
+      "markdown_inline_link",
+      "[guide](old.md)",
+      "renamed 100%.md",
+    )).toBe("[guide](renamed%20100%25.md)");
     expect(renderRegisteredReference(
       "markdown_embed",
       "![alt](<old image.png>)",
