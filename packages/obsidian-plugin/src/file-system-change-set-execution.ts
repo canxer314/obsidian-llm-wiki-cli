@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -21,6 +22,10 @@ export interface DirectoryExecutionHost {
   publishDirectory(stageId: string, path: string): Promise<void>;
   discardPreparedDirectory(stageId: string): Promise<void>;
   removeDirectory(path: string): Promise<void>;
+  readBinary?(path: string): Promise<ArrayBuffer | Uint8Array | null>;
+  prepareFile?(stageId: string, bytes: Uint8Array): Promise<void>;
+  publishFile?(stageId: string, path: string): Promise<void>;
+  discardPreparedFile?(stageId: string): Promise<void>;
   publishSearchSnapshot(): Promise<void>;
 }
 
@@ -28,6 +33,18 @@ export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
   host: DirectoryExecutionHost;
   slotCapacity?: number;
+}
+
+function contentVersion(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function canonicalBase64(value: string): Buffer | null {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    return null;
+  }
+  const bytes = Buffer.from(value, "base64");
+  return bytes.toString("base64") === value ? bytes : null;
 }
 
 function parseFrame(value: unknown): RecoveryJournalFrame {
@@ -45,10 +62,32 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
     typeof frame.input !== "object" ||
     frame.input === null ||
     !Array.isArray(frame.directories) ||
+    (frame.files !== undefined && !Array.isArray(frame.files)) ||
     typeof frame.preview !== "object" ||
     frame.preview === null
   ) {
     throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  for (const file of frame.files ?? []) {
+    if (typeof file !== "object" || file === null) {
+      throw new Error("Recovery Journal payload is corrupt or incompatible");
+    }
+    const before = canonicalBase64(file.beforeBase64);
+    const expectedAfter = canonicalBase64(file.expectedAfterBase64);
+    if (
+      typeof file.path !== "string" ||
+      file.path.length === 0 ||
+      typeof file.stageId !== "string" ||
+      file.stageId.length === 0 ||
+      before === null ||
+      expectedAfter === null ||
+      !/^sha256:[0-9a-f]{64}$/u.test(file.beforeVersion) ||
+      !/^sha256:[0-9a-f]{64}$/u.test(file.expectedAfterVersion) ||
+      contentVersion(before) !== file.beforeVersion ||
+      contentVersion(expectedAfter) !== file.expectedAfterVersion
+    ) {
+      throw new Error("Recovery Journal payload is corrupt or incompatible");
+    }
   }
   return structuredClone(value) as RecoveryJournalFrame;
 }
@@ -94,6 +133,18 @@ export async function createFileSystemChangeSetExecutionAdapter(
     publishDirectory: options.host.publishDirectory,
     discardPreparedDirectory: options.host.discardPreparedDirectory,
     removeDirectory: options.host.removeDirectory,
+    ...(options.host.readBinary === undefined
+      ? {}
+      : { readBinary: options.host.readBinary }),
+    ...(options.host.prepareFile === undefined
+      ? {}
+      : { prepareFile: options.host.prepareFile }),
+    ...(options.host.publishFile === undefined
+      ? {}
+      : { publishFile: options.host.publishFile }),
+    ...(options.host.discardPreparedFile === undefined
+      ? {}
+      : { discardPreparedFile: options.host.discardPreparedFile }),
     publishSearchSnapshot: options.host.publishSearchSnapshot,
     close: () => handle.close(),
   };

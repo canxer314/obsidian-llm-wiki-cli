@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import {
   FileSystemAdapter,
@@ -85,6 +85,26 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 }
               },
               removeDirectory: (path) => adapter.rmdir(path, false),
+              readBinary: async (path) =>
+                (await adapter.exists(path)) ? adapter.readBinary(path) : null,
+              prepareFile: async (stageId, bytes) => {
+                const stagePath = join(stagingDirectory, ...stageId.split("/"));
+                await mkdir(dirname(stagePath), { recursive: true });
+                await writeFile(stagePath, bytes);
+              },
+              publishFile: async (stageId, path) => {
+                await rename(
+                  join(stagingDirectory, ...stageId.split("/")),
+                  join(basePath, ...path.split("/")),
+                );
+              },
+              discardPreparedFile: async (stageId) => {
+                try {
+                  await unlink(join(stagingDirectory, ...stageId.split("/")));
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+                }
+              },
               publishSearchSnapshot: async () => {
                 await runtime.publishSuccessorSearchSnapshot();
               },
