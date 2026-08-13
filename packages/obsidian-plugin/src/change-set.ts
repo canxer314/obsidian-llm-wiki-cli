@@ -14,6 +14,8 @@ import {
   type VaultState,
 } from "@llm-wiki/vault-contracts";
 
+import { contentVersion } from "./content-version.js";
+
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
 
@@ -333,10 +335,6 @@ function operationTargetPaths(operation: ChangeSetOperation): string[] {
 function protectedPath(path: string): boolean {
   const root = path.split("/", 1)[0]?.toLocaleLowerCase("en-US");
   return root !== undefined && protectedRoots.includes(root);
-}
-
-function contentVersion(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function attachmentHash(bytes: Uint8Array): string {

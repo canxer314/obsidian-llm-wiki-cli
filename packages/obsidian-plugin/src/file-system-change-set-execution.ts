@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -7,6 +6,7 @@ import type {
   ChangeSetPathKind,
   RecoveryJournalFrame,
 } from "./change-set.js";
+import { contentVersion } from "./content-version.js";
 import {
   openRecoveryJournal,
   type RecoveryJournal,
@@ -33,10 +33,6 @@ export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
   host: DirectoryExecutionHost;
   slotCapacity?: number;
-}
-
-function contentVersion(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function canonicalBase64(value: string): Buffer | null {
