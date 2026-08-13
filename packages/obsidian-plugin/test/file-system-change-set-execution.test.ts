@@ -28,7 +28,17 @@ const frame = {
   changeSetId: "change-set-a",
   enqueueSeq: 1,
   phase: "PREPARED" as const,
-  input: {},
+  input: {
+    submissionKey: "key-a",
+    operations: [
+      {
+        operationId: "dir-1",
+        kind: "create_directory",
+        path: "dir",
+        ifExists: "reject",
+      },
+    ],
+  },
   preview: {},
   directories: [],
 };

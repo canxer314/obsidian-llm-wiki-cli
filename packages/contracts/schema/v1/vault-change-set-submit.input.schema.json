@@ -32,7 +32,7 @@
       }
     },
     "__schema2": {
-      "oneOf": [
+      "anyOf": [
         {
           "type": "object",
           "properties": {
@@ -309,32 +309,64 @@
           "additionalProperties": false
         },
         {
-          "type": "object",
-          "properties": {
-            "operationId": {
-              "$ref": "#/$defs/__schema3"
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/__schema3"
+                },
+                "afterOperationId": {
+                  "$ref": "#/$defs/__schema4"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "trash"
+                },
+                "path": {
+                  "$ref": "#/$defs/__schema6"
+                },
+                "targetVersion": {
+                  "$ref": "#/$defs/__schema7"
+                }
+              },
+              "required": [
+                "operationId",
+                "kind",
+                "path",
+                "targetVersion"
+              ],
+              "additionalProperties": false
             },
-            "afterOperationId": {
-              "$ref": "#/$defs/__schema4"
-            },
-            "kind": {
-              "type": "string",
-              "const": "trash"
-            },
-            "path": {
-              "$ref": "#/$defs/__schema6"
-            },
-            "targetVersion": {
-              "$ref": "#/$defs/__schema7"
+            {
+              "type": "object",
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/__schema3"
+                },
+                "afterOperationId": {
+                  "$ref": "#/$defs/__schema4"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "trash"
+                },
+                "path": {
+                  "$ref": "#/$defs/__schema5"
+                },
+                "expectedSha256": {
+                  "$ref": "#/$defs/__schema10"
+                }
+              },
+              "required": [
+                "operationId",
+                "kind",
+                "path",
+                "expectedSha256"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "operationId",
-            "kind",
-            "path",
-            "targetVersion"
-          ],
-          "additionalProperties": false
+          ]
         }
       ]
     },

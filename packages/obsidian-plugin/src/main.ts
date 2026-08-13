@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   FileSystemAdapter,
@@ -14,8 +14,13 @@ import {
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
+import { BRIDGE_STATE_DIRECTORY_NAME } from "./change-set.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
-import { createFileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
+import {
+  createChangeSetSemanticEvidenceTracker,
+  createFileSystemChangeSetExecutionAdapter,
+  createNodeFileSystemChangeSetHost,
+} from "./file-system-change-set-execution.js";
 import {
   assertValidatedInstalledBundle,
   registerRunMaintenanceCommand,
@@ -45,81 +50,74 @@ export default class VaultOperationBridgePlugin extends Plugin {
       adapter instanceof FileSystemAdapter
         ? createFileSystemChangeSetDataSource(basePath, adapter)
         : undefined;
-    const stateDirectory = join(basePath, ".llm-wiki");
+    const stateDirectory = join(basePath, BRIDGE_STATE_DIRECTORY_NAME);
     const recoveryStatePath = join(stateDirectory, "bridge-state.json");
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
-    const stagingDirectory = join(stateDirectory, "staging");
-    const vaultPath = (path: string) => join(basePath, ...path.split("/"));
-    const stagePath = (stageId: string) => join(stagingDirectory, ...stageId.split("/"));
-    const pathIdentity = async (
-      path: string,
-      expectedKind: "directory" | "file",
-    ): Promise<string | null> => {
-      try {
-        const value = await stat(vaultPath(path));
-        const matches = expectedKind === "directory" ? value.isDirectory() : value.isFile();
-        return matches ? `${value.dev}:${value.ino}:${value.birthtimeMs}` : null;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }
-    };
     let runtime!: ManagedVaultBridgeRuntime;
     let incompatibleState = false;
     const semanticVersions = new ObsidianSemanticVersionTracker();
+    const semanticEvidence = createChangeSetSemanticEvidenceTracker({
+      publishSuccessorSearchSnapshot: async () => {
+        await runtime.publishSuccessorSearchSnapshot();
+      },
+    });
     const changeSetExecution =
       adapter instanceof FileSystemAdapter
         ? await createFileSystemChangeSetExecutionAdapter({
             journalPath: recoveryJournalPath,
-            host: {
-              pathKind: async (path) => {
-                const value = await adapter.stat(path);
-                if (value === null) return null;
-                return value.type === "folder" ? "directory" : "file";
-              },
-              directoryIdentity: (path) => pathIdentity(path, "directory"),
-              prepareDirectory: async (stageId) => {
-                const path = stagePath(stageId);
-                await mkdir(path, { recursive: true });
-                const value = await stat(path);
-                return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
-              },
-              publishDirectory: (stageId, path) =>
-                rename(stagePath(stageId), vaultPath(path)),
-              discardPreparedDirectory: async (stageId) => {
-                try {
-                  await rmdir(stagePath(stageId));
-                } catch (error) {
-                  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            host: await createNodeFileSystemChangeSetHost({
+              basePath,
+              stateDirectory,
+              publishFile: async (stageId, path) => {
+                const stagedPath = join(stateDirectory, "staging", ...stageId.split("/"));
+                const bytes = await readFile(stagedPath);
+                const exactBytes = Uint8Array.from(bytes);
+                const existing = this.app.vault.getFileByPath(path);
+                if (existing === null) {
+                  await this.app.vault.createBinary(path, exactBytes.buffer);
+                } else {
+                  await this.app.vault.modifyBinary(existing, exactBytes.buffer);
                 }
+                await rm(stagedPath, { force: true });
               },
-              removeDirectory: (path) => adapter.rmdir(path, false),
-              readBinary: changeSetDataSource!.readBinary,
-              fileIdentity: (path) => pathIdentity(path, "file"),
-              prepareFile: async (stageId, bytes) => {
-                const path = stagePath(stageId);
-                await mkdir(dirname(path), { recursive: true });
-                await writeFile(path, bytes, { flag: "wx" });
-                const value = await stat(path);
-                return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
-              },
-              publishFile: (stageId, path) =>
-                rename(stagePath(stageId), vaultPath(path)),
-              discardPreparedFile: async (stageId) => {
-                await unlink(stagePath(stageId)).catch(
-                  (error: NodeJS.ErrnoException) => {
-                    if (error.code !== "ENOENT") throw error;
-                  },
-                );
+              moveFile: async (sourcePath, destinationPath) => {
+                const source = this.app.vault.getFileByPath(sourcePath);
+                if (source === null) throw new Error("Attachment move source disappeared");
+                await this.app.vault.rename(source, destinationPath);
               },
               removeFile: async (path) => {
-                await unlink(vaultPath(path));
+                const file = this.app.vault.getFileByPath(path);
+                if (file === null) throw new Error("Attachment removal source disappeared");
+                // Reached only from compare-before-restore rollback of
+                // Change-Set-created copies. Permanent deletion is unavailable:
+                // route through the system trash as a last-resort safety net.
+                await this.app.vault.trash(file, true);
               },
+              moveToTrash: async (path) => {
+                const file = this.app.vault.getFileByPath(path);
+                if (file === null) throw new Error("Managed trash source disappeared");
+                // The host has already hard-linked the bytes into the
+                // Bridge-owned managed trash before this call; use the system
+                // trash rather than permanent deletion so the Bridge never
+                // irreversibly destroys Vault content.
+                await this.app.vault.trash(file, true);
+              },
+              restoreFromTrash: async (_trashId, path, bytes) => {
+                const exactBytes = Uint8Array.from(bytes);
+                await this.app.vault.createBinary(path, exactBytes.buffer);
+              },
+              beginSemanticEvidence: async (request) => {
+                semanticEvidence.begin(request);
+              },
+              awaitSemanticEvidence: async (request) => {
+                await semanticEvidence.await(request);
+              },
+              semanticEvidencePublishesSnapshot: true,
               publishSearchSnapshot: async (targets) => {
                 await runtime.publishSuccessorSearchSnapshot(targets);
               },
-            },
+            }),
           }).catch((error: unknown) => {
             if (!(error instanceof RecoveryJournalIncompatibleError)) throw error;
             incompatibleState = true;
@@ -257,10 +255,14 @@ export default class VaultOperationBridgePlugin extends Plugin {
     );
     this.registerEvent(this.app.metadataCache.on("resolve", scheduleMarkdownRefresh));
     this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
-    this.registerEvent(this.app.vault.on("create", scheduleMarkdownRefresh));
+    this.registerEvent(this.app.vault.on("create", (file) => {
+      semanticEvidence.record({ kind: "create", path: file.path });
+      scheduleMarkdownRefresh(file);
+    }));
     this.registerEvent(this.app.vault.on("modify", scheduleMarkdownRefresh));
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
+        semanticEvidence.record({ kind: "delete", path: file.path });
         if (file instanceof TFile && file.extension === "md") {
           semanticVersions.remove(file.path);
           scheduleRefresh();
@@ -269,6 +271,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        semanticEvidence.record({ kind: "rename", oldPath, path: file.path });
         if (file instanceof TFile && file.extension === "md") {
           semanticVersions.rename(oldPath, file.path);
           scheduleRefresh();
