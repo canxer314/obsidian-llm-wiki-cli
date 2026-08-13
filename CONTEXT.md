@@ -43,3 +43,7 @@ _Avoid_: Read lock, search result
 **Recovery Journal**:
 Short-lived durable state that lets the Vault Operation Bridge restore an interrupted Change Set before accepting further writes. It exists only for crash recovery and is removed after success or completed restoration.
 _Avoid_: Audit log, version history, Git backup
+
+**Trusted Recovery Baseline**:
+The current Managed Vault state that the Primary Operator explicitly accepts through the local interactive management entry point after an unresolved recovery cannot prove whether a Change Set took effect. Acceptance permits eligible Recovery Journal data to be cleared and the recovery block to be released, but it does not turn an unproven Change Set into a proved result or resume writes.
+_Avoid_: Recovery override, forced success, automatic recovery
