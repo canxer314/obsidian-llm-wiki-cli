@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import {
   FileSystemAdapter,
@@ -43,6 +43,21 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const stagingDirectory = join(stateDirectory, "staging");
+    const vaultPath = (path: string) => join(basePath, ...path.split("/"));
+    const stagePath = (stageId: string) => join(stagingDirectory, ...stageId.split("/"));
+    const pathIdentity = async (
+      path: string,
+      expectedKind: "directory" | "file",
+    ): Promise<string | null> => {
+      try {
+        const value = await stat(vaultPath(path));
+        const matches = expectedKind === "directory" ? value.isDirectory() : value.isFile();
+        return matches ? `${value.dev}:${value.ino}:${value.birthtimeMs}` : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    };
     let runtime!: ManagedVaultBridgeRuntime;
     const changeSetExecution =
       adapter instanceof FileSystemAdapter
@@ -54,37 +69,44 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 if (value === null) return null;
                 return value.type === "folder" ? "directory" : "file";
               },
-              directoryIdentity: async (path) => {
-                try {
-                  const value = await stat(join(basePath, ...path.split("/")));
-                  return value.isDirectory()
-                    ? `${value.dev}:${value.ino}:${value.birthtimeMs}`
-                    : null;
-                } catch (error) {
-                  if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-                  throw error;
-                }
-              },
+              directoryIdentity: (path) => pathIdentity(path, "directory"),
               prepareDirectory: async (stageId) => {
-                const stagePath = join(stagingDirectory, ...stageId.split("/"));
-                await mkdir(stagePath, { recursive: true });
-                const value = await stat(stagePath);
+                const path = stagePath(stageId);
+                await mkdir(path, { recursive: true });
+                const value = await stat(path);
                 return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
               },
-              publishDirectory: async (stageId, path) => {
-                await rename(
-                  join(stagingDirectory, ...stageId.split("/")),
-                  join(basePath, ...path.split("/")),
-                );
-              },
+              publishDirectory: (stageId, path) =>
+                rename(stagePath(stageId), vaultPath(path)),
               discardPreparedDirectory: async (stageId) => {
                 try {
-                  await rmdir(join(stagingDirectory, ...stageId.split("/")));
+                  await rmdir(stagePath(stageId));
                 } catch (error) {
                   if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
                 }
               },
               removeDirectory: (path) => adapter.rmdir(path, false),
+              readBinary: changeSetDataSource!.readBinary,
+              fileIdentity: (path) => pathIdentity(path, "file"),
+              prepareFile: async (stageId, bytes) => {
+                const path = stagePath(stageId);
+                await mkdir(dirname(path), { recursive: true });
+                await writeFile(path, bytes, { flag: "wx" });
+                const value = await stat(path);
+                return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
+              },
+              publishFile: (stageId, path) =>
+                rename(stagePath(stageId), vaultPath(path)),
+              discardPreparedFile: async (stageId) => {
+                await unlink(stagePath(stageId)).catch(
+                  (error: NodeJS.ErrnoException) => {
+                    if (error.code !== "ENOENT") throw error;
+                  },
+                );
+              },
+              removeFile: async (path) => {
+                await unlink(vaultPath(path));
+              },
               publishSearchSnapshot: async () => {
                 await runtime.publishSuccessorSearchSnapshot();
               },
