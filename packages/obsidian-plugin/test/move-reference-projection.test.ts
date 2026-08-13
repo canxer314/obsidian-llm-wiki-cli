@@ -250,6 +250,151 @@ describe("note move reference projection", () => {
     }, Buffer.from(target))).resolves.toBeNull();
   });
 
+  it("keeps a markdown link whose moved target name contains a literal %20 sequence", async () => {
+    const target = "# a%20b\n";
+    const backlink = "See [guide](a%2520b.md) now\n";
+    const manager = new SearchSnapshotManager({
+      listMarkdownPaths: async () => ["Notes/a%20b.md", "Notes/Backlink.md"],
+      readBinary: async (path) => Buffer.from(
+        path === "Notes/a%20b.md" ? target : backlink,
+      ),
+      semanticEvidence: async (path) => path === "Notes/a%20b.md"
+        ? {
+            frontmatter: null,
+            tags: [],
+            headings: [{ heading: "a%20b", level: 1 }],
+            references: [],
+            resolvedLinks: {},
+            unresolvedLinks: {},
+          }
+        : {
+            frontmatter: null,
+            tags: [],
+            headings: [],
+            references: [reference(
+              backlink,
+              "[guide](a%2520b.md)",
+              "a%2520b.md",
+              "Notes/a%20b.md",
+              "markdown_inline_link",
+            )],
+            resolvedLinks: { "Notes/a%20b.md": 1 },
+            unresolvedLinks: {},
+          },
+    });
+    await manager.rebuild();
+
+    const projection = await createMoveReferenceProjector(manager)({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/a%20b.md",
+      destinationPath: "Archive/a%20b.md",
+      targetVersion: version(target),
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target));
+
+    expect(Buffer.from(projection!.derivedEffects[0]!.projectedBytes).toString()).toBe(backlink);
+  });
+
+  it("rewrites a markdown link whose moved target name contains a literal percent sign", async () => {
+    const target = "# 100%\n";
+    const backlink = "See [guide](100%25.md) now\n";
+    const manager = new SearchSnapshotManager({
+      listMarkdownPaths: async () => ["Notes/100%.md", "Notes/Backlink.md"],
+      readBinary: async (path) => Buffer.from(
+        path === "Notes/100%.md" ? target : backlink,
+      ),
+      semanticEvidence: async (path) => path === "Notes/100%.md"
+        ? {
+            frontmatter: null,
+            tags: [],
+            headings: [{ heading: "100%", level: 1 }],
+            references: [],
+            resolvedLinks: {},
+            unresolvedLinks: {},
+          }
+        : {
+            frontmatter: null,
+            tags: [],
+            headings: [],
+            references: [reference(
+              backlink,
+              "[guide](100%25.md)",
+              "100%25.md",
+              "Notes/100%.md",
+              "markdown_inline_link",
+            )],
+            resolvedLinks: { "Notes/100%.md": 1 },
+            unresolvedLinks: {},
+          },
+    });
+    await manager.rebuild();
+
+    const projection = await createMoveReferenceProjector(manager)({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/100%.md",
+      destinationPath: "Archive/renamed 100%.md",
+      targetVersion: version(target),
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target));
+
+    expect(Buffer.from(projection!.derivedEffects[0]!.projectedBytes).toString())
+      .toBe("See [guide](renamed%20100%25.md) now\n");
+  });
+
+  it("rejects the projection instead of throwing when a target decodes outside the vault", async () => {
+    const target = "# Target\n";
+    const backlink = "See [g](../escape.md) now\n";
+    const original = "[g](../escape.md)";
+    const snapshot = {
+      version: 1,
+      notes: [{
+        path: "Notes/Target.md",
+        filename: "Target.md",
+        bytes: Buffer.from(target),
+        content: target,
+        contentVersion: version(target),
+        sizeBytes: Buffer.byteLength(target),
+        frontmatter: null,
+        tags: [],
+        headings: [{ heading: "Target", level: 1 }],
+        references: [],
+        resolvedLinks: {},
+        unresolvedLinks: {},
+      }, {
+        path: "Backlink.md",
+        filename: "Backlink.md",
+        bytes: Buffer.from(backlink),
+        content: backlink,
+        contentVersion: version(backlink),
+        sizeBytes: Buffer.byteLength(backlink),
+        frontmatter: null,
+        tags: [],
+        headings: [],
+        references: [{
+          profile: "markdown_inline_link",
+          target: "../escape.md",
+          resolvedPath: "Notes/Target.md",
+          original,
+          startByte: 4,
+          endByteExclusive: 4 + original.length,
+        }],
+        resolvedLinks: { "Notes/Target.md": 1 },
+        unresolvedLinks: {},
+      }],
+    } as SearchSnapshot;
+
+    await expect(createMoveReferenceProjector({ current: () => snapshot })({
+      operationId: "move-1",
+      kind: "move",
+      sourcePath: "Notes/Target.md",
+      destinationPath: "Notes/Renamed.md",
+      targetVersion: version(target),
+      linkEffect: "update_resolved_references",
+    }, Buffer.from(target))).resolves.toBeNull();
+  });
+
   it("rejects the whole projection when immutable graph closure and spans disagree", async () => {
     const { manager, target } = await snapshots(5);
     const projectMove = createMoveReferenceProjector(manager);

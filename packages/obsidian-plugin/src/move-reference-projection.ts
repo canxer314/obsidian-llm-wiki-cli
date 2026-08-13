@@ -7,7 +7,7 @@ import type {
   MoveProjection,
 } from "./change-set.js";
 import {
-  enumerateCanonicalReferenceTargets,
+  enumerateDecodedReferenceTargets,
   renderRegisteredReference,
   type CanonicalReferenceCandidate,
 } from "./obsidian-search-data-source.js";
@@ -49,6 +49,16 @@ function decodeLinkpath(reference: SearchSnapshotReference, fileLinkpath: string
   }
 }
 
+function resolvesUniquely(
+  decodedLinkpath: string,
+  candidates: readonly CanonicalReferenceCandidate[],
+  sourcePath: string,
+  destinationPath: string,
+): boolean {
+  const targets = enumerateDecodedReferenceTargets(decodedLinkpath, candidates, sourcePath);
+  return targets.length === 1 && targets[0] === destinationPath;
+}
+
 function projectedCandidates(
   snapshot: SearchSnapshot,
   operation: MoveOperation,
@@ -72,10 +82,16 @@ function renderedTarget(
 ): string | null {
   const { fileLinkpath, fragment } = splitFragment(reference.target);
   if (fileLinkpath === "") {
-    return sourceNote.path === operation.sourcePath ? fragment : null;
+    return sourceNote.path === operation.sourcePath
+      ? decodeLinkpath(reference, fragment)
+      : null;
   }
+  // Probes run on decoded linkpaths so decoding happens exactly once, here;
+  // the renderer re-encodes markdown destinations when splicing them back.
   const decoded = decodeLinkpath(reference, fileLinkpath);
   if (decoded === null) return null;
+  const decodedFragment = decodeLinkpath(reference, fragment);
+  if (decodedFragment === null) return null;
   const keptExtension = decoded.endsWith(".md");
   const relativeStyle = decoded.startsWith("./") || decoded.startsWith("../");
   const destinationWithoutExtension = operation.destinationPath.slice(0, -3);
@@ -87,10 +103,9 @@ function renderedTarget(
   const projectedSourcePath = sourceNote.path === operation.sourcePath
     ? operation.destinationPath
     : sourceNote.path;
-  if (
-    enumerateCanonicalReferenceTargets(decoded, candidates, projectedSourcePath)
-      .join("\0") === operation.destinationPath
-  ) return fileLinkpath + fragment;
+  if (resolvesUniquely(decoded, candidates, projectedSourcePath, operation.destinationPath)) {
+    return decoded + decodedFragment;
+  }
   const hadExplicitPath = decoded.includes("/");
   let nextFileLinkpath = relativeStyle
     ? posix.relative(posix.dirname(projectedSourcePath), destination)
@@ -101,16 +116,14 @@ function renderedTarget(
     nextFileLinkpath = `./${nextFileLinkpath}`;
   }
   if (
-    enumerateCanonicalReferenceTargets(nextFileLinkpath, candidates, projectedSourcePath)
-      .join("\0") !== operation.destinationPath
+    !resolvesUniquely(nextFileLinkpath, candidates, projectedSourcePath, operation.destinationPath)
   ) {
     nextFileLinkpath = destination;
   }
   if (
-    enumerateCanonicalReferenceTargets(nextFileLinkpath, candidates, projectedSourcePath)
-      .join("\0") !== operation.destinationPath
+    !resolvesUniquely(nextFileLinkpath, candidates, projectedSourcePath, operation.destinationPath)
   ) return null;
-  return nextFileLinkpath + fragment;
+  return nextFileLinkpath + decodedFragment;
 }
 
 function projectNote(
@@ -132,10 +145,10 @@ function projectNote(
         projected.slice(reference.startByte, reference.endByteExclusive),
       ).equals(Buffer.from(reference.original))
     ) return null;
-    const target = renderedTarget(reference, note, operation, candidates);
-    if (target === null) return null;
     let rendered: string;
     try {
+      const target = renderedTarget(reference, note, operation, candidates);
+      if (target === null) return null;
       rendered = renderRegisteredReference(reference.profile, reference.original, target, "note");
     } catch {
       return null;

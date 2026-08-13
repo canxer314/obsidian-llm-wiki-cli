@@ -283,6 +283,11 @@ describe("installed Obsidian reference profiles", () => {
       "new path.md",
     )).toBe("[guide](new%20path.md \"title\")");
     expect(renderRegisteredReference(
+      "markdown_inline_link",
+      "[guide](old.md)",
+      "renamed 100%.md",
+    )).toBe("[guide](renamed%20100%25.md)");
+    expect(renderRegisteredReference(
       "markdown_embed",
       "![alt](<old image.png>)",
       "new image.png",

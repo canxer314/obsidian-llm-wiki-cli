@@ -151,6 +151,19 @@ export function enumerateCanonicalReferenceTargets(
   } catch {
     throw new Error("Registered reference has an invalid encoded target");
   }
+  return enumerateDecodedReferenceTargets(path, files, sourcePath);
+}
+
+/**
+ * Resolves an already-decoded linkpath. Callers holding raw reference text
+ * must use enumerateCanonicalReferenceTargets instead, so that every target
+ * is decoded exactly once at the registry boundary.
+ */
+export function enumerateDecodedReferenceTargets(
+  path: string,
+  files: readonly CanonicalReferenceCandidate[],
+  sourcePath?: string,
+): string[] {
   const sourceRelative = path.startsWith("./") || path.startsWith("../");
   if (sourceRelative) {
     if (sourcePath === undefined || !isCanonicalVaultPath(sourcePath)) return [];
@@ -293,7 +306,9 @@ export function renderRegisteredReference(
   if (parsed === null || parsed.profile !== profile) {
     throw new Error("Original reference does not match its registered profile");
   }
-  const renderedTarget = parsed.wrapped ? target : target.replaceAll(" ", "%20");
+  const renderedTarget = parsed.wrapped
+    ? target
+    : target.replaceAll("%", "%25").replaceAll(" ", "%20");
   return original.slice(0, parsed.destinationStart) +
     renderedTarget + original.slice(parsed.destinationEnd);
 }
