@@ -13,14 +13,19 @@ export {
   RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   ChangeSetService,
   fingerprintChangeSetRequest,
+  type BoundMoveDerivedEffect,
+  type BoundMoveProjection,
   type FrontmatterChange,
   type MoveDerivedProjection,
   type MoveProjection,
+  type MoveSnapshotBarrier,
   type ChangeSetExecutionAdapter,
   type ChangeSetExecutionState,
   type ChangeSetRuntimeStatePort,
   type ChangeSetWriteMode,
   type RecoveryJournalFrame,
+  type RecoveryFileFootprint,
+  type RecoveryFileState,
   type RecoveryJournalPhase,
   InjectedChangeSetCrash,
   type ChangeSetGate,
@@ -33,6 +38,7 @@ export {
   type ChangeSetRequestState,
   type ChangeSetServiceOptions,
 } from "./change-set.js";
+export { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 export {
   DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
   CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS,
@@ -48,6 +54,11 @@ export {
   type NodeFileSystemChangeSetHostOptions,
 } from "./file-system-change-set-execution.js";
 export { createRegistrationCommand } from "./registration-command.js";
+export {
+  createMoveReferenceProjector,
+  withMoveReferenceProjection,
+  type MoveReferenceSnapshotSource,
+} from "./move-reference-projection.js";
 export {
   ManagedVaultBridgeRuntime,
   PERSISTENT_STATE_SCHEMA_VERSION,

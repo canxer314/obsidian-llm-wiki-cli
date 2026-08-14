@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 
 import { isCanonicalVaultPath } from "./canonical-vault-path.js";
 import type {
@@ -186,10 +187,32 @@ export function enumerateCanonicalReferenceTargets(
   } catch {
     throw new Error("Registered reference has an invalid encoded target");
   }
+  return enumerateDecodedReferenceTargets(path, files, sourcePath);
+}
+
+/**
+ * Resolves an already-decoded linkpath. Callers holding raw reference text
+ * must use enumerateCanonicalReferenceTargets instead, so that every target
+ * is decoded exactly once at the registry boundary.
+ */
+export function enumerateDecodedReferenceTargets(
+  path: string,
+  files: readonly CanonicalReferenceCandidate[],
+  sourcePath?: string,
+): string[] {
+  const sourceRelative = path.startsWith("./") || path.startsWith("../");
+  if (sourceRelative) {
+    if (sourcePath === undefined || !isCanonicalVaultPath(sourcePath)) return [];
+    const resolved = posix.normalize(posix.join(posix.dirname(sourcePath), path));
+    if (!isCanonicalVaultPath(resolved)) {
+      throw new Error("Registered reference target is not canonical");
+    }
+    path = resolved;
+  }
   if (!isCanonicalVaultPath(path)) {
     throw new Error("Registered reference target is not canonical");
   }
-  const explicitPath = path.includes("/");
+  const explicitPath = sourceRelative || path.includes("/");
   const candidates = files.filter((file) => {
     if (!isCanonicalVaultPath(file.path)) return false;
     if (explicitPath) {
@@ -303,9 +326,14 @@ export function renderRegisteredReference(
   profile: RegisteredReferenceProfile,
   original: string,
   target: string,
+  targetKind: "note" | "attachment" = "attachment",
 ): string {
   if (target.length === 0) throw new Error("Reference target must not be empty");
-  if ((profile === "embed" || profile === "markdown_embed") && target.includes("#")) {
+  if (
+    targetKind === "attachment" &&
+    (profile === "embed" || profile === "markdown_embed") &&
+    target.includes("#")
+  ) {
     throw new Error("Registered attachment profiles reject literal # targets");
   }
   if (profile === "wikilink" || profile === "embed") {
@@ -324,7 +352,15 @@ export function renderRegisteredReference(
   if (parsed === null || parsed.profile !== profile) {
     throw new Error("Original reference does not match its registered profile");
   }
-  const renderedTarget = parsed.wrapped ? target : target.replaceAll(" ", "%20");
+  // An unchanged target is spliced back byte-for-byte so the original
+  // encoding style survives (issue #38 AC3); re-encoding is only safe when
+  // the target was actually rewritten.
+  if (target === original.slice(parsed.destinationStart, parsed.destinationEnd)) {
+    return original;
+  }
+  const renderedTarget = parsed.wrapped
+    ? target
+    : target.replaceAll("%", "%25").replaceAll(" ", "%20");
   return original.slice(0, parsed.destinationStart) +
     renderedTarget + original.slice(parsed.destinationEnd);
 }

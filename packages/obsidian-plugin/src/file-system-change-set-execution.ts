@@ -27,6 +27,7 @@ import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
   ChangeSetSemanticEvidenceRequest,
+  MoveSnapshotBarrier,
   RecoveryJournalFrame,
   SearchSnapshotTargetEvidence,
 } from "./change-set.js";
@@ -195,7 +196,10 @@ export interface ChangeSetExecutionHost {
   beginSemanticEvidence?: ChangeSetExecutionAdapter["beginSemanticEvidence"];
   awaitSemanticEvidence?: ChangeSetExecutionAdapter["awaitSemanticEvidence"];
   semanticEvidencePublishesSnapshot?: boolean;
-  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
+  publishSearchSnapshot(
+    targets?: readonly SearchSnapshotTargetEvidence[],
+    moveBarrier?: MoveSnapshotBarrier,
+  ): Promise<void>;
 }
 
 export type DirectoryExecutionHost = ChangeSetExecutionHost;
@@ -216,7 +220,10 @@ export interface NodeFileSystemChangeSetHostOptions {
   beginSemanticEvidence?: NonNullable<ChangeSetExecutionAdapter["beginSemanticEvidence"]>;
   awaitSemanticEvidence: NonNullable<ChangeSetExecutionAdapter["awaitSemanticEvidence"]>;
   semanticEvidencePublishesSnapshot?: boolean;
-  publishSearchSnapshot(targets?: readonly SearchSnapshotTargetEvidence[]): Promise<void>;
+  publishSearchSnapshot(
+    targets?: readonly SearchSnapshotTargetEvidence[],
+    moveBarrier?: MoveSnapshotBarrier,
+  ): Promise<void>;
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -367,8 +374,7 @@ export async function createNodeFileSystemChangeSetHost(
         await options.publishFile(stageId, path);
         return;
       }
-      await link(source, destination);
-      await unlink(source);
+      await rename(source, destination);
     },
     discardPreparedFile: async (stageId) =>
       rm(await assertPrivateContained(stagePath(stageId)), { force: true }),
@@ -471,6 +477,38 @@ function isRecoveryState(value: unknown): boolean {
   );
 }
 
+function isMoveBarrier(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const barrier = value as Record<string, unknown>;
+  if (
+    typeof barrier.presentPath !== "string" ||
+    barrier.presentPath.length === 0 ||
+    typeof barrier.absentPath !== "string" ||
+    barrier.absentPath.length === 0 ||
+    typeof barrier.presentVersion !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(barrier.presentVersion) ||
+    !Array.isArray(barrier.closure)
+  ) return false;
+  const paths = new Set<string>();
+  return barrier.closure.every((raw: unknown) => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+    const item = raw as Record<string, unknown>;
+    if (
+      typeof item.path !== "string" ||
+      item.path.length === 0 ||
+      paths.has(item.path) ||
+      typeof item.contentVersion !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(item.contentVersion) ||
+      typeof item.resolvedPath !== "string" ||
+      item.resolvedPath.length === 0 ||
+      !Number.isInteger(item.referenceCount) ||
+      (item.referenceCount as number) < 1
+    ) return false;
+    paths.add(item.path);
+    return true;
+  });
+}
+
 function parseFrame(value: unknown): RecoveryJournalFrame {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("Recovery Journal payload is corrupt or incompatible");
@@ -506,7 +544,16 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   }
   if (
     frame.schemaVersion === 1 &&
-    (frame.files !== undefined || frame.mutations !== undefined)
+    (frame.files !== undefined ||
+      frame.mutations !== undefined ||
+      frame.successBarrier !== undefined ||
+      frame.rollbackBarrier !== undefined)
+  ) {
+    throw new Error("Recovery Journal payload is corrupt or incompatible");
+  }
+  if (
+    (frame.successBarrier !== undefined && !isMoveBarrier(frame.successBarrier)) ||
+    (frame.rollbackBarrier !== undefined && !isMoveBarrier(frame.rollbackBarrier))
   ) {
     throw new Error("Recovery Journal payload is corrupt or incompatible");
   }
@@ -545,7 +592,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
           if (typeof mutation !== "object" || mutation === null) return true;
           if (
             typeof mutation.operationId !== "string" ||
-            !["copy_attachment", "move_attachment", "trash"].includes(mutation.kind)
+            !["copy_attachment", "move_attachment", "move", "trash"].includes(mutation.kind)
           ) return true;
           if (mutation.kind === "trash") {
             return (
@@ -569,6 +616,12 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
                 !isRecoveryState(mutation.destinationAfter))) ||
             (mutation.kind === "move_attachment" &&
               (!isRecoveryState(mutation.sourceBefore) ||
+                !isRecoveryState(mutation.sourceAfter) ||
+                !isRecoveryState(mutation.destinationBefore) ||
+                !isRecoveryState(mutation.destinationAfter))) ||
+            (mutation.kind === "move" &&
+              (!isPrivateId(mutation.stageId) ||
+                !isRecoveryState(mutation.sourceBefore) ||
                 !isRecoveryState(mutation.sourceAfter) ||
                 !isRecoveryState(mutation.destinationBefore) ||
                 !isRecoveryState(mutation.destinationAfter)))

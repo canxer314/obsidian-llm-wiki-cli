@@ -12,6 +12,7 @@
   "dependencies": {
     "@llm-wiki/vault-contracts": "1.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
