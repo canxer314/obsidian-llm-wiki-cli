@@ -314,8 +314,7 @@ export async function createNodeFileSystemChangeSetHost(
         await options.publishFile(stageId, path);
         return;
       }
-      await link(source, destination);
-      await unlink(source);
+      await rename(source, destination);
     },
     discardPreparedFile: async (stageId) =>
       rm(await assertPrivateContained(stagePath(stageId)), { force: true }),

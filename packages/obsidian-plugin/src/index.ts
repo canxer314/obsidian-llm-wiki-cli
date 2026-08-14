@@ -38,6 +38,7 @@ export {
   type ChangeSetRequestState,
   type ChangeSetServiceOptions,
 } from "./change-set.js";
+export { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 export {
   DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
   CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS,

@@ -14,6 +14,8 @@ import {
   type VaultState,
 } from "@llm-wiki/vault-contracts";
 
+import { contentVersion } from "./content-version.js";
+
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 2;
 const LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
@@ -607,10 +609,6 @@ function protectedPath(path: string): boolean {
   return root !== undefined && protectedRoots.includes(root);
 }
 
-function contentVersion(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-}
-
 function attachmentHash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -855,7 +853,11 @@ function recoveryPlanMatchesFrame(frame: RecoveryJournalFrame): boolean {
   let mutationIndex = 0;
   for (const [operationIndex, operation] of frame.input.operations.entries()) {
     if (operation.kind === "create_directory") continue;
-    if (operation.kind === "create_note" || operation.kind === "edit_body") {
+    if (
+      operation.kind === "create_note" ||
+      operation.kind === "edit_body" ||
+      operation.kind === "edit_frontmatter"
+    ) {
       // Markdown mutations are journaled as file footprints, not RecoveryMutations.
       const footprint = files.find(({ path }) => path === operation.path);
       if (footprint === undefined) return false;
@@ -1407,6 +1409,7 @@ export class ChangeSetService {
           kind !== "create_directory" &&
           kind !== "create_note" &&
           kind !== "edit_body" &&
+          kind !== "edit_frontmatter" &&
           kind !== "copy_attachment" &&
           kind !== "move_attachment" &&
           kind !== "trash",
@@ -1706,8 +1709,10 @@ export class ChangeSetService {
           current === "file" ? await readExecutionBytes(execution, file.path) : null;
         const beforeBytes = recoveryBytes(file.before);
         if (current === null) {
-          await execution.discardPreparedFile?.(file.stageId);
           if (file.before.kind !== "absent") throw new Error("original file disappeared");
+          actions.push(async () => {
+            await execution.discardPreparedFile?.(file.stageId!);
+          });
           continue;
         }
         if (
@@ -1717,7 +1722,9 @@ export class ChangeSetService {
           currentBytes !== null &&
           Buffer.from(currentBytes).equals(beforeBytes)
         ) {
-          await execution.discardPreparedFile?.(file.stageId);
+          actions.push(async () => {
+            await execution.discardPreparedFile?.(file.stageId!);
+          });
           continue;
         }
         if (
@@ -1729,17 +1736,20 @@ export class ChangeSetService {
           throw new Error("third-party path state");
         }
         if (file.before.kind === "absent") {
-          await execution.removeFile?.(file.path);
+          if (execution.removeFile === undefined) throw new Error("File removal is unavailable");
+          actions.push(() => execution.removeFile!(file.path));
         } else {
           if (beforeBytes === null || execution.prepareFile === undefined || execution.publishFile === undefined) {
             throw new Error("file rollback evidence is incomplete");
           }
-          const rollbackStageId = `${file.stageId}/rollback`;
-          await execution.discardPreparedFile?.(rollbackStageId);
-          await execution.prepareFile(rollbackStageId, beforeBytes);
-          await this.#crash(`recovery_after_file_prepared:${file.path}`);
-          await execution.publishFile(rollbackStageId, file.path);
-          await this.#crash(`recovery_after_file_published:${file.path}`);
+          actions.push(async () => {
+            const rollbackStageId = `${file.stageId}/rollback`;
+            await execution.discardPreparedFile?.(rollbackStageId);
+            await execution.prepareFile!(rollbackStageId, beforeBytes);
+            await this.#crash(`recovery_after_file_prepared:${file.path}`);
+            await execution.publishFile!(rollbackStageId, file.path);
+            await this.#crash(`recovery_after_file_published:${file.path}`);
+          });
         }
       }
       const directoryActions: (() => Promise<void>)[] = [];
@@ -3055,6 +3065,7 @@ export class ChangeSetService {
           kind === "create_directory" ||
           kind === "create_note" ||
           kind === "edit_body" ||
+          kind === "edit_frontmatter" ||
           kind === "copy_attachment" ||
           kind === "move_attachment" ||
           kind === "trash",

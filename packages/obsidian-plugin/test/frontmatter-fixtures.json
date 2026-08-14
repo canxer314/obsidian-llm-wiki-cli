@@ -1,0 +1,39 @@
+[
+  {
+    "name": "preserve CRLF quotes flow and block forms",
+    "original": "---\r\ntitle: 'Old'\r\naliases: [one, \"two\"]\r\ncssclasses:\r\n  - wide\r\nliteral: |\r\n  unchanged\r\n---\r\n# Body\r\n\r\nUntouched.\r\n",
+    "changes": [
+      { "kind": "set", "key": "title", "value": "New" }
+    ],
+    "projected": "---\r\ntitle: \"New\"\r\naliases: [one, \"two\"]\r\ncssclasses:\r\n  - wide\r\nliteral: |\r\n  unchanged\r\n---\r\n# Body\r\n\r\nUntouched.\r\n"
+  },
+  {
+    "name": "ordered remove then set appends typed values",
+    "original": "﻿---\nquoted: 'keep'\nflow: [one, \"two\"]\nblock:\n  - three\n  - four\nliteral: |\n  unchanged\ncount: 1\n---\nBody without normalization.\n",
+    "changes": [
+      { "kind": "set", "key": "count", "value": 2 },
+      { "kind": "set", "key": "new", "value": { "enabled": true, "tags": ["a", "b"] } },
+      { "kind": "remove", "key": "count" },
+      { "kind": "set", "key": "count", "value": null },
+      { "kind": "remove", "key": "missing" }
+    ],
+    "projected": "﻿---\nquoted: 'keep'\nflow: [one, \"two\"]\nblock:\n  - three\n  - four\nliteral: |\n  unchanged\n\"new\": {\"enabled\":true,\"tags\":[\"a\",\"b\"]}\n\"count\": null\n---\nBody without normalization.\n"
+  },
+  {
+    "name": "adds a field to comment-only Frontmatter without changing surrounding bytes",
+    "original": "---\r\n# metadata\r\n  # keep indentation\r\n\r\n---\r\nBody unchanged.\r\n",
+    "changes": [
+      { "kind": "set", "key": "ready", "value": true }
+    ],
+    "projected": "---\r\n# metadata\r\n  # keep indentation\r\n\r\n\"ready\": true\r\n---\r\nBody unchanged.\r\n"
+  },
+  {
+    "name": "typed round trip restores original numeric representation",
+    "original": "---\ncount: 1.0 # exact comment\n---\nbody\n",
+    "changes": [
+      { "kind": "set", "key": "count", "value": 2 },
+      { "kind": "set", "key": "count", "value": 1 }
+    ],
+    "projected": "---\ncount: 1.0 # exact comment\n---\nbody\n"
+  }
+]

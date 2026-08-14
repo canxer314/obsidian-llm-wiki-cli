@@ -5,6 +5,7 @@ import type {
   ChangeSetPathKind,
   ChangeSetPreflightDataSource,
 } from "./change-set.js";
+import { projectFrontmatter } from "./frontmatter-projector.js";
 
 interface FileSystemVaultAdapter {
   exists(path: string): Promise<boolean>;
@@ -75,5 +76,6 @@ export function createFileSystemChangeSetDataSource(
       return stat.type === "folder" ? "directory" : "file";
     },
     isContained: async (path) => isContained(await root, basePath, path),
+    projectFrontmatter: async (bytes, changes) => projectFrontmatter(bytes, changes),
   };
 }

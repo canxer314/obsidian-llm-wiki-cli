@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -69,18 +69,6 @@ export default class VaultOperationBridgePlugin extends Plugin {
             host: await createNodeFileSystemChangeSetHost({
               basePath,
               stateDirectory,
-              publishFile: async (stageId, path) => {
-                const stagedPath = join(stateDirectory, "staging", ...stageId.split("/"));
-                const bytes = await readFile(stagedPath);
-                const exactBytes = Uint8Array.from(bytes);
-                const existing = this.app.vault.getFileByPath(path);
-                if (existing === null) {
-                  await this.app.vault.createBinary(path, exactBytes.buffer);
-                } else {
-                  await this.app.vault.modifyBinary(existing, exactBytes.buffer);
-                }
-                await rm(stagedPath, { force: true });
-              },
               moveFile: async (sourcePath, destinationPath) => {
                 const source = this.app.vault.getFileByPath(sourcePath);
                 if (source === null) throw new Error("Attachment move source disappeared");
