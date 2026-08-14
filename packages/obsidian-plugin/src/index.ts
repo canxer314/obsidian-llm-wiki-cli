@@ -48,6 +48,7 @@ export {
   type ChangeSetExecutionHost,
   type ChangeSetSemanticEvidenceTracker,
   type ChangeSetSemanticEvidenceTrackerOptions,
+  type ChangeSetSemanticProbes,
   type DirectoryExecutionHost,
   type FileSystemChangeSetExecutionOptions,
   type NodeFileSystemChangeSetHostOptions,

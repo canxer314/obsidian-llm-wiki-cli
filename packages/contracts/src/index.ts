@@ -732,6 +732,16 @@ const trashOperationSchema = z.union([
   attachmentTrashOperationSchema,
 ]);
 
+// The Markdown and attachment trash variants share kind "trash" and each
+// forbids the other's evidence key, so they are mutually exclusive. Publish
+// the split as oneOf (like every other closed split in this contract) rather
+// than the anyOf that z.union emits by default.
+function trashSplitAsOneOf(jsonSchema: Record<string, unknown>): void {
+  if (!Array.isArray(jsonSchema.anyOf)) return;
+  jsonSchema.oneOf = jsonSchema.anyOf;
+  delete jsonSchema.anyOf;
+}
+
 const changeSetOperationSchema = z.union([
   createDirectoryOperationSchema,
   createNoteOperationSchema,
@@ -1026,7 +1036,15 @@ function contractJsonSchema(
   return {
     $id: `https://canxer314.github.io/obsidian-llm-wiki-cli/contracts/v1/${name}.${direction}.schema.json`,
     title: `${name.replaceAll("-", "_")} v1 ${direction}`,
-    ...z.toJSONSchema(schema, { target: "draft-2020-12", reused: "ref" }),
+    ...z.toJSONSchema(schema, {
+      target: "draft-2020-12",
+      reused: "ref",
+      override: ({ zodSchema, jsonSchema }) => {
+        if (zodSchema === trashOperationSchema) {
+          trashSplitAsOneOf(jsonSchema as Record<string, unknown>);
+        }
+      },
+    }),
   };
 }
 

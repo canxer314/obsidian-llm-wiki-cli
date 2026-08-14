@@ -57,9 +57,20 @@ export default class VaultOperationBridgePlugin extends Plugin {
     let runtime!: ManagedVaultBridgeRuntime;
     let incompatibleState = false;
     const semanticVersions = new ObsidianSemanticVersionTracker();
+    const referenced = async (path: string): Promise<boolean> =>
+      Object.values(this.app.metadataCache.resolvedLinks).some(
+        (targets) => targets[path] !== undefined,
+      );
     const semanticEvidence = createChangeSetSemanticEvidenceTracker({
       publishSuccessorSearchSnapshot: async () => {
         await runtime.publishSuccessorSearchSnapshot();
+      },
+      probes: {
+        cacheVisible: async (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          return file !== null && this.app.metadataCache.getFileCache(file) !== null;
+        },
+        referenced,
       },
     });
     const changeSetExecution =
@@ -95,6 +106,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 const exactBytes = Uint8Array.from(bytes);
                 await this.app.vault.createBinary(path, exactBytes.buffer);
               },
+              referenced,
               beginSemanticEvidence: async (request) => {
                 semanticEvidence.begin(request);
               },

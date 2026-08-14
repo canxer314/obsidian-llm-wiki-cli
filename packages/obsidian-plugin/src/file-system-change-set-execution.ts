@@ -49,8 +49,24 @@ export interface ChangeSetSemanticEvidenceTracker {
   await(request: ChangeSetSemanticEvidenceRequest): Promise<void>;
 }
 
+/**
+ * Targeted postconditions that stand in for the generic Vault events hidden
+ * trash and restore never emit (spec A-38). Both probes are polled until the
+ * evidence deadline, so asynchronous metadata-cache updates may catch up
+ * while the barrier waits. A hidden-trash request evaluated without probes can never
+ * converge: raw path state alone does not prove the result, so the barrier
+ * fails closed at the deadline.
+ */
+export interface ChangeSetSemanticProbes {
+  /** True while Obsidian still serves a metadata-cache entry for the path. */
+  cacheVisible(path: string): Promise<boolean>;
+  /** True while any note's resolved references still point at the path. */
+  referenced(path: string): Promise<boolean>;
+}
+
 export interface ChangeSetSemanticEvidenceTrackerOptions {
   publishSuccessorSearchSnapshot(): Promise<void>;
+  probes?: ChangeSetSemanticProbes;
   deadlineMs?: number;
   now?: () => number;
   delay?: (milliseconds: number) => Promise<void>;
@@ -64,7 +80,8 @@ function semanticRequestsMatch(
     left.mode === right.mode &&
     left.hiddenTrash === right.hiddenTrash &&
     JSON.stringify(left.operations) === JSON.stringify(right.operations) &&
-    JSON.stringify(left.publicPaths) === JSON.stringify(right.publicPaths)
+    JSON.stringify(left.publicPaths) === JSON.stringify(right.publicPaths) &&
+    JSON.stringify(left.referenceBaselines) === JSON.stringify(right.referenceBaselines)
   );
 }
 
@@ -80,6 +97,34 @@ export function createChangeSetSemanticEvidenceTracker(
     request.requiredEvents.length;
   const hasEvent = (expected: VaultMutationEvent): boolean =>
     events.some((event) => JSON.stringify(event) === JSON.stringify(expected));
+  const probesSatisfied = async (
+    request: ChangeSetSemanticEvidenceRequest,
+  ): Promise<boolean> => {
+    if (!request.hiddenTrash) return true;
+    const probes = options.probes;
+    if (probes === undefined) return false;
+    for (const operation of request.operations) {
+      if (operation.kind !== "trash") continue;
+      if (request.mode === "apply") {
+        if (await probes.referenced(operation.path)) return false;
+        if ("targetVersion" in operation && (await probes.cacheVisible(operation.path))) {
+          return false;
+        }
+      } else {
+        const baseline = request.referenceBaselines?.find(
+          ({ path }) => path === operation.path,
+        );
+        if (
+          baseline === undefined ||
+          ("targetVersion" in operation && !(await probes.cacheVisible(operation.path))) ||
+          (await probes.referenced(operation.path)) !== baseline.referenced
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
   return {
     begin(request) {
       active = structuredClone(request);
@@ -97,7 +142,8 @@ export function createChangeSetSemanticEvidenceTracker(
       const required = expectedEvents(request);
       while (
         events.length < required ||
-        request.requiredEvents.some((expected) => !hasEvent(expected))
+        request.requiredEvents.some((expected) => !hasEvent(expected)) ||
+        !(await probesSatisfied(request))
       ) {
         if (now() >= deadline) {
           active = null;
@@ -146,6 +192,7 @@ export interface ChangeSetExecutionHost {
   restoreFromTrash?(trashId: string, path: string): Promise<void>;
   discardTrash?(trashId: string): Promise<void>;
   readTrash?(trashId: string): Promise<ArrayBuffer | Uint8Array | null>;
+  referenced?(path: string): Promise<boolean>;
   beginSemanticEvidence?: ChangeSetExecutionAdapter["beginSemanticEvidence"];
   awaitSemanticEvidence?: ChangeSetExecutionAdapter["awaitSemanticEvidence"];
   semanticEvidencePublishesSnapshot?: boolean;
@@ -169,6 +216,7 @@ export interface NodeFileSystemChangeSetHostOptions {
     path: string,
     bytes: Uint8Array,
   ): Promise<void>;
+  referenced?(path: string): Promise<boolean>;
   beginSemanticEvidence?: NonNullable<ChangeSetExecutionAdapter["beginSemanticEvidence"]>;
   awaitSemanticEvidence: NonNullable<ChangeSetExecutionAdapter["awaitSemanticEvidence"]>;
   semanticEvidencePublishesSnapshot?: boolean;
@@ -229,14 +277,26 @@ export async function createNodeFileSystemChangeSetHost(
     const absolute = publicPath(path);
     if (!isWithin(root, absolute)) throw new Error("Vault path escaped containment");
     const inspected = mode === "destination" ? dirname(absolute) : absolute;
-    const nearest = await realpath(inspected).catch(async (error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-      return realpath(dirname(inspected));
-    });
-    if (!isWithin(root, nearest)) throw new Error("Vault path escaped containment");
-    if (mode === "existing" && (await lstat(absolute)).isSymbolicLink()) {
-      throw new Error("Symbolic links cannot be mutated through Change Sets");
+    if (mode === "existing") {
+      try {
+        if ((await lstat(absolute)).isSymbolicLink()) {
+          throw new Error("Symbolic links cannot be mutated through Change Sets");
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
+    let nearest = inspected;
+    while (true) {
+      try {
+        nearest = await realpath(nearest);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        nearest = dirname(nearest);
+      }
+    }
+    if (!isWithin(root, nearest)) throw new Error("Vault path escaped containment");
     return absolute;
   };
   return {
@@ -371,6 +431,7 @@ export async function createNodeFileSystemChangeSetHost(
         throw error;
       }
     },
+    ...(options.referenced === undefined ? {} : { referenced: options.referenced }),
     beginSemanticEvidence: options.beginSemanticEvidence,
     awaitSemanticEvidence: options.awaitSemanticEvidence,
     semanticEvidencePublishesSnapshot: options.semanticEvidencePublishesSnapshot,
@@ -464,6 +525,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   }
   if (
     (frame.schemaVersion !== 1 &&
+      frame.schemaVersion !== 2 &&
       frame.schemaVersion !== RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION) ||
     typeof frame.vaultId !== "string" ||
     frame.vaultId.length === 0 ||
@@ -474,8 +536,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
     frame.input === null ||
     !Array.isArray(frame.directories) ||
     (frame.schemaVersion === 1 && frame.files !== undefined) ||
-    (frame.schemaVersion === RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION &&
-      !Array.isArray(frame.files)) ||
+    (frame.schemaVersion !== 1 && !Array.isArray(frame.files)) ||
     typeof frame.preview !== "object" ||
     frame.preview === null
   ) {
@@ -523,8 +584,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
             (file.beforeIdentity !== undefined &&
               typeof file.beforeIdentity !== "string") ||
             (file.identity !== undefined && typeof file.identity !== "string") ||
-            (file.stageId !== undefined && !isPrivateId(file.stageId)) ||
-            (file.trashId !== undefined && !isPrivateId(file.trashId)),
+            (file.stageId !== undefined && !isPrivateId(file.stageId)),
         ))) ||
     (frame.mutations !== undefined &&
       (!Array.isArray(frame.mutations) ||
@@ -539,7 +599,11 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
               typeof mutation.path !== "string" ||
               !isPrivateId(mutation.trashId) ||
               !isRecoveryState(mutation.before) ||
-              !isRecoveryState(mutation.expectedAfter)
+              !isRecoveryState(mutation.expectedAfter) ||
+              (frame.schemaVersion === RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION &&
+                typeof mutation.referencedBefore !== "boolean") ||
+              (mutation.referencedBefore !== undefined &&
+                typeof mutation.referencedBefore !== "boolean")
             );
           }
           return (
@@ -638,6 +702,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
       ? {}
       : { discardTrash: options.host.discardTrash }),
     ...(options.host.readTrash === undefined ? {} : { readTrash: options.host.readTrash }),
+    ...(options.host.referenced === undefined ? {} : { referenced: options.host.referenced }),
     ...(options.host.beginSemanticEvidence === undefined
       ? {}
       : { beginSemanticEvidence: options.host.beginSemanticEvidence }),

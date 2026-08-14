@@ -309,7 +309,7 @@
           "additionalProperties": false
         },
         {
-          "anyOf": [
+          "oneOf": [
             {
               "type": "object",
               "properties": {

@@ -43,3 +43,11 @@ _Avoid_: Read lock, search result
 **Recovery Journal**:
 Short-lived durable state that lets the Vault Operation Bridge restore an interrupted Change Set before accepting further writes. It exists only for crash recovery and is removed after success or completed restoration.
 _Avoid_: Audit log, version history, Git backup
+
+**Managed Trash**:
+The Bridge-owned private trash location inside the Vault's Bridge state directory. Trashing a note or attachment hard-links its exact bytes there before the public path disappears, so every trash is reversible during crash recovery and the Bridge never permanently deletes Vault content. Its private paths never appear in public results.
+_Avoid_: Recycle bin, system trash, deletion
+
+**Semantic Evidence**:
+The Obsidian-layer confirmation that a Change Set's mutations became visible to the rest of the Vault — required Vault events for ordinary operations, plus targeted metadata-cache and reference probes for Managed Trash and restore, which emit no generic events. Success is reported only after Semantic Evidence converges within its deadline; otherwise the Change Set rolls back or fails closed.
+_Avoid_: Indexing, search results, cache warm-up

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   createFileSystemChangeSetExecutionAdapter,
   type ChangeSetExecutionHost,
   type RecoveryJournalJson,
@@ -107,6 +108,65 @@ describe("filesystem Change Set execution frame compatibility", () => {
       schemaVersion: 2,
       files: [],
     });
+    await adapter.close?.();
+  });
+
+  it("accepts legacy schema 2 trash frames without reference evidence", async () => {
+    const journalPath = await writeFrame(2, {
+      files: [],
+      mutations: [{
+        kind: "trash",
+        operationId: "trash-1",
+        path: "Note.md",
+        before: {
+          kind: "markdown",
+          contentVersion:
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          bytesBase64: "",
+        },
+        expectedAfter: { kind: "absent" },
+        trashId: "change-set-a/0",
+      }],
+    });
+    const adapter = await createFileSystemChangeSetExecutionAdapter({
+      journalPath,
+      slotCapacity: 4096,
+      host,
+    });
+
+    await expect(adapter.loadRecoveryFrame()).resolves.toMatchObject({
+      schemaVersion: 2,
+      mutations: [{ kind: "trash", operationId: "trash-1" }],
+    });
+    await adapter.close?.();
+  });
+
+  it("rejects current trash frames without durable reference evidence", async () => {
+    const journalPath = await writeFrame(RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION, {
+      files: [],
+      mutations: [{
+        kind: "trash",
+        operationId: "trash-1",
+        path: "Note.md",
+        before: {
+          kind: "markdown",
+          contentVersion:
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          bytesBase64: "",
+        },
+        expectedAfter: { kind: "absent" },
+        trashId: "change-set-a/0",
+      }],
+    });
+    const adapter = await createFileSystemChangeSetExecutionAdapter({
+      journalPath,
+      slotCapacity: 4096,
+      host,
+    });
+
+    await expect(adapter.loadRecoveryFrame()).rejects.toThrow(
+      "Recovery Journal payload is corrupt or incompatible",
+    );
     await adapter.close?.();
   });
 });
