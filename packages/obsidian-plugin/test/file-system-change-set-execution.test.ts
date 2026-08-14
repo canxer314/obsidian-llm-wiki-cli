@@ -111,7 +111,7 @@ describe("filesystem Change Set execution frame compatibility", () => {
     await adapter.close?.();
   });
 
-  it("rejects current trash frames without durable reference evidence", async () => {
+  it("rejects schema 2 trash frames without durable reference evidence", async () => {
     const journalPath = await writeFrame(RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION, {
       files: [],
       mutations: [{

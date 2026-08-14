@@ -475,7 +475,6 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
   }
   if (
     (frame.schemaVersion !== 1 &&
-      frame.schemaVersion !== 2 &&
       frame.schemaVersion !== RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION) ||
     typeof frame.vaultId !== "string" ||
     frame.vaultId.length === 0 ||
@@ -541,10 +540,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
               !isPrivateId(mutation.trashId) ||
               !isRecoveryState(mutation.before) ||
               !isRecoveryState(mutation.expectedAfter) ||
-              (frame.schemaVersion === RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION &&
-                typeof mutation.referencedBefore !== "boolean") ||
-              (mutation.referencedBefore !== undefined &&
-                typeof mutation.referencedBefore !== "boolean")
+              typeof mutation.referencedBefore !== "boolean"
             );
           }
           return (

@@ -17,8 +17,7 @@ import {
 export const CHANGE_SET_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const CHANGE_SET_REGISTRY_SCHEMA_VERSION = 2;
 const LEGACY_CHANGE_SET_REGISTRY_SCHEMA_VERSION = 1;
-export const RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 3;
-const LEGACY_RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 2;
+export const RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION = 2;
 
 export interface ChangeSetExecutionState {
   phase: "queued" | "executing" | "terminal";
@@ -156,14 +155,11 @@ export type RecoveryMutation =
       expectedAfter: RecoveryFileState;
       trashId: string;
       /** Durable incoming-reference state captured before the public path disappears. */
-      referencedBefore?: boolean;
+      referencedBefore: boolean;
     };
 
 export interface RecoveryJournalFrame {
-  schemaVersion:
-    | 1
-    | typeof LEGACY_RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION
-    | typeof RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION;
+  schemaVersion: 1 | typeof RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION;
   vaultId: string;
   changeSetId: string;
   enqueueSeq: number;
@@ -584,6 +580,7 @@ interface MutationKindDescriptor {
     operationIndex: number,
     changeSetId: string,
     states: Map<string, RecoveryFileState>,
+    referenceBaselines: ReadonlyMap<string, boolean>,
   ): RecoveryMutation;
   execute(execution: ChangeSetExecutionAdapter, mutation: RecoveryMutation): Promise<void>;
   planRestore(
@@ -786,14 +783,16 @@ const trashDescriptor: MutationKindDescriptor = {
     operationIndex,
     changeSetId,
     states,
+    referenceBaselines,
   ) {
     const before = states.get(operation.path);
+    const referencedBefore = referenceBaselines.get(operation.path);
     const evidenceMatches = before !== undefined && before.kind !== "absent" && (
       "targetVersion" in operation
         ? before.kind === "markdown" && before.contentVersion === operation.targetVersion
         : before.kind === "attachment" && before.sha256 === operation.expectedSha256
     );
-    if (!evidenceMatches || before === undefined) {
+    if (!evidenceMatches || before === undefined || referencedBefore === undefined) {
       throw new Error("Managed trash recovery evidence is incomplete");
     }
     const expectedAfter = { kind: "absent" } as const;
@@ -805,6 +804,7 @@ const trashDescriptor: MutationKindDescriptor = {
       before,
       expectedAfter,
       trashId: `${changeSetId}/${operationIndex}`,
+      referencedBefore,
     };
   },
   async execute(execution, mutation: Extract<RecoveryMutation, { kind: "trash" }>) {
@@ -857,13 +857,7 @@ const EXECUTABLE_OPERATION_KINDS: readonly ChangeSetOperation["kind"][] = [
 ];
 
 function recoveryMutationsEqual(left: RecoveryMutation, right: RecoveryMutation): boolean {
-  const withoutReferenceBaseline = (mutation: RecoveryMutation): RecoveryMutation => {
-    if (mutation.kind !== "trash") return mutation;
-    const { referencedBefore: _referencedBefore, ...rest } = mutation;
-    return rest;
-  };
-  return JSON.stringify(canonicalize(withoutReferenceBaseline(left))) ===
-    JSON.stringify(canonicalize(withoutReferenceBaseline(right)));
+  return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
 }
 
 
@@ -1034,6 +1028,13 @@ function recoveryPlanMatchesFrame(frame: RecoveryJournalFrame): boolean {
 
   const states = new Map(files.map(({ path, before }) => [path, before]));
   const mutations = frame.mutations ?? [];
+  const referenceBaselines = new Map(
+    mutations.flatMap((mutation) =>
+      mutation.kind === "trash"
+        ? [[mutation.path, mutation.referencedBefore] as const]
+        : []
+    ),
+  );
   let mutationIndex = 0;
   for (const [operationIndex, operation] of frame.input.operations.entries()) {
     if (operation.kind === "create_directory") continue;
@@ -1057,6 +1058,7 @@ function recoveryPlanMatchesFrame(frame: RecoveryJournalFrame): boolean {
         operationIndex,
         frame.changeSetId,
         states,
+        referenceBaselines,
       );
     } catch {
       return false;
@@ -1572,7 +1574,7 @@ export class ChangeSetService {
         hiddenTrash: frame.input.operations.some(({ kind }) => kind === "trash"),
         requiredEvents: [],
         referenceBaselines: (frame.mutations ?? []).flatMap((mutation) =>
-          mutation.kind === "trash" && typeof mutation.referencedBefore === "boolean"
+          mutation.kind === "trash"
             ? [{ path: mutation.path, referenced: mutation.referencedBefore }]
             : []
         ),
@@ -2063,7 +2065,22 @@ export class ChangeSetService {
         }),
     );
     const mutationStates = new Map(files.map(({ path, before }) => [path, before]));
-    let mutations: RecoveryMutation[] = [];
+    const trashPaths = plan.input.operations.flatMap((operation) =>
+      operation.kind === "trash" ? [operation.path] : []
+    );
+    const referenceBaselines = new Map<string, boolean>();
+    if (trashPaths.length > 0) {
+      const readReferenceState = execution.referenced?.bind(execution);
+      if (readReferenceState === undefined) {
+        throw new Error("Managed trash reference evidence is unavailable");
+      }
+      await Promise.all(
+        trashPaths.map(async (path) => {
+          referenceBaselines.set(path, await readReferenceState(path));
+        }),
+      );
+    }
+    const mutations: RecoveryMutation[] = [];
     plan.input.operations.forEach((operation, operationIndex) => {
       if (!isMutationOperation(operation)) return;
       mutations.push(
@@ -2072,31 +2089,10 @@ export class ChangeSetService {
           operationIndex,
           entry.changeSetId,
           mutationStates,
+          referenceBaselines,
         ),
       );
     });
-    const trashMutations = mutations.filter(
-      (mutation): mutation is Extract<RecoveryMutation, { kind: "trash" }> =>
-        mutation.kind === "trash",
-    );
-    if (trashMutations.length > 0) {
-      const readReferenceState = execution.referenced?.bind(execution);
-      if (readReferenceState === undefined) {
-        throw new Error("Managed trash reference evidence is unavailable");
-      }
-      const withReferenceBaselines = await Promise.all(
-        trashMutations.map(async (mutation) => ({
-          ...mutation,
-          referencedBefore: await readReferenceState(mutation.path),
-        })),
-      );
-      const byOperationId = new Map(
-        withReferenceBaselines.map((mutation) => [mutation.operationId, mutation]),
-      );
-      mutations = mutations.map(
-        (mutation) => byOperationId.get(mutation.operationId) ?? mutation,
-      );
-    }
     let frame: RecoveryJournalFrame = {
       schemaVersion: RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
       vaultId: this.#options.vaultId ?? "vault",
