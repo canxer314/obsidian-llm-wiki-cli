@@ -3084,6 +3084,9 @@ describe("durable attachment and managed-trash Change Set execution", () => {
     await expect(host.readBinary?.("assets/escape/outside.bin")).rejects.toThrow(
       "Vault path escaped containment",
     );
+    await expect(host.pathKind("assets/escape/missing.bin")).rejects.toThrow(
+      "Vault path escaped containment",
+    );
     await expect(readFile(join(outside, "outside.bin"))).resolves.toEqual(Buffer.from(bytes));
   });
 
@@ -3115,7 +3118,9 @@ describe("durable attachment and managed-trash Change Set execution", () => {
       temporaryRoots.push(outside);
       await mkdir(join(root, "assets"));
       const bytes = Uint8Array.from([4, 5, 6]);
+      await writeFile(join(root, "assets", "inside.bin"), bytes);
       await writeFile(join(outside, "outside.bin"), bytes);
+      await symlink(join(root, "assets", "inside.bin"), join(root, "assets", "inside-link.bin"), "file");
       await symlink(join(outside, "outside.bin"), join(root, "assets", "link.bin"), "file");
       const host = await createNodeFileSystemChangeSetHost({
         basePath: root,
@@ -3132,6 +3137,12 @@ describe("durable attachment and managed-trash Change Set execution", () => {
       );
       await expect(host.pathKind("assets/link.bin")).rejects.toThrow(
         "Symbolic links cannot be mutated through Change Sets",
+      );
+      await expect(host.pathKind("assets/inside-link.bin")).rejects.toThrow(
+        "Symbolic links cannot be mutated through Change Sets",
+      );
+      await expect(readFile(join(root, "assets", "inside.bin"))).resolves.toEqual(
+        Buffer.from(bytes),
       );
       await expect(readFile(join(outside, "outside.bin"))).resolves.toEqual(
         Buffer.from(bytes),

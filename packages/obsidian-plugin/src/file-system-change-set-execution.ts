@@ -270,14 +270,20 @@ export async function createNodeFileSystemChangeSetHost(
     const absolute = publicPath(path);
     if (!isWithin(root, absolute)) throw new Error("Vault path escaped containment");
     const inspected = mode === "destination" ? dirname(absolute) : absolute;
+    if (mode === "existing") {
+      try {
+        if ((await lstat(absolute)).isSymbolicLink()) {
+          throw new Error("Symbolic links cannot be mutated through Change Sets");
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     const nearest = await realpath(inspected).catch(async (error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
       return realpath(dirname(inspected));
     });
     if (!isWithin(root, nearest)) throw new Error("Vault path escaped containment");
-    if (mode === "existing" && (await lstat(absolute)).isSymbolicLink()) {
-      throw new Error("Symbolic links cannot be mutated through Change Sets");
-    }
     return absolute;
   };
   return {

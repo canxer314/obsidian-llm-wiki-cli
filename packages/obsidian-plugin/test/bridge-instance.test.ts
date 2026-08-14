@@ -121,11 +121,13 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
             ],
           },
         }),
-        client.callTool({
+      ]);
+      calls.push(
+        await client.callTool({
           name: "vault_change_set_status",
           arguments: { submissionKey: "blocked-key" },
         }),
-      ]);
+      );
 
       expect(calls[0]).toMatchObject({
         isError: false,
