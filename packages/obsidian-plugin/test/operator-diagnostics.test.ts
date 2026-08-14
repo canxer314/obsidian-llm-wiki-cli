@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  createContentInclusiveDiagnosticData,
   createStandardDiagnosticBundle,
+  requestContentInclusiveDiagnosticData,
   type StandardDiagnosticSource,
 } from "../src/operator-diagnostics.js";
 
@@ -85,20 +85,20 @@ describe("standard local operator diagnostics", () => {
     expect(changed.checksum).not.toBe(first.checksum);
   });
 
-  it("requires a local interactive confirmation for selected content-inclusive data", () => {
-    expect(() =>
-      createContentInclusiveDiagnosticData(
-        { confirmedByPrimaryOperator: false, source: "agent" },
+  it("requires a local interactive confirmation for selected content-inclusive data", async () => {
+    await expect(
+      requestContentInclusiveDiagnosticData(
+        async () => false,
         [{ label: "selected-note", content: "private note" }],
       ),
-    ).toThrow(/local interactive Primary Operator/u);
+    ).rejects.toThrow(/not confirmed/u);
 
-    expect(
-      createContentInclusiveDiagnosticData(
-        { confirmedByPrimaryOperator: true, source: "local_interactive" },
+    await expect(
+      requestContentInclusiveDiagnosticData(
+        async () => true,
         [{ label: "selected-note", content: "private note" }],
       ),
-    ).toEqual({
+    ).resolves.toEqual({
       format: "llm-wiki-content-diagnostics-v1",
       selections: [{ label: "selected-note", content: "private note" }],
     });

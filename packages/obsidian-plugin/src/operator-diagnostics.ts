@@ -109,27 +109,17 @@ function canonicalize(value: unknown): unknown {
   );
 }
 
-export interface ContentInclusiveDiagnosticAuthorization {
-  confirmedByPrimaryOperator: boolean;
-  source: "local_interactive" | "agent";
-}
-
 export interface ContentInclusiveDiagnosticData {
   format: "llm-wiki-content-diagnostics-v1";
   selections: readonly { label: string; content: string }[];
 }
 
-export function createContentInclusiveDiagnosticData(
-  authorization: ContentInclusiveDiagnosticAuthorization,
+export async function requestContentInclusiveDiagnosticData(
+  confirm: () => boolean | Promise<boolean>,
   selections: readonly { label: string; content: string }[],
-): ContentInclusiveDiagnosticData {
-  if (
-    authorization.source !== "local_interactive" ||
-    authorization.confirmedByPrimaryOperator !== true
-  ) {
-    throw new Error(
-      "Content-inclusive diagnostics require a local interactive Primary Operator confirmation",
-    );
+): Promise<ContentInclusiveDiagnosticData> {
+  if (!(await confirm())) {
+    throw new Error("Content-inclusive diagnostics were not confirmed by the Primary Operator");
   }
   return {
     format: "llm-wiki-content-diagnostics-v1",

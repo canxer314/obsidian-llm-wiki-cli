@@ -62,8 +62,8 @@ export interface ChangeSetRegistryState {
   writeMode?: ChangeSetWriteMode;
   lifecycle?: PersistedChangeSetLifecycle;
   recovery?:
-    | { state: "blocked" }
-    | { state: "baseline_accepted" }
+    | { state: "blocked"; changeSetId: string }
+    | { state: "baseline_accepted"; changeSetId: string }
     | { state: "none" };
 }
 
@@ -445,14 +445,16 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
     throw new Error("Change Set registry is corrupt or incompatible");
   }
   const recovery = state.recovery;
-  if (
-    (isLegacy && recovery !== undefined) ||
-    (recovery !== undefined &&
-      (typeof recovery !== "object" ||
-        recovery === null ||
-        !["blocked", "baseline_accepted", "none"].includes(recovery.state) ||
-        Object.keys(recovery).join(",") !== "state"))
-  ) {
+  const validRecovery =
+    recovery === undefined ||
+    (typeof recovery === "object" &&
+      recovery !== null &&
+      (recovery.state === "none"
+        ? Object.keys(recovery).join(",") === "state"
+        : ["blocked", "baseline_accepted"].includes(recovery.state) &&
+          isNonEmptyString(recovery.changeSetId) &&
+          Object.keys(recovery).sort().join(",") === "changeSetId,state"));
+  if ((isLegacy && recovery !== undefined) || !validRecovery) {
     throw new Error("Change Set registry is corrupt or incompatible");
   }
   return {
@@ -1293,7 +1295,7 @@ export class ChangeSetService {
           : {}),
       };
       if (current.execution !== undefined) current.execution.phase = "terminal";
-      nextState.recovery = { state: "blocked" };
+      nextState.recovery = { state: "blocked", changeSetId: current.changeSetId };
       await this.#save(nextState);
       this.#dequeuePaused = true;
       this.#admissionGate = { code: "recovery_blocked" };
@@ -1732,7 +1734,8 @@ export class ChangeSetService {
         if (execution === undefined) {
           throw new Error("Recovery Journal access is unavailable");
         }
-        if (this.#state.recovery?.state === "baseline_accepted") {
+        const recovery = this.#state.recovery;
+        if (recovery?.state === "baseline_accepted") {
           if (execution.clearRecoveryFrame === undefined) {
             throw new Error("Recovery Journal clearing is unavailable");
           }
@@ -1747,19 +1750,26 @@ export class ChangeSetService {
           });
           return;
         }
-        if (!this.#recoveryBlocked || this.#state.recovery?.state !== "blocked") {
+        if (!this.#recoveryBlocked || recovery?.state !== "blocked") {
           throw new Error("No recovery-blocked state awaits a trusted baseline");
         }
         const unresolved = this.#state.entries.filter(
           ({ changeSet, execution }) =>
             changeSet.state === "result_unproven" && execution?.phase === "terminal",
         );
-        if (unresolved.length === 0 || this.#currentExecutionId !== null) {
+        if (
+          unresolved.length !== 1 ||
+          unresolved[0]?.changeSetId !== recovery.changeSetId ||
+          this.#currentExecutionId !== null
+        ) {
           throw new Error("Recovery proof state does not permit baseline acceptance");
         }
         const frame = await execution.loadRecoveryFrame();
         if (frame === null || frame.phase !== "FAILED") {
           throw new Error("Recovery Journal is not eligible for baseline acceptance");
+        }
+        if (frame.changeSetId !== recovery.changeSetId) {
+          throw new Error("Recovery Journal does not match the blocked proof state");
         }
         if (execution.clearRecoveryFrame === undefined) {
           throw new Error("Recovery Journal clearing is unavailable");
@@ -1768,7 +1778,10 @@ export class ChangeSetService {
         await recheckTrustedBaseline();
         await this.#serialize(async () => {
           const nextState = structuredClone(this.#state);
-          nextState.recovery = { state: "baseline_accepted" };
+          nextState.recovery = {
+            state: "baseline_accepted",
+            changeSetId: recovery.changeSetId,
+          };
           nextState.writeMode = "manual_paused";
           await this.#save(nextState);
         });

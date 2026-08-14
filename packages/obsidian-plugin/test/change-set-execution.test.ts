@@ -25,6 +25,7 @@ import {
   RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
   createFileSystemChangeSetExecutionAdapter,
   createNodeFileSystemChangeSetHost,
+  fingerprintChangeSetRequest,
   type ChangeSetExecutionAdapter,
   type ChangeSetRegistryState,
   type ChangeSetRegistryStore,
@@ -930,6 +931,13 @@ describe("durable Markdown Change Set execution", () => {
     );
     expect(adapter.frame?.phase).toBe("FAILED");
     expect(blocked).toEqual(["change-set-third-party-file"]);
+    const matchingFrame = structuredClone(adapter.frame!);
+    adapter.frame = { ...matchingFrame, changeSetId: "different-change-set" };
+    await expect(
+      recovered.acceptTrustedRecoveryBaseline(async () => undefined),
+    ).rejects.toThrow(/does not match/u);
+    expect(adapter.frame?.changeSetId).toBe("different-change-set");
+    adapter.frame = matchingFrame;
     await expect(
       recovered.status({ submissionKey: "third-party-file-key" }, requestState),
     ).resolves.toMatchObject({
@@ -985,11 +993,9 @@ describe("durable Markdown Change Set execution", () => {
       ],
       tombstones: [],
     };
-    // Use the canonical fingerprint rather than coupling this test to its literal encoding.
-    store.state.entries[0]!.fingerprint = createHash("sha256")
-      .update(JSON.stringify({ operations: createDirectory("unproven-key").operations }))
-      .digest("hex");
-    store.state.entries[0]!.fingerprint = `sha256:${store.state.entries[0]!.fingerprint}`;
+    store.state.entries[0]!.fingerprint = fingerprintChangeSetRequest(
+      createDirectory("unproven-key"),
+    );
 
     const service = await ChangeSetService.open({
       store,
@@ -1008,8 +1014,69 @@ describe("durable Markdown Change Set execution", () => {
     ).rejects.toThrow("baseline scan failed");
     expect(adapter.frame?.phase).toBe("FAILED");
     expect(store.state?.writeMode).toBeUndefined();
-    expect(store.state?.recovery).toEqual({ state: "blocked" });
+    expect(store.state?.recovery).toEqual({
+      state: "blocked",
+      changeSetId: "change-set-unproven",
+    });
     await expect(service.resume()).rejects.toThrow(/Recovery/u);
+  });
+
+  it("keeps a mismatched failed Recovery Journal blocked", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.identities.set("Notes", "notes-directory");
+    adapter.files.set("Notes/Bound.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/Bound.md", "before-identity");
+    const version = `sha256:${createHash("sha256").update("before").digest("hex")}`;
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-bound",
+      crashInjector: (point) => {
+        if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "bound-key",
+          operations: [{
+            operationId: "edit-bound",
+            kind: "edit_body",
+            path: "Notes/Bound.md",
+            targetVersion: version,
+            edit: { kind: "replace_whole", replacement: "after" },
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    adapter.files.set("Notes/Bound.md", Buffer.from("third party"));
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState: new RecordingRuntimeState(),
+    });
+    adapter.frame = { ...adapter.frame!, changeSetId: "unrelated-change-set" };
+    await expect(
+      service.acceptTrustedRecoveryBaseline(async () => undefined),
+    ).rejects.toThrow(/does not match/u);
+    expect(store.state?.recovery).toEqual({
+      state: "blocked",
+      changeSetId: "change-set-bound",
+    });
+    expect(adapter.frame.changeSetId).toBe("unrelated-change-set");
   });
 
   it("revalidates target versions, absence, and Read Dependencies under the write lease", async () => {

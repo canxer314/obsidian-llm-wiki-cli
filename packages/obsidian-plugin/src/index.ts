@@ -47,9 +47,8 @@ export {
   type NodeFileSystemChangeSetHostOptions,
 } from "./file-system-change-set-execution.js";
 export {
-  createContentInclusiveDiagnosticData,
   createStandardDiagnosticBundle,
-  type ContentInclusiveDiagnosticAuthorization,
+  requestContentInclusiveDiagnosticData,
   type ContentInclusiveDiagnosticData,
   type StandardDiagnosticBundle,
   type StandardDiagnosticSource,

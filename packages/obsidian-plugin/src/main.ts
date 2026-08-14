@@ -14,6 +14,7 @@ import {
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
+import { requestContentInclusiveDiagnosticData } from "./operator-diagnostics.js";
 import { BRIDGE_STATE_DIRECTORY_NAME } from "./change-set.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import {
@@ -317,6 +318,26 @@ export default class VaultOperationBridgePlugin extends Plugin {
       callback: async () => {
         const bundle = await runtime.createStandardDiagnosticBundle();
         await navigator.clipboard.writeText(`${JSON.stringify(bundle, null, 2)}\n`);
+      },
+    });
+    this.addCommand({
+      id: "copy-selected-content-inclusive-diagnostics",
+      name: "Copy selected content-inclusive diagnostics",
+      editorCheckCallback: (checking, editor) => {
+        const content = editor.getSelection();
+        if (content.length === 0) return false;
+        if (!checking) {
+          void requestContentInclusiveDiagnosticData(
+            () =>
+              window.confirm(
+                "Include the currently selected Vault content in a local diagnostic copy?",
+              ),
+            [{ label: "primary-operator-selection", content }],
+          ).then((diagnostics) =>
+            navigator.clipboard.writeText(`${JSON.stringify(diagnostics, null, 2)}\n`),
+          );
+        }
+        return true;
       },
     });
     this.addCommand({
