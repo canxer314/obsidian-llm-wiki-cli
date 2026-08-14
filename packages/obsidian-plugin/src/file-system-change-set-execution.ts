@@ -279,10 +279,16 @@ export async function createNodeFileSystemChangeSetHost(
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    const nearest = await realpath(inspected).catch(async (error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-      return realpath(dirname(inspected));
-    });
+    let nearest = inspected;
+    while (true) {
+      try {
+        nearest = await realpath(nearest);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        nearest = dirname(nearest);
+      }
+    }
     if (!isWithin(root, nearest)) throw new Error("Vault path escaped containment");
     return absolute;
   };

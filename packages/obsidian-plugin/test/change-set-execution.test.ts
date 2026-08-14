@@ -3087,6 +3087,15 @@ describe("durable attachment and managed-trash Change Set execution", () => {
     await expect(host.pathKind("assets/escape/missing.bin")).rejects.toThrow(
       "Vault path escaped containment",
     );
+    await expect(host.readBinary?.("assets/escape/missing/leaf.bin")).rejects.toThrow(
+      "Vault path escaped containment",
+    );
+    await expect(host.pathKind("assets/escape/missing/leaf.bin")).rejects.toThrow(
+      "Vault path escaped containment",
+    );
+    await expect(host.removeFile?.("assets/escape/missing/leaf.bin")).rejects.toThrow(
+      "Vault path escaped containment",
+    );
     await expect(readFile(join(outside, "outside.bin"))).resolves.toEqual(Buffer.from(bytes));
   });
 
