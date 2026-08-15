@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createBoundedTransitionWork,
   runBoundedDeliveryWorker,
   type PreflightCheck,
 } from "../src/index.js";
@@ -8,6 +9,53 @@ const failedPreflight: PreflightCheck = {
   name: "docker",
   check: async () => ({ ok: false, reason: "daemon unavailable" }),
 };
+
+describe("createBoundedTransitionWork", () => {
+  it("binds one lease-protected transition to the freshly reconstructed snapshot", () => {
+    const snapshot = {
+      number: 64,
+      open: true,
+      labels: ["ready-for-agent"],
+      openBlockerNumbers: [],
+      dependencyDataComplete: true,
+    };
+
+    expect(createBoundedTransitionWork({
+      repository: "acme/wiki",
+      snapshot,
+      leaseId: "123:2",
+      workflowRun: { id: "123", attempt: 2 },
+      policy: { readyLabel: "ready-for-agent", prohibitedLabel: "afk:prohibited" },
+    })).toEqual({
+      schemaVersion: 1,
+      repository: "acme/wiki",
+      ticket: snapshot,
+      lease: { status: "acquired", leaseId: "123:2" },
+      workflowRun: { id: "123", attempt: 2 },
+      maximumTransitions: 1,
+    });
+  });
+
+  it.each([
+    ["an Open Blocker", ["ready-for-agent"], [63]],
+    ["the AFK prohibition", ["ready-for-agent", "afk:prohibited"], []],
+    ["missing delivery authorization", [], []],
+  ])("rejects snapshots with %s instead of dispatching them", (_name, labels, openBlockerNumbers) => {
+    expect(() => createBoundedTransitionWork({
+      repository: "acme/wiki",
+      snapshot: {
+        number: 64,
+        open: true,
+        labels,
+        openBlockerNumbers,
+        dependencyDataComplete: true,
+      },
+      leaseId: "123:1",
+      workflowRun: { id: "123", attempt: 1 },
+      policy: { readyLabel: "ready-for-agent", prohibitedLabel: "afk:prohibited" },
+    })).toThrow("not in the Delivery Frontier");
+  });
+});
 
 describe("runBoundedDeliveryWorker", () => {
   it("performs no GitHub state mutation when preflight fails", async () => {

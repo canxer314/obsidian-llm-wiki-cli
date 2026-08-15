@@ -74,8 +74,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery reconstruct ${{ matrix.ticket }}
-      - name: Dispatch one bounded transition
+      - id: transition
+        name: Dispatch one bounded transition
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AFK_DELIVERY_SNAPSHOT: ${{ steps.current.outputs.snapshot }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery dispatch ${{ matrix.ticket }}

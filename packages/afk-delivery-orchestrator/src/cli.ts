@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
+  createBoundedTransitionWork,
   discoverDeliveryFrontier,
   runWorkerPreflight,
   type GitHubReadPort,
@@ -88,14 +89,18 @@ function preflightChecks(): PreflightCheck[] {
   ];
 }
 
-async function discover(): Promise<void> {
+async function loadFrontier() {
   const { owner, repository } = repositoryParts();
-  const result = await discoverDeliveryFrontier(new GitHubApi(), {
+  return discoverDeliveryFrontier(new GitHubApi(), {
     owner,
     repository,
     readyLabel: process.env.AFK_READY_LABEL ?? "ready-for-agent",
     prohibitedLabel: process.env.AFK_PROHIBITED_LABEL ?? "afk:prohibited",
   });
+}
+
+async function discover(): Promise<void> {
+  const result = await loadFrontier();
   await writeOutput("tickets", JSON.stringify(result.frontier.map((ticket) => ticket.number)));
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
@@ -107,13 +112,7 @@ async function preflight(): Promise<void> {
 }
 
 async function reconstruct(ticketNumber: number): Promise<void> {
-  const { owner, repository } = repositoryParts();
-  const result = await discoverDeliveryFrontier(new GitHubApi(), {
-    owner,
-    repository,
-    readyLabel: process.env.AFK_READY_LABEL ?? "ready-for-agent",
-    prohibitedLabel: process.env.AFK_PROHIBITED_LABEL ?? "afk:prohibited",
-  });
+  const result = await loadFrontier();
   const ticket = result.frontier.find((candidate) => candidate.number === ticketNumber);
   if (ticket === undefined) throw new Error(`Delivery Ticket #${ticketNumber} is no longer in the Delivery Frontier`);
   await writeOutput("snapshot", JSON.stringify(ticket));
@@ -121,8 +120,25 @@ async function reconstruct(ticketNumber: number): Promise<void> {
 }
 
 async function dispatch(ticketNumber: number): Promise<void> {
-  const leaseId = `${requiredEnvironment("GITHUB_RUN_ID")}:${requiredEnvironment("GITHUB_RUN_ATTEMPT")}`;
-  process.stdout.write(`${JSON.stringify({ ticketNumber, lease: { status: "acquired", leaseId }, maximumTransitions: 1 })}\n`);
+  const runId = requiredEnvironment("GITHUB_RUN_ID");
+  const attempt = Number(requiredEnvironment("GITHUB_RUN_ATTEMPT"));
+  const value: unknown = JSON.parse(requiredEnvironment("AFK_DELIVERY_SNAPSHOT"));
+  if (typeof value !== "object" || value === null || (value as { number?: unknown }).number !== ticketNumber ||
+      !Number.isInteger(attempt)) {
+    throw new Error("bounded transition input does not match the leased Delivery Ticket");
+  }
+  const work = createBoundedTransitionWork({
+    repository: repositoryParts().fullName,
+    snapshot: value as Parameters<typeof createBoundedTransitionWork>[0]["snapshot"],
+    leaseId: `${runId}:${attempt}`,
+    workflowRun: { id: runId, attempt },
+    policy: {
+      readyLabel: process.env.AFK_READY_LABEL ?? "ready-for-agent",
+      prohibitedLabel: process.env.AFK_PROHIBITED_LABEL ?? "afk:prohibited",
+    },
+  });
+  await writeOutput("transition_work", JSON.stringify(work));
+  process.stdout.write(`${JSON.stringify(work)}\n`);
 }
 
 const [operation, argument] = process.argv.slice(2);

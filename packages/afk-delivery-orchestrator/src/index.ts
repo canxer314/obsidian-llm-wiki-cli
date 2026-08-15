@@ -58,6 +58,38 @@ export async function runWorkerPreflight(
   return { status: "ready", checks };
 }
 
+export interface BoundedTransitionWork {
+  schemaVersion: 1;
+  repository: string;
+  ticket: DeliveryTicketSnapshot;
+  lease: { status: "acquired"; leaseId: string };
+  workflowRun: { id: string; attempt: number };
+  maximumTransitions: 1;
+}
+
+export function createBoundedTransitionWork(input: {
+  repository: string;
+  snapshot: DeliveryTicketSnapshot;
+  leaseId: string;
+  workflowRun: { id: string; attempt: number };
+  policy: { readyLabel: string; prohibitedLabel: string };
+}): BoundedTransitionWork {
+  if (!input.snapshot.open || !input.snapshot.dependencyDataComplete ||
+      input.snapshot.openBlockerNumbers.length > 0 ||
+      !input.snapshot.labels.includes(input.policy.readyLabel) ||
+      input.snapshot.labels.includes(input.policy.prohibitedLabel)) {
+    throw new Error(`Delivery Ticket #${input.snapshot.number} is not in the Delivery Frontier`);
+  }
+  return {
+    schemaVersion: 1,
+    repository: input.repository,
+    ticket: input.snapshot,
+    lease: { status: "acquired", leaseId: input.leaseId },
+    workflowRun: input.workflowRun,
+    maximumTransitions: 1,
+  };
+}
+
 export interface BoundedDeliveryWorkerPorts<Snapshot> {
   preflightChecks: PreflightCheck[];
   reconstruct(signal?: AbortSignal): Promise<Snapshot>;
