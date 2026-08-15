@@ -1,0 +1,83 @@
+name: AFK Delivery
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  discover:
+    runs-on: [self-hosted, afk-delivery]
+    timeout-minutes: 10
+    outputs:
+      tickets: ${{ steps.frontier.outputs.tickets }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w @llm-wiki/afk-delivery-orchestrator
+      - name: Worker preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
+          AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
+          AFK_DELIVERY_SKILL_MANIFEST: .sandcastle/skills.lock
+          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery preflight
+      - id: frontier
+        name: Discover Delivery Frontier
+        env:
+          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery discover
+
+  deliver:
+    needs: discover
+    if: needs.discover.outputs.tickets != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        ticket: ${{ fromJSON(needs.discover.outputs.tickets) }}
+    runs-on: [self-hosted, afk-delivery]
+    timeout-minutes: 30
+    concurrency:
+      group: afk-delivery-${{ github.repository }}-ticket-${{ matrix.ticket }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w @llm-wiki/afk-delivery-orchestrator
+      - name: Worker preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
+          AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
+          AFK_DELIVERY_SKILL_MANIFEST: .sandcastle/skills.lock
+          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery preflight
+      - id: current
+        name: Reconstruct current GitHub state
+        env:
+          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery reconstruct ${{ matrix.ticket }}
+      - id: transition
+        name: Dispatch one bounded transition
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AFK_DELIVERY_SNAPSHOT: ${{ steps.current.outputs.snapshot }}
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery dispatch ${{ matrix.ticket }}
