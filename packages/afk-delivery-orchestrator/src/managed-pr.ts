@@ -4,11 +4,12 @@ export interface ManagedControlEnvelope {
   repository: string;
   ticketNumber: number;
   prNumber: number;
+  targetBranch?: string;
   round: 0;
   transitionId: string;
   inputRevision: string;
   outputRevision: string;
-  disposition: "succeeded";
+  disposition: "succeeded" | "adopted";
   workflowRunId: string;
 }
 
@@ -71,7 +72,7 @@ function pullRequestBody(request: ManagedImplementationRequest): string {
   ].join("\n");
 }
 
-function envelopeComment(envelope: ManagedControlEnvelope, narrative: string): string {
+export function envelopeComment(envelope: ManagedControlEnvelope, narrative: string): string {
   return [
     ENVELOPE_PREFIX + JSON.stringify(envelope) + ENVELOPE_SUFFIX,
     "",
@@ -79,24 +80,34 @@ function envelopeComment(envelope: ManagedControlEnvelope, narrative: string): s
   ].join("\n");
 }
 
-function parseEnvelope(body: string): ManagedControlEnvelope | undefined {
+export function extractControlEnvelope(body: string): unknown | undefined {
   const start = body.indexOf(ENVELOPE_PREFIX);
   if (start < 0) return undefined;
   const jsonStart = start + ENVELOPE_PREFIX.length;
   const end = body.indexOf(ENVELOPE_SUFFIX, jsonStart);
   if (end < 0) return undefined;
   try {
-    const value: unknown = JSON.parse(body.slice(jsonStart, end));
+    return JSON.parse(body.slice(jsonStart, end)) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseManagedControlEnvelope(body: string): ManagedControlEnvelope | undefined {
+  try {
+    const value = extractControlEnvelope(body);
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
     const record = value as Record<string, unknown>;
     const allowedKeys = new Set([
-      "schemaVersion", "kind", "repository", "ticketNumber", "prNumber", "round",
+      "schemaVersion", "kind", "repository", "ticketNumber", "prNumber", "targetBranch", "round",
       "transitionId", "inputRevision", "outputRevision", "disposition", "workflowRunId",
     ]);
     if (Object.keys(record).some((key) => !allowedKeys.has(key))) return undefined;
     if (
       record.schemaVersion !== 1 || record.kind !== "managed-pr" || record.round !== 0 ||
-      record.disposition !== "succeeded" || !Number.isInteger(record.ticketNumber) ||
+      (record.disposition !== "succeeded" && record.disposition !== "adopted") ||
+      (record.targetBranch !== undefined && typeof record.targetBranch !== "string") ||
+      !Number.isInteger(record.ticketNumber) ||
       !Number.isInteger(record.prNumber) || typeof record.repository !== "string" ||
       typeof record.transitionId !== "string" || typeof record.workflowRunId !== "string" ||
       typeof record.inputRevision !== "string" || typeof record.outputRevision !== "string" ||
@@ -114,6 +125,7 @@ export function recognizeManagedPullRequest(
   policy: {
     repository: string;
     ticketNumber: number;
+    targetBranch?: string;
     trustedActors: Array<{ login: string; type: "Bot" | "App" }>;
   },
 ): { managed: true; ticketNumber: number; initialRevision: string } | { managed: false } {
@@ -122,19 +134,95 @@ export function recognizeManagedPullRequest(
       (actor) => actor.login === comment.author.login && actor.type === comment.author.type,
     );
     if (!trusted) continue;
-    const envelope = parseEnvelope(comment.body);
+    const envelope = parseManagedControlEnvelope(comment.body);
     if (
       envelope?.repository === policy.repository &&
       envelope.ticketNumber === policy.ticketNumber &&
       envelope.prNumber === pr.number &&
+      (policy.targetBranch === undefined ||
+        (pr.baseBranch === policy.targetBranch &&
+          (envelope.disposition !== "adopted" || envelope.targetBranch === policy.targetBranch))) &&
       envelope.inputRevision === envelope.outputRevision &&
       pr.body.includes(`Closes #${policy.ticketNumber}`) &&
-      pr.body.includes(pullRequestMarker(policy.ticketNumber, envelope.transitionId))
+      (envelope.disposition === "adopted" ||
+        pr.body.includes(pullRequestMarker(policy.ticketNumber, envelope.transitionId)))
     ) {
       return { managed: true, ticketNumber: policy.ticketNumber, initialRevision: envelope.outputRevision };
     }
   }
   return { managed: false };
+}
+
+export interface ManagedPullRequestAdoptionRequest {
+  repository: string;
+  ticketNumber: number;
+  prNumber: number;
+  targetBranch: string;
+  currentRevision: string;
+  transitionId: string;
+  workflowRunId: string;
+  trustedActor: { login: string; type: "Bot" | "App" };
+  narrative: string;
+}
+
+export async function adoptManagedPullRequest(
+  request: ManagedPullRequestAdoptionRequest,
+  ports: ManagedImplementationPorts,
+): Promise<{
+  prNumber: number;
+  currentRevision: string;
+  managementRecordCreated: boolean;
+}> {
+  const candidates = await ports.findOpenPullRequests(
+    request.ticketNumber,
+    "",
+    request.targetBranch,
+  );
+  const pr = candidates.find((candidate) => candidate.number === request.prNumber);
+  if (
+    candidates.length !== 1 ||
+    pr === undefined ||
+    pr.baseBranch !== request.targetBranch ||
+    pr.headRevision !== request.currentRevision
+  ) {
+    throw new Error("adoption requires one eligible PR at the exact current Revision and target branch");
+  }
+
+  const existing = pr.comments.some((comment) => {
+    if (comment.author.login !== request.trustedActor.login ||
+        comment.author.type !== request.trustedActor.type) return false;
+    const envelope = parseManagedControlEnvelope(comment.body);
+    return envelope?.disposition === "adopted" &&
+      envelope.repository === request.repository &&
+      envelope.ticketNumber === request.ticketNumber &&
+      envelope.prNumber === request.prNumber &&
+      envelope.targetBranch === request.targetBranch &&
+      envelope.inputRevision === request.currentRevision &&
+      envelope.outputRevision === request.currentRevision &&
+      envelope.transitionId === request.transitionId;
+  });
+  if (!existing) {
+    const envelope: ManagedControlEnvelope = {
+      schemaVersion: 1,
+      kind: "managed-pr",
+      repository: request.repository,
+      ticketNumber: request.ticketNumber,
+      prNumber: request.prNumber,
+      targetBranch: request.targetBranch,
+      round: 0,
+      transitionId: request.transitionId,
+      inputRevision: request.currentRevision,
+      outputRevision: request.currentRevision,
+      disposition: "adopted",
+      workflowRunId: request.workflowRunId,
+    };
+    await ports.postComment(pr.number, envelopeComment(envelope, request.narrative));
+  }
+  return {
+    prNumber: pr.number,
+    currentRevision: request.currentRevision,
+    managementRecordCreated: !existing,
+  };
 }
 
 export async function publishManagedImplementation(
@@ -189,7 +277,7 @@ export async function publishManagedImplementation(
   const managementRecordCreated = !pr.comments.some((comment) => {
     if (comment.author.login !== request.trustedActor.login ||
         comment.author.type !== request.trustedActor.type) return false;
-    const current = parseEnvelope(comment.body);
+    const current = parseManagedControlEnvelope(comment.body);
     return current?.transitionId === request.transitionId &&
       current.kind === "managed-pr" && current.prNumber === pr.number;
   });

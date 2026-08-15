@@ -4,6 +4,10 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type {
+  ConflictResolutionStagePorts,
+  ConflictResolutionStageRequest,
+} from "./conflict-resolution.js";
+import type {
   ImplementationAgentInvocation,
   ImplementationStagePorts,
   ImplementationStageRequest,
@@ -89,6 +93,64 @@ export function validateContainerClaudeSettings(content: string): void {
   if (values?.GITHUB_TOKEN !== undefined || values?.GH_TOKEN !== undefined) {
     throw new Error("container Claude settings must not contain GitHub credentials");
   }
+}
+
+export function createLocalConflictResolutionPorts(input: {
+  repositoryPath: string;
+  image: string;
+  claudeSettingsPath: string;
+  modelGatewayUrl: string;
+  modelGatewayToken: string;
+}): ConflictResolutionStagePorts {
+  const agentPorts = createLocalImplementationPorts(input);
+  return {
+    async createWorktree(request: ConflictResolutionStageRequest): Promise<ImplementationWorktree> {
+      const directory = await mkdtemp(join(tmpdir(), `afk-conflict-pr-${request.prNumber}-`));
+      try {
+        const { stdout } = await execFileAsync("git", [
+          "-C", input.repositoryPath, "remote", "get-url", "origin",
+        ]);
+        await execFileAsync("git", ["clone", "--no-checkout", stdout.trim(), directory]);
+        await execFileAsync("git", [
+          "-C", directory, "checkout", "--detach", request.expectedHeadRevision,
+        ]);
+        try {
+          await execFileAsync("git", [
+            "-C", directory, "merge", "--no-commit", "--no-ff", request.targetRevision,
+          ]);
+          throw new Error("conflict resolution stage was invoked for a clean synchronization");
+        } catch (error) {
+          const { stdout: paths } = await execFileAsync("git", [
+            "-C", directory, "diff", "--name-only", "--diff-filter=U",
+          ]);
+          if (paths.trim().length === 0) throw error;
+        }
+        return {
+          path: directory,
+          branch: request.headBranch,
+          baseRevision: request.expectedHeadRevision,
+        };
+      } catch (error) {
+        await rm(directory, { recursive: true, force: true });
+        throw error;
+      }
+    },
+    runAgent: agentPorts.runAgent,
+    async resolveHeadRevision(worktreePath) {
+      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+      return stdout.trim();
+    },
+    async pushResolvedRevision(request) {
+      await execFileAsync("git", [
+        "-C", request.worktreePath, "push", "origin",
+        `${request.outputRevision}:refs/heads/${request.branch}`,
+        `--force-with-lease=refs/heads/${request.branch}:${request.expectedHeadRevision}`,
+      ]);
+    },
+    async removeWorktree(worktree) {
+      await rm(worktree.path, { recursive: true, force: true });
+    },
+  };
 }
 
 export function createLocalImplementationPorts(input: {

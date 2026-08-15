@@ -23,7 +23,7 @@ describe("AFK Delivery workflow contract", () => {
 
   it("keeps GitHub authority in orchestration and supplies explicit implementation bounds", async () => {
     const workflow = await readFile(workflowPath, "utf8");
-    const implementation = workflow.indexOf("name: Implement and publish Managed PR");
+    const implementation = workflow.indexOf("name: Implement or continue Managed PR");
 
     expect(implementation).toBeGreaterThan(workflow.indexOf("name: Dispatch one bounded transition"));
     expect(workflow).toContain("contents: write");
@@ -34,6 +34,20 @@ describe("AFK Delivery workflow contract", () => {
     expect(workflow).toContain('AFK_MAX_ITERATIONS: "24"');
     expect(workflow).toContain('AFK_STAGE_TIMEOUT_MS: "3600000"');
     expect(workflow).toContain('AFK_STAGE_CPUS: "2"');
+  });
+
+  it("authenticates bounded Managed PR recovery during discovery", async () => {
+    const workflow = await readFile(workflowPath, "utf8");
+    const discovery = workflow.slice(
+      workflow.indexOf("name: Discover Delivery Frontier"),
+      workflow.indexOf("\n\n  deliver:"),
+    );
+
+    expect(discovery).toContain("AFK_DELIVERY_ACTOR:");
+    expect(discovery).toContain("AFK_DELIVERY_ACTOR_TYPE:");
+    expect(discovery).toContain("AFK_TARGET_BRANCH: master");
+    expect(discovery).toContain("AFK_RECOVERY_SCAN_LIMIT:");
+    expect(workflow).not.toMatch(/if:.*(?:managed|synchroniz|continu)/iu);
   });
 
   it("runs preflight before fresh reconstruction and bounded transition dispatch", async () => {

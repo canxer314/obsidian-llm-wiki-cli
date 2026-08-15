@@ -245,6 +245,33 @@ describe("selectDeliveryTransition", () => {
     expect(prepared.transition.kind).toBe("record-merge-report");
   });
 
+  it("invalidates old evidence after an unexpected human push and validates the new Revision", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr(ADVANCED_REVISION)],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "old-test" },
+          { command: "npm run typecheck", exitCode: 0, checkId: "old-types" },
+        ] }),
+        trustedRecord("review-handoff", { disposition: "approved" }),
+      ],
+    })));
+    expect(result.transition.kind).toBe("validate");
+    expect(result.transition.inputRevision).toBe(ADVANCED_REVISION);
+  });
+
+  it("rejects trusted evidence for a Revision outside the known management history", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("review-handoff", { inputRevision: ADVANCED_REVISION }),
+      ],
+    })));
+    expect(result.transition.kind).toBe("needs-human");
+  });
+
   it("continues a repaired Revision with fresh validation instead of reusing stale review", () => {
     const result = selectDeliveryTransition(input(snapshot({
       pullRequests: [managedPr(ADVANCED_REVISION)],
@@ -360,6 +387,23 @@ describe("selectDeliveryTransition", () => {
       controlComments: [trustedRecord("managed-pr")],
     });
     expect(selectDeliveryTransition(input(value)).transition.kind).toBe("validate");
+  });
+
+  it("accepts a trusted adoption record bound to the current target branch", () => {
+    const adopted = trustedRecord("managed-pr", {
+      round: 0,
+      disposition: "adopted",
+      targetBranch: "master",
+    });
+    expect(selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [adopted],
+    })))).toMatchObject({ transition: { kind: "validate" } });
+
+    expect(selectDeliveryTransition(input(snapshot({
+      pullRequests: [{ ...managedPr(), targetBranch: "release" }],
+      controlComments: [adopted],
+    })))).toMatchObject({ transition: { kind: "needs-human" } });
   });
 
   it("requires an authenticated managed-pr record for continuation", () => {

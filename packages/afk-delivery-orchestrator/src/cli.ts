@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import type { RepositoryPolicy } from "@llm-wiki/afk-delivery-core";
 import { execFile } from "node:child_process";
 
 import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -7,15 +8,23 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
+  adoptManagedPullRequest,
+  continueManagedPullRequest,
   createBoundedTransitionWork,
+  createGitHubContinuationEffects,
   createGitHubManagedImplementationPorts,
+  createGitHubManagedPullRequestRecoveryPorts,
+  createGitSynchronizationPorts,
+  createLocalConflictResolutionPorts,
   createLocalImplementationPorts,
+  createManagedPullRequestReconstructor,
   containerClaudeSettingsPath,
   discoverDeliveryFrontier,
+  discoverManagedPullRequestRecovery,
   executeNewImplementationTransition,
-  implementationBranch,
   implementationTransitionId,
-  recognizeManagedPullRequest,
+  reconstructDeliveryTicket,
+  runConflictResolutionStage,
   runWorkerPreflight,
   type GitHubReadPort,
   type PreflightCheck,
@@ -61,6 +70,39 @@ function repositoryParts(): { owner: string; repository: string; fullName: strin
 async function writeOutput(name: string, value: string): Promise<void> {
   const output = requiredEnvironment("GITHUB_OUTPUT");
   await appendFile(output, `${name}=${value}\n`, "utf8");
+}
+
+function trustedActor(): { login: string; type: "Bot" | "App" } {
+  const type = process.env.AFK_DELIVERY_ACTOR_TYPE ?? "Bot";
+  if (type !== "Bot" && type !== "App") {
+    throw new Error("AFK_DELIVERY_ACTOR_TYPE must be Bot or App");
+  }
+  return { login: requiredEnvironment("AFK_DELIVERY_ACTOR"), type };
+}
+
+function stagePolicy() {
+  return {
+    model: process.env.AFK_MODEL ?? "fable",
+    contextWindow: Number(process.env.AFK_CONTEXT_WINDOW ?? "372000"),
+    maximumIterations: Number(process.env.AFK_MAX_ITERATIONS ?? "24"),
+    timeoutMs: Number(process.env.AFK_STAGE_TIMEOUT_MS ?? "3600000"),
+    cpuLimit: Number(process.env.AFK_STAGE_CPUS ?? "2"),
+  };
+}
+
+function repositoryPolicy(targetBranch: string, actor: ReturnType<typeof trustedActor>): RepositoryPolicy {
+  return {
+    schemaVersion: 1,
+    targetBranch,
+    readyLabel: process.env.AFK_READY_LABEL ?? "ready-for-agent",
+    prohibitedLabel: process.env.AFK_PROHIBITED_LABEL ?? "afk:prohibited",
+    needsHumanLabel: process.env.AFK_NEEDS_HUMAN_LABEL ?? "afk:needs-human",
+    trustedActors: [actor],
+    maximumRepairRounds: Number(process.env.AFK_MAX_REPAIR_ROUNDS ?? "2"),
+    requiredValidationCommands: (process.env.AFK_VALIDATION_COMMANDS ?? "npm run typecheck\nnpm test -- --run")
+      .split("\n").filter(Boolean),
+    mergeStrategy: "squash",
+  };
 }
 
 function preflightChecks(): PreflightCheck[] {
@@ -110,8 +152,23 @@ async function loadFrontier() {
 
 async function discover(): Promise<void> {
   const result = await loadFrontier();
-  await writeOutput("tickets", JSON.stringify(result.frontier.map((ticket) => ticket.number)));
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const repository = repositoryParts().fullName;
+  const recovery = await discoverManagedPullRequestRecovery(
+    createGitHubManagedPullRequestRecoveryPorts({ repository }),
+    {
+      repository,
+      targetBranch: process.env.AFK_TARGET_BRANCH ?? "master",
+      trustedActors: [trustedActor()],
+      maximumPullRequests: Number(process.env.AFK_RECOVERY_SCAN_LIMIT ?? "100"),
+    },
+  );
+  const tickets = [...new Set([
+    ...result.frontier.map((ticket) => ticket.number),
+    ...recovery.managedPullRequests.map((pr) => pr.ticketNumber),
+    ...recovery.ambiguousTicketNumbers,
+  ])].sort((left, right) => left - right);
+  await writeOutput("tickets", JSON.stringify(tickets));
+  process.stdout.write(`${JSON.stringify({ ...result, recovery, tickets })}\n`);
 }
 
 async function preflight(): Promise<void> {
@@ -121,11 +178,17 @@ async function preflight(): Promise<void> {
 }
 
 async function reconstruct(ticketNumber: number): Promise<void> {
-  const result = await loadFrontier();
-  const ticket = result.frontier.find((candidate) => candidate.number === ticketNumber);
-  if (ticket === undefined) throw new Error(`Delivery Ticket #${ticketNumber} is no longer in the Delivery Frontier`);
-  await writeOutput("snapshot", JSON.stringify(ticket));
-  process.stdout.write(`${JSON.stringify(ticket)}\n`);
+  const { owner, repository } = repositoryParts();
+  const result = await reconstructDeliveryTicket(new GitHubApi(), {
+    owner,
+    repository,
+    ticketNumber,
+    readyLabel: process.env.AFK_READY_LABEL ?? "ready-for-agent",
+    prohibitedLabel: process.env.AFK_PROHIBITED_LABEL ?? "afk:prohibited",
+  });
+  if (result.status === "needs-human") throw new Error(result.reason);
+  await writeOutput("snapshot", JSON.stringify(result.ticket));
+  process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 async function dispatch(ticketNumber: number): Promise<void> {
@@ -161,12 +224,65 @@ function configuredPaths(name: string): string[] {
     : value.split(":").filter(Boolean).map((path) => resolve(path));
 }
 
-async function implement(ticketNumber: number): Promise<void> {
-  const frontier = await loadFrontier();
-  if (!frontier.frontier.some((ticket) => ticket.number === ticketNumber)) {
-    throw new Error(`Delivery Ticket #${ticketNumber} is no longer in the Delivery Frontier`);
-  }
+async function adopt(ticketNumber: number, prNumber: number): Promise<void> {
   const repository = repositoryParts().fullName;
+  const targetBranch = process.env.AFK_TARGET_BRANCH ?? "master";
+  const actor = trustedActor();
+  const raw = await command("gh", [
+    "pr", "view", String(prNumber), "--repo", repository,
+    "--json", "number,state,baseRefName,headRefName,headRefOid,headRepository,body,closingIssuesReferences",
+  ]);
+  const pr = JSON.parse(raw) as {
+    number: number;
+    state: string;
+    baseRefName: string;
+    headRefName: string;
+    headRefOid: string;
+    headRepository: { nameWithOwner: string } | null;
+    body: string;
+    closingIssuesReferences: Array<{ number: number }>;
+  };
+  if (
+    pr.number !== prNumber || pr.state !== "OPEN" || pr.baseRefName !== targetBranch ||
+    pr.headRepository?.nameWithOwner !== repository ||
+    pr.closingIssuesReferences.length !== 1 || pr.closingIssuesReferences[0]?.number !== ticketNumber
+  ) {
+    throw new Error("adoption requires one authenticated open PR link at the configured target branch");
+  }
+  const transitionId = `afk-v1-adopt-${ticketNumber}-${prNumber}-${pr.headRefOid.slice(0, 12)}`;
+  const result = await adoptManagedPullRequest({
+    repository,
+    ticketNumber,
+    prNumber,
+    targetBranch,
+    currentRevision: pr.headRefOid,
+    transitionId,
+    workflowRunId: requiredEnvironment("GITHUB_RUN_ID"),
+    trustedActor: actor,
+    narrative: "Explicitly adopted for autonomous Managed PR continuation.",
+  }, createGitHubManagedImplementationPorts({
+    repositoryPath: resolve(process.env.GITHUB_WORKSPACE ?? process.cwd()),
+    repository,
+  }));
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+async function implement(ticketNumber: number): Promise<void> {
+  const { owner, repository: repositoryName, fullName: repository } = repositoryParts();
+  const reconstructedTicket = await reconstructDeliveryTicket(new GitHubApi(), {
+    owner,
+    repository: repositoryName,
+    ticketNumber,
+    readyLabel: process.env.AFK_READY_LABEL ?? "ready-for-agent",
+    prohibitedLabel: process.env.AFK_PROHIBITED_LABEL ?? "afk:prohibited",
+  });
+  if (reconstructedTicket.status !== "eligible") {
+    if (reconstructedTicket.status === "waiting") {
+      process.stdout.write(`${JSON.stringify(reconstructedTicket)}\n`);
+      return;
+    }
+    throw new Error(reconstructedTicket.reason);
+  }
   const repositoryPath = resolve(process.env.GITHUB_WORKSPACE ?? process.cwd());
   const targetBranch = process.env.AFK_TARGET_BRANCH ?? "master";
   const rawTicket = await command("gh", [
@@ -191,30 +307,65 @@ async function implement(ticketNumber: number): Promise<void> {
     targetBranch,
   });
   const publication = createGitHubManagedImplementationPorts({ repositoryPath, repository });
-  const actorTypeValue = process.env.AFK_DELIVERY_ACTOR_TYPE ?? "Bot";
-  if (actorTypeValue !== "Bot" && actorTypeValue !== "App") {
-    throw new Error("AFK_DELIVERY_ACTOR_TYPE must be Bot or App");
-  }
-  const actorType: "Bot" | "App" = actorTypeValue;
-  const trustedActor = { login: requiredEnvironment("AFK_DELIVERY_ACTOR"), type: actorType };
-  const branch = implementationBranch({ ticket, transitionId });
-  const existing = await publication.findOpenPullRequests(ticketNumber, branch, targetBranch);
-  if (existing.length > 1 || (existing[0] !== undefined &&
-      (existing[0].headBranch !== branch || existing[0].baseBranch !== targetBranch))) {
-    throw new Error(`Delivery Ticket #${ticketNumber} no longer selects new implementation`);
-  }
-  if (existing[0] !== undefined && recognizeManagedPullRequest(existing[0], {
+  const actor = trustedActor();
+  const policy = repositoryPolicy(targetBranch, actor);
+  const boundedStagePolicy = stagePolicy();
+  const frontierTicket = reconstructedTicket.ticket;
+  const recovery = createGitHubManagedPullRequestRecoveryPorts({ repository });
+  const reconstructor = createManagedPullRequestReconstructor({
+    repository,
+    targetBranch,
+    trustedActors: [actor],
+    maximumPullRequests: Number(process.env.AFK_RECOVERY_SCAN_LIMIT ?? "100"),
+    candidates: recovery,
+    loadTicket: async () => ({ ...frontierTicket, body: ticket.body }),
+    loadTargetRevision: async () => command("gh", [
+      "api", `repos/${repository}/git/ref/heads/${targetBranch}`, "--jq", ".object.sha",
+    ]),
+  });
+  const repositoryUrl = await command("git", ["-C", repositoryPath, "remote", "get-url", "origin"]);
+  const localConflict = createLocalConflictResolutionPorts({
+    repositoryPath,
+    image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
+    claudeSettingsPath: containerClaudeSettingsPath(),
+    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
+    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+  });
+  const continuation = await continueManagedPullRequest({
     repository,
     ticketNumber,
-    trustedActors: [trustedActor],
-  }).managed) {
-    process.stdout.write(`${JSON.stringify({
-      status: "already-managed",
-      prNumber: existing[0].number,
-      outputRevision: existing[0].headRevision,
-    })}\n`);
+    lease: { status: "acquired", leaseId: `${requiredEnvironment("GITHUB_RUN_ID")}:${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` },
+    policy,
+    workflowRun: {
+      id: requiredEnvironment("GITHUB_RUN_ID"),
+      attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? "1"),
+    },
+  }, {
+    ...reconstructor,
+    ...createGitSynchronizationPorts({ repositoryUrl }),
+    ...createGitHubContinuationEffects({ repository, trustedActor: actor }),
+    resolveConflicts: async (conflict) => runConflictResolutionStage({
+      repository,
+      ticket: conflict.ticket,
+      prNumber: conflict.prNumber,
+      headBranch: conflict.headBranch,
+      expectedHeadRevision: conflict.expectedHeadRevision,
+      targetRevision: conflict.targetRevision,
+      conflicts: conflict.conflicts,
+      controlComments: conflict.controlComments,
+      policy: boundedStagePolicy,
+    }, localConflict),
+  });
+  if (continuation.status === "needs-human") {
+    process.stdout.write(`${JSON.stringify(continuation)}\n`);
+    process.exitCode = 1;
     return;
   }
+  if (continuation.status !== "selected" || continuation.transition.kind !== "implement") {
+    process.stdout.write(`${JSON.stringify(continuation)}\n`);
+    return;
+  }
+
   const result = await executeNewImplementationTransition({
     repository,
     ticket,
@@ -222,18 +373,11 @@ async function implement(ticketNumber: number): Promise<void> {
     domainDocuments: await readPromptDocuments(configuredPaths("AFK_DOMAIN_DOCUMENTS")),
     architectureDecisions: await readPromptDocuments(configuredPaths("AFK_ARCHITECTURE_DECISIONS")),
     targetBranch,
-    validationCommands: (process.env.AFK_VALIDATION_COMMANDS ?? "npm run typecheck\nnpm test -- --run")
-      .split("\n").filter(Boolean),
+    validationCommands: policy.requiredValidationCommands,
     transitionId,
     workflowRunId: requiredEnvironment("GITHUB_RUN_ID"),
-    trustedActor,
-    policy: {
-      model: process.env.AFK_MODEL ?? "fable",
-      contextWindow: Number(process.env.AFK_CONTEXT_WINDOW ?? "372000"),
-      maximumIterations: Number(process.env.AFK_MAX_ITERATIONS ?? "24"),
-      timeoutMs: Number(process.env.AFK_STAGE_TIMEOUT_MS ?? "3600000"),
-      cpuLimit: Number(process.env.AFK_STAGE_CPUS ?? "2"),
-    },
+    trustedActor: actor,
+    policy: boundedStagePolicy,
   }, {
     stage: createLocalImplementationPorts({
       repositoryPath,
@@ -248,14 +392,16 @@ async function implement(ticketNumber: number): Promise<void> {
   if (result.status !== "published") process.exitCode = 1;
 }
 
-const [operation, argument] = process.argv.slice(2);
+const [operation, argument, secondArgument] = process.argv.slice(2);
 if (operation === "discover") await discover();
 else if (operation === "preflight") await preflight();
-else if ((operation === "reconstruct" || operation === "dispatch" || operation === "implement") && /^\d+$/u.test(argument ?? "")) {
+else if (operation === "adopt" && /^\d+$/u.test(argument ?? "") && /^\d+$/u.test(secondArgument ?? "")) {
+  await adopt(Number(argument), Number(secondArgument));
+} else if ((operation === "reconstruct" || operation === "dispatch" || operation === "implement") && /^\d+$/u.test(argument ?? "")) {
   const ticketNumber = Number(argument);
   if (operation === "reconstruct") await reconstruct(ticketNumber);
   else if (operation === "dispatch") await dispatch(ticketNumber);
   else await implement(ticketNumber);
 } else {
-  throw new Error("usage: afk-delivery <discover|preflight|reconstruct TICKET|dispatch TICKET|implement TICKET>");
+  throw new Error("usage: afk-delivery <discover|preflight|adopt TICKET PR|reconstruct TICKET|dispatch TICKET|implement TICKET>");
 }

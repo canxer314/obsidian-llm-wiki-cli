@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  adoptManagedPullRequest,
   publishManagedImplementation,
   recognizeManagedPullRequest,
   type ManagedImplementationPorts,
@@ -117,6 +118,72 @@ describe("Managed PR publication", () => {
       ticketNumber: 65,
       trustedActors: [request.trustedActor],
     })).toEqual({ managed: true, ticketNumber: 65, initialRevision: revision });
+  });
+
+  it("adopts an eligible PR through one trusted record bound to its current Revision and target", async () => {
+    const existing: ManagedPullRequestRecord = {
+      number: 104,
+      headRevision: revision,
+      headBranch: "human/issue-65",
+      baseBranch: "master",
+      body: "Closes #65",
+      comments: [],
+    };
+    const initial = fakePorts(existing);
+    const adoption = {
+      repository: request.repository,
+      ticketNumber: 65,
+      prNumber: 104,
+      targetBranch: "master",
+      currentRevision: revision,
+      transitionId: "afk-v1-adopt-104",
+      workflowRunId: "2000",
+      trustedActor: request.trustedActor,
+      narrative: "Adopted for autonomous continuation",
+    };
+
+    await expect(adoptManagedPullRequest(adoption, initial.ports)).resolves.toEqual({
+      prNumber: 104,
+      currentRevision: revision,
+      managementRecordCreated: true,
+    });
+    await expect(adoptManagedPullRequest(adoption, initial.ports)).resolves.toEqual({
+      prNumber: 104,
+      currentRevision: revision,
+      managementRecordCreated: false,
+    });
+    expect(initial.calls.filter((call) => call.startsWith("comment:"))).toHaveLength(1);
+    expect(recognizeManagedPullRequest(existing, {
+      repository: request.repository,
+      ticketNumber: 65,
+      targetBranch: "master",
+      trustedActors: [request.trustedActor],
+    })).toEqual({ managed: true, ticketNumber: 65, initialRevision: revision });
+  });
+
+  it("rejects adoption after the PR head or target changes", async () => {
+    const existing: ManagedPullRequestRecord = {
+      number: 104,
+      headRevision: "c".repeat(40),
+      headBranch: "human/issue-65",
+      baseBranch: "release",
+      body: "Closes #65",
+      comments: [],
+    };
+    const initial = fakePorts(existing);
+
+    await expect(adoptManagedPullRequest({
+      repository: request.repository,
+      ticketNumber: 65,
+      prNumber: 104,
+      targetBranch: "master",
+      currentRevision: revision,
+      transitionId: "afk-v1-adopt-104",
+      workflowRunId: "2000",
+      trustedActor: request.trustedActor,
+      narrative: "Adopt",
+    }, initial.ports)).rejects.toThrow("current Revision and target branch");
+    expect(initial.calls.filter((call) => call.startsWith("comment:"))).toHaveLength(0);
   });
 
   it("fails closed when more than one open PR matches the deterministic identity", async () => {
