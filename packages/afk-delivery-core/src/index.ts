@@ -136,7 +136,7 @@ export interface ValidationCommandResult {
   command: string;
   exitCode: number | null;
   checkId: string;
-  timedOut: boolean;
+  timedOut?: boolean;
 }
 
 export interface ValidationRequest {
@@ -316,8 +316,6 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
       !Number.isInteger(value.workflowRunAttempt) ||
       (value.workflowRunAttempt as number) < 1
     )) ||
-    ((value.kind === "validation" || value.kind === "review-handoff") &&
-      value.workflowRunAttempt === undefined) ||
     !REVISION_PATTERN.test(value.inputRevision as string) ||
     (value.baseRevision !== undefined &&
       (typeof value.baseRevision !== "string" || !REVISION_PATTERN.test(value.baseRevision))) ||
@@ -335,7 +333,7 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
           typeof command.command === "string" &&
           (Number.isInteger(command.exitCode) || command.exitCode === null) &&
           typeof command.checkId === "string" &&
-          typeof command.timedOut === "boolean",
+          (command.timedOut === undefined || typeof command.timedOut === "boolean"),
       )
     ) {
       return undefined;

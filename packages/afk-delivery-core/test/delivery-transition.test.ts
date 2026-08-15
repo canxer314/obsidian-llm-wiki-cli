@@ -867,7 +867,7 @@ describe("selectDeliveryTransition", () => {
     expect(result.transition.kind).toBe("validate");
   });
 
-  it("rejects validation evidence without a workflow run attempt while accepting legacy management history", () => {
+  it("reads legacy validation evidence without allowing it to authorize the Revision", () => {
     const result = selectDeliveryTransition(input(snapshot({
       pullRequests: [managedPr()],
       controlComments: [
@@ -875,15 +875,17 @@ describe("selectDeliveryTransition", () => {
         trustedRecord("validation", {
           workflowRunAttempt: undefined,
           commands: [
-            { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
-            { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+            { command: "npm test", exitCode: 0, checkId: "test", timedOut: undefined },
+            { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: undefined },
           ],
         }),
       ],
     })));
 
-    expect(result.transition.kind).toBe("needs-human");
-    expect(result.transition.reason).toContain("malformed or unsupported envelope");
+    expect(result.transition).toMatchObject({
+      kind: "validate",
+      inputRevision: HEAD_REVISION,
+    });
   });
 
   it.each([
