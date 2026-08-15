@@ -1,6 +1,10 @@
+export * from "./conflict-resolution.js";
+export * from "./git-synchronization.js";
 export * from "./github-publication.js";
 export * from "./implementation.js";
 export * from "./local-stage.js";
+export * from "./managed-pr-continuation.js";
+export * from "./managed-pr-recovery.js";
 export * from "./managed-pr.js";
 export * from "./new-implementation.js";
 export * from "./sandcastle.js";
@@ -239,6 +243,64 @@ async function readAllIssues(
     }
     if (!result.hasNext) return all;
   }
+}
+
+export type ReconstructedDeliveryTicket =
+  | { status: "eligible"; ticket: DeliveryTicketSnapshot }
+  | { status: "waiting"; ticket: DeliveryTicketSnapshot; reason: "open-blockers" }
+  | { status: "needs-human"; reason: string };
+
+export async function reconstructDeliveryTicket(
+  github: GitHubReadPort,
+  input: DiscoveryPolicy & { ticketNumber: number },
+  signal?: AbortSignal,
+): Promise<ReconstructedDeliveryTicket> {
+  const root = `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repository)}`;
+  let issue: GitHubIssue | undefined;
+  let body: string | undefined;
+  try {
+    const response = await github.request(`${root}/issues/${input.ticketNumber}`, signal);
+    if (response.status !== 200) return { status: "needs-human", reason: "Delivery Ticket reconstruction failed closed" };
+    const value: unknown = await response.json();
+    issue = parseIssue(value);
+    if (isRecord(value) && typeof value.body === "string") body = value.body;
+  } catch {
+    return { status: "needs-human", reason: "Delivery Ticket reconstruction failed closed" };
+  }
+  if (issue === undefined || issue.pullRequest || issue.number !== input.ticketNumber) {
+    return { status: "needs-human", reason: "Delivery Ticket response is unverifiable" };
+  }
+  const labels = labelsOf(issue);
+  if (issue.state !== "open" || !labels.includes(input.readyLabel)) {
+    return { status: "needs-human", reason: "Delivery Ticket is not open and authorized" };
+  }
+  if (labels.includes(input.prohibitedLabel)) {
+    return { status: "needs-human", reason: "AFK Delivery is prohibited" };
+  }
+  if (issue.openBlockerCount === undefined) {
+    return { status: "needs-human", reason: "native dependency data is incomplete" };
+  }
+  const blockers = await readAllIssues(
+    github,
+    (page) => `${root}/issues/${input.ticketNumber}/dependencies/blocked_by?per_page=100&page=${page}`,
+    signal,
+  );
+  if (blockers === undefined) return { status: "needs-human", reason: "native dependency data is incomplete" };
+  const openBlockerNumbers = blockers.filter((blocker) => blocker.state === "open").map((blocker) => blocker.number);
+  if (openBlockerNumbers.length !== issue.openBlockerCount) {
+    return { status: "needs-human", reason: "native dependency data is contradictory" };
+  }
+  const ticket: DeliveryTicketSnapshot = {
+    number: issue.number,
+    open: true,
+    labels,
+    openBlockerNumbers,
+    dependencyDataComplete: true,
+    ...(body === undefined ? {} : { body }),
+  };
+  return openBlockerNumbers.length > 0
+    ? { status: "waiting", ticket, reason: "open-blockers" }
+    : { status: "eligible", ticket };
 }
 
 export async function discoverDeliveryFrontier(

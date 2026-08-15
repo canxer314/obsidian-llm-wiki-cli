@@ -34,6 +34,7 @@ export interface ImplementationPullRequestSnapshot {
   ticketNumber: number;
   open: boolean;
   targetBranch: string;
+  headBranch?: string;
   headRevision: Revision;
   baseRevision: Revision;
   mergeable: boolean | "unknown";
@@ -58,6 +59,8 @@ export interface ControlEnvelope {
   repository: string;
   ticketNumber: number;
   prNumber: number;
+  targetBranch?: string;
+  targetRevision?: Revision;
   round: number;
   transitionId: string;
   inputRevision: Revision;
@@ -228,10 +231,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseEnvelope(value: unknown): ControlEnvelope | undefined {
+export function parseControlEnvelope(value: unknown): ControlEnvelope | undefined {
   if (!isRecord(value)) return undefined;
   const allowedKeys = new Set([
-    "schemaVersion", "kind", "repository", "ticketNumber", "prNumber", "round",
+    "schemaVersion", "kind", "repository", "ticketNumber", "prNumber", "targetBranch", "targetRevision", "round",
     "transitionId", "inputRevision", "outputRevision", "disposition", "workflowRunId",
     "commands",
   ]);
@@ -251,6 +254,9 @@ function parseEnvelope(value: unknown): ControlEnvelope | undefined {
     !Number.isInteger(value.ticketNumber) ||
     !Number.isInteger(value.prNumber) ||
     !Number.isInteger(value.round) ||
+    (value.targetBranch !== undefined && typeof value.targetBranch !== "string") ||
+    (value.targetRevision !== undefined &&
+      (typeof value.targetRevision !== "string" || !REVISION_PATTERN.test(value.targetRevision))) ||
     (value.round as number) < 0 ||
     !REVISION_PATTERN.test(value.inputRevision as string) ||
     (value.outputRevision !== undefined &&
@@ -295,7 +301,7 @@ function authenticateHistory(
   const parsed: Array<{ commentId: string; envelope: ControlEnvelope }> = [];
   for (const comment of snapshot.controlComments) {
     if (!actorIsTrusted(comment.author, policy)) continue;
-    const envelope = parseEnvelope(comment.envelope);
+    const envelope = parseControlEnvelope(comment.envelope);
     if (envelope === undefined) {
       return { records, invalidReason: `trusted control comment ${comment.commentId} has a malformed or unsupported envelope` };
     }
@@ -305,6 +311,14 @@ function authenticateHistory(
   const connectedRevisions = new Set<Revision>([pr?.headRevision, predecessorRevision].filter(
     (revision): revision is Revision => revision !== undefined,
   ));
+  for (const { envelope } of parsed) {
+    if (
+      envelope.kind === "managed-pr" &&
+      (envelope.outputRevision === undefined || envelope.inputRevision === envelope.outputRevision)
+    ) {
+      connectedRevisions.add(envelope.inputRevision);
+    }
+  }
   let expanded = true;
   while (expanded) {
     expanded = false;
@@ -326,7 +340,9 @@ function authenticateHistory(
       envelope.repository !== snapshot.repository ||
       envelope.ticketNumber !== snapshot.ticket.number ||
       pr === undefined ||
-      envelope.prNumber !== pr.number
+      envelope.prNumber !== pr.number ||
+      (envelope.kind === "managed-pr" && envelope.disposition === "adopted" &&
+        (envelope.targetBranch !== policy.targetBranch || pr.targetBranch !== envelope.targetBranch))
     ) {
       return { records, invalidReason: `trusted control comment ${commentId} does not match the GitHub snapshot` };
     }
@@ -336,7 +352,9 @@ function authenticateHistory(
     }
     if (
       (envelope.kind === "repair-handoff" || envelope.kind === "synchronization") &&
-      envelope.outputRevision === undefined
+      envelope.outputRevision === undefined &&
+      !(envelope.kind === "synchronization" && envelope.disposition === "started" &&
+        envelope.targetRevision !== undefined)
     ) {
       return { records, invalidReason: `trusted control comment ${commentId} is missing its output Revision` };
     }
@@ -420,7 +438,14 @@ function needsHuman(
     ...(pr === undefined ? {} : { inputRevision: pr.headRevision }),
     reason,
   });
-  return result(input, selected, [{ kind: "record-needs-human" }]);
+  const effect = pr === undefined
+    ? { kind: "record-needs-human" as const }
+    : {
+        kind: "record-needs-human" as const,
+        envelope: controlEnvelope(input, selected, "needs-human", "recorded"),
+        narrative: reason,
+      };
+  return result(input, selected, [effect]);
 }
 
 function controlEnvelope(
@@ -621,6 +646,18 @@ export function selectDeliveryTransition(
   }
   if (latest(history.records, "managed-pr") === undefined) {
     return needsHuman(input, "the Implementation PR is not authenticated as Managed", pr);
+  }
+  const unfinishedSynchronization = history.records.find((record) =>
+    record.kind === "synchronization" && record.disposition === "started" &&
+    !history.records.some((later) =>
+      later.kind === "synchronization" && later.disposition === "ready" &&
+      later.inputRevision === record.inputRevision && later.targetRevision === record.targetRevision &&
+      record.transitionId.endsWith(":intent") &&
+      later.transitionId === `${record.transitionId.slice(0, -":intent".length)}:ready`
+    ),
+  );
+  if (unfinishedSynchronization !== undefined) {
+    return needsHuman(input, "a synchronization attempt was interrupted before its output was authenticated", pr);
   }
   if (
     snapshot.targetBranchRevision !== undefined &&

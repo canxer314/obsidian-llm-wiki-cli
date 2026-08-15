@@ -69,7 +69,7 @@ function managedPr(headRevision = HEAD_REVISION) {
 }
 
 function envelope(
-  kind: "managed-pr" | "validation" | "review-handoff" | "repair-handoff" | "merge-report",
+  kind: "managed-pr" | "synchronization" | "validation" | "review-handoff" | "repair-handoff" | "merge-report",
   overrides: Record<string, unknown> = {},
 ) {
   return {
@@ -131,6 +131,50 @@ describe("selectDeliveryTransition", () => {
     const result = selectDeliveryTransition(input(value));
     expect(result.transition.kind).toBe("needs-human");
     expect(result.effects[0]?.kind).toBe("record-needs-human");
+  });
+
+  it("fails closed when a trusted synchronization intent has no authenticated output", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("synchronization", {
+          transitionId: "sync-started",
+          disposition: "started",
+          targetRevision: BASE_REVISION,
+          outputRevision: undefined,
+        }),
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({
+      kind: "needs-human",
+      reason: "a synchronization attempt was interrupted before its output was authenticated",
+    });
+  });
+
+  it("does not let an orphan ready record release a different synchronization intent", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("synchronization", {
+          transitionId: "sync-a:intent",
+          disposition: "started",
+          targetRevision: BASE_REVISION,
+          outputRevision: undefined,
+        }),
+        trustedRecord("synchronization", {
+          transitionId: "sync-b:ready",
+          disposition: "ready",
+          targetRevision: BASE_REVISION,
+          outputRevision: ADVANCED_REVISION,
+        }),
+      ],
+    })));
+
+    expect(result.transition.kind).toBe("needs-human");
+    expect(result.transition.reason).toMatch(/authenticated Revision chain|interrupted before its output/u);
   });
 
   it("requires an acquired Delivery Lease for mutations", () => {
@@ -243,6 +287,33 @@ describe("selectDeliveryTransition", () => {
       narrative: "Complete merge report",
     }));
     expect(prepared.transition.kind).toBe("record-merge-report");
+  });
+
+  it("invalidates old evidence after an unexpected human push and validates the new Revision", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr(ADVANCED_REVISION)],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "old-test" },
+          { command: "npm run typecheck", exitCode: 0, checkId: "old-types" },
+        ] }),
+        trustedRecord("review-handoff", { disposition: "approved" }),
+      ],
+    })));
+    expect(result.transition.kind).toBe("validate");
+    expect(result.transition.inputRevision).toBe(ADVANCED_REVISION);
+  });
+
+  it("rejects trusted evidence for a Revision outside the known management history", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("review-handoff", { inputRevision: ADVANCED_REVISION }),
+      ],
+    })));
+    expect(result.transition.kind).toBe("needs-human");
   });
 
   it("continues a repaired Revision with fresh validation instead of reusing stale review", () => {
@@ -360,6 +431,23 @@ describe("selectDeliveryTransition", () => {
       controlComments: [trustedRecord("managed-pr")],
     });
     expect(selectDeliveryTransition(input(value)).transition.kind).toBe("validate");
+  });
+
+  it("accepts a trusted adoption record bound to the current target branch", () => {
+    const adopted = trustedRecord("managed-pr", {
+      round: 0,
+      disposition: "adopted",
+      targetBranch: "master",
+    });
+    expect(selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [adopted],
+    })))).toMatchObject({ transition: { kind: "validate" } });
+
+    expect(selectDeliveryTransition(input(snapshot({
+      pullRequests: [{ ...managedPr(), targetBranch: "release" }],
+      controlComments: [adopted],
+    })))).toMatchObject({ transition: { kind: "needs-human" } });
   });
 
   it("requires an authenticated managed-pr record for continuation", () => {

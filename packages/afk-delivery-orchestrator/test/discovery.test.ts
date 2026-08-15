@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  reconstructDeliveryTicket,
   discoverDeliveryFrontier,
   type GitHubReadPort,
 } from "../src/index.js";
@@ -10,6 +11,63 @@ function response(status: number, body: unknown, link?: string): Response {
     headers: link === undefined ? undefined : { link },
   });
 }
+
+describe("reconstructDeliveryTicket", () => {
+  it("reconstructs an eligible ticket directly without relying on a discovery page", async () => {
+    const github: GitHubReadPort = {
+      async request(path) {
+        if (path === "/repos/acme/wiki/issues/66") {
+          return response(200, {
+            number: 66,
+            state: "open",
+            labels: [{ name: "ready-for-agent" }],
+            issue_dependencies_summary: { blocked_by: 0 },
+            body: "Continue the Managed PR",
+          });
+        }
+        if (path.endsWith("/issues/66/dependencies/blocked_by?per_page=100&page=1")) {
+          return response(200, []);
+        }
+        throw new Error(`unexpected request: ${path}`);
+      },
+    };
+
+    await expect(reconstructDeliveryTicket(github, {
+      owner: "acme",
+      repository: "wiki",
+      ticketNumber: 66,
+      readyLabel: "ready-for-agent",
+      prohibitedLabel: "afk:prohibited",
+    })).resolves.toEqual({
+      status: "eligible",
+      ticket: {
+        number: 66,
+        open: true,
+        labels: ["ready-for-agent"],
+        openBlockerNumbers: [],
+        dependencyDataComplete: true,
+        body: "Continue the Managed PR",
+      },
+    });
+  });
+
+  it("fails closed when direct dependency data contradicts its summary", async () => {
+    const github: GitHubReadPort = {
+      async request(path) {
+        return path.includes("blocked_by")
+          ? response(200, [])
+          : response(200, {
+              number: 66, state: "open", labels: [{ name: "ready-for-agent" }],
+              issue_dependencies_summary: { blocked_by: 1 },
+            });
+      },
+    };
+    await expect(reconstructDeliveryTicket(github, {
+      owner: "acme", repository: "wiki", ticketNumber: 66,
+      readyLabel: "ready-for-agent", prohibitedLabel: "afk:prohibited",
+    })).resolves.toMatchObject({ status: "needs-human" });
+  });
+});
 
 describe("discoverDeliveryFrontier", () => {
   it("paginates ready Delivery Tickets and excludes open native blockers without changing readiness", async () => {

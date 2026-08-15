@@ -23,7 +23,11 @@ jobs:
           node-version: 24.14.0
           cache: npm
       - run: npm ci
-      - run: npm run build -w @llm-wiki/afk-delivery-orchestrator
+      - name: Verify repository
+        run: |
+          npm run build
+          npm run typecheck
+          npm test
       - name: Worker preflight
         env:
           GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
@@ -37,6 +41,11 @@ jobs:
         name: Discover Delivery Frontier
         env:
           GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
+          AFK_DELIVERY_ACTOR_TYPE: ${{ vars.AFK_DELIVERY_ACTOR_TYPE || 'Bot' }}
+          AFK_TARGET_BRANCH: master
+          AFK_RECOVERY_SCAN_LIMIT: "100"
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery discover
 
   deliver:
@@ -65,7 +74,11 @@ jobs:
           node-version: 24.14.0
           cache: npm
       - run: npm ci
-      - run: npm run build -w @llm-wiki/afk-delivery-orchestrator
+      - name: Verify repository
+        run: |
+          npm run build
+          npm run typecheck
+          npm test
       - name: Worker preflight
         env:
           GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
@@ -87,11 +100,12 @@ jobs:
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           AFK_DELIVERY_SNAPSHOT: ${{ steps.current.outputs.snapshot }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery dispatch ${{ matrix.ticket }}
-      - name: Implement and publish Managed PR
+      - name: Implement or continue Managed PR
         env:
           GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
           GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
           GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
           MODEL_GATEWAY_TOKEN: ${{ secrets.MODEL_GATEWAY_TOKEN }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
