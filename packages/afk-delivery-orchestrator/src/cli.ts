@@ -362,7 +362,7 @@ async function implement(ticketNumber: number): Promise<void> {
     modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
     modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
   });
-  const localValidation = createLocalValidationPorts({ repositoryPath });
+  const localValidation = createLocalValidationPorts({ repositoryUrl });
   const localReview = createLocalReviewPorts({
     reviewerLauncher: resolve(repositoryPath, ".sandcastle/run-reviewer.sh"),
     modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),

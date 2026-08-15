@@ -161,12 +161,16 @@ export function createLocalConflictResolutionPorts(input: {
   };
 }
 
-export function createLocalValidationPorts(input: { repositoryPath: string }): ValidationStagePorts {
+export function createLocalValidationPorts(input: { repositoryUrl: string }): ValidationStagePorts {
   return {
     async createDetachedClone(revision) {
+      if (!/^[0-9a-f]{40}$/u.test(revision)) {
+        throw new Error("validation requires an exact 40-character Revision");
+      }
       const directory = await mkdtemp(join(tmpdir(), "afk-validation-"));
       try {
-        await execFileAsync("git", ["clone", "--no-local", "--no-checkout", input.repositoryPath, directory]);
+        await execFileAsync("git", ["clone", "--no-checkout", input.repositoryUrl, directory]);
+        await execFileAsync("git", ["-C", directory, "fetch", "--no-tags", "origin", revision]);
         await execFileAsync("git", ["-C", directory, "checkout", "--detach", revision]);
         await execFileAsync("npm", ["ci", "--ignore-scripts"], {
           cwd: directory,
