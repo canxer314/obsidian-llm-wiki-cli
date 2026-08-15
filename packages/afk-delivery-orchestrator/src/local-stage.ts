@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type {
   ImplementationAgentInvocation,
@@ -66,6 +66,13 @@ export async function runContainerCommand(
     });
     child.stdin.end(command.stdin);
   });
+}
+
+export function containerClaudeSettingsPath(
+  override = process.env.AFK_CLAUDE_SETTINGS,
+  runnerHome = homedir(),
+): string {
+  return resolve(override ?? join(runnerHome, ".claude", "settings-docker.json"));
 }
 
 export function validateContainerClaudeSettings(content: string): void {

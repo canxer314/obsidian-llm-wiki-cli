@@ -95,7 +95,6 @@ jobs:
           MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
           MODEL_GATEWAY_TOKEN: ${{ secrets.MODEL_GATEWAY_TOKEN }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
-          AFK_CLAUDE_SETTINGS: ${{ vars.AFK_CLAUDE_SETTINGS }}
           AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
           AFK_DELIVERY_ACTOR_TYPE: ${{ vars.AFK_DELIVERY_ACTOR_TYPE || 'Bot' }}
           AFK_REPOSITORY_INSTRUCTIONS: ${{ github.workspace }}/CLAUDE.md

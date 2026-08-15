@@ -8,9 +8,8 @@ fi
 
 : "${MODEL_GATEWAY_URL:?MODEL_GATEWAY_URL is required}"
 : "${MODEL_GATEWAY_TOKEN:?MODEL_GATEWAY_TOKEN is required}"
-: "${AFK_CLAUDE_SETTINGS:?AFK_CLAUDE_SETTINGS is required}"
 
-settings_path="$(realpath -- "$AFK_CLAUDE_SETTINGS")"
+settings_path="$(realpath -- "${AFK_CLAUDE_SETTINGS:-$HOME/.claude/settings-docker.json}")"
 if [[ ! -f "$settings_path" ]]; then
   printf '%s\n' 'AFK_CLAUDE_SETTINGS must name a container-specific settings file' >&2
   exit 2

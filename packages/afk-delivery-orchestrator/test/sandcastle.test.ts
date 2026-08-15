@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { redactSecretValues, validateContainerClaudeSettings } from "../src/local-stage.js";
+import {
+  containerClaudeSettingsPath,
+  redactSecretValues,
+  validateContainerClaudeSettings,
+} from "../src/local-stage.js";
 import { buildImplementationContainerCommand } from "../src/sandcastle.js";
 
 const invocation = {
@@ -22,6 +26,15 @@ const invocation = {
 };
 
 describe("Sandcastle implementation container", () => {
+  it("resolves settings from runner-local convention with an optional local override", () => {
+    expect(containerClaudeSettingsPath(undefined, "/home/runner")).toBe(
+      "/home/runner/.claude/settings-docker.json",
+    );
+    expect(containerClaudeSettingsPath("/etc/afk/claude.json", "/home/runner")).toBe(
+      "/etc/afk/claude.json",
+    );
+  });
+
   it("builds a bounded invocation with worktree and controlled settings mounts", () => {
     const command = buildImplementationContainerCommand(
       "afk-delivery:test",

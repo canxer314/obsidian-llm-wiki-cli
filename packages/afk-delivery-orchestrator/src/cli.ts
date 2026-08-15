@@ -10,6 +10,7 @@ import {
   createBoundedTransitionWork,
   createGitHubManagedImplementationPorts,
   createLocalImplementationPorts,
+  containerClaudeSettingsPath,
   discoverDeliveryFrontier,
   executeNewImplementationTransition,
   implementationBranch,
@@ -237,7 +238,7 @@ async function implement(ticketNumber: number): Promise<void> {
     stage: createLocalImplementationPorts({
       repositoryPath,
       image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
-      claudeSettingsPath: resolve(requiredEnvironment("AFK_CLAUDE_SETTINGS")),
+      claudeSettingsPath: containerClaudeSettingsPath(),
       modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
       modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
     }),
