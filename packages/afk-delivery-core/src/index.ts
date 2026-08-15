@@ -366,7 +366,10 @@ function authenticateHistory(
     if (envelope === undefined) {
       return { records, invalidReason: `trusted control comment ${comment.commentId} has a malformed or unsupported envelope` };
     }
-    if (envelope.kind === "review-handoff" && (
+    const legacyReview = envelope.kind === "review-handoff" &&
+      envelope.workflowRunAttempt === undefined && envelope.baseRevision === undefined;
+    if (envelope.kind === "review-handoff" && !legacyReview && (
+      envelope.workflowRunAttempt === undefined ||
       envelope.baseRevision !== pr?.baseRevision ||
       !["approved", "changes-required", "unable-to-review"].includes(envelope.disposition) ||
       !reviewNarrativeMatchesDisposition(
@@ -553,7 +556,11 @@ function requiredValidationPassed(
   policy: RepositoryPolicy,
   ticket?: DeliveryTicketSnapshot,
 ): boolean {
-  if (record?.kind !== "validation" || record.disposition !== "succeeded") return false;
+  if (
+    record?.kind !== "validation" ||
+    record.disposition !== "succeeded" ||
+    record.workflowRunAttempt === undefined
+  ) return false;
   const commands = record.commands ?? [];
   if (new Set(commands.map((command) => command.checkId)).size !== commands.length) return false;
   const requiredCommands = [
@@ -903,7 +910,10 @@ export function selectDeliveryTransition(
   );
   const repair = latest(currentRecords, "repair-handoff");
   const validation = latest(currentRecords, "validation");
-  const review = latest(currentRecords, "review-handoff");
+  const currentReview = latest(currentRecords, "review-handoff");
+  const review = currentReview?.workflowRunAttempt === undefined || currentReview.baseRevision === undefined
+    ? undefined
+    : currentReview;
   const mergeReport = latest(currentRecords, "merge-report");
 
   if (mergeReport !== undefined) {

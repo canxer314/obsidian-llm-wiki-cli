@@ -888,6 +888,31 @@ describe("selectDeliveryTransition", () => {
     });
   });
 
+  it("reads legacy review evidence without allowing it to authorize the Revision", () => {
+    const result = selectDeliveryTransition(input(reviewContextSnapshot({
+      controlComments: [
+        trustedRecord("managed-pr", { workflowRunAttempt: undefined }),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ] }),
+        {
+          ...trustedRecord("review-handoff", {
+            workflowRunAttempt: undefined,
+            baseRevision: undefined,
+            disposition: "approved",
+          }),
+          narrative: "Legacy review narrative",
+        },
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({
+      kind: "review",
+      inputRevision: HEAD_REVISION,
+    });
+  });
+
   it.each([
     ["unknown schema", [trustedRecord("managed-pr"), trustedRecord("review-handoff", { schemaVersion: 2 })]],
     ["stale revision", [trustedRecord("managed-pr"), trustedRecord("review-handoff", { inputRevision: ADVANCED_REVISION })]],
