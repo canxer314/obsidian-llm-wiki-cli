@@ -21,7 +21,17 @@ case "$MODEL_GATEWAY_URL" in
     ;;
 esac
 
-docker build --tag "$image" .sandcastle
+build_args=(--tag "$image")
+for name in HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+  if [[ -n "${!name:-}" ]]; then
+    build_args+=(--build-arg "$name=${!name}")
+  fi
+done
+if [[ "${HTTP_PROXY:-}${HTTPS_PROXY:-}" == *"127.0.0.1:"* ||
+      "${HTTP_PROXY:-}${HTTPS_PROXY:-}" == *"localhost:"* ]]; then
+  build_args+=(--network host)
+fi
+docker build "${build_args[@]}" .sandcastle
 
 docker run --rm --entrypoint sh "$image" -c '
   test "$(id -u)" != 0
