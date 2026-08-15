@@ -227,8 +227,8 @@ async function implement(ticketNumber: number): Promise<void> {
     workflowRunId: requiredEnvironment("GITHUB_RUN_ID"),
     trustedActor,
     policy: {
-      model: process.env.AFK_MODEL ?? "claude-opus-5",
-      contextWindow: Number(process.env.AFK_CONTEXT_WINDOW ?? "1000000"),
+      model: process.env.AFK_MODEL ?? "gpt-5.6-sol[1M]",
+      contextWindow: Number(process.env.AFK_CONTEXT_WINDOW ?? "372000"),
       maximumIterations: Number(process.env.AFK_MAX_ITERATIONS ?? "24"),
       timeoutMs: Number(process.env.AFK_STAGE_TIMEOUT_MS ?? "3600000"),
       cpuLimit: Number(process.env.AFK_STAGE_CPUS ?? "2"),

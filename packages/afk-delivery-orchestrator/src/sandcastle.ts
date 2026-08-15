@@ -35,7 +35,7 @@ export function buildImplementationContainerCommand(
     "--cpus", String(invocation.cpuLimit),
     "--mount", `type=bind,source=${invocation.worktreePath},target=/workspace`,
     "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
-    "--tmpfs", "/home/agent:rw,nosuid,nodev,size=256m",
+    "--tmpfs", "/home/agent:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=0700",
     "--add-host", "host.docker.internal:host-gateway",
     "--workdir", "/workspace",
   ];

@@ -10,7 +10,10 @@ fi
 : "${MODEL_GATEWAY_TOKEN:?MODEL_GATEWAY_TOKEN is required}"
 
 image="${AFK_DELIVERY_IMAGE:-afk-delivery:smoke}"
-model="${AFK_MODEL:-claude-opus-5}"
+model="${AFK_MODEL:-gpt-5.6-sol[1M]}"
+context_window="${AFK_CONTEXT_WINDOW:-372000}"
+script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(dirname -- "$script_directory")"
 case "$MODEL_GATEWAY_URL" in
   http://localhost:*|http://127.0.0.1:*|http://host.docker.internal:*) ;;
   *)
@@ -19,6 +22,11 @@ case "$MODEL_GATEWAY_URL" in
       exit 2
     fi
     ;;
+esac
+
+runtime_network_args=()
+case "$MODEL_GATEWAY_URL" in
+  http://localhost:*|http://127.0.0.1:*) runtime_network_args=(--network host) ;;
 esac
 
 build_args=(--tag "$image")
@@ -31,7 +39,7 @@ if [[ "${HTTP_PROXY:-}${HTTPS_PROXY:-}" == *"127.0.0.1:"* ||
       "${HTTP_PROXY:-}${HTTPS_PROXY:-}" == *"localhost:"* ]]; then
   build_args+=(--network host)
 fi
-docker build "${build_args[@]}" .sandcastle
+docker build "${build_args[@]}" "$script_directory"
 
 docker run --rm --entrypoint sh "$image" -c '
   test "$(id -u)" != 0
@@ -46,30 +54,33 @@ docker run --rm --entrypoint sh "$image" -c '
 '
 
 docker run --rm \
+  "${runtime_network_args[@]}" \
   --add-host host.docker.internal:host-gateway \
   --env MODEL_GATEWAY_URL \
   --env MODEL_GATEWAY_TOKEN \
   --env AFK_MODEL="$model" \
+  --env AFK_CONTEXT_WINDOW="$context_window" \
   --entrypoint sh \
   "$image" -c '
     export ANTHROPIC_AUTH_TOKEN="$MODEL_GATEWAY_TOKEN"
     curl --fail --silent --show-error \
       --header "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
       "$MODEL_GATEWAY_URL/v1/models" |
-      node /opt/afk-delivery/verify-model.mjs "$AFK_MODEL" 1000000
+      node /opt/afk-delivery/verify-model.mjs "$AFK_MODEL" "$AFK_CONTEXT_WINDOW"
   '
 
 printf '%s' 'Read the repository README and reply with exactly READ_ONLY_OK. Do not edit files or run commands.' |
-  docker run --rm \
+  docker run --rm -i \
+    "${runtime_network_args[@]}" \
     --read-only \
     --cpus 1 \
     --add-host host.docker.internal:host-gateway \
-    --mount "type=bind,source=$PWD,target=/workspace,readonly" \
+    --mount "type=bind,source=$repository_root,target=/workspace,readonly" \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-    --tmpfs /home/agent:rw,nosuid,nodev,size=128m \
+    --tmpfs /home/agent:rw,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=0700 \
     --env MODEL_GATEWAY_URL \
     --env MODEL_GATEWAY_TOKEN \
     --env AFK_MODEL="$model" \
-    --env AFK_CONTEXT_WINDOW=1000000 \
-    --env AFK_MAX_ITERATIONS=1 \
+    --env AFK_CONTEXT_WINDOW="$context_window" \
+    --env AFK_MAX_ITERATIONS=3 \
     "$image" | grep -F 'READ_ONLY_OK'

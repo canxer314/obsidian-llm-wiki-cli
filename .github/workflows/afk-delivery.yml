@@ -101,8 +101,8 @@ jobs:
           AFK_DOMAIN_DOCUMENTS: ${{ github.workspace }}/CONTEXT.md:${{ github.workspace }}/docs/agents/domain.md
           AFK_ARCHITECTURE_DECISIONS: ${{ github.workspace }}/docs/adr/0001-managed-pr-implementation-boundary.md
           AFK_TARGET_BRANCH: master
-          AFK_MODEL: claude-opus-5
-          AFK_CONTEXT_WINDOW: "1000000"
+          AFK_MODEL: gpt-5.6-sol[1M]
+          AFK_CONTEXT_WINDOW: "372000"
           AFK_MAX_ITERATIONS: "24"
           AFK_STAGE_TIMEOUT_MS: "3600000"
           AFK_STAGE_CPUS: "2"

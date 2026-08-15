@@ -29,11 +29,13 @@ delete process.env.MODEL_GATEWAY_TOKEN;
 delete process.env.GITHUB_TOKEN;
 delete process.env.GH_TOKEN;
 
-const model = process.env.AFK_MODEL ?? "claude-opus-5";
-const requiredContextWindow = Number(process.env.AFK_CONTEXT_WINDOW ?? "1000000");
+const model = process.env.AFK_MODEL ?? "gpt-5.6-sol[1M]";
+const requiredContextWindow = Number(process.env.AFK_CONTEXT_WINDOW ?? "372000");
 if (!Number.isSafeInteger(requiredContextWindow) || requiredContextWindow <= 0) {
   throw new Error("AFK_CONTEXT_WINDOW must be a positive integer");
 }
+process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(requiredContextWindow);
+process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(requiredContextWindow);
 if (process.env.ANTHROPIC_BASE_URL !== undefined) {
   const modelsUrl = new URL("v1/models", process.env.ANTHROPIC_BASE_URL.endsWith("/")
     ? process.env.ANTHROPIC_BASE_URL
@@ -45,11 +47,14 @@ if (process.env.ANTHROPIC_BASE_URL !== undefined) {
   });
   if (!response.ok) throw new Error(`model gateway preflight returned ${response.status}`);
   const payload = await response.json();
-  const selected = Array.isArray(payload.data)
-    ? payload.data.find((candidate) => candidate?.id === model)
-    : undefined;
-  if (selected === undefined || !Number.isSafeInteger(selected.max_input_tokens) ||
-      selected.max_input_tokens < requiredContextWindow) {
+  const candidates = Array.isArray(payload.data)
+    ? payload.data
+    : Array.isArray(payload.models)
+      ? payload.models
+      : [];
+  const selected = candidates.find((candidate) => candidate?.id === model);
+  if (selected !== undefined && (!Number.isSafeInteger(selected.max_input_tokens) ||
+      selected.max_input_tokens < requiredContextWindow)) {
     throw new Error(`model ${model} does not provide the required ${requiredContextWindow}-token context`);
   }
 }
