@@ -941,7 +941,7 @@ export function selectDeliveryTransition(
     }]);
   }
   if (!requiredValidationPassed(validation, policy, ticket)) {
-    const selected = transition(input, "validate", { pr, inputRevision: currentRevision });
+    const selected = transition(input, "validate", { pr, round: 1, inputRevision: currentRevision });
     return result(input, selected, [{
       kind: "run-validation",
       exactRevision: currentRevision,

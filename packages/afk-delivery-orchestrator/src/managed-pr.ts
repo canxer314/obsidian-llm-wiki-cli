@@ -81,14 +81,29 @@ export function envelopeComment(envelope: ManagedControlEnvelope, narrative: str
   ].join("\n");
 }
 
-export function extractControlEnvelope(body: string): unknown | undefined {
+export function extractControlNarrative(body: string): string {
+  const envelope = extractControlEnvelopeRange(body);
+  if (envelope === undefined) return body;
+  const withoutEnvelope = body.slice(0, envelope.start) + body.slice(envelope.end);
+  return withoutEnvelope
+    .replace(/^\s*<!-- afk-effect:[^>]+ -->\s*(?:\n|$)/u, "")
+    .replace(/^\n+/u, "");
+}
+
+function extractControlEnvelopeRange(body: string): { start: number; end: number } | undefined {
   const start = body.indexOf(ENVELOPE_PREFIX);
   if (start < 0) return undefined;
   const jsonStart = start + ENVELOPE_PREFIX.length;
-  const end = body.indexOf(ENVELOPE_SUFFIX, jsonStart);
-  if (end < 0) return undefined;
+  const suffixStart = body.indexOf(ENVELOPE_SUFFIX, jsonStart);
+  if (suffixStart < 0) return undefined;
+  return { start, end: suffixStart + ENVELOPE_SUFFIX.length };
+}
+
+export function extractControlEnvelope(body: string): unknown | undefined {
+  const range = extractControlEnvelopeRange(body);
+  if (range === undefined) return undefined;
   try {
-    return JSON.parse(body.slice(jsonStart, end)) as unknown;
+    return JSON.parse(body.slice(range.start + ENVELOPE_PREFIX.length, range.end - ENVELOPE_SUFFIX.length)) as unknown;
   } catch {
     return undefined;
   }

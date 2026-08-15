@@ -8,6 +8,7 @@ export * from "./managed-pr-recovery.js";
 export * from "./managed-pr.js";
 export * from "./new-implementation.js";
 export * from "./sandcastle.js";
+export * from "./validation-review.js";
 
 export interface DeliveryTicketSnapshot {
   number: number;

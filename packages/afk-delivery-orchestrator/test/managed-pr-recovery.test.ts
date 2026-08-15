@@ -1,4 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../src/managed-pr.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/managed-pr.js")>(),
+  extractControlNarrative(body: string): string {
+    const envelope = /<!-- afk-control-envelope\n[\s\S]*?\n-->/u;
+    return body.replace(/^<!-- afk-effect:[^\n]*-->\n/u, "").replace(envelope, "").replace(/^\n+/u, "");
+  },
+}));
 import {
   createManagedPullRequestReconstructor,
   discoverManagedPullRequestRecovery,
@@ -10,6 +18,11 @@ import {
 const REVISION = "a".repeat(40);
 const repository = "canxer314/obsidian-llm-wiki-cli";
 const trustedActor = { login: "delivery-bot", type: "Bot" as const };
+const reviewContext = {
+  repositoryInstructions: "Repository instructions",
+  domainDocuments: [],
+  architectureDecisions: [],
+};
 
 function candidate(overrides: Partial<RecoveryPullRequestCandidate> = {}): RecoveryPullRequestCandidate {
   const ticketNumber = overrides.ticketNumbers?.[0] ?? 66;
@@ -29,6 +42,7 @@ function candidate(overrides: Partial<RecoveryPullRequestCandidate> = {}): Recov
     headParents: [],
     headMessage: "Implementation",
     headAuthor: { name: "Developer", email: "developer@example.com" },
+    diff: "diff --git a/file.ts b/file.ts\n",
     body: `Closes #${ticketNumber}\n\n<!-- afk-managed-pr:${ticketNumber}:${transitionId} -->`,
     comments: [{
       author: trustedActor,
@@ -131,6 +145,7 @@ describe("Managed PR recovery discovery", () => {
       trustedActors: [trustedActor],
       maximumPullRequests: 25,
       candidates: ports([merged]).value,
+    loadReviewContext: async () => reviewContext,
       loadTicket: async () => ({
         number: 66, open: true, labels: ["ready-for-agent"],
         openBlockerNumbers: [], dependencyDataComplete: true,
@@ -159,6 +174,7 @@ describe("Managed PR recovery discovery", () => {
       trustedActors: [trustedActor],
       maximumPullRequests: 25,
       candidates: ports([preparedCandidate]).value,
+    loadReviewContext: async () => reviewContext,
       loadTicket: async () => ({
         number: 66, open: true, labels: ["ready-for-agent"],
         openBlockerNumbers: [], dependencyDataComplete: true,
@@ -181,6 +197,7 @@ describe("Managed PR recovery discovery", () => {
       trustedActors: [trustedActor],
       maximumPullRequests: 25,
       candidates: ports([{ ...merged, comments: candidate().comments }]).value,
+    loadReviewContext: async () => reviewContext,
       loadTicket: async () => ({
         number: 66, open: true, labels: ["ready-for-agent"],
         openBlockerNumbers: [], dependencyDataComplete: true,
@@ -224,6 +241,7 @@ describe("Managed PR recovery discovery", () => {
       trustedActors: [trustedActor],
       maximumPullRequests: 25,
       candidates: input.value,
+    loadReviewContext: async () => reviewContext,
       loadTicket: async () => ({
         number: 66, open: true, labels: ["ready-for-agent"],
         openBlockerNumbers: [], dependencyDataComplete: true,
@@ -291,6 +309,75 @@ describe("Managed PR recovery discovery", () => {
     });
   });
 
+  it("preserves only the byte-exact narrative adjacent to a Control Envelope", async () => {
+    const effectMarker = "<!-- afk-effect:record-73 -->";
+    const envelope = candidate().comments[0]!.body.replace("\n\nInitial management record", "");
+    const narrative = "# Review handoff\n\nFindings remain **verbatim**.\n";
+    const snapshot = await reconstructManagedPullRequestSnapshot({
+      repository,
+      targetBranch: "master",
+      targetBranchRevision: "b".repeat(40),
+      reviewContext,
+      ticket: {
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      },
+      candidates: ports([candidate({
+        comments: [{ author: trustedActor, body: `${effectMarker}\n${envelope}\n\n${narrative}` }],
+      })]).value,
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+    });
+
+    expect(snapshot.controlComments[0]?.narrative).toBe(narrative);
+  });
+
+  it("enriches the reconstructed snapshot with the complete candidate diff and explicit review context", async () => {
+    const reviewContext = {
+      repositoryInstructions: "# Repository instructions\n\nPreserve this exact content.\n",
+      domainDocuments: [{ path: "docs/contexts/afk-delivery/CONTEXT.md", content: "# Delivery context\n" }],
+      architectureDecisions: [{ path: "docs/adr/0001-managed-pr.md", content: "# Decision\n" }],
+    };
+    const input = ports([candidate({ diff: "diff --git a/a.ts b/a.ts\n+exact diff\n" })]);
+
+    const snapshot = await reconstructManagedPullRequestSnapshot({
+      repository,
+      targetBranch: "master",
+      targetBranchRevision: "b".repeat(40),
+      reviewContext,
+      ticket: {
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      },
+      candidates: input.value,
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+    });
+
+    expect(snapshot.pullRequests[0]?.diff).toBe("diff --git a/a.ts b/a.ts\n+exact diff\n");
+    expect(snapshot).toMatchObject(reviewContext);
+  });
+
+  it("fails reconstruction when its explicit review-context loader fails", async () => {
+    const reconstructor = createManagedPullRequestReconstructor({
+      repository,
+      targetBranch: "master",
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+      candidates: ports([candidate()]).value,
+      loadReviewContext: async () => {
+        throw new Error("review context could not be loaded");
+      },
+      loadTicket: async () => ({
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      }),
+      loadTargetRevision: async () => "b".repeat(40),
+    });
+
+    await expect(reconstructor.reconstruct()).rejects.toThrow("review context could not be loaded");
+  });
+
   it("keeps forged management history visible but does not authenticate the PR", async () => {
     const forged = candidate({
       comments: [{ ...candidate().comments[0]!, author: { login: "mallory", type: "User" } }],
@@ -300,6 +387,7 @@ describe("Managed PR recovery discovery", () => {
       repository,
       targetBranch: "master",
       targetBranchRevision: "b".repeat(40),
+      reviewContext,
       ticket: {
         number: 66, open: true, labels: ["ready-for-agent"],
         openBlockerNumbers: [], dependencyDataComplete: true,
@@ -370,6 +458,7 @@ describe("Managed PR recovery discovery", () => {
       repository,
       targetBranch: "master",
       targetBranchRevision: "b".repeat(40),
+      reviewContext,
       ticket: {
         number: 66, open: true, labels: ["ready-for-agent"],
         openBlockerNumbers: [], dependencyDataComplete: true,

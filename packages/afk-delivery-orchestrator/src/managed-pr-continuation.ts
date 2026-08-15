@@ -5,6 +5,9 @@ import {
   type DeliveryLeaseResult,
   type RepositoryPolicy,
   type WorkflowRunIdentity,
+  type ValidationRequest,
+  type ReviewRequest,
+  type StageOutcome,
 } from "@llm-wiki/afk-delivery-core";
 
 export interface ManagedPullRequestContinuationRequest {
@@ -73,6 +76,8 @@ export interface ManagedPullRequestContinuationPorts {
     outputRevision?: string;
     narrative: string;
   }>;
+  runValidation?(input: ValidationRequest): Promise<Extract<StageOutcome, { kind: "validation" }>>;
+  runReview?(input: ReviewRequest): Promise<Extract<StageOutcome, { kind: "review" }>>;
   recordControlComment(input: {
     prNumber: number;
     envelope: ControlEnvelope;
@@ -158,6 +163,76 @@ function verifySnapshot(
   }
 }
 
+function verifyStageSnapshot(
+  request: ManagedPullRequestContinuationRequest,
+  snapshot: AuthenticatedGitHubSnapshot,
+  prNumber: number,
+  headRevision: string,
+  baseRevision?: string,
+): void {
+  verifySnapshot(request, snapshot);
+  const pr = snapshot.pullRequests.find((candidate) => candidate.number === prNumber);
+  if (pr === undefined || pr.headRevision !== headRevision ||
+      (baseRevision !== undefined && pr.baseRevision !== baseRevision)) {
+    throw new Error("PR Revision changed before stage evidence was persisted");
+  }
+}
+
+async function consumeSelectedStageEffect(
+  request: ManagedPullRequestContinuationRequest,
+  ports: ManagedPullRequestContinuationPorts,
+  snapshot: AuthenticatedGitHubSnapshot,
+  selected: ReturnType<typeof selectDeliveryTransition>,
+): Promise<ManagedPullRequestContinuationResult | undefined> {
+  const effect = selected.effects[0];
+  const prNumber = selected.transition.prNumber;
+  const revision = selected.transition.inputRevision;
+  if (effect === undefined || prNumber === undefined || revision === undefined) return undefined;
+  if (effect.kind === "run-validation") {
+    if (ports.runValidation === undefined || effect.validationRequest === undefined ||
+        effect.validationRequest.revision !== revision || effect.exactRevision !== revision ||
+        effect.validationRequest.round !== selected.transition.round) {
+      throw new Error("validation effect is incomplete or not bound to the selected Revision");
+    }
+    const outcome = await ports.runValidation(effect.validationRequest);
+    const refreshed = await ports.reconstruct();
+    verifyStageSnapshot(request, refreshed.snapshot, prNumber, revision);
+    const recorded = selectDeliveryTransition({
+      snapshot: refreshed.snapshot, lease: request.lease, policy: request.policy, workflowRun: request.workflowRun,
+      stageOutcome: outcome,
+    });
+    const record = recorded.effects[0];
+    if (record?.kind !== "record-control-comment" || record.envelope === undefined) {
+      throw new Error("fresh GitHub reconstruction rejected validation evidence");
+    }
+    await ports.recordControlComment({ prNumber, envelope: record.envelope, idempotencyKey: record.idempotencyKey });
+    return { status: "selected", transition: recorded.transition };
+  }
+  if (effect.kind === "run-review") {
+    if (ports.runReview === undefined || effect.reviewRequest === undefined ||
+        effect.reviewRequest.headRevision !== revision || effect.exactRevision !== revision ||
+        effect.reviewRequest.round !== selected.transition.round) {
+      throw new Error("review effect is incomplete or not bound to the selected Revision");
+    }
+    const outcome = await ports.runReview(effect.reviewRequest);
+    const refreshed = await ports.reconstruct();
+    verifyStageSnapshot(request, refreshed.snapshot, prNumber, revision, effect.reviewRequest.baseRevision);
+    const recorded = selectDeliveryTransition({
+      snapshot: refreshed.snapshot, lease: request.lease, policy: request.policy, workflowRun: request.workflowRun,
+      stageOutcome: outcome,
+    });
+    const record = recorded.effects[0];
+    if (record?.kind !== "record-control-comment" || record.envelope === undefined) {
+      throw new Error("fresh GitHub reconstruction rejected Review Handoff");
+    }
+    await ports.recordControlComment({
+      prNumber, envelope: record.envelope, ...(record.narrative === undefined ? {} : { narrative: record.narrative }), idempotencyKey: record.idempotencyKey,
+    });
+    return { status: "selected", transition: recorded.transition };
+  }
+  return undefined;
+}
+
 export async function continueManagedPullRequest(
   request: ManagedPullRequestContinuationRequest,
   ports: ManagedPullRequestContinuationPorts,
@@ -204,6 +279,9 @@ export async function continueManagedPullRequest(
     policy: request.policy,
     workflowRun: request.workflowRun,
   });
+
+  const consumed = await consumeSelectedStageEffect(request, ports, reconstructed.snapshot, selected);
+  if (consumed !== undefined) return consumed;
 
   if (selected.transition.kind === "needs-human") {
     const effect = selected.effects[0];

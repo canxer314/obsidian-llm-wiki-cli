@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -13,6 +13,7 @@ import type {
   ImplementationStageRequest,
   ImplementationWorktree,
 } from "./implementation.js";
+import type { ReviewStagePorts, ValidationStagePorts } from "./validation-review.js";
 import { buildImplementationContainerCommand } from "./sandcastle.js";
 
 const execFileAsync = promisify(execFile);
@@ -156,6 +157,81 @@ export function createLocalConflictResolutionPorts(input: {
     },
     async removeWorktree(worktree) {
       await rm(worktree.path, { recursive: true, force: true });
+    },
+  };
+}
+
+export function createLocalValidationPorts(input: { repositoryPath: string }): ValidationStagePorts {
+  return {
+    async createDetachedClone(revision) {
+      const directory = await mkdtemp(join(tmpdir(), "afk-validation-"));
+      try {
+        await execFileAsync("git", ["clone", "--no-local", "--no-checkout", input.repositoryPath, directory]);
+        await execFileAsync("git", ["-C", directory, "checkout", "--detach", revision]);
+        await execFileAsync("npm", ["ci", "--ignore-scripts"], {
+          cwd: directory,
+          env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "/tmp", CI: "true" },
+          timeout: 600_000,
+        });
+        const { stdout } = await execFileAsync("git", ["-C", directory, "rev-parse", "HEAD"]);
+        if (stdout.trim() !== revision) throw new Error("validation checkout is not the exact requested Revision");
+        return { path: directory };
+      } catch (error) {
+        await rm(directory, { recursive: true, force: true });
+        throw error;
+      }
+    },
+    async runCheck({ worktreePath, command, timeoutMs }) {
+      return await new Promise((resolve, reject) => {
+        const child = spawn("sh", ["-lc", command], {
+          cwd: worktreePath,
+          env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "/tmp", CI: "true" },
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
+        child.once("error", (error) => { clearTimeout(timer); reject(error); });
+        child.once("close", (code) => { clearTimeout(timer); resolve({ exitCode: timedOut ? null : code, timedOut }); });
+      });
+    },
+    async removeDetachedClone(worktree) { await rm(worktree.path, { recursive: true, force: true }); },
+  };
+}
+
+export function createLocalReviewPorts(input: {
+  reviewerLauncher: string;
+  modelGatewayUrl: string;
+  modelGatewayToken: string;
+  reviewerImage: string;
+}): ReviewStagePorts {
+  return {
+    async runReviewer({ request, timeoutMs }) {
+      const directory = await mkdtemp(join(tmpdir(), "afk-review-request-"));
+      const bundle = join(directory, "review.json");
+      try {
+        await chmod(directory, 0o700);
+        await writeFile(bundle, request, { encoding: "utf8", mode: 0o400 });
+        const { stdout, stderr } = await execFileAsync(input.reviewerLauncher, [bundle], {
+          timeout: timeoutMs,
+          maxBuffer: 10 * 1024 * 1024,
+          env: {
+            PATH: process.env.PATH ?? "",
+            ANTHROPIC_BASE_URL: input.modelGatewayUrl,
+            ANTHROPIC_AUTH_TOKEN: input.modelGatewayToken,
+            AFK_REVIEWER_IMAGE: input.reviewerImage,
+          },
+        });
+        return { exitCode: 0, stdout, stderr };
+      } catch (error) {
+        const detail = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
+        return {
+          exitCode: typeof detail.code === "number" ? detail.code : 1,
+          stdout: typeof detail.stdout === "string" ? detail.stdout : "",
+          stderr: typeof detail.stderr === "string" ? detail.stderr : "",
+        };
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     },
   };
 }

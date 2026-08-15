@@ -68,6 +68,9 @@ describe("GitHub Managed PR publication adapter", () => {
       if (args[0] === "pr" && args[1] === "list") {
         return JSON.stringify([{ number: 73 }]);
       }
+      if (args[0] === "pr" && args[1] === "diff") {
+        return "diff --git a/file.ts b/file.ts\n+complete diff\n";
+      }
       if (args[0] === "pr" && args[1] === "view") {
         return JSON.stringify({
           number: 73,
@@ -116,6 +119,7 @@ describe("GitHub Managed PR publication adapter", () => {
       headParents: ["a".repeat(40)],
       headMessage: "Implementation",
       headAuthor: { name: "Developer", email: "developer@example.com" },
+      diff: "diff --git a/file.ts b/file.ts\n+complete diff\n",
       body: "Closes #66",
       comments: [
         { author: { login: "delivery-app", type: "App" }, body: "control-1" },
@@ -136,6 +140,29 @@ describe("GitHub Managed PR publication adapter", () => {
     expect(commentsCall?.args).toContain("--paginate");
     expect(commentsCall?.args.at(-2)).toBe("--jq");
     expect(commentsCall?.args.at(-1)).toContain("author:");
+    const diffCall = calls.find((call) => call.args[0] === "pr" && call.args[1] === "diff");
+    expect(diffCall?.args).toEqual(["pr", "diff", "73", "--repo", "owner/repo"]);
+  });
+
+  it("fails closed when GitHub does not provide a complete textual PR diff", async () => {
+    const command = async (_file: string, args: string[]): Promise<string> => {
+      if (args[0] === "pr" && args[1] === "list") return JSON.stringify([{ number: 73 }]);
+      if (args[0] === "pr" && args[1] === "diff") return "diff unavailable";
+      if (args[0] === "pr" && args[1] === "view") return JSON.stringify({
+        number: 73, state: "OPEN", headRefName: "afk/ticket-66", headRefOid: "a".repeat(40),
+        headRepository: { nameWithOwner: "owner/repo" }, baseRefName: "master", baseRefOid: "b".repeat(40),
+        body: "Closes #66", mergeable: "UNKNOWN", statusCheckRollup: [], closingIssuesReferences: [{ number: 66 }],
+      });
+      if (args[0] === "api" && args[1]?.endsWith("/comments")) return "";
+      if (args[0] === "api" && args[1]?.includes("/compare/")) return "b".repeat(40);
+      if (args[0] === "api" && args[1]?.includes("/git/commits/")) return JSON.stringify({
+        parents: [], message: "Implementation", author: { name: "Developer", email: "developer@example.com" },
+      });
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    };
+
+    await expect(createGitHubManagedPullRequestRecoveryPorts({ repository: "owner/repo", command })
+      .listOpenPullRequests(25)).rejects.toThrow("complete textual diff");
   });
 
   it("reads an exact staged synchronization from the versioned durable ref", async () => {
