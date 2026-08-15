@@ -9,7 +9,7 @@
   "scripts": {
     "build": "npm run build -w @llm-wiki/vault-contracts && npm run build -w @llm-wiki/obsidian-vault-bridge",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "vitest run",
+    "test": "vitest run --exclude '.claude/worktrees/**'",
     "test:watch": "vitest",
     "sandcastle": "tsx .sandcastle/main.ts",
     "sandcastle:docker:build": "docker build --network host --build-arg HTTP_PROXY=http://127.0.0.1:7890 --build-arg HTTPS_PROXY=http://127.0.0.1:7890 --build-arg NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,10.0.0.0/8 --build-arg AGENT_UID=$(id -u) --build-arg AGENT_GID=$(id -g) -t sandcastle:obsidian-llm-wiki-cli -f .sandcastle/Dockerfile .",
