@@ -1,5 +1,8 @@
 import { parseControlEnvelope, type AuthenticatedGitHubSnapshot } from "@llm-wiki/afk-delivery-core";
-import type { ManagedPullRequestContinuationPorts } from "./managed-pr-continuation.js";
+import {
+  synchronizationStagingRef,
+  type ManagedPullRequestContinuationPorts,
+} from "./managed-pr-continuation.js";
 import {
   extractControlEnvelope,
   recognizeManagedPullRequest,
@@ -21,6 +24,11 @@ export interface RecoveryPullRequestCandidate extends ManagedPullRequestRecord {
 
 export interface ManagedPullRequestRecoveryPorts {
   listOpenPullRequests(limit: number): Promise<RecoveryPullRequestCandidate[]>;
+  readSynchronizationStaging(input: {
+    prNumber: number;
+    inputRevision: string;
+    targetRevision: string;
+  }): Promise<{ revision: string; parents: string[] } | undefined>;
 }
 
 export interface ManagedPullRequestRecoveryPolicy {
@@ -39,7 +47,12 @@ export interface ManagedPullRequestRecoveryResult {
   ambiguousTicketNumbers: number[];
 }
 
-const AFK_SYNC_AUTHOR = { name: "AFK Delivery", email: "afk-delivery@invalid" };
+const actorIsTrusted = (
+  actor: { login: string; type: "Bot" | "App" | "User" },
+  trustedActors: ManagedPullRequestRecoveryPolicy["trustedActors"],
+): boolean => trustedActors.some((trusted) =>
+  trusted.login === actor.login && trusted.type === actor.type,
+);
 
 export function createManagedPullRequestReconstructor(input: {
   repository: string;
@@ -59,25 +72,111 @@ export function createManagedPullRequestReconstructor(input: {
       ]);
       const snapshot = await reconstructManagedPullRequestSnapshot({
         repository: input.repository,
+        targetBranch: input.targetBranch,
         targetBranchRevision,
         ticket,
-        candidates: { listOpenPullRequests: async () => candidates },
+        candidates: {
+          listOpenPullRequests: async () => candidates,
+          readSynchronizationStaging: input.candidates.readSynchronizationStaging,
+        },
         trustedActors: input.trustedActors,
         maximumPullRequests: input.maximumPullRequests,
       });
       const candidate = candidates.find((value) =>
         value.ticketNumbers.length === 1 && value.ticketNumbers[0] === ticket.number,
       );
+      if (candidate === undefined || snapshot.pullRequests.length !== 1) return { snapshot };
+      const snapshotPr = snapshot.pullRequests[0];
+      const trustedSynchronizationRecords = candidate.comments
+        .filter((comment) => actorIsTrusted(comment.author, input.trustedActors))
+        .map((comment) => parseControlEnvelope(extractControlEnvelope(comment.body)))
+        .filter((envelope): envelope is NonNullable<typeof envelope> =>
+          envelope?.kind === "synchronization" &&
+          envelope.repository === input.repository &&
+          envelope.ticketNumber === ticket.number &&
+          envelope.prNumber === candidate.number &&
+          envelope.targetRevision === targetBranchRevision
+        );
+      const readyRecords = trustedSynchronizationRecords.filter((envelope) =>
+        envelope.disposition === "ready" && envelope.outputRevision !== undefined
+      );
+      const trustedCandidate = snapshotPr?.managed === true &&
+        candidate.repository === input.repository &&
+        candidate.headRepository === input.repository &&
+        candidate.baseBranch === input.targetBranch;
+      const startedRecords = trustedSynchronizationRecords.filter((envelope) =>
+        envelope.disposition === "started" &&
+        envelope.outputRevision === undefined &&
+        envelope.transitionId.endsWith(":intent")
+      );
+      if (trustedCandidate && readyRecords.length === 0 && startedRecords.length === 1 &&
+          candidate.headRevision === startedRecords[0]!.inputRevision) {
+        const started = startedRecords[0]!;
+        const staged = await input.candidates.readSynchronizationStaging({
+          prNumber: candidate.number,
+          inputRevision: started.inputRevision,
+          targetRevision: targetBranchRevision,
+        });
+        if (
+          staged !== undefined && staged.parents.length === 2 &&
+          staged.parents.includes(started.inputRevision) &&
+          staged.parents.includes(targetBranchRevision)
+        ) {
+          const readyEnvelope = {
+            ...started,
+            transitionId: `${started.transitionId.slice(0, -":intent".length)}:ready`,
+            outputRevision: staged.revision,
+            disposition: "ready",
+          };
+          return {
+            snapshot,
+            preparedSynchronization: {
+              prNumber: candidate.number,
+              headBranch: candidate.headBranch,
+              inputRevision: started.inputRevision,
+              outputRevision: staged.revision,
+              targetRevision: targetBranchRevision,
+              narrative: `Recovered prepared synchronization Revision ${staged.revision}.`,
+              readyEnvelope,
+            },
+          };
+        }
+      }
+      if (readyRecords.length !== 1) return { snapshot };
+      const ready = readyRecords[0]!;
+      const matchingStarted = startedRecords.filter((envelope) =>
+        envelope.inputRevision === ready.inputRevision &&
+        ready.transitionId === `${envelope.transitionId.slice(0, -":intent".length)}:ready`
+      );
+      if (matchingStarted.length !== 1) return { snapshot };
       if (
-        candidate !== undefined &&
+        trustedCandidate &&
+        ready !== undefined &&
+        candidate.headRevision === ready.inputRevision
+      ) {
+        return {
+          snapshot,
+          preparedSynchronization: {
+            prNumber: candidate.number,
+            headBranch: candidate.headBranch,
+            inputRevision: ready.inputRevision,
+            outputRevision: ready.outputRevision!,
+            targetRevision: targetBranchRevision,
+            narrative: `Published prepared synchronization Revision ${ready.outputRevision}.`,
+          },
+        };
+      }
+      if (
+        trustedCandidate &&
+        ready !== undefined &&
+        candidate.headRevision === ready.outputRevision &&
         candidate.headParents.length === 2 &&
         candidate.headParents.includes(targetBranchRevision) &&
-        candidate.headMessage === `AFK Delivery synchronize ${targetBranchRevision} into ${candidate.headParents.find((parent) => parent !== targetBranchRevision)}` &&
-        candidate.headAuthor.name === AFK_SYNC_AUTHOR.name &&
-        candidate.headAuthor.email === AFK_SYNC_AUTHOR.email &&
+        candidate.headParents.includes(ready.inputRevision) &&
         !snapshot.controlComments.some((comment) => {
           const envelope = parseControlEnvelope(comment.envelope);
-          return envelope?.kind === "synchronization" && envelope.outputRevision === candidate.headRevision;
+          return envelope?.kind === "synchronization" && envelope.disposition === "succeeded" &&
+            envelope.outputRevision === candidate.headRevision;
         })
       ) {
         const inputRevision = candidate.headParents.find((parent) => parent !== targetBranchRevision)!;
@@ -99,6 +198,7 @@ export function createManagedPullRequestReconstructor(input: {
 
 export async function reconstructManagedPullRequestSnapshot(input: {
   repository: string;
+  targetBranch: string;
   targetBranchRevision: string;
   ticket: AuthenticatedGitHubSnapshot["ticket"];
   candidates: ManagedPullRequestRecoveryPorts;
@@ -112,8 +212,7 @@ export async function reconstructManagedPullRequestSnapshot(input: {
   const linked = candidates.filter((candidate) =>
     candidate.repository === input.repository &&
     candidate.open &&
-    candidate.ticketNumbers.length === 1 &&
-    candidate.ticketNumbers[0] === input.ticket.number,
+    candidate.ticketNumbers.includes(input.ticket.number),
   );
   const controlComments: AuthenticatedGitHubSnapshot["controlComments"] = [];
   const pullRequests = linked.map((candidate) => {
@@ -137,11 +236,13 @@ export async function reconstructManagedPullRequestSnapshot(input: {
       baseRevision: candidate.baseRevision,
       mergeable: candidate.mergeable,
       requiredChecksPass: candidate.requiredChecksPass,
-      managed: candidate.headRepository === input.repository &&
+      managed: candidate.ticketNumbers.length === 1 &&
+        candidate.baseBranch === input.targetBranch &&
+        candidate.headRepository === input.repository &&
         recognizeManagedPullRequest(candidate, {
           repository: input.repository,
           ticketNumber: input.ticket.number,
-          targetBranch: candidate.baseBranch,
+          targetBranch: input.targetBranch,
           trustedActors: input.trustedActors,
         }).managed,
       body: candidate.body,

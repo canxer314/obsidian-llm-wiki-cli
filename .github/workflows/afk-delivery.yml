@@ -23,7 +23,11 @@ jobs:
           node-version: 24.14.0
           cache: npm
       - run: npm ci
-      - run: npm run build -w @llm-wiki/afk-delivery-orchestrator
+      - name: Verify repository
+        run: |
+          npm run build
+          npm run typecheck
+          npm test
       - name: Worker preflight
         env:
           GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
@@ -70,7 +74,11 @@ jobs:
           node-version: 24.14.0
           cache: npm
       - run: npm ci
-      - run: npm run build -w @llm-wiki/afk-delivery-orchestrator
+      - name: Verify repository
+        run: |
+          npm run build
+          npm run typecheck
+          npm test
       - name: Worker preflight
         env:
           GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}

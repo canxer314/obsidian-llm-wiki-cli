@@ -69,7 +69,7 @@ function managedPr(headRevision = HEAD_REVISION) {
 }
 
 function envelope(
-  kind: "managed-pr" | "validation" | "review-handoff" | "repair-handoff" | "merge-report",
+  kind: "managed-pr" | "synchronization" | "validation" | "review-handoff" | "repair-handoff" | "merge-report",
   overrides: Record<string, unknown> = {},
 ) {
   return {
@@ -131,6 +131,50 @@ describe("selectDeliveryTransition", () => {
     const result = selectDeliveryTransition(input(value));
     expect(result.transition.kind).toBe("needs-human");
     expect(result.effects[0]?.kind).toBe("record-needs-human");
+  });
+
+  it("fails closed when a trusted synchronization intent has no authenticated output", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("synchronization", {
+          transitionId: "sync-started",
+          disposition: "started",
+          targetRevision: BASE_REVISION,
+          outputRevision: undefined,
+        }),
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({
+      kind: "needs-human",
+      reason: "a synchronization attempt was interrupted before its output was authenticated",
+    });
+  });
+
+  it("does not let an orphan ready record release a different synchronization intent", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("synchronization", {
+          transitionId: "sync-a:intent",
+          disposition: "started",
+          targetRevision: BASE_REVISION,
+          outputRevision: undefined,
+        }),
+        trustedRecord("synchronization", {
+          transitionId: "sync-b:ready",
+          disposition: "ready",
+          targetRevision: BASE_REVISION,
+          outputRevision: ADVANCED_REVISION,
+        }),
+      ],
+    })));
+
+    expect(result.transition.kind).toBe("needs-human");
+    expect(result.transition.reason).toMatch(/authenticated Revision chain|interrupted before its output/u);
   });
 
   it("requires an acquired Delivery Lease for mutations", () => {

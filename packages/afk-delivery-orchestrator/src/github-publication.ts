@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type {
-  ManagedPullRequestContinuationPorts,
+import {
+  synchronizationStagingRef,
+  type ManagedPullRequestContinuationPorts,
 } from "./managed-pr-continuation.js";
 import type {
   ManagedPullRequestRecoveryPorts,
@@ -87,12 +88,17 @@ export function createGitHubContinuationEffects(input: {
     async recordNeedsHuman(record) {
       const subjectNumber = record.prNumber ?? record.ticketNumber;
       if (await recordExists(subjectNumber, record.idempotencyKey)) return { created: false };
-      const body = [
-        `<!-- afk-effect:${record.idempotencyKey} -->`,
-        `AFK Delivery needs human intervention for Delivery Ticket #${record.ticketNumber}.`,
-        "",
-        record.reason,
-      ].join("\n");
+      const body = record.envelope === undefined
+        ? [
+            `<!-- afk-effect:${record.idempotencyKey} -->`,
+            `AFK Delivery needs human intervention for Delivery Ticket #${record.ticketNumber}.`,
+            "",
+            record.reason,
+          ].join("\n")
+        : [
+            `<!-- afk-effect:${record.idempotencyKey} -->`,
+            envelopeComment(record.envelope as Parameters<typeof envelopeComment>[0], record.reason),
+          ].join("\n");
       if (record.prNumber === undefined) {
         await command("gh", [
           "issue", "comment", String(record.ticketNumber), "--repo", input.repository, "--body", body,
@@ -111,6 +117,27 @@ export function createGitHubManagedPullRequestRecoveryPorts(input: {
 }): ManagedPullRequestRecoveryPorts {
   const command = input.command ?? defaultCommand;
   return {
+    async readSynchronizationStaging(staging) {
+      const ref = synchronizationStagingRef({
+        prNumber: staging.prNumber,
+        expectedHeadRevision: staging.inputRevision,
+        targetRevision: staging.targetRevision,
+      }).replace(/^refs\//u, "");
+      let revision: string;
+      try {
+        revision = await command("gh", [
+          "api", `repos/${input.repository}/git/ref/${ref}`, "--jq", ".object.sha",
+        ]);
+      } catch {
+        return undefined;
+      }
+      const raw = await command("gh", [
+        "api", `repos/${input.repository}/git/commits/${revision}`,
+        "--jq", "{parents: [.parents[].sha]}",
+      ]);
+      const commit = JSON.parse(raw) as { parents: string[] };
+      return { revision, parents: commit.parents };
+    },
     async listOpenPullRequests(limit) {
       const raw = await command("gh", [
         "pr", "list", "--repo", input.repository, "--state", "open",

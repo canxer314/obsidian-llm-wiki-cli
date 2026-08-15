@@ -228,6 +228,10 @@ async function adopt(ticketNumber: number, prNumber: number): Promise<void> {
   const repository = repositoryParts().fullName;
   const targetBranch = process.env.AFK_TARGET_BRANCH ?? "master";
   const actor = trustedActor();
+  const viewer = JSON.parse(await command("gh", ["api", "user"])) as { login?: unknown; type?: unknown };
+  if (viewer.login !== actor.login || viewer.type !== actor.type) {
+    throw new Error("GitHub credential is not the configured trusted bot/App identity");
+  }
   const raw = await command("gh", [
     "pr", "view", String(prNumber), "--repo", repository,
     "--json", "number,state,baseRefName,headRefName,headRefOid,headRepository,body,closingIssuesReferences",
@@ -310,7 +314,6 @@ async function implement(ticketNumber: number): Promise<void> {
   const actor = trustedActor();
   const policy = repositoryPolicy(targetBranch, actor);
   const boundedStagePolicy = stagePolicy();
-  const frontierTicket = reconstructedTicket.ticket;
   const recovery = createGitHubManagedPullRequestRecoveryPorts({ repository });
   const reconstructor = createManagedPullRequestReconstructor({
     repository,
@@ -318,7 +321,17 @@ async function implement(ticketNumber: number): Promise<void> {
     trustedActors: [actor],
     maximumPullRequests: Number(process.env.AFK_RECOVERY_SCAN_LIMIT ?? "100"),
     candidates: recovery,
-    loadTicket: async () => ({ ...frontierTicket, body: ticket.body }),
+    loadTicket: async () => {
+      const current = await reconstructDeliveryTicket(new GitHubApi(), {
+        owner,
+        repository: repositoryName,
+        ticketNumber,
+        readyLabel: policy.readyLabel,
+        prohibitedLabel: policy.prohibitedLabel,
+      });
+      if (current.status === "needs-human") throw new Error(current.reason);
+      return current.ticket;
+    },
     loadTargetRevision: async () => command("gh", [
       "api", `repos/${repository}/git/ref/heads/${targetBranch}`, "--jq", ".object.sha",
     ]),
@@ -351,6 +364,7 @@ async function implement(ticketNumber: number): Promise<void> {
       headBranch: conflict.headBranch,
       expectedHeadRevision: conflict.expectedHeadRevision,
       targetRevision: conflict.targetRevision,
+      authorizeOutput: conflict.authorizeOutput,
       conflicts: conflict.conflicts,
       controlComments: conflict.controlComments,
       policy: boundedStagePolicy,

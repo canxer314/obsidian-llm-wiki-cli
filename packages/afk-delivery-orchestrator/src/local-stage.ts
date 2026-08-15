@@ -136,15 +136,22 @@ export function createLocalConflictResolutionPorts(input: {
       }
     },
     runAgent: agentPorts.runAgent,
-    async resolveHeadRevision(worktreePath) {
-      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
-      return stdout.trim();
+    async resolveHead(worktreePath) {
+      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "rev-list", "--parents", "-n", "1", "HEAD"]);
+      const [revision, ...parents] = stdout.trim().split(/\s+/u);
+      if (revision === undefined || revision.length === 0) throw new Error("conflict output Revision is unavailable");
+      return { revision, parents };
     },
     async pushResolvedRevision(request) {
+      const destination = request.branch.startsWith("refs/")
+        ? request.branch
+        : `refs/heads/${request.branch}`;
       await execFileAsync("git", [
         "-C", request.worktreePath, "push", "origin",
-        `${request.outputRevision}:refs/heads/${request.branch}`,
-        `--force-with-lease=refs/heads/${request.branch}:${request.expectedHeadRevision}`,
+        `${request.outputRevision}:${destination}`,
+        ...(request.expectedHeadRevision === "create-only"
+          ? [`--force-with-lease=${destination}:`]
+          : [`--force-with-lease=${destination}:${request.expectedHeadRevision}`]),
       ]);
     },
     async removeWorktree(worktree) {

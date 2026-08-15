@@ -217,6 +217,18 @@ export async function adoptManagedPullRequest(
       workflowRunId: request.workflowRunId,
     };
     await ports.postComment(pr.number, envelopeComment(envelope, request.narrative));
+    const refreshed = await ports.findOpenPullRequests(request.ticketNumber, "", request.targetBranch);
+    const authenticated = refreshed.length === 1 && refreshed[0]?.number === request.prNumber &&
+      refreshed[0].headRevision === request.currentRevision &&
+      recognizeManagedPullRequest(refreshed[0], {
+        repository: request.repository,
+        ticketNumber: request.ticketNumber,
+        targetBranch: request.targetBranch,
+        trustedActors: [request.trustedActor],
+      }).managed;
+    if (!authenticated) {
+      throw new Error("published adoption record could not be authenticated from GitHub");
+    }
   }
   return {
     prNumber: pr.number,

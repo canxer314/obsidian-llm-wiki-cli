@@ -22,6 +22,7 @@ const request = {
   headBranch: "afk/ticket-66",
   expectedHeadRevision: HEAD,
   targetRevision: TARGET,
+  authorizeOutput: async () => undefined,
   conflicts: [{ path: "src/index.ts", ours: "feature side", theirs: "master side" }],
   controlComments: [{
     commentId: "managed-1",
@@ -48,7 +49,7 @@ function ports(): { value: ConflictResolutionStagePorts; invocations: unknown[] 
         invocations.push(invocation);
         return { exitCode: 0, stdout: "Resolved conflict", stderr: "" };
       },
-      resolveHeadRevision: async () => OUTPUT,
+      resolveHead: async () => ({ revision: OUTPUT, parents: [HEAD, TARGET] }),
       pushResolvedRevision: async (input) => {
         invocations.push(input);
       },
@@ -84,6 +85,12 @@ describe("conflict resolution stage", () => {
     expect(prompt).toContain("Trusted history");
     expect(fake.invocations[1]).toEqual({
       worktreePath: "/worktree",
+      branch: `refs/afk-delivery/v1/synchronizations/73/${HEAD}-${TARGET}`,
+      expectedHeadRevision: "create-only",
+      outputRevision: OUTPUT,
+    });
+    expect(fake.invocations[2]).toEqual({
+      worktreePath: "/worktree",
       branch: request.headBranch,
       expectedHeadRevision: HEAD,
       outputRevision: OUTPUT,
@@ -92,7 +99,7 @@ describe("conflict resolution stage", () => {
 
   it("rejects a successful agent that produces no new Revision", async () => {
     const fake = ports();
-    fake.value.resolveHeadRevision = async () => HEAD;
+    fake.value.resolveHead = async () => ({ revision: HEAD, parents: [] });
     await expect(runConflictResolutionStage(request, fake.value)).resolves.toMatchObject({
       status: "failed",
       reason: "conflict resolution produced no new Revision",

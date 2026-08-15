@@ -161,6 +161,33 @@ describe("Managed PR publication", () => {
     })).toEqual({ managed: true, ticketNumber: 65, initialRevision: revision });
   });
 
+  it("rejects adoption when the published record is not authored by the trusted actor", async () => {
+    const existing: ManagedPullRequestRecord = {
+      number: 104,
+      headRevision: revision,
+      headBranch: "human/issue-65",
+      baseBranch: "master",
+      body: "Closes #65",
+      comments: [],
+    };
+    const initial = fakePorts(existing);
+    initial.ports.postComment = async (_prNumber, body) => {
+      existing.comments.push({ author: { login: "operator", type: "User" }, body });
+    };
+
+    await expect(adoptManagedPullRequest({
+      repository: request.repository,
+      ticketNumber: 65,
+      prNumber: 104,
+      targetBranch: "master",
+      currentRevision: revision,
+      transitionId: "afk-v1-adopt-104",
+      workflowRunId: "2000",
+      trustedActor: request.trustedActor,
+      narrative: "Adopt",
+    }, initial.ports)).rejects.toThrow("could not be authenticated");
+  });
+
   it("rejects adoption after the PR head or target changes", async () => {
     const existing: ManagedPullRequestRecord = {
       number: 104,

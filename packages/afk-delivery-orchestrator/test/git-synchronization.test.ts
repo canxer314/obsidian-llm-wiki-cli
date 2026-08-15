@@ -14,25 +14,38 @@ function request() {
     headBranch: "afk/ticket-66",
     expectedHeadRevision: HEAD,
     targetRevision: TARGET,
+    authorizeOutput: async () => undefined,
   };
 }
 
 describe("Git synchronization adapter", () => {
-  it("creates a deterministic merge Revision and pushes it with an exact-head lease", async () => {
+  it("creates a deterministic merge Revision, durably authorizes it, and pushes with an exact-head lease", async () => {
     const calls: Array<{ file: string; args: string[]; environment?: Record<string, string> }> = [];
+    const authorized: string[] = [];
     const command: GitSynchronizationCommand = async (file, args, options) => {
       calls.push({ file, args, ...(options?.environment === undefined ? {} : { environment: options.environment }) });
-      if (file === "git" && args.includes("ls-remote")) return `${HEAD}\trefs/heads/afk/ticket-66`;
+      if (file === "git" && args.includes("ls-remote")) {
+        return args.at(-1)?.startsWith("refs/heads/")
+          ? `${HEAD}\trefs/heads/afk/ticket-66`
+          : "";
+      }
       if (file === "git" && args.includes("rev-parse")) return OUTPUT;
       return "";
     };
     const ports = createGitSynchronizationPorts({ repositoryUrl: "git@github.com:owner/repo.git", command });
 
-    await expect(ports.synchronize(request())).resolves.toEqual({
+    await expect(ports.synchronize({
+      ...request(),
+      authorizeOutput: async (revision) => {
+        authorized.push(revision);
+        expect(calls.filter((call) => call.args.includes("push"))).toHaveLength(1);
+      },
+    })).resolves.toEqual({
       status: "succeeded",
       outputRevision: OUTPUT,
       narrative: `Merged target Revision ${TARGET} into ${HEAD}.`,
     });
+    expect(authorized).toEqual([OUTPUT]);
     const merge = calls.find((call) => call.args.includes("merge"));
     expect(merge?.environment).toMatchObject({
       GIT_AUTHOR_NAME: "AFK Delivery",
@@ -64,24 +77,18 @@ describe("Git synchronization adapter", () => {
     expect(calls.some((args) => args.includes("push"))).toBe(false);
   });
 
-  it("recovers an already-pushed synchronization Revision without another push", async () => {
+  it("rejects an already-changed head so recovery remains authenticated", async () => {
     const pushed = "d".repeat(40);
     const calls: string[][] = [];
     const command: GitSynchronizationCommand = async (_file, args) => {
       calls.push(args);
       if (args.includes("ls-remote")) return `${pushed}\trefs/heads/afk/ticket-66`;
-      if (args.includes("rev-list")) return `${pushed} ${HEAD} ${TARGET}`;
-      return "";
+      throw new Error(`unexpected command: ${args.join(" ")}`);
     };
     const ports = createGitSynchronizationPorts({ repositoryUrl: "git@github.com:owner/repo.git", command });
 
-    await expect(ports.synchronize(request())).resolves.toEqual({
-      status: "succeeded",
-      outputRevision: pushed,
-      narrative: `Recovered synchronization Revision ${pushed}.`,
-    });
-    expect(calls.some((args) => args.includes("push"))).toBe(false);
-    expect(calls.some((args) => args.includes("merge"))).toBe(false);
+    await expect(ports.synchronize(request())).rejects.toThrow("head changed before synchronization");
+    expect(calls).toHaveLength(1);
   });
 
   it("rejects a stale expected head before cloning or pushing", async () => {

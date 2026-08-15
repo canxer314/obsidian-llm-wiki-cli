@@ -7,7 +7,10 @@ import type {
   ImplementationStagePolicy,
   ImplementationWorktree,
 } from "./implementation.js";
-import type { SynchronizationConflict } from "./managed-pr-continuation.js";
+import {
+  synchronizationStagingRef,
+  type SynchronizationConflict,
+} from "./managed-pr-continuation.js";
 
 export interface ConflictResolutionStageRequest {
   repository: string;
@@ -16,6 +19,7 @@ export interface ConflictResolutionStageRequest {
   headBranch: string;
   expectedHeadRevision: string;
   targetRevision: string;
+  authorizeOutput(outputRevision: string): Promise<void>;
   conflicts: SynchronizationConflict[];
   controlComments: AuthenticatedControlComment[];
   policy: ImplementationStagePolicy;
@@ -28,7 +32,7 @@ export interface ConflictResolutionStagePorts {
     stdout: string;
     stderr: string;
   }>;
-  resolveHeadRevision(worktreePath: string): Promise<string>;
+  resolveHead(worktreePath: string): Promise<{ revision: string; parents: string[] }>;
   pushResolvedRevision(input: {
     worktreePath: string;
     branch: string;
@@ -122,10 +126,25 @@ export async function runConflictResolutionStage(
     if (agent.exitCode !== 0) {
       return { status: "failed", reason: `conflict resolution agent exited with ${agent.exitCode}`, narrative };
     }
-    const outputRevision = await ports.resolveHeadRevision(worktree.path);
-    if (outputRevision === request.expectedHeadRevision) {
+    const output = await ports.resolveHead(worktree.path);
+    if (output.revision === request.expectedHeadRevision) {
       return { status: "failed", reason: "conflict resolution produced no new Revision", narrative };
     }
+    if (
+      output.parents.length !== 2 ||
+      !output.parents.includes(request.expectedHeadRevision) ||
+      !output.parents.includes(request.targetRevision)
+    ) {
+      return { status: "failed", reason: "conflict resolution did not produce the exact synchronization merge", narrative };
+    }
+    const outputRevision = output.revision;
+    await ports.pushResolvedRevision({
+      worktreePath: worktree.path,
+      branch: synchronizationStagingRef(request),
+      expectedHeadRevision: "create-only",
+      outputRevision,
+    });
+    await request.authorizeOutput(outputRevision);
     await ports.pushResolvedRevision({
       worktreePath: worktree.path,
       branch: request.headBranch,

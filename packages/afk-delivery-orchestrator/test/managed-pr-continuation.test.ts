@@ -83,8 +83,12 @@ function fakePorts(initial: AuthenticatedGitHubSnapshot): {
         calls.push("reconstruct");
         return { snapshot: current };
       },
+      publishPreparedSynchronization: async () => {
+        calls.push("publish-prepared");
+      },
       synchronize: async (input) => {
         calls.push(`synchronize:${input.prNumber}:${input.headBranch}:${input.expectedHeadRevision}:${input.targetRevision}`);
+        await input.authorizeOutput(SYNCHRONIZED);
         current = {
           ...current,
           pullRequests: current.pullRequests.map((pr) => pr.number === input.prNumber
@@ -113,6 +117,81 @@ function fakePorts(initial: AuthenticatedGitHubSnapshot): {
 }
 
 describe("Managed PR continuation", () => {
+  it("publishes a trusted prepared output after worker loss without rerunning synchronization", async () => {
+    const initial = snapshot();
+    const synchronized = snapshot({
+      pullRequests: [{ ...initial.pullRequests[0]!, headRevision: SYNCHRONIZED, baseRevision: TARGET }],
+    });
+    let current = initial;
+    let synchronizeCalls = 0;
+    let conflictCalls = 0;
+    let publishCalls = 0;
+    const recoveryOrder: string[] = [];
+    const ports = fakePorts(initial).ports;
+    ports.reconstruct = async () => current === initial
+      ? {
+          snapshot: current,
+          preparedSynchronization: {
+            prNumber: 73,
+            headBranch: "afk/ticket-66",
+            inputRevision: INITIAL,
+            outputRevision: SYNCHRONIZED,
+            targetRevision: TARGET,
+            narrative: "Prepared output",
+            readyEnvelope: {
+              schemaVersion: 1,
+              kind: "synchronization",
+              repository: initial.repository,
+              ticketNumber: 66,
+              prNumber: 73,
+              targetRevision: TARGET,
+              round: 0,
+              transitionId: "sync:ready",
+              inputRevision: INITIAL,
+              outputRevision: SYNCHRONIZED,
+              disposition: "ready",
+              workflowRunId: "run-2",
+            },
+          },
+        }
+      : { snapshot: current };
+    ports.publishPreparedSynchronization = async () => {
+      publishCalls += 1;
+      recoveryOrder.push("publish");
+      current = synchronized;
+    };
+    ports.recordControlComment = async (input) => {
+      recoveryOrder.push(input.envelope.disposition);
+      return { created: true };
+    };
+    ports.synchronize = async () => {
+      synchronizeCalls += 1;
+      throw new Error("must not rerun synchronization");
+    };
+    ports.resolveConflicts = async () => {
+      conflictCalls += 1;
+      throw new Error("must not rerun conflict resolution");
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: initial.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "ticket-66" },
+      policy,
+      workflowRun: { id: "run-3", attempt: 2 },
+    }, ports)).resolves.toMatchObject({
+      status: "synchronized",
+      outputRevision: SYNCHRONIZED,
+      recovered: true,
+    });
+    expect(recoveryOrder).toEqual(["ready", "publish", "succeeded"]);
+    expect({ publishCalls, synchronizeCalls, conflictCalls }).toEqual({
+      publishCalls: 1,
+      synchronizeCalls: 0,
+      conflictCalls: 0,
+    });
+  });
+
   it("records an already-pushed synchronization after worker loss without merging or pushing again", async () => {
     const synchronized = snapshot({
       pullRequests: [{
@@ -169,6 +248,9 @@ describe("Managed PR continuation", () => {
     const calls: string[] = [];
     const ports: ManagedPullRequestContinuationPorts = {
       reconstruct: async () => ({ snapshot: current }),
+      publishPreparedSynchronization: async () => {
+        throw new Error("no prepared synchronization expected");
+      },
       synchronize: async () => ({
         status: "conflicted",
         narrative: "Conflict in src/index.ts",
@@ -176,6 +258,7 @@ describe("Managed PR continuation", () => {
       }),
       resolveConflicts: async (input) => {
         calls.push(`resolve:${input.conflicts[0]?.path}:${input.ticket.body}:${input.controlComments[0]?.commentId}`);
+        await input.authorizeOutput(SYNCHRONIZED);
         current = {
           ...current,
           pullRequests: current.pullRequests.map((pr) => ({
@@ -205,7 +288,9 @@ describe("Managed PR continuation", () => {
       conflictResolved: true,
     });
     expect(calls).toEqual([
+      "comment",
       "resolve:src/index.ts:Continue the Managed PR:managed-1",
+      "comment",
       "comment",
     ]);
   });
@@ -236,7 +321,7 @@ describe("Managed PR continuation", () => {
       policy,
       workflowRun: { id: "run-2", attempt: 1 },
     }, ports)).rejects.toThrow("changed before its control record");
-    expect(comments).toBe(0);
+    expect(comments).toBe(2);
   });
 
   it("synchronizes the one authenticated Managed PR instead of creating another PR", async () => {
@@ -258,7 +343,9 @@ describe("Managed PR continuation", () => {
 
     expect(calls).toEqual([
       "reconstruct",
+      `comment:synchronization:undefined`,
       `synchronize:73:afk/ticket-66:${INITIAL}:${TARGET}`,
+      `comment:synchronization:${SYNCHRONIZED}`,
       "reconstruct",
       `comment:synchronization:${SYNCHRONIZED}`,
     ]);

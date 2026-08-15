@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createManagedPullRequestReconstructor,
   discoverManagedPullRequestRecovery,
   reconstructManagedPullRequestSnapshot,
   type ManagedPullRequestRecoveryPorts,
@@ -63,6 +64,7 @@ function ports(candidates: RecoveryPullRequestCandidate[]): {
   return {
     limits,
     value: {
+      readSynchronizationStaging: async () => undefined,
       listOpenPullRequests: async (limit) => {
         limits.push(limit);
         return candidates;
@@ -72,6 +74,185 @@ function ports(candidates: RecoveryPullRequestCandidate[]): {
 }
 
 describe("Managed PR recovery discovery", () => {
+  it("recovers a pushed merge only when a trusted ready record authorizes its exact output", async () => {
+    const targetRevision = "b".repeat(40);
+    const inputRevision = REVISION;
+    const outputRevision = "c".repeat(40);
+    const started = {
+      author: trustedActor,
+      body: [
+        "<!-- afk-control-envelope",
+        JSON.stringify({
+          schemaVersion: 1,
+          kind: "synchronization",
+          repository,
+          ticketNumber: 66,
+          prNumber: 73,
+          targetRevision,
+          round: 0,
+          transitionId: "afk-v1-sync:intent",
+          inputRevision,
+          disposition: "started",
+          workflowRunId: "run-2",
+        }),
+        "-->",
+      ].join("\n"),
+    };
+    const ready = {
+      author: trustedActor,
+      body: [
+        "<!-- afk-control-envelope",
+        JSON.stringify({
+          schemaVersion: 1,
+          kind: "synchronization",
+          repository,
+          ticketNumber: 66,
+          prNumber: 73,
+          targetRevision,
+          round: 0,
+          transitionId: "afk-v1-sync:ready",
+          inputRevision,
+          outputRevision,
+          disposition: "ready",
+          workflowRunId: "run-2",
+        }),
+        "-->",
+      ].join("\n"),
+    };
+    const merged = candidate({
+      headRevision: outputRevision,
+      baseRevision: targetRevision,
+      headParents: [inputRevision, targetRevision],
+      comments: [...candidate().comments, started, ready],
+    });
+    const reconstructor = createManagedPullRequestReconstructor({
+      repository,
+      targetBranch: "master",
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+      candidates: ports([merged]).value,
+      loadTicket: async () => ({
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      }),
+      loadTargetRevision: async () => targetRevision,
+    });
+
+    await expect(reconstructor.reconstruct()).resolves.toMatchObject({
+      interruptedSynchronization: {
+        prNumber: 73,
+        inputRevision,
+        outputRevision,
+        targetRevision,
+      },
+    });
+
+    const preparedCandidate = candidate({
+      headRevision: inputRevision,
+      baseRevision: inputRevision,
+      headParents: [],
+      comments: [...candidate().comments, started, ready],
+    });
+    const prepared = createManagedPullRequestReconstructor({
+      repository,
+      targetBranch: "master",
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+      candidates: ports([preparedCandidate]).value,
+      loadTicket: async () => ({
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      }),
+      loadTargetRevision: async () => targetRevision,
+    });
+    await expect(prepared.reconstruct()).resolves.toMatchObject({
+      preparedSynchronization: {
+        prNumber: 73,
+        headBranch: "afk/ticket-66",
+        inputRevision,
+        outputRevision,
+        targetRevision,
+      },
+    });
+
+    const withoutIntent = createManagedPullRequestReconstructor({
+      repository,
+      targetBranch: "master",
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+      candidates: ports([{ ...merged, comments: candidate().comments }]).value,
+      loadTicket: async () => ({
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      }),
+      loadTargetRevision: async () => targetRevision,
+    });
+    await expect(withoutIntent.reconstruct()).resolves.not.toHaveProperty("interruptedSynchronization");
+  });
+
+  it("reconstructs a trusted ready record from an exact staged merge after pre-ready worker loss", async () => {
+    const targetRevision = "b".repeat(40);
+    const outputRevision = "c".repeat(40);
+    const started = {
+      author: trustedActor,
+      body: [
+        "<!-- afk-control-envelope",
+        JSON.stringify({
+          schemaVersion: 1,
+          kind: "synchronization",
+          repository,
+          ticketNumber: 66,
+          prNumber: 73,
+          targetRevision,
+          round: 0,
+          transitionId: "afk-v1-sync:intent",
+          inputRevision: REVISION,
+          disposition: "started",
+          workflowRunId: "run-2",
+        }),
+        "-->",
+      ].join("\n"),
+    };
+    const input = ports([candidate({ comments: [...candidate().comments, started] })]);
+    input.value.readSynchronizationStaging = async () => ({
+      revision: outputRevision,
+      parents: [REVISION, targetRevision],
+    });
+    const reconstructor = createManagedPullRequestReconstructor({
+      repository,
+      targetBranch: "master",
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+      candidates: input.value,
+      loadTicket: async () => ({
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      }),
+      loadTargetRevision: async () => targetRevision,
+    });
+
+    await expect(reconstructor.reconstruct()).resolves.toMatchObject({
+      preparedSynchronization: {
+        inputRevision: REVISION,
+        outputRevision,
+        targetRevision,
+        readyEnvelope: {
+          transitionId: "afk-v1-sync:ready",
+          disposition: "ready",
+          inputRevision: REVISION,
+          outputRevision,
+          targetRevision,
+        },
+      },
+    });
+
+    input.value.readSynchronizationStaging = async () => ({
+      revision: outputRevision,
+      parents: [targetRevision],
+    });
+    await expect(reconstructor.reconstruct()).resolves.not.toHaveProperty("preparedSynchronization");
+  });
+
   it("reconstructs the same authenticated snapshot on a fresh worker", async () => {
     const input = ports([candidate()]);
     const ticket = {
@@ -84,6 +265,7 @@ describe("Managed PR recovery discovery", () => {
     };
     const reconstruct = () => reconstructManagedPullRequestSnapshot({
       repository,
+      targetBranch: "master",
       targetBranchRevision: "b".repeat(40),
       ticket,
       candidates: input.value,
@@ -116,6 +298,7 @@ describe("Managed PR recovery discovery", () => {
     const input = ports([forged]);
     const value = await reconstructManagedPullRequestSnapshot({
       repository,
+      targetBranch: "master",
       targetBranchRevision: "b".repeat(40),
       ticket: {
         number: 66, open: true, labels: ["ready-for-agent"],
@@ -177,12 +360,27 @@ describe("Managed PR recovery discovery", () => {
     });
   });
 
-  it("ignores unverifiable or multiple ticket links", async () => {
+  it("fails closed when a candidate has multiple native ticket links", async () => {
     const input = ports([
       candidate({ ticketNumbers: [66, 67], body: "Closes #66 and closes #67" }),
       candidate({ open: false }),
       candidate({ baseBranch: "release" }),
     ]);
+    const snapshot = await reconstructManagedPullRequestSnapshot({
+      repository,
+      targetBranch: "master",
+      targetBranchRevision: "b".repeat(40),
+      ticket: {
+        number: 66, open: true, labels: ["ready-for-agent"],
+        openBlockerNumbers: [], dependencyDataComplete: true,
+      },
+      candidates: input.value,
+      trustedActors: [trustedActor],
+      maximumPullRequests: 25,
+    });
+    expect(snapshot.pullRequests).toContainEqual(expect.objectContaining({ number: 73, managed: false }));
+    expect(snapshot.pullRequests.find((pr) => pr.targetBranch === "release")?.managed).toBe(false);
+
     await expect(discoverManagedPullRequestRecovery(input.value, {
       repository,
       targetBranch: "master",

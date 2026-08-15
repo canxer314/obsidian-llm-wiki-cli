@@ -3,9 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type {
-  ManagedPullRequestContinuationPorts,
-  SynchronizationConflict,
+import {
+  synchronizationStagingRef,
+  type ManagedPullRequestContinuationPorts,
+  type SynchronizationConflict,
 } from "./managed-pr-continuation.js";
 
 const execFileAsync = promisify(execFile);
@@ -43,7 +44,7 @@ const deterministicGitEnvironment = {
 export function createGitSynchronizationPorts(input: {
   repositoryUrl: string;
   command?: GitSynchronizationCommand;
-}): Pick<ManagedPullRequestContinuationPorts, "synchronize"> {
+}): Pick<ManagedPullRequestContinuationPorts, "synchronize" | "publishPreparedSynchronization"> {
   const command = input.command ?? defaultCommand;
   return {
     async synchronize(request) {
@@ -52,27 +53,6 @@ export function createGitSynchronizationPorts(input: {
       ]);
       const remoteHead = remote.split(/\s+/u)[0];
       if (remoteHead !== request.expectedHeadRevision) {
-        const recoveryDirectory = await mkdtemp(join(tmpdir(), `afk-sync-recover-pr-${request.prNumber}-`));
-        try {
-          await command("git", ["clone", "--no-checkout", input.repositoryUrl, recoveryDirectory]);
-          const parentLine = await command("git", [
-            "-C", recoveryDirectory, "rev-list", "--parents", "-n", "1", remoteHead ?? "",
-          ]);
-          const [, ...parents] = parentLine.split(/\s+/u);
-          if (
-            parents.length === 2 &&
-            parents.includes(request.expectedHeadRevision) &&
-            parents.includes(request.targetRevision)
-          ) {
-            return {
-              status: "succeeded",
-              outputRevision: remoteHead!,
-              narrative: `Recovered synchronization Revision ${remoteHead}.`,
-            };
-          }
-        } finally {
-          await rm(recoveryDirectory, { recursive: true, force: true });
-        }
         throw new Error("Managed PR head changed before synchronization");
       }
 
@@ -107,6 +87,20 @@ export function createGitSynchronizationPorts(input: {
         if (outputRevision === request.expectedHeadRevision) {
           throw new Error("synchronization did not produce a new Revision");
         }
+        const stagingRef = synchronizationStagingRef(request);
+        const staged = await command("git", ["ls-remote", input.repositoryUrl, stagingRef]);
+        const stagedRevision = staged.split(/\s+/u)[0];
+        if (stagedRevision !== undefined && stagedRevision.length > 0 && stagedRevision !== outputRevision) {
+          throw new Error("synchronization staging ref already fixes a different output Revision");
+        }
+        if (stagedRevision !== outputRevision) {
+          await command("git", [
+            "-C", directory, "push", "origin",
+            `${outputRevision}:${stagingRef}`,
+            `--force-with-lease=${stagingRef}:`,
+          ]);
+        }
+        await request.authorizeOutput(outputRevision);
         await command("git", [
           "-C", directory, "push", "origin",
           `HEAD:refs/heads/${request.headBranch}`,
@@ -117,6 +111,29 @@ export function createGitSynchronizationPorts(input: {
           outputRevision,
           narrative: `Merged target Revision ${request.targetRevision} into ${request.expectedHeadRevision}.`,
         };
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    async publishPreparedSynchronization(request) {
+      const directory = await mkdtemp(join(tmpdir(), `afk-sync-publish-pr-${request.prNumber}-`));
+      try {
+        const stagingRef = synchronizationStagingRef({
+          prNumber: request.prNumber,
+          expectedHeadRevision: request.inputRevision,
+          targetRevision: request.targetRevision,
+        });
+        await command("git", ["clone", "--no-checkout", input.repositoryUrl, directory]);
+        await command("git", ["-C", directory, "fetch", "origin", stagingRef]);
+        const stagedRevision = await command("git", ["-C", directory, "rev-parse", "FETCH_HEAD"]);
+        if (stagedRevision !== request.outputRevision) {
+          throw new Error("prepared synchronization staging ref does not match its trusted output Revision");
+        }
+        await command("git", [
+          "-C", directory, "push", "origin",
+          `FETCH_HEAD:refs/heads/${request.headBranch}`,
+          `--force-with-lease=refs/heads/${request.headBranch}:${request.inputRevision}`,
+        ]);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }

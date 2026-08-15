@@ -138,6 +138,31 @@ describe("GitHub Managed PR publication adapter", () => {
     expect(commentsCall?.args.at(-1)).toContain("author:");
   });
 
+  it("reads an exact staged synchronization from the versioned durable ref", async () => {
+    const output = "c".repeat(40);
+    const inputRevision = "a".repeat(40);
+    const targetRevision = "b".repeat(40);
+    const calls: string[][] = [];
+    const ports = createGitHubManagedPullRequestRecoveryPorts({
+      repository: "owner/repo",
+      command: async (_file, args) => {
+        calls.push(args);
+        if (args[1]?.includes("/git/ref/afk-delivery/v1/synchronizations/73/")) return output;
+        if (args[1]?.includes(`/git/commits/${output}`)) {
+          return JSON.stringify({ parents: [inputRevision, targetRevision] });
+        }
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      },
+    });
+
+    await expect(ports.readSynchronizationStaging({
+      prNumber: 73,
+      inputRevision,
+      targetRevision,
+    })).resolves.toEqual({ revision: output, parents: [inputRevision, targetRevision] });
+    expect(calls[0]?.[1]).toContain("git/ref/afk-delivery/v1/synchronizations/73");
+  });
+
   it("finds every open PR closing the ticket regardless of head branch", async () => {
     const calls: string[][] = [];
     const command = async (_file: string, args: string[]): Promise<string> => {
