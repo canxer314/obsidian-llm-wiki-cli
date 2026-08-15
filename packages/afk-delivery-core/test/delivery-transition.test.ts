@@ -867,6 +867,25 @@ describe("selectDeliveryTransition", () => {
     expect(result.transition.kind).toBe("validate");
   });
 
+  it("rejects validation evidence without a workflow run attempt while accepting legacy management history", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr", { workflowRunAttempt: undefined }),
+        trustedRecord("validation", {
+          workflowRunAttempt: undefined,
+          commands: [
+            { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+            { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+          ],
+        }),
+      ],
+    })));
+
+    expect(result.transition.kind).toBe("needs-human");
+    expect(result.transition.reason).toContain("malformed or unsupported envelope");
+  });
+
   it.each([
     ["unknown schema", [trustedRecord("managed-pr"), trustedRecord("review-handoff", { schemaVersion: 2 })]],
     ["stale revision", [trustedRecord("managed-pr"), trustedRecord("review-handoff", { inputRevision: ADVANCED_REVISION })]],
