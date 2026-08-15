@@ -13,6 +13,7 @@ export interface ImplementationContainerCommand {
 
 export function buildImplementationContainerCommand(
   image: string,
+  claudeSettingsPath: string,
   invocation: ImplementationAgentInvocation,
 ): ImplementationContainerCommand {
   for (const name of Object.keys(invocation.environment)) {
@@ -34,9 +35,13 @@ export function buildImplementationContainerCommand(
     "--read-only",
     "--cpus", String(invocation.cpuLimit),
     "--mount", `type=bind,source=${invocation.worktreePath},target=/workspace`,
+    "--mount", `type=bind,source=${claudeSettingsPath},target=/opt/afk-delivery/settings.json,readonly`,
     "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
     "--tmpfs", "/home/agent:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=0700",
     "--add-host", "host.docker.internal:host-gateway",
+    ...(environment.MODEL_GATEWAY_URL?.match(/^http:\/\/(?:127\.0\.0\.1|localhost)(?::|\/)/u) === null
+      ? []
+      : ["--network", "host"]),
     "--workdir", "/workspace",
   ];
   for (const name of Object.keys(environment).sort()) {

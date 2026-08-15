@@ -8,9 +8,16 @@ fi
 
 : "${MODEL_GATEWAY_URL:?MODEL_GATEWAY_URL is required}"
 : "${MODEL_GATEWAY_TOKEN:?MODEL_GATEWAY_TOKEN is required}"
+: "${AFK_CLAUDE_SETTINGS:?AFK_CLAUDE_SETTINGS is required}"
+
+settings_path="$(realpath -- "$AFK_CLAUDE_SETTINGS")"
+if [[ ! -f "$settings_path" ]]; then
+  printf '%s\n' 'AFK_CLAUDE_SETTINGS must name a container-specific settings file' >&2
+  exit 2
+fi
 
 image="${AFK_DELIVERY_IMAGE:-afk-delivery:smoke}"
-model="${AFK_MODEL:-gpt-5.6-sol[1M]}"
+model="${AFK_MODEL:-fable}"
 context_window="${AFK_CONTEXT_WINDOW:-372000}"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(dirname -- "$script_directory")"
@@ -76,6 +83,7 @@ printf '%s' 'Read the repository README and reply with exactly READ_ONLY_OK. Do 
     --cpus 1 \
     --add-host host.docker.internal:host-gateway \
     --mount "type=bind,source=$repository_root,target=/workspace,readonly" \
+    --mount "type=bind,source=$settings_path,target=/opt/afk-delivery/settings.json,readonly" \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
     --tmpfs /home/agent:rw,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=0700 \
     --env MODEL_GATEWAY_URL \

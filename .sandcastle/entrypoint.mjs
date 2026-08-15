@@ -14,6 +14,7 @@ if (prompt.length === 0) throw new Error("implementation prompt is required on s
 const home = process.env.HOME ?? "/home/agent";
 const skillsDirectory = join(home, ".claude", "skills");
 await mkdir(skillsDirectory, { recursive: true });
+await cp("/opt/afk-delivery/settings.json", join(home, ".claude", "settings.json"));
 for (const skill of ["implement", "tdd", "code-review"]) {
   await cp(`/opt/afk-delivery/skills/${skill}`, join(skillsDirectory, skill), { recursive: true });
 }
@@ -29,7 +30,7 @@ delete process.env.MODEL_GATEWAY_TOKEN;
 delete process.env.GITHUB_TOKEN;
 delete process.env.GH_TOKEN;
 
-const model = process.env.AFK_MODEL ?? "gpt-5.6-sol[1M]";
+const model = process.env.AFK_MODEL ?? "fable";
 const requiredContextWindow = Number(process.env.AFK_CONTEXT_WINDOW ?? "372000");
 if (!Number.isSafeInteger(requiredContextWindow) || requiredContextWindow <= 0) {
   throw new Error("AFK_CONTEXT_WINDOW must be a positive integer");

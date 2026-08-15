@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -68,12 +68,36 @@ export async function runContainerCommand(
   });
 }
 
+export function validateContainerClaudeSettings(content: string): void {
+  const settings: unknown = JSON.parse(content);
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+    throw new Error("container Claude settings must be a JSON object");
+  }
+  const environment = (settings as { env?: unknown }).env;
+  if (environment !== undefined &&
+      (typeof environment !== "object" || environment === null || Array.isArray(environment))) {
+    throw new Error("container Claude settings env must be a JSON object");
+  }
+  const values = environment as Record<string, unknown> | undefined;
+  if (values?.GITHUB_TOKEN !== undefined || values?.GH_TOKEN !== undefined) {
+    throw new Error("container Claude settings must not contain GitHub credentials");
+  }
+}
+
 export function createLocalImplementationPorts(input: {
   repositoryPath: string;
   image: string;
+  claudeSettingsPath: string;
   modelGatewayUrl: string;
   modelGatewayToken: string;
 }): ImplementationStagePorts {
+  let settingsChecked: Promise<void> | undefined;
+  const checkSettings = (): Promise<void> => {
+    settingsChecked ??= readFile(input.claudeSettingsPath, "utf8").then((content) => {
+      validateContainerClaudeSettings(content);
+    });
+    return settingsChecked;
+  };
   const branches = new Map<string, string>();
   return {
     async createWorktree(request): Promise<ImplementationWorktree> {
@@ -98,13 +122,18 @@ export function createLocalImplementationPorts(input: {
       return { path: directory, branch, baseRevision };
     },
     async runAgent(invocation: ImplementationAgentInvocation) {
-      const result = await runContainerCommand(buildImplementationContainerCommand(input.image, {
-        ...invocation,
-        environment: {
-          MODEL_GATEWAY_URL: input.modelGatewayUrl,
-          MODEL_GATEWAY_TOKEN: input.modelGatewayToken,
+      await checkSettings();
+      const result = await runContainerCommand(buildImplementationContainerCommand(
+        input.image,
+        input.claudeSettingsPath,
+        {
+          ...invocation,
+          environment: {
+            MODEL_GATEWAY_URL: input.modelGatewayUrl,
+            MODEL_GATEWAY_TOKEN: input.modelGatewayToken,
+          },
         },
-      }));
+      ));
       return {
         ...result,
         stdout: redactSecretValues(result.stdout, [input.modelGatewayToken]),

@@ -95,13 +95,14 @@ jobs:
           MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
           MODEL_GATEWAY_TOKEN: ${{ secrets.MODEL_GATEWAY_TOKEN }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
+          AFK_CLAUDE_SETTINGS: ${{ vars.AFK_CLAUDE_SETTINGS }}
           AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
           AFK_DELIVERY_ACTOR_TYPE: ${{ vars.AFK_DELIVERY_ACTOR_TYPE || 'Bot' }}
           AFK_REPOSITORY_INSTRUCTIONS: ${{ github.workspace }}/CLAUDE.md
           AFK_DOMAIN_DOCUMENTS: ${{ github.workspace }}/CONTEXT.md:${{ github.workspace }}/docs/agents/domain.md
           AFK_ARCHITECTURE_DECISIONS: ${{ github.workspace }}/docs/adr/0001-managed-pr-implementation-boundary.md
           AFK_TARGET_BRANCH: master
-          AFK_MODEL: gpt-5.6-sol[1M]
+          AFK_MODEL: fable
           AFK_CONTEXT_WINDOW: "372000"
           AFK_MAX_ITERATIONS: "24"
           AFK_STAGE_TIMEOUT_MS: "3600000"

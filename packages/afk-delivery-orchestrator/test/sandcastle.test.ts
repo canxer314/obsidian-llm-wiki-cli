@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactSecretValues } from "../src/local-stage.js";
+import { redactSecretValues, validateContainerClaudeSettings } from "../src/local-stage.js";
 import { buildImplementationContainerCommand } from "../src/sandcastle.js";
 
 const invocation = {
@@ -11,7 +11,7 @@ const invocation = {
   timeoutMs: 60_000,
   cpuLimit: 2,
   environment: {
-    MODEL_GATEWAY_URL: "http://host.docker.internal:3456",
+    MODEL_GATEWAY_URL: "http://127.0.0.1:15721",
     MODEL_GATEWAY_TOKEN: "gateway-token",
   },
   runAsNonRoot: true as const,
@@ -22,13 +22,18 @@ const invocation = {
 };
 
 describe("Sandcastle implementation container", () => {
-  it("builds a bounded non-root invocation with only the worktree mount", () => {
-    const command = buildImplementationContainerCommand("afk-delivery:test", invocation);
+  it("builds a bounded invocation with worktree and controlled settings mounts", () => {
+    const command = buildImplementationContainerCommand(
+      "afk-delivery:test",
+      "/etc/afk/settings-docker.json",
+      invocation,
+    );
 
     expect(command.file).toBe("docker");
     expect(command.args).toEqual(expect.arrayContaining([
       "run", "--rm", "--user", "agent", "--read-only", "--cpus", "2",
       "--mount", "type=bind,source=/worktrees/65,target=/workspace",
+      "--mount", "type=bind,source=/etc/afk/settings-docker.json,target=/opt/afk-delivery/settings.json,readonly",
       "--workdir", "/workspace",
       "--env", "AFK_MODEL=claude-opus-5",
       "--env", "AFK_CONTEXT_WINDOW=1000000",
@@ -38,14 +43,15 @@ describe("Sandcastle implementation container", () => {
     expect(command.stdin).toBe("implement ticket");
     expect(command.timeoutMs).toBe(60_000);
     const serialized = command.args.join(" ");
+    expect(serialized).toContain("--network host");
     expect(serialized).not.toContain("/var/run/docker.sock");
-    expect(serialized).not.toContain(".claude");
+    expect(serialized).not.toContain("/home/canxer/.claude");
     expect(serialized).not.toContain(".config/gh");
     expect(serialized).not.toContain("--privileged");
     expect(serialized).not.toContain("GITHUB_TOKEN");
     expect(serialized).not.toContain("gateway-token");
     expect(command.redactedEnvironment).toEqual({
-      MODEL_GATEWAY_URL: "http://host.docker.internal:3456",
+      MODEL_GATEWAY_URL: "http://127.0.0.1:15721",
       MODEL_GATEWAY_TOKEN: "[REDACTED]",
     });
   });
@@ -57,10 +63,36 @@ describe("Sandcastle implementation container", () => {
     )).toBe("request failed for token [REDACTED] and [REDACTED] again");
   });
 
+  it("rejects GitHub credentials embedded in the settings file", () => {
+    expect(() => validateContainerClaudeSettings(JSON.stringify({
+      model: "fable",
+      env: { GITHUB_TOKEN: "secret" },
+    }))).toThrow("container Claude settings must not contain GitHub credentials");
+    expect(() => validateContainerClaudeSettings(JSON.stringify({
+      model: "fable",
+      env: { GH_TOKEN: "secret" },
+    }))).toThrow("container Claude settings must not contain GitHub credentials");
+  });
+
+  it("accepts a container-specific settings policy", () => {
+    expect(() => validateContainerClaudeSettings(JSON.stringify({
+      model: "fable",
+      env: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:15721",
+        ANTHROPIC_AUTH_TOKEN: "PROXY_MANAGED",
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: "372000",
+      },
+    }))).not.toThrow();
+  });
+
   it("rejects forbidden credentials instead of silently forwarding them", () => {
-    expect(() => buildImplementationContainerCommand("afk-delivery:test", {
-      ...invocation,
-      environment: { GITHUB_TOKEN: "secret" },
-    })).toThrow("forbidden implementation-stage environment variable: GITHUB_TOKEN");
+    expect(() => buildImplementationContainerCommand(
+      "afk-delivery:test",
+      "/etc/afk/settings-docker.json",
+      {
+        ...invocation,
+        environment: { GITHUB_TOKEN: "secret" },
+      },
+    )).toThrow("forbidden implementation-stage environment variable: GITHUB_TOKEN");
   });
 });

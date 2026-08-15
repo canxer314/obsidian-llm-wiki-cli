@@ -28,7 +28,8 @@ describe("AFK Delivery workflow contract", () => {
     expect(implementation).toBeGreaterThan(workflow.indexOf("name: Dispatch one bounded transition"));
     expect(workflow).toContain("contents: write");
     expect(workflow).toContain("pull-requests: write");
-    expect(workflow).toContain("AFK_MODEL: gpt-5.6-sol[1M]");
+    expect(workflow).toContain("AFK_CLAUDE_SETTINGS: ${{ vars.AFK_CLAUDE_SETTINGS }}");
+    expect(workflow).toContain("AFK_MODEL: fable");
     expect(workflow).toContain('AFK_CONTEXT_WINDOW: "372000"');
     expect(workflow).toContain('AFK_MAX_ITERATIONS: "24"');
     expect(workflow).toContain('AFK_STAGE_TIMEOUT_MS: "3600000"');

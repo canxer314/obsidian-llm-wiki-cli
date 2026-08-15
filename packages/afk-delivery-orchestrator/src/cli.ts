@@ -227,7 +227,7 @@ async function implement(ticketNumber: number): Promise<void> {
     workflowRunId: requiredEnvironment("GITHUB_RUN_ID"),
     trustedActor,
     policy: {
-      model: process.env.AFK_MODEL ?? "gpt-5.6-sol[1M]",
+      model: process.env.AFK_MODEL ?? "fable",
       contextWindow: Number(process.env.AFK_CONTEXT_WINDOW ?? "372000"),
       maximumIterations: Number(process.env.AFK_MAX_ITERATIONS ?? "24"),
       timeoutMs: Number(process.env.AFK_STAGE_TIMEOUT_MS ?? "3600000"),
@@ -237,6 +237,7 @@ async function implement(ticketNumber: number): Promise<void> {
     stage: createLocalImplementationPorts({
       repositoryPath,
       image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
+      claudeSettingsPath: resolve(requiredEnvironment("AFK_CLAUDE_SETTINGS")),
       modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
       modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
     }),
