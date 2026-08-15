@@ -1,41 +1,35 @@
-FROM node:22-bookworm
+FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-  git \
-  curl \
-  jq \
-  && rm -rf /var/lib/apt/lists/*
+ARG CLAUDE_CODE_VERSION=2.1.233
+ARG CLAUDE_CODE_INTEGRITY=sha512-WS0ZSsNu2zkQonC+rW7HdByMCkPQ2l+hO1G0LdvWTj40kiYr0qAiSJjCBNRIbi0foBol4IFTCKwLHAN83qxxUQ==
 
-# Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-  | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-  && apt-get update && apt-get install -y gh \
-  && rm -rf /var/lib/apt/lists/*
+COPY verify-integrity.mjs /opt/build/verify-integrity.mjs
 
-# Build-args for UID/GID alignment: sandcastle docker build-image
-# defaults these to the host user's UID/GID so image-built files
-# and bind-mounted files share an owner without runtime chown.
-ARG AGENT_UID=1000
-ARG AGENT_GID=1000
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupmod --new-name agent node \
+    && usermod --login agent --home /home/agent --move-home --shell /bin/bash node
 
-# Rename the base image's "node" user to "agent" and align UID/GID.
-RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
+RUN npm pack "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" --pack-destination /opt/build \
+    && node /opt/build/verify-integrity.mjs "/opt/build/anthropic-ai-claude-code-${CLAUDE_CODE_VERSION}.tgz" "${CLAUDE_CODE_INTEGRITY}" \
+    && npm install --global --allow-scripts=@anthropic-ai/claude-code "/opt/build/anthropic-ai-claude-code-${CLAUDE_CODE_VERSION}.tgz" \
+    && claude --version \
+    && rm -rf /opt/build
 
-# Install and verify Claude Code before dropping root privileges.
-RUN npm install -g \
-    @anthropic-ai/claude-code@2.1.232 \
-    @anthropic-ai/claude-code-linux-x64@2.1.232 \
-  && node /usr/local/lib/node_modules/@anthropic-ai/claude-code/install.cjs \
-  && claude --version
+COPY skills.lock /opt/afk-delivery/skills.lock
+COPY skills /opt/afk-delivery/skills
+COPY entrypoint.mjs /opt/afk-delivery/entrypoint.mjs
+COPY verify-model.mjs /opt/afk-delivery/verify-model.mjs
 
-USER ${AGENT_UID}:${AGENT_GID}
+RUN set -eu; \
+    while IFS='=' read -r name expected; do \
+      actual="$(sha256sum "/opt/afk-delivery/skills/${name%.sha256}/SKILL.md" | cut -d' ' -f1)"; \
+      test "$actual" = "$expected"; \
+    done < /opt/afk-delivery/skills.lock; \
+    chown -R root:root /opt/afk-delivery; \
+    chmod -R a-w /opt/afk-delivery
 
-WORKDIR /home/agent
-
-# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at /home/agent/workspace
-# and overrides the working directory to /home/agent/workspace at container start.
-# Structure your Dockerfile so that /home/agent/workspace can serve as the project root.
-ENTRYPOINT ["sleep", "infinity"]
+USER agent
+WORKDIR /workspace
+ENTRYPOINT ["node", "/opt/afk-delivery/entrypoint.mjs"]

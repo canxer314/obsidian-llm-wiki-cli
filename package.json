@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @llm-wiki/vault-contracts && npm run build -w @llm-wiki/obsidian-vault-bridge",
+    "build": "npm run build -w @llm-wiki/vault-contracts && npm run build -w @llm-wiki/obsidian-vault-bridge && npm run build -w @llm-wiki/afk-delivery-core && npm run build -w @llm-wiki/afk-delivery-orchestrator",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run --exclude '.claude/worktrees/**'",
     "test:watch": "vitest",
