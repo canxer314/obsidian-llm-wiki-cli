@@ -41,6 +41,10 @@ jobs:
 
   deliver:
     needs: discover
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     if: needs.discover.outputs.tickets != '[]'
     strategy:
       fail-fast: false
@@ -48,12 +52,14 @@ jobs:
       matrix:
         ticket: ${{ fromJSON(needs.discover.outputs.tickets) }}
     runs-on: [self-hosted, afk-delivery]
-    timeout-minutes: 30
+    timeout-minutes: 75
     concurrency:
       group: afk-delivery-${{ github.repository }}-ticket-${{ matrix.ticket }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AFK_DELIVERY_TOKEN }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24.14.0
@@ -81,3 +87,23 @@ jobs:
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           AFK_DELIVERY_SNAPSHOT: ${{ steps.current.outputs.snapshot }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery dispatch ${{ matrix.ticket }}
+      - name: Implement and publish Managed PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
+          MODEL_GATEWAY_TOKEN: ${{ secrets.MODEL_GATEWAY_TOKEN }}
+          AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
+          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
+          AFK_DELIVERY_ACTOR_TYPE: ${{ vars.AFK_DELIVERY_ACTOR_TYPE || 'Bot' }}
+          AFK_REPOSITORY_INSTRUCTIONS: ${{ github.workspace }}/CLAUDE.md
+          AFK_DOMAIN_DOCUMENTS: ${{ github.workspace }}/CONTEXT.md:${{ github.workspace }}/docs/agents/domain.md
+          AFK_ARCHITECTURE_DECISIONS: ${{ github.workspace }}/docs/adr/0001-managed-pr-implementation-boundary.md
+          AFK_TARGET_BRANCH: master
+          AFK_MODEL: claude-opus-5
+          AFK_CONTEXT_WINDOW: "1000000"
+          AFK_MAX_ITERATIONS: "24"
+          AFK_STAGE_TIMEOUT_MS: "3600000"
+          AFK_STAGE_CPUS: "2"
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery implement ${{ matrix.ticket }}

@@ -21,6 +21,20 @@ describe("AFK Delivery workflow contract", () => {
     expect(workflow).not.toMatch(/add-label|remove-label|claim-comment/u);
   });
 
+  it("keeps GitHub authority in orchestration and supplies explicit implementation bounds", async () => {
+    const workflow = await readFile(workflowPath, "utf8");
+    const implementation = workflow.indexOf("name: Implement and publish Managed PR");
+
+    expect(implementation).toBeGreaterThan(workflow.indexOf("name: Dispatch one bounded transition"));
+    expect(workflow).toContain("contents: write");
+    expect(workflow).toContain("pull-requests: write");
+    expect(workflow).toContain("AFK_MODEL: claude-opus-5");
+    expect(workflow).toContain('AFK_CONTEXT_WINDOW: "1000000"');
+    expect(workflow).toContain('AFK_MAX_ITERATIONS: "24"');
+    expect(workflow).toContain('AFK_STAGE_TIMEOUT_MS: "3600000"');
+    expect(workflow).toContain('AFK_STAGE_CPUS: "2"');
+  });
+
   it("runs preflight before fresh reconstruction and bounded transition dispatch", async () => {
     const workflow = await readFile(workflowPath, "utf8");
     const preflight = workflow.indexOf("name: Worker preflight");
