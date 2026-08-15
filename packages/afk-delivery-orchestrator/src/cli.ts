@@ -1,16 +1,25 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
+
 import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
   createBoundedTransitionWork,
+  createGitHubManagedImplementationPorts,
+  createLocalImplementationPorts,
+  containerClaudeSettingsPath,
   discoverDeliveryFrontier,
+  executeNewImplementationTransition,
+  implementationBranch,
+  implementationTransitionId,
+  recognizeManagedPullRequest,
   runWorkerPreflight,
   type GitHubReadPort,
   type PreflightCheck,
+  type PromptDocument,
 } from "./index.js";
 
 const execFileAsync = promisify(execFile);
@@ -141,13 +150,112 @@ async function dispatch(ticketNumber: number): Promise<void> {
   process.stdout.write(`${JSON.stringify(work)}\n`);
 }
 
+async function readPromptDocuments(paths: string[]): Promise<PromptDocument[]> {
+  return Promise.all(paths.map(async (path) => ({ path, content: await readFile(path, "utf8") })));
+}
+
+function configuredPaths(name: string): string[] {
+  const value = process.env[name];
+  return value === undefined || value.length === 0
+    ? []
+    : value.split(":").filter(Boolean).map((path) => resolve(path));
+}
+
+async function implement(ticketNumber: number): Promise<void> {
+  const frontier = await loadFrontier();
+  if (!frontier.frontier.some((ticket) => ticket.number === ticketNumber)) {
+    throw new Error(`Delivery Ticket #${ticketNumber} is no longer in the Delivery Frontier`);
+  }
+  const repository = repositoryParts().fullName;
+  const repositoryPath = resolve(process.env.GITHUB_WORKSPACE ?? process.cwd());
+  const targetBranch = process.env.AFK_TARGET_BRANCH ?? "master";
+  const rawTicket = await command("gh", [
+    "issue", "view", String(ticketNumber), "--repo", repository,
+    "--json", "number,title,body,state,labels",
+  ]);
+  const ticket = JSON.parse(rawTicket) as {
+    number: number;
+    title: string;
+    body: string;
+    state: string;
+    labels: Array<{ name: string }>;
+  };
+  if (ticket.number !== ticketNumber || ticket.state !== "OPEN" ||
+      !ticket.labels.some((label) => label.name === (process.env.AFK_READY_LABEL ?? "ready-for-agent")) ||
+      ticket.labels.some((label) => label.name === (process.env.AFK_PROHIBITED_LABEL ?? "afk:prohibited"))) {
+    throw new Error(`Delivery Ticket #${ticketNumber} is no longer authorized for implementation`);
+  }
+  const transitionId = implementationTransitionId({
+    repository,
+    ticketNumber,
+    targetBranch,
+  });
+  const publication = createGitHubManagedImplementationPorts({ repositoryPath, repository });
+  const actorTypeValue = process.env.AFK_DELIVERY_ACTOR_TYPE ?? "Bot";
+  if (actorTypeValue !== "Bot" && actorTypeValue !== "App") {
+    throw new Error("AFK_DELIVERY_ACTOR_TYPE must be Bot or App");
+  }
+  const actorType: "Bot" | "App" = actorTypeValue;
+  const trustedActor = { login: requiredEnvironment("AFK_DELIVERY_ACTOR"), type: actorType };
+  const branch = implementationBranch({ ticket, transitionId });
+  const existing = await publication.findOpenPullRequests(ticketNumber, branch, targetBranch);
+  if (existing.length > 1 || (existing[0] !== undefined &&
+      (existing[0].headBranch !== branch || existing[0].baseBranch !== targetBranch))) {
+    throw new Error(`Delivery Ticket #${ticketNumber} no longer selects new implementation`);
+  }
+  if (existing[0] !== undefined && recognizeManagedPullRequest(existing[0], {
+    repository,
+    ticketNumber,
+    trustedActors: [trustedActor],
+  }).managed) {
+    process.stdout.write(`${JSON.stringify({
+      status: "already-managed",
+      prNumber: existing[0].number,
+      outputRevision: existing[0].headRevision,
+    })}\n`);
+    return;
+  }
+  const result = await executeNewImplementationTransition({
+    repository,
+    ticket,
+    repositoryInstructions: await readPromptDocuments(configuredPaths("AFK_REPOSITORY_INSTRUCTIONS")),
+    domainDocuments: await readPromptDocuments(configuredPaths("AFK_DOMAIN_DOCUMENTS")),
+    architectureDecisions: await readPromptDocuments(configuredPaths("AFK_ARCHITECTURE_DECISIONS")),
+    targetBranch,
+    validationCommands: (process.env.AFK_VALIDATION_COMMANDS ?? "npm run typecheck\nnpm test -- --run")
+      .split("\n").filter(Boolean),
+    transitionId,
+    workflowRunId: requiredEnvironment("GITHUB_RUN_ID"),
+    trustedActor,
+    policy: {
+      model: process.env.AFK_MODEL ?? "fable",
+      contextWindow: Number(process.env.AFK_CONTEXT_WINDOW ?? "372000"),
+      maximumIterations: Number(process.env.AFK_MAX_ITERATIONS ?? "24"),
+      timeoutMs: Number(process.env.AFK_STAGE_TIMEOUT_MS ?? "3600000"),
+      cpuLimit: Number(process.env.AFK_STAGE_CPUS ?? "2"),
+    },
+  }, {
+    stage: createLocalImplementationPorts({
+      repositoryPath,
+      image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
+      claudeSettingsPath: containerClaudeSettingsPath(),
+      modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
+      modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    }),
+    publication,
+  });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result.status !== "published") process.exitCode = 1;
+}
+
 const [operation, argument] = process.argv.slice(2);
 if (operation === "discover") await discover();
 else if (operation === "preflight") await preflight();
-else if ((operation === "reconstruct" || operation === "dispatch") && /^\d+$/u.test(argument ?? "")) {
+else if ((operation === "reconstruct" || operation === "dispatch" || operation === "implement") && /^\d+$/u.test(argument ?? "")) {
   const ticketNumber = Number(argument);
   if (operation === "reconstruct") await reconstruct(ticketNumber);
-  else await dispatch(ticketNumber);
+  else if (operation === "dispatch") await dispatch(ticketNumber);
+  else await implement(ticketNumber);
 } else {
-  throw new Error("usage: afk-delivery <discover|preflight|reconstruct TICKET|dispatch TICKET>");
+  throw new Error("usage: afk-delivery <discover|preflight|reconstruct TICKET|dispatch TICKET|implement TICKET>");
 }

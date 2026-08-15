@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run test"
+    "test": "vitest run test",
+    "test:container-smoke": "bash ../../.sandcastle/smoke.sh"
   },
   "dependencies": {
     "@llm-wiki/afk-delivery-core": "0.1.0"
