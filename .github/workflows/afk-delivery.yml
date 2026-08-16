@@ -109,11 +109,12 @@ jobs:
           MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
           MODEL_GATEWAY_TOKEN: ${{ secrets.MODEL_GATEWAY_TOKEN }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
+          AFK_REVIEWER_IMAGE: ${{ vars.AFK_REVIEWER_IMAGE }}
           AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
           AFK_DELIVERY_ACTOR_TYPE: ${{ vars.AFK_DELIVERY_ACTOR_TYPE || 'Bot' }}
           AFK_REPOSITORY_INSTRUCTIONS: ${{ github.workspace }}/CLAUDE.md
-          AFK_DOMAIN_DOCUMENTS: ${{ github.workspace }}/CONTEXT.md:${{ github.workspace }}/docs/agents/domain.md
-          AFK_ARCHITECTURE_DECISIONS: ${{ github.workspace }}/docs/adr/0001-managed-pr-implementation-boundary.md
+          AFK_DOMAIN_DOCUMENTS: ${{ github.workspace }}/docs/agents/domain.md:${{ github.workspace }}/docs/contexts/afk-delivery/CONTEXT.md
+          AFK_ARCHITECTURE_DECISIONS: ${{ github.workspace }}/docs/adr/0001-github-as-afk-delivery-record.md:${{ github.workspace }}/docs/adr/0001-managed-pr-implementation-boundary.md:${{ github.workspace }}/docs/adr/0002-autonomous-merge-for-ready-delivery-tickets.md
           AFK_TARGET_BRANCH: master
           AFK_MODEL: fable
           AFK_CONTEXT_WINDOW: "372000"

@@ -155,6 +155,12 @@ export function createGitHubManagedPullRequestRecoveryPorts(input: {
           ].join(","),
         ]);
         const detail = JSON.parse(detailRaw) as GhRecoveryPullRequest;
+        const diff = await command("gh", [
+          "pr", "diff", String(detail.number), "--repo", input.repository,
+        ]);
+        if (!diff.startsWith("diff --git ")) {
+          throw new Error(`GitHub did not provide a complete textual diff for PR #${detail.number}`);
+        }
         const baseRevision = await command("gh", [
           "api", `repos/${input.repository}/compare/${detail.baseRefOid}...${detail.headRefOid}`,
           "--jq", ".merge_base_commit.sha",
@@ -190,6 +196,7 @@ export function createGitHubManagedPullRequestRecoveryPorts(input: {
           headParents: commit.parents,
           headMessage: commit.message,
           headAuthor: commit.author,
+          diff,
           body: detail.body,
           comments,
         });

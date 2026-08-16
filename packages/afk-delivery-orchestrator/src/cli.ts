@@ -17,6 +17,8 @@ import {
   createGitSynchronizationPorts,
   createLocalConflictResolutionPorts,
   createLocalImplementationPorts,
+  createLocalReviewPorts,
+  createLocalValidationPorts,
   createManagedPullRequestReconstructor,
   containerClaudeSettingsPath,
   discoverDeliveryFrontier,
@@ -25,6 +27,8 @@ import {
   implementationTransitionId,
   reconstructDeliveryTicket,
   runConflictResolutionStage,
+  runReviewStage,
+  runValidationStage,
   runWorkerPreflight,
   type GitHubReadPort,
   type PreflightCheck,
@@ -101,6 +105,10 @@ function repositoryPolicy(targetBranch: string, actor: ReturnType<typeof trusted
     maximumRepairRounds: Number(process.env.AFK_MAX_REPAIR_ROUNDS ?? "2"),
     requiredValidationCommands: (process.env.AFK_VALIDATION_COMMANDS ?? "npm run typecheck\nnpm test -- --run")
       .split("\n").filter(Boolean),
+    reviewSkill: {
+      path: "/home/agent/.claude/skills/code-review/SKILL.md",
+      revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+    },
     mergeStrategy: "squash",
   };
 }
@@ -217,6 +225,15 @@ async function readPromptDocuments(paths: string[]): Promise<PromptDocument[]> {
   return Promise.all(paths.map(async (path) => ({ path, content: await readFile(path, "utf8") })));
 }
 
+async function loadReviewContext() {
+  const repositoryInstructions = await readPromptDocuments(configuredPaths("AFK_REPOSITORY_INSTRUCTIONS"));
+  return {
+    repositoryInstructions: repositoryInstructions.map((document) => document.content).join("\n\n"),
+    domainDocuments: await readPromptDocuments(configuredPaths("AFK_DOMAIN_DOCUMENTS")),
+    architectureDecisions: await readPromptDocuments(configuredPaths("AFK_ARCHITECTURE_DECISIONS")),
+  };
+}
+
 function configuredPaths(name: string): string[] {
   const value = process.env[name];
   return value === undefined || value.length === 0
@@ -321,6 +338,7 @@ async function implement(ticketNumber: number): Promise<void> {
     trustedActors: [actor],
     maximumPullRequests: Number(process.env.AFK_RECOVERY_SCAN_LIMIT ?? "100"),
     candidates: recovery,
+    loadReviewContext,
     loadTicket: async () => {
       const current = await reconstructDeliveryTicket(new GitHubApi(), {
         owner,
@@ -344,6 +362,13 @@ async function implement(ticketNumber: number): Promise<void> {
     modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
     modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
   });
+  const localValidation = createLocalValidationPorts({ repositoryUrl });
+  const localReview = createLocalReviewPorts({
+    reviewerLauncher: resolve(repositoryPath, ".sandcastle/run-reviewer.sh"),
+    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
+    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    reviewerImage: requiredEnvironment("AFK_REVIEWER_IMAGE"),
+  });
   const continuation = await continueManagedPullRequest({
     repository,
     ticketNumber,
@@ -357,6 +382,16 @@ async function implement(ticketNumber: number): Promise<void> {
     ...reconstructor,
     ...createGitSynchronizationPorts({ repositoryUrl }),
     ...createGitHubContinuationEffects({ repository, trustedActor: actor }),
+    runValidation: async (request) => runValidationStage(
+      request,
+      Number(process.env.AFK_VALIDATION_COMMAND_TIMEOUT_MS ?? "900000"),
+      localValidation,
+    ),
+    runReview: async (request) => runReviewStage(
+      request,
+      Number(process.env.AFK_REVIEW_TIMEOUT_MS ?? "1830000"),
+      localReview,
+    ),
     resolveConflicts: async (conflict) => runConflictResolutionStage({
       repository,
       ticket: conflict.ticket,

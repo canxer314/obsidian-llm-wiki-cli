@@ -22,6 +22,10 @@ const policy: RepositoryPolicy = {
   trustedActors: [{ login: "delivery-bot", type: "Bot" }],
   maximumRepairRounds: 2,
   requiredValidationCommands: ["npm test", "npm run typecheck"],
+  reviewSkill: {
+    path: "/home/agent/.claude/skills/code-review/SKILL.md",
+    revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+  },
   mergeStrategy: "squash",
 };
 
@@ -83,20 +87,75 @@ function envelope(
     inputRevision: HEAD_REVISION,
     disposition: kind === "review-handoff" ? "approved" : "succeeded",
     workflowRunId: "run-99",
+    workflowRunAttempt: 1,
+    ...(kind === "review-handoff" ? { baseRevision: BASE_REVISION } : {}),
     ...overrides,
   };
+}
+
+function reviewNarrative(
+  disposition: "approved" | "changes-required" | "unable-to-review",
+  detail = "No findings.",
+) {
+  return [
+    "## Verdict",
+    disposition,
+    "",
+    "## Standards",
+    detail,
+    "",
+    "## Spec",
+    detail,
+    "",
+    "## Interactions",
+    "None.",
+    "",
+    "## Constraints",
+    "None.",
+  ].join("\n");
 }
 
 function trustedRecord(
   kind: Parameters<typeof envelope>[0],
   overrides: Record<string, unknown> = {},
 ) {
+  const controlEnvelope = envelope(kind, overrides);
   return {
     commentId: `comment-${kind}-${String(overrides.transitionId ?? "1")}`,
     author: { login: "delivery-bot", type: "Bot" as const },
-    envelope: envelope(kind, overrides),
-    narrative: `Complete ${kind} narrative\n`,
+    envelope: controlEnvelope,
+    narrative: kind === "review-handoff"
+      ? reviewNarrative(controlEnvelope.disposition as "approved" | "changes-required" | "unable-to-review")
+      : `Complete ${kind} narrative\n`,
   };
+}
+
+function reviewContextSnapshot(overrides: Partial<AuthenticatedGitHubSnapshot> = {}) {
+  return snapshot({
+    repositoryInstructions: "# Repository instructions\nRun tests.",
+    domainDocuments: [{ path: "docs/contexts/afk-delivery/CONTEXT.md", content: "# AFK Delivery" }],
+    architectureDecisions: [{ path: "docs/adr/0001-github-as-afk-delivery-record.md", content: "# ADR" }],
+    ticket: {
+      number: 63,
+      open: true,
+      labels: ["ready-for-agent"],
+      openBlockerNumbers: [],
+      dependencyDataComplete: true,
+      body: "Complete delivery ticket specification",
+    },
+    pullRequests: [{
+      ...managedPr(),
+      diff: "diff --git a/a.ts b/a.ts\n+complete diff",
+    }],
+    controlComments: [
+      trustedRecord("managed-pr"),
+      trustedRecord("validation", { commands: [
+        { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+        { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+      ] }),
+    ],
+    ...overrides,
+  });
 }
 
 describe("selectDeliveryTransition", () => {
@@ -217,35 +276,36 @@ describe("selectDeliveryTransition", () => {
       kind: "validation",
       status: "succeeded",
       revision: HEAD_REVISION,
+      round: 1,
       commands: [
-        { command: "npm test", exitCode: 0, checkId: "test" },
-        { command: "npm run typecheck", exitCode: 0, checkId: "types" },
+        { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+        { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
       ],
     }));
     expect(validation.transition.kind).toBe("record-validation");
 
-    const validated = snapshot({
-      pullRequests: [managedPr()],
-      controlComments: [
-        trustedRecord("managed-pr"),
-        trustedRecord("validation", { commands: [
-          { command: "npm test", exitCode: 0, checkId: "test" },
-          { command: "npm run typecheck", exitCode: 0, checkId: "types" },
-        ] }),
-      ],
-    });
+    const validated = reviewContextSnapshot();
     expect(selectDeliveryTransition(input(validated)).transition.kind).toBe("review");
 
     const review = selectDeliveryTransition(input(validated, {
       kind: "review",
       status: "succeeded",
       revision: HEAD_REVISION,
+      baseRevision: BASE_REVISION,
       round: 1,
       disposition: "changes-required",
-      narrative: "## Findings\nFull rationale",
+      narrative: reviewNarrative("changes-required", "Full rationale and failure scenario."),
+      capabilities: {
+        sourceReadOnly: true,
+        canEdit: false,
+        canCommit: false,
+        canPush: false,
+        canComment: false,
+        githubCredentials: false,
+      },
     }));
     expect(review.transition.kind).toBe("record-review-handoff");
-    expect(review.effects[0]?.narrative).toBe("## Findings\nFull rationale");
+    expect(review.effects[0]?.narrative).toBe(reviewNarrative("changes-required", "Full rationale and failure scenario."));
 
     const changesRequired = snapshot({
       pullRequests: [managedPr()],
@@ -289,14 +349,449 @@ describe("selectDeliveryTransition", () => {
     expect(prepared.transition.kind).toBe("record-merge-report");
   });
 
+  it("builds validation from repository gates plus ticket-specific checks", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      ticket: {
+        number: 63,
+        open: true,
+        labels: ["ready-for-agent"],
+        openBlockerNumbers: [],
+        dependencyDataComplete: true,
+        additionalValidationCommands: ["npm run test:ticket"],
+      },
+      pullRequests: [managedPr()],
+      controlComments: [trustedRecord("managed-pr")],
+    })));
+
+    expect(result.transition.kind).toBe("validate");
+    expect(result.effects).toMatchObject([{
+      kind: "run-validation",
+      exactRevision: HEAD_REVISION,
+      validationRequest: {
+        revision: HEAD_REVISION,
+        workflowRun: { id: "run-100", attempt: 1 },
+        checks: [
+          { command: "npm test", source: "repository-policy" },
+          { command: "npm run typecheck", source: "repository-policy" },
+          { command: "npm run test:ticket", source: "delivery-ticket" },
+        ],
+      },
+    }]);
+  });
+
+  it("fails closed when repository validation command selection is ambiguous", () => {
+    const result = selectDeliveryTransition({
+      ...input(snapshot({
+        pullRequests: [managedPr()],
+        controlComments: [trustedRecord("managed-pr")],
+      })),
+      policy: {
+        ...policy,
+        requiredValidationCommands: ["npm test", "npm test"],
+      },
+    });
+
+    expect(result.transition.kind).toBe("needs-human");
+    expect(result.transition.reason).toContain("validation policy");
+  });
+
+  it("records complete successful validation evidence for the exact Revision", () => {
+    const result = selectDeliveryTransition(input(snapshot({ pullRequests: [managedPr()] }), {
+      kind: "validation",
+      status: "succeeded",
+      revision: HEAD_REVISION,
+      round: 1,
+      commands: [
+        { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+        { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+      ],
+    }));
+
+    expect(result.transition.kind).toBe("record-validation");
+    expect(result.effects[0]?.envelope).toMatchObject({
+      kind: "validation",
+      inputRevision: HEAD_REVISION,
+      disposition: "succeeded",
+      workflowRunId: "run-100",
+      workflowRunAttempt: 1,
+      commands: [
+        { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+        { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+      ],
+    });
+  });
+
+  it.each([
+    ["missing required check", [
+      { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+    ]],
+    ["non-zero required check", [
+      { command: "npm test", exitCode: 1, checkId: "test", timedOut: false },
+      { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+    ]],
+    ["timed out required check", [
+      { command: "npm test", exitCode: null, checkId: "test", timedOut: true },
+      { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+    ]],
+    ["ambiguous duplicate check identity", [
+      { command: "npm test", exitCode: 0, checkId: "same", timedOut: false },
+      { command: "npm run typecheck", exitCode: 0, checkId: "same", timedOut: false },
+    ]],
+  ])("fails closed for %s", (_name, commands) => {
+    const result = selectDeliveryTransition(input(snapshot({ pullRequests: [managedPr()] }), {
+      kind: "validation",
+      status: "succeeded",
+      revision: HEAD_REVISION,
+      commands,
+    }));
+
+    expect(result.transition.kind).toBe("needs-human");
+  });
+
+  it("preserves infrastructure validation failure separately from code failure", () => {
+    const infrastructure = selectDeliveryTransition(input(snapshot({ pullRequests: [managedPr()] }), {
+      kind: "validation",
+      status: "failed",
+      failureKind: "infrastructure",
+      revision: HEAD_REVISION,
+      round: 1,
+      commands: [
+        { command: "npm test", exitCode: null, checkId: "test", timedOut: false },
+      ],
+    }));
+    const code = selectDeliveryTransition(input(snapshot({ pullRequests: [managedPr()] }), {
+      kind: "validation",
+      status: "failed",
+      failureKind: "code-validation",
+      revision: HEAD_REVISION,
+      round: 1,
+      commands: [
+        { command: "npm test", exitCode: 1, checkId: "test", timedOut: false },
+      ],
+    }));
+
+    expect(infrastructure.transition.kind).toBe("record-validation");
+    expect(infrastructure.effects[0]?.envelope?.disposition).toBe("infrastructure-failed");
+    expect(code.transition.kind).toBe("record-validation");
+    expect(code.effects[0]?.envelope?.disposition).toBe("code-validation-failed");
+    expect(infrastructure.effects.some((effect) => effect.kind === "run-repair")).toBe(false);
+    expect(code.effects.some((effect) => effect.kind === "run-repair")).toBe(false);
+  });
+
+  it("supplies the independent reviewer with complete exact-Revision context and no mutation capability", () => {
+    const result = selectDeliveryTransition(input(reviewContextSnapshot()));
+
+    expect(result.transition.kind).toBe("review");
+    expect(result.effects).toMatchObject([{
+      kind: "run-review",
+      exactRevision: HEAD_REVISION,
+      reviewRequest: {
+        ticket: {
+          number: 63,
+          body: "Complete delivery ticket specification",
+        },
+        repositoryInstructions: "# Repository instructions\nRun tests.",
+        domainDocuments: [{ path: "docs/contexts/afk-delivery/CONTEXT.md", content: "# AFK Delivery" }],
+        architectureDecisions: [{ path: "docs/adr/0001-github-as-afk-delivery-record.md", content: "# ADR" }],
+        baseRevision: BASE_REVISION,
+        headRevision: HEAD_REVISION,
+        diff: "diff --git a/a.ts b/a.ts\n+complete diff",
+        skill: {
+          path: "/home/agent/.claude/skills/code-review/SKILL.md",
+          revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+        },
+        capabilities: {
+          sourceReadOnly: true,
+          canEdit: false,
+          canCommit: false,
+          canPush: false,
+          canComment: false,
+          githubCredentials: false,
+        },
+      },
+    }]);
+  });
+
+  it.each([
+    ["ticket body", { ticket: { number: 63, open: true, labels: ["ready-for-agent"], openBlockerNumbers: [], dependencyDataComplete: true } }],
+    ["repository instructions", { repositoryInstructions: undefined }],
+    ["domain documents", { domainDocuments: [] }],
+    ["domain document content", { domainDocuments: [{ path: "docs/contexts/afk-delivery/CONTEXT.md", content: "  " }] }],
+    ["architecture decisions", { architectureDecisions: [] }],
+    ["architecture decision content", { architectureDecisions: [{ path: "docs/adr/0001.md", content: "" }] }],
+    ["complete diff", { pullRequests: [{ ...managedPr(), diff: undefined }] }],
+  ])("fails closed before review when %s is unavailable", (_name, overrides) => {
+    const result = selectDeliveryTransition(input(reviewContextSnapshot(overrides as Partial<AuthenticatedGitHubSnapshot>)));
+
+    expect(result.transition.kind).toBe("needs-human");
+    expect(result.transition.reason).toContain("review context");
+  });
+
+  it.each(["approved", "changes-required"] as const)(
+    "records a complete %s review handoff with a trusted envelope",
+    (disposition) => {
+      const narrative = reviewNarrative(disposition, "Failure scenario and rationale.");
+      const result = selectDeliveryTransition(input(reviewContextSnapshot(), {
+        kind: "review",
+        status: "succeeded",
+        revision: HEAD_REVISION,
+        baseRevision: BASE_REVISION,
+        round: 1,
+        disposition,
+        narrative,
+        capabilities: {
+          sourceReadOnly: true,
+          canEdit: false,
+          canCommit: false,
+          canPush: false,
+          canComment: false,
+          githubCredentials: false,
+        },
+      }));
+
+      expect(result.transition.kind).toBe("record-review-handoff");
+      expect(result.effects[0]).toMatchObject({
+        kind: "record-control-comment",
+        narrative,
+        envelope: {
+          kind: "review-handoff",
+          inputRevision: HEAD_REVISION,
+          baseRevision: BASE_REVISION,
+          round: 1,
+          disposition,
+        },
+      });
+    },
+  );
+
+  it("records unable-to-review with the complete narrative before failing closed", () => {
+    const narrative = reviewNarrative("unable-to-review", "Repository instructions conflict.");
+    const result = selectDeliveryTransition(input(reviewContextSnapshot(), {
+      kind: "review",
+      status: "succeeded",
+      revision: HEAD_REVISION,
+      baseRevision: BASE_REVISION,
+      round: 1,
+      disposition: "unable-to-review",
+      narrative,
+      capabilities: {
+        sourceReadOnly: true,
+        canEdit: false,
+        canCommit: false,
+        canPush: false,
+        canComment: false,
+        githubCredentials: false,
+      },
+    }));
+
+    expect(result.transition.kind).toBe("record-review-handoff");
+    expect(result.effects[0]).toMatchObject({
+      narrative,
+      envelope: { disposition: "unable-to-review" },
+    });
+  });
+
+  it.each([
+    ["narrative/envelope contradiction", "approved", "## Verdict\nchanges-required"],
+    ["missing explicit verdict", "approved", "Complete review without verdict"],
+    ["review base mismatch", "approved", "## Verdict\napproved"],
+  ])("fails closed for trusted %s", (name, disposition, narrative) => {
+    const result = selectDeliveryTransition(input(reviewContextSnapshot({
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ] }),
+        {
+          ...trustedRecord("review-handoff", {
+            disposition,
+            ...(name === "review base mismatch" ? { baseRevision: ADVANCED_REVISION } : {}),
+          }),
+          narrative,
+        },
+      ],
+    })));
+
+    expect(result.transition.kind).toBe("needs-human");
+  });
+
+  it.each([
+    ["ambiguous narrative", { disposition: "approved", narrative: "No explicit verdict" }],
+    ["incomplete narrative", { disposition: "approved", narrative: "## Verdict\napproved" }],
+    ["contradictory narrative", { disposition: "approved", narrative: reviewNarrative("changes-required") }],
+    ["changed base", { disposition: "approved", narrative: reviewNarrative("approved"), baseRevision: ADVANCED_REVISION }],
+    ["mutation capability", {
+      disposition: "approved",
+      narrative: reviewNarrative("approved"),
+      capabilities: { sourceReadOnly: false, canEdit: true, canCommit: false, canPush: false, canComment: false, githubCredentials: false },
+    }],
+  ])("fails closed for %s", (_name, reviewOverrides) => {
+    const result = selectDeliveryTransition(input(reviewContextSnapshot(), {
+      kind: "review",
+      status: "succeeded",
+      revision: HEAD_REVISION,
+      baseRevision: BASE_REVISION,
+      round: 1,
+      disposition: "approved",
+      narrative: reviewNarrative("approved"),
+      capabilities: {
+        sourceReadOnly: true,
+        canEdit: false,
+        canCommit: false,
+        canPush: false,
+        canComment: false,
+        githubCredentials: false,
+      },
+      ...reviewOverrides,
+    } as StageOutcome));
+
+    expect(result.transition.kind).toBe("needs-human");
+  });
+
+  it("invalidates validation and review evidence after a known human head change and revalidates the new Revision", () => {
+    const beforeReview = reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+new head" }],
+    });
+    const beforeReviewResult = selectDeliveryTransition(input(beforeReview));
+    expect(beforeReviewResult.transition).toMatchObject({
+      kind: "validate",
+      inputRevision: ADVANCED_REVISION,
+    });
+
+    const duringReview = selectDeliveryTransition(input(reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+new head" }],
+    }), {
+      kind: "review",
+      status: "succeeded",
+      revision: HEAD_REVISION,
+      baseRevision: BASE_REVISION,
+      round: 1,
+      disposition: "approved",
+      narrative: reviewNarrative("approved"),
+      capabilities: {
+        sourceReadOnly: true,
+        canEdit: false,
+        canCommit: false,
+        canPush: false,
+        canComment: false,
+        githubCredentials: false,
+      },
+    }));
+    expect(duringReview.transition.kind).toBe("needs-human");
+
+    const afterReview = reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+new head" }],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ] }),
+        trustedRecord("review-handoff", { disposition: "approved" }),
+      ],
+    });
+    const afterReviewResult = selectDeliveryTransition(input(afterReview));
+    expect(afterReviewResult.transition).toMatchObject({
+      kind: "validate",
+      inputRevision: ADVANCED_REVISION,
+    });
+  });
+
+  it("rejects validation and review outcomes bound to the wrong round", () => {
+    const validation = selectDeliveryTransition(input(reviewContextSnapshot(), {
+      kind: "validation",
+      status: "succeeded",
+      revision: HEAD_REVISION,
+      round: 2,
+      commands: [
+        { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+        { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+      ],
+    }));
+    expect(validation.transition.kind).toBe("needs-human");
+
+    const review = selectDeliveryTransition(input(reviewContextSnapshot(), {
+      kind: "review",
+      status: "succeeded",
+      revision: HEAD_REVISION,
+      baseRevision: BASE_REVISION,
+      round: 2,
+      disposition: "approved",
+      narrative: reviewNarrative("approved"),
+      capabilities: {
+        sourceReadOnly: true,
+        canEdit: false,
+        canCommit: false,
+        canPush: false,
+        canComment: false,
+        githubCredentials: false,
+      },
+    }));
+    expect(review.transition.kind).toBe("needs-human");
+  });
+
+  it("binds validation and review evidence to the next repair round", () => {
+    const repairedRevision = reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+repair" }],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("repair-handoff", {
+          inputRevision: HEAD_REVISION,
+          outputRevision: ADVANCED_REVISION,
+          round: 1,
+          disposition: "succeeded",
+        }),
+      ],
+    });
+    const validationRequestResult = selectDeliveryTransition(input(repairedRevision));
+    expect(validationRequestResult.transition).toMatchObject({ kind: "validate", round: 2 });
+    expect(validationRequestResult.effects[0]?.validationRequest?.round).toBe(2);
+
+    const validationResult = selectDeliveryTransition(input(repairedRevision, {
+      kind: "validation",
+      status: "succeeded",
+      revision: ADVANCED_REVISION,
+      round: 2,
+      commands: [
+        { command: "npm test", exitCode: 0, checkId: "test-round-2", timedOut: false },
+        { command: "npm run typecheck", exitCode: 0, checkId: "types-round-2", timedOut: false },
+      ],
+    }));
+    expect(validationResult.effects[0]?.envelope?.round).toBe(2);
+
+    const reviewResult = selectDeliveryTransition(input(reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+repair" }],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("repair-handoff", {
+          inputRevision: HEAD_REVISION,
+          outputRevision: ADVANCED_REVISION,
+          round: 1,
+          disposition: "succeeded",
+        }),
+        trustedRecord("validation", {
+          inputRevision: ADVANCED_REVISION,
+          round: 2,
+          commands: [
+            { command: "npm test", exitCode: 0, checkId: "test-round-2", timedOut: false },
+            { command: "npm run typecheck", exitCode: 0, checkId: "types-round-2", timedOut: false },
+          ],
+        }),
+      ],
+    })));
+    expect(reviewResult.transition).toMatchObject({ kind: "review", round: 2 });
+    expect(reviewResult.effects[0]?.reviewRequest?.round).toBe(2);
+  });
+
   it("invalidates old evidence after an unexpected human push and validates the new Revision", () => {
     const result = selectDeliveryTransition(input(snapshot({
       pullRequests: [managedPr(ADVANCED_REVISION)],
       controlComments: [
         trustedRecord("managed-pr"),
         trustedRecord("validation", { commands: [
-          { command: "npm test", exitCode: 0, checkId: "old-test" },
-          { command: "npm run typecheck", exitCode: 0, checkId: "old-types" },
+          { command: "npm test", exitCode: 0, checkId: "old-test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "old-types", timedOut: false },
         ] }),
         trustedRecord("review-handoff", { disposition: "approved" }),
       ],
@@ -322,8 +817,8 @@ describe("selectDeliveryTransition", () => {
       controlComments: [
         trustedRecord("managed-pr"),
         trustedRecord("validation", { commands: [
-          { command: "npm test", exitCode: 0, checkId: "old-test" },
-          { command: "npm run typecheck", exitCode: 0, checkId: "old-types" },
+          { command: "npm test", exitCode: 0, checkId: "old-test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "old-types", timedOut: false },
         ] }),
         trustedRecord("review-handoff", { disposition: "changes-required" }),
         trustedRecord("repair-handoff", {
@@ -352,8 +847,8 @@ describe("selectDeliveryTransition", () => {
   it("rejects stale stage evidence and failed or incomplete outcomes", () => {
     const managed = snapshot({ pullRequests: [managedPr()] });
     expect(selectDeliveryTransition(input(managed, {
-      kind: "validation", status: "succeeded", revision: ADVANCED_REVISION,
-      commands: [{ command: "npm test", exitCode: 0, checkId: "test" }],
+      kind: "validation", status: "succeeded", revision: ADVANCED_REVISION, round: 1,
+      commands: [{ command: "npm test", exitCode: 0, checkId: "test", timedOut: false }],
     })).transition.kind).toBe("needs-human");
     expect(selectDeliveryTransition(input(managed, {
       kind: "repair", status: "succeeded", inputRevision: HEAD_REVISION, outputRevision: ADVANCED_REVISION,
@@ -370,6 +865,52 @@ describe("selectDeliveryTransition", () => {
       ],
     })));
     expect(result.transition.kind).toBe("validate");
+  });
+
+  it("reads legacy validation evidence without allowing it to authorize the Revision", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr", { workflowRunAttempt: undefined }),
+        trustedRecord("validation", {
+          workflowRunAttempt: undefined,
+          commands: [
+            { command: "npm test", exitCode: 0, checkId: "test", timedOut: undefined },
+            { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: undefined },
+          ],
+        }),
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({
+      kind: "validate",
+      inputRevision: HEAD_REVISION,
+    });
+  });
+
+  it("reads legacy review evidence without allowing it to authorize the Revision", () => {
+    const result = selectDeliveryTransition(input(reviewContextSnapshot({
+      controlComments: [
+        trustedRecord("managed-pr", { workflowRunAttempt: undefined }),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ] }),
+        {
+          ...trustedRecord("review-handoff", {
+            workflowRunAttempt: undefined,
+            baseRevision: undefined,
+            disposition: "approved",
+          }),
+          narrative: "Legacy review narrative",
+        },
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({
+      kind: "review",
+      inputRevision: HEAD_REVISION,
+    });
   });
 
   it.each([
@@ -391,8 +932,8 @@ describe("selectDeliveryTransition", () => {
       controlComments: [
         trustedRecord("managed-pr"),
         trustedRecord("validation", { commands: [
-          { command: "npm test", exitCode: 0, checkId: "test" },
-          { command: "npm run typecheck", exitCode: 0, checkId: "types" },
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
         ] }),
         trustedRecord("review-handoff", { disposition: "approved" }),
         trustedRecord("merge-report", { disposition: "ready" }),

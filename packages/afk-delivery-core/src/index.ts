@@ -17,6 +17,10 @@ export interface RepositoryPolicy {
   trustedActors: TrustedActor[];
   maximumRepairRounds: number;
   requiredValidationCommands: string[];
+  reviewSkill: {
+    path: string;
+    revision: string;
+  };
   mergeStrategy: "merge" | "squash" | "rebase";
 }
 
@@ -27,6 +31,7 @@ export interface DeliveryTicketSnapshot {
   openBlockerNumbers: number[];
   dependencyDataComplete: boolean;
   body?: string;
+  additionalValidationCommands?: string[];
 }
 
 export interface ImplementationPullRequestSnapshot {
@@ -67,6 +72,8 @@ export interface ControlEnvelope {
   outputRevision?: Revision;
   disposition: string;
   workflowRunId: string;
+  workflowRunAttempt?: number;
+  baseRevision?: Revision;
   commands?: ValidationCommandResult[];
 }
 
@@ -77,8 +84,38 @@ export interface AuthenticatedControlComment {
   narrative: string;
 }
 
+export interface RepositoryDocument {
+  path: string;
+  content: string;
+}
+
+export interface ReviewerCapabilities {
+  sourceReadOnly: boolean;
+  canEdit: boolean;
+  canCommit: boolean;
+  canPush: boolean;
+  canComment: boolean;
+  githubCredentials: boolean;
+}
+
+export interface ReviewRequest {
+  ticket: DeliveryTicketSnapshot & { body: string };
+  round: number;
+  repositoryInstructions: string;
+  domainDocuments: RepositoryDocument[];
+  architectureDecisions: RepositoryDocument[];
+  baseRevision: Revision;
+  headRevision: Revision;
+  diff: string;
+  skill: RepositoryPolicy["reviewSkill"];
+  capabilities: ReviewerCapabilities;
+}
+
 export interface AuthenticatedGitHubSnapshot {
   repository: string;
+  repositoryInstructions?: string;
+  domainDocuments?: RepositoryDocument[];
+  architectureDecisions?: RepositoryDocument[];
   targetBranchRevision?: Revision;
   ticket: DeliveryTicketSnapshot;
   pullRequests: ImplementationPullRequestSnapshot[];
@@ -97,8 +134,19 @@ export interface WorkflowRunIdentity {
 
 export interface ValidationCommandResult {
   command: string;
-  exitCode: number;
+  exitCode: number | null;
   checkId: string;
+  timedOut?: boolean;
+}
+
+export interface ValidationRequest {
+  revision: Revision;
+  round: number;
+  workflowRun: WorkflowRunIdentity;
+  checks: Array<{
+    command: string;
+    source: "repository-policy" | "delivery-ticket";
+  }>;
 }
 
 export type StageOutcome =
@@ -119,16 +167,20 @@ export type StageOutcome =
   | {
       kind: "validation";
       status: "succeeded" | "failed";
+      failureKind?: "code-validation" | "infrastructure";
       revision: Revision;
+      round: number;
       commands: ValidationCommandResult[];
     }
   | {
       kind: "review";
       status: "succeeded" | "failed";
       revision: Revision;
+      baseRevision: Revision;
       round: number;
       disposition: "approved" | "changes-required" | "unable-to-review";
       narrative: string;
+      capabilities: ReviewerCapabilities;
     }
   | {
       kind: "repair";
@@ -204,6 +256,8 @@ export interface ModeledEffect {
   envelope?: ControlEnvelope;
   narrative?: string;
   exactRevision?: Revision;
+  validationRequest?: ValidationRequest;
+  reviewRequest?: ReviewRequest;
 }
 
 export interface DeliveryTransitionResult {
@@ -236,7 +290,7 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
   const allowedKeys = new Set([
     "schemaVersion", "kind", "repository", "ticketNumber", "prNumber", "targetBranch", "targetRevision", "round",
     "transitionId", "inputRevision", "outputRevision", "disposition", "workflowRunId",
-    "commands",
+    "workflowRunAttempt", "baseRevision", "commands",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) return undefined;
   const requiredStrings = [
@@ -258,7 +312,13 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
     (value.targetRevision !== undefined &&
       (typeof value.targetRevision !== "string" || !REVISION_PATTERN.test(value.targetRevision))) ||
     (value.round as number) < 0 ||
+    (value.workflowRunAttempt !== undefined && (
+      !Number.isInteger(value.workflowRunAttempt) ||
+      (value.workflowRunAttempt as number) < 1
+    )) ||
     !REVISION_PATTERN.test(value.inputRevision as string) ||
+    (value.baseRevision !== undefined &&
+      (typeof value.baseRevision !== "string" || !REVISION_PATTERN.test(value.baseRevision))) ||
     (value.outputRevision !== undefined &&
       (typeof value.outputRevision !== "string" || !REVISION_PATTERN.test(value.outputRevision)))
   ) {
@@ -271,8 +331,9 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
         (command) =>
           isRecord(command) &&
           typeof command.command === "string" &&
-          Number.isInteger(command.exitCode) &&
-          typeof command.checkId === "string",
+          (Number.isInteger(command.exitCode) || command.exitCode === null) &&
+          typeof command.checkId === "string" &&
+          (command.timedOut === undefined || typeof command.timedOut === "boolean"),
       )
     ) {
       return undefined;
@@ -298,14 +359,27 @@ function authenticateHistory(
 ): TrustedHistory {
   const records: ControlEnvelope[] = [];
   const identities = new Map<string, string>();
-  const parsed: Array<{ commentId: string; envelope: ControlEnvelope }> = [];
+  const parsed: Array<{ commentId: string; envelope: ControlEnvelope; narrative: string }> = [];
   for (const comment of snapshot.controlComments) {
     if (!actorIsTrusted(comment.author, policy)) continue;
     const envelope = parseControlEnvelope(comment.envelope);
     if (envelope === undefined) {
       return { records, invalidReason: `trusted control comment ${comment.commentId} has a malformed or unsupported envelope` };
     }
-    parsed.push({ commentId: comment.commentId, envelope });
+    const legacyReview = envelope.kind === "review-handoff" &&
+      envelope.workflowRunAttempt === undefined && envelope.baseRevision === undefined;
+    if (envelope.kind === "review-handoff" && !legacyReview && (
+      envelope.workflowRunAttempt === undefined ||
+      envelope.baseRevision !== pr?.baseRevision ||
+      !["approved", "changes-required", "unable-to-review"].includes(envelope.disposition) ||
+      !reviewNarrativeMatchesDisposition(
+        comment.narrative,
+        envelope.disposition as "approved" | "changes-required" | "unable-to-review",
+      )
+    )) {
+      return { records, invalidReason: `trusted review handoff ${comment.commentId} contradicts its Control Envelope or current base Revision` };
+    }
+    parsed.push({ commentId: comment.commentId, envelope, narrative: comment.narrative });
   }
 
   const connectedRevisions = new Set<Revision>([pr?.headRevision, predecessorRevision].filter(
@@ -454,6 +528,7 @@ function controlEnvelope(
   kind: ControlKind,
   disposition: string,
   commands?: ValidationCommandResult[],
+  baseRevision?: Revision,
 ): ControlEnvelope {
   if (selected.prNumber === undefined || selected.inputRevision === undefined) {
     throw new Error("control records require a PR and input Revision");
@@ -470,6 +545,8 @@ function controlEnvelope(
     ...(selected.outputRevision === undefined ? {} : { outputRevision: selected.outputRevision }),
     disposition,
     workflowRunId: input.workflowRun.id,
+    workflowRunAttempt: input.workflowRun.attempt,
+    ...(baseRevision === undefined ? {} : { baseRevision }),
     ...(commands === undefined ? {} : { commands }),
   };
 }
@@ -477,12 +554,131 @@ function controlEnvelope(
 function requiredValidationPassed(
   record: ControlEnvelope | undefined,
   policy: RepositoryPolicy,
+  ticket?: DeliveryTicketSnapshot,
 ): boolean {
-  if (record?.kind !== "validation" || record.disposition !== "succeeded") return false;
+  if (
+    record?.kind !== "validation" ||
+    record.disposition !== "succeeded" ||
+    record.workflowRunAttempt === undefined
+  ) return false;
   const commands = record.commands ?? [];
-  return policy.requiredValidationCommands.every((required) =>
-    commands.some((command) => command.command === required && command.exitCode === 0),
-  );
+  if (new Set(commands.map((command) => command.checkId)).size !== commands.length) return false;
+  const requiredCommands = [
+    ...policy.requiredValidationCommands,
+    ...(ticket?.additionalValidationCommands ?? []),
+  ];
+  return requiredCommands.every((required) => {
+    const matches = commands.filter((command) => command.command === required);
+    return matches.length === 1 && matches[0]?.exitCode === 0 && matches[0].timedOut === false;
+  });
+}
+
+function validationPolicyIsUnambiguous(
+  policy: RepositoryPolicy,
+  ticket: DeliveryTicketSnapshot,
+): boolean {
+  const baseline = policy.requiredValidationCommands;
+  const additional = ticket.additionalValidationCommands ?? [];
+  return baseline.length > 0 &&
+    baseline.every((command) => command.trim().length > 0) &&
+    additional.every((command) => command.trim().length > 0) &&
+    new Set(baseline).size === baseline.length &&
+    new Set(additional).size === additional.length &&
+    additional.every((command) => !baseline.includes(command));
+}
+
+function validationRequest(
+  input: DeliveryTransitionInput,
+  revision: Revision,
+  round: number,
+): ValidationRequest {
+  return {
+    revision,
+    round,
+    workflowRun: input.workflowRun,
+    checks: [
+      ...input.policy.requiredValidationCommands.map((command) => ({
+        command,
+        source: "repository-policy" as const,
+      })),
+      ...(input.snapshot.ticket.additionalValidationCommands ?? []).map((command) => ({
+        command,
+        source: "delivery-ticket" as const,
+      })),
+    ],
+  };
+}
+
+const REVIEWER_CAPABILITIES: ReviewerCapabilities = {
+  sourceReadOnly: true,
+  canEdit: false,
+  canCommit: false,
+  canPush: false,
+  canComment: false,
+  githubCredentials: false,
+};
+
+function reviewerIsIsolated(capabilities: ReviewerCapabilities): boolean {
+  return capabilities.sourceReadOnly &&
+    !capabilities.canEdit &&
+    !capabilities.canCommit &&
+    !capabilities.canPush &&
+    !capabilities.canComment &&
+    !capabilities.githubCredentials;
+}
+
+function reviewNarrativeMatchesDisposition(
+  narrative: string,
+  disposition: "approved" | "changes-required" | "unable-to-review",
+): boolean {
+  const headingPattern = /^## (Verdict|Standards|Spec|Interactions|Constraints)\s*$/gmu;
+  const matches = [...narrative.matchAll(headingPattern)];
+  const expectedHeadings = ["Verdict", "Standards", "Spec", "Interactions", "Constraints"];
+  if (
+    matches.length !== expectedHeadings.length ||
+    matches.some((match, index) => match[1] !== expectedHeadings[index])
+  ) return false;
+
+  const sections = matches.map((match, index) => {
+    const start = (match.index ?? 0) + match[0].length;
+    const end = matches[index + 1]?.index ?? narrative.length;
+    return narrative.slice(start, end).trim();
+  });
+  return sections.every((section) => section.length > 0) && sections[0] === disposition;
+}
+
+function buildReviewRequest(
+  input: DeliveryTransitionInput,
+  pr: ImplementationPullRequestSnapshot,
+  round: number,
+): ReviewRequest | undefined {
+  const { snapshot, policy } = input;
+  if (
+    snapshot.ticket.body === undefined || snapshot.ticket.body.trim().length === 0 ||
+    snapshot.repositoryInstructions === undefined || snapshot.repositoryInstructions.trim().length === 0 ||
+    snapshot.domainDocuments === undefined || snapshot.domainDocuments.length === 0 ||
+    snapshot.domainDocuments.some((document) =>
+      document.path.trim().length === 0 || document.content.trim().length === 0
+    ) ||
+    snapshot.architectureDecisions === undefined || snapshot.architectureDecisions.length === 0 ||
+    snapshot.architectureDecisions.some((document) =>
+      document.path.trim().length === 0 || document.content.trim().length === 0
+    ) ||
+    pr.diff === undefined || pr.diff.trim().length === 0 ||
+    policy.reviewSkill.path.trim().length === 0 || policy.reviewSkill.revision.trim().length === 0
+  ) return undefined;
+  return {
+    ticket: { ...snapshot.ticket, body: snapshot.ticket.body },
+    round,
+    repositoryInstructions: snapshot.repositoryInstructions,
+    domainDocuments: snapshot.domainDocuments,
+    architectureDecisions: snapshot.architectureDecisions,
+    baseRevision: pr.baseRevision,
+    headRevision: pr.headRevision,
+    diff: pr.diff,
+    skill: policy.reviewSkill,
+    capabilities: REVIEWER_CAPABILITIES,
+  };
 }
 
 function latest(records: ControlEnvelope[], kind: ControlKind): ControlEnvelope | undefined {
@@ -492,10 +688,13 @@ function latest(records: ControlEnvelope[], kind: ControlKind): ControlEnvelope 
 function processStageOutcome(
   input: DeliveryTransitionInput,
   pr: ImplementationPullRequestSnapshot | undefined,
+  records: ControlEnvelope[],
 ): DeliveryTransitionResult | undefined {
   const stage = input.stageOutcome;
   if (stage === undefined) return undefined;
-  if (stage.status !== "succeeded") return needsHuman(input, `${stage.kind} stage did not succeed`, pr);
+  if (stage.status !== "succeeded" && stage.kind !== "validation") {
+    return needsHuman(input, `${stage.kind} stage did not succeed`, pr);
+  }
 
   if (stage.kind === "implementation") {
     if (pr === undefined || stage.prNumber !== pr.number || stage.outputRevision !== pr.headRevision) {
@@ -529,31 +728,66 @@ function processStageOutcome(
     }]);
   }
   if (stage.kind === "validation") {
-    const complete = requiredValidationPassed({
-      schemaVersion: 1, kind: "validation", repository: input.snapshot.repository,
-      ticketNumber: input.snapshot.ticket.number, prNumber: pr.number, round: 0,
-      transitionId: "pending", inputRevision: stage.revision, disposition: "succeeded",
-      workflowRunId: input.workflowRun.id, commands: stage.commands,
-    }, input.policy);
-    if (stage.revision !== pr.headRevision || !complete) {
-      return needsHuman(input, "validation is stale, failed, or missing required commands", pr);
+    const currentRepair = latest(records.filter((record) =>
+      record.outputRevision === pr.headRevision
+    ), "repair-handoff");
+    const expectedRound = currentRepair === undefined ? 1 : currentRepair.round + 1;
+    if (stage.revision !== pr.headRevision || stage.round !== expectedRound) {
+      return needsHuman(input, "validation is stale or bound to the wrong review round", pr);
     }
-    const selected = transition(input, "record-validation", { pr, inputRevision: pr.headRevision });
+    const validationDisposition = stage.status === "failed"
+      ? stage.failureKind === "infrastructure"
+        ? "infrastructure-failed"
+        : stage.failureKind === "code-validation"
+          ? "code-validation-failed"
+          : undefined
+      : "succeeded";
+    if (validationDisposition === undefined) {
+      return needsHuman(input, "failed validation has no unambiguous failure classification", pr);
+    }
+    if (stage.status === "succeeded") {
+      const complete = requiredValidationPassed({
+        schemaVersion: 1, kind: "validation", repository: input.snapshot.repository,
+        ticketNumber: input.snapshot.ticket.number, prNumber: pr.number, round: 0,
+        transitionId: "pending", inputRevision: stage.revision, disposition: "succeeded",
+        workflowRunId: input.workflowRun.id, workflowRunAttempt: input.workflowRun.attempt,
+        commands: stage.commands,
+      }, input.policy, input.snapshot.ticket);
+      if (!complete) {
+        return needsHuman(input, "validation failed or is missing required commands", pr);
+      }
+    }
+    const selected = transition(input, "record-validation", {
+      pr,
+      round: stage.round,
+      inputRevision: pr.headRevision,
+    });
     return result(input, selected, [{
       kind: "record-control-comment",
-      envelope: controlEnvelope(input, selected, "validation", "succeeded", stage.commands),
+      envelope: controlEnvelope(input, selected, "validation", validationDisposition, stage.commands),
     }]);
   }
   if (stage.kind === "review") {
-    if (stage.revision !== pr.headRevision || stage.disposition === "unable-to-review") {
-      return needsHuman(input, "review is stale or unable to establish a disposition", pr);
+    const currentValidation = latest(records.filter((record) =>
+      record.inputRevision === pr.headRevision
+    ), "validation");
+    const expectedRound = currentValidation?.round;
+    if (
+      stage.revision !== pr.headRevision ||
+      expectedRound === undefined ||
+      stage.round !== expectedRound ||
+      stage.baseRevision !== pr.baseRevision ||
+      !reviewerIsIsolated(stage.capabilities) ||
+      !reviewNarrativeMatchesDisposition(stage.narrative, stage.disposition)
+    ) {
+      return needsHuman(input, "review is stale, contradictory, incomplete, or not capability-isolated", pr);
     }
     const selected = transition(input, "record-review-handoff", {
       pr, round: stage.round, inputRevision: pr.headRevision,
     });
     return result(input, selected, [{
       kind: "record-control-comment",
-      envelope: controlEnvelope(input, selected, "review-handoff", stage.disposition),
+      envelope: controlEnvelope(input, selected, "review-handoff", stage.disposition, undefined, stage.baseRevision),
       narrative: redactHandoffNarrative(stage.narrative),
     }]);
   }
@@ -596,6 +830,9 @@ export function selectDeliveryTransition(
   if (input.lease.status !== "acquired") {
     return result(input, transition(input, "no-transition", { reason: input.lease.reason }), []);
   }
+  if (!validationPolicyIsUnambiguous(policy, ticket)) {
+    return needsHuman(input, "repository and ticket validation policy is ambiguous");
+  }
   if (!ticket.open || !ticket.labels.includes(policy.readyLabel)) {
     return needsHuman(input, "ticket is not open and authorized for AFK Delivery");
   }
@@ -630,7 +867,7 @@ export function selectDeliveryTransition(
     : authenticateHistory(snapshot, policy, pr, predecessorRevision);
   if (history.invalidReason !== undefined) return needsHuman(input, history.invalidReason, pr);
 
-  const stageResult = processStageOutcome(input, pr);
+  const stageResult = processStageOutcome(input, pr, history.records);
   if (stageResult !== undefined) return stageResult;
 
   if (pr === undefined) {
@@ -673,7 +910,10 @@ export function selectDeliveryTransition(
   );
   const repair = latest(currentRecords, "repair-handoff");
   const validation = latest(currentRecords, "validation");
-  const review = latest(currentRecords, "review-handoff");
+  const currentReview = latest(currentRecords, "review-handoff");
+  const review = currentReview?.workflowRunAttempt === undefined || currentReview.baseRevision === undefined
+    ? undefined
+    : currentReview;
   const mergeReport = latest(currentRecords, "merge-report");
 
   if (mergeReport !== undefined) {
@@ -694,15 +934,32 @@ export function selectDeliveryTransition(
   }
   if (repair !== undefined && repair.outputRevision === currentRevision && validation === undefined) {
     const selected = transition(input, "validate", { pr, round: repair.round + 1, inputRevision: currentRevision });
-    return result(input, selected, [{ kind: "run-validation", exactRevision: currentRevision }]);
+    return result(input, selected, [{
+      kind: "run-validation",
+      exactRevision: currentRevision,
+      validationRequest: validationRequest(input, currentRevision, selected.round),
+    }]);
   }
-  if (!requiredValidationPassed(validation, policy)) {
-    const selected = transition(input, "validate", { pr, inputRevision: currentRevision });
-    return result(input, selected, [{ kind: "run-validation", exactRevision: currentRevision }]);
+  if (!requiredValidationPassed(validation, policy, ticket)) {
+    const selected = transition(input, "validate", { pr, round: 1, inputRevision: currentRevision });
+    return result(input, selected, [{
+      kind: "run-validation",
+      exactRevision: currentRevision,
+      validationRequest: validationRequest(input, currentRevision, selected.round),
+    }]);
   }
   if (review === undefined) {
-    const selected = transition(input, "review", { pr, round: 1, inputRevision: currentRevision });
-    return result(input, selected, [{ kind: "run-review", exactRevision: currentRevision }]);
+    const reviewRound = repair?.outputRevision === currentRevision ? repair.round + 1 : 1;
+    const request = buildReviewRequest(input, pr, reviewRound);
+    if (request === undefined) {
+      return needsHuman(input, "review context is incomplete or the pinned review skill is unavailable", pr);
+    }
+    const selected = transition(input, "review", { pr, round: reviewRound, inputRevision: currentRevision });
+    return result(input, selected, [{
+      kind: "run-review",
+      exactRevision: currentRevision,
+      reviewRequest: request,
+    }]);
   }
   if (review.disposition !== "approved") {
     return needsHuman(input, "trusted review history has no actionable disposition", pr);

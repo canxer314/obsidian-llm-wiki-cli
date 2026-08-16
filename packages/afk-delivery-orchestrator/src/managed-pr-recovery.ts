@@ -5,6 +5,7 @@ import {
 } from "./managed-pr-continuation.js";
 import {
   extractControlEnvelope,
+  extractControlNarrative,
   recognizeManagedPullRequest,
   type ManagedPullRequestRecord,
 } from "./managed-pr.js";
@@ -20,6 +21,7 @@ export interface RecoveryPullRequestCandidate extends ManagedPullRequestRecord {
   headParents: string[];
   headMessage: string;
   headAuthor: { name: string; email: string };
+  diff: string;
 }
 
 export interface ManagedPullRequestRecoveryPorts {
@@ -29,6 +31,16 @@ export interface ManagedPullRequestRecoveryPorts {
     inputRevision: string;
     targetRevision: string;
   }): Promise<{ revision: string; parents: string[] } | undefined>;
+}
+
+export interface ManagedPullRequestReviewContext {
+  repositoryInstructions: string;
+  domainDocuments: Array<{ path: string; content: string }>;
+  architectureDecisions: Array<{ path: string; content: string }>;
+}
+
+export interface ManagedPullRequestReviewContextPorts {
+  loadReviewContext(): Promise<ManagedPullRequestReviewContext>;
 }
 
 export interface ManagedPullRequestRecoveryPolicy {
@@ -60,15 +72,17 @@ export function createManagedPullRequestReconstructor(input: {
   trustedActors: ManagedPullRequestRecoveryPolicy["trustedActors"];
   maximumPullRequests: number;
   candidates: ManagedPullRequestRecoveryPorts;
+  loadReviewContext(): Promise<ManagedPullRequestReviewContext>;
   loadTicket(): Promise<AuthenticatedGitHubSnapshot["ticket"]>;
   loadTargetRevision(): Promise<string>;
 }): Pick<ManagedPullRequestContinuationPorts, "reconstruct"> {
   return {
     async reconstruct() {
-      const [ticket, targetBranchRevision, candidates] = await Promise.all([
+      const [ticket, targetBranchRevision, candidates, reviewContext] = await Promise.all([
         input.loadTicket(),
         input.loadTargetRevision(),
         input.candidates.listOpenPullRequests(input.maximumPullRequests),
+        input.loadReviewContext(),
       ]);
       const snapshot = await reconstructManagedPullRequestSnapshot({
         repository: input.repository,
@@ -79,6 +93,7 @@ export function createManagedPullRequestReconstructor(input: {
           listOpenPullRequests: async () => candidates,
           readSynchronizationStaging: input.candidates.readSynchronizationStaging,
         },
+        reviewContext,
         trustedActors: input.trustedActors,
         maximumPullRequests: input.maximumPullRequests,
       });
@@ -202,6 +217,7 @@ export async function reconstructManagedPullRequestSnapshot(input: {
   targetBranchRevision: string;
   ticket: AuthenticatedGitHubSnapshot["ticket"];
   candidates: ManagedPullRequestRecoveryPorts;
+  reviewContext: ManagedPullRequestReviewContext;
   trustedActors: ManagedPullRequestRecoveryPolicy["trustedActors"];
   maximumPullRequests: number;
 }): Promise<AuthenticatedGitHubSnapshot> {
@@ -223,7 +239,7 @@ export async function reconstructManagedPullRequestSnapshot(input: {
         commentId: `pr-${candidate.number}-comment-${index + 1}`,
         author: comment.author,
         envelope: envelope ?? extractControlEnvelope(comment.body) ?? comment.body,
-        narrative: comment.body,
+        narrative: extractControlNarrative(comment.body),
       });
     });
     return {
@@ -246,10 +262,12 @@ export async function reconstructManagedPullRequestSnapshot(input: {
           trustedActors: input.trustedActors,
         }).managed,
       body: candidate.body,
+      diff: candidate.diff,
     };
   });
   return {
     repository: input.repository,
+    ...input.reviewContext,
     targetBranchRevision: input.targetBranchRevision,
     ticket: input.ticket,
     pullRequests,

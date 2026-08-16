@@ -21,6 +21,10 @@ const policy: RepositoryPolicy = {
   trustedActors: [{ login: "delivery-bot", type: "Bot" }],
   maximumRepairRounds: 2,
   requiredValidationCommands: ["npm test", "npm run typecheck"],
+  reviewSkill: {
+    path: "/home/agent/.claude/skills/code-review/SKILL.md",
+    revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+  },
   mergeStrategy: "squash",
 };
 
@@ -322,6 +326,176 @@ describe("Managed PR continuation", () => {
       workflowRun: { id: "run-2", attempt: 1 },
     }, ports)).rejects.toThrow("changed before its control record");
     expect(comments).toBe(2);
+  });
+
+  it("executes and persists validation for the exact selected Revision", async () => {
+    const initial = snapshot({
+      targetBranchRevision: INITIAL,
+      pullRequests: [{ ...snapshot().pullRequests[0]!, diff: "diff --git a/a b/a\n+change" }],
+    });
+    const fake = fakePorts(initial);
+    let validationRequest: Parameters<NonNullable<ManagedPullRequestContinuationPorts["runValidation"]>>[0] | undefined;
+    let recorded: Parameters<ManagedPullRequestContinuationPorts["recordControlComment"]>[0] | undefined;
+    fake.ports.runValidation = async (request) => {
+      validationRequest = request;
+      return {
+        kind: "validation",
+        status: "succeeded",
+        revision: request.revision,
+        round: request.round,
+        commands: request.checks.map((check, index) => ({
+          command: check.command,
+          exitCode: 0,
+          checkId: `check-${index}`,
+          timedOut: false,
+        })),
+      };
+    };
+    fake.ports.recordControlComment = async (record) => {
+      recorded = record;
+      return { created: true };
+    };
+
+    const result = await continueManagedPullRequest({
+      repository: initial.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-2", attempt: 1 },
+    }, fake.ports);
+
+    expect(validationRequest).toMatchObject({
+      revision: INITIAL,
+      round: 1,
+      workflowRun: { id: "run-2", attempt: 1 },
+      checks: [
+        { command: "npm test", source: "repository-policy" },
+        { command: "npm run typecheck", source: "repository-policy" },
+      ],
+    });
+    expect(recorded?.envelope).toMatchObject({
+      kind: "validation",
+      inputRevision: INITIAL,
+      disposition: "succeeded",
+      workflowRunAttempt: 1,
+    });
+    expect(result).toMatchObject({ status: "selected", transition: { kind: "record-validation" } });
+  });
+
+  it("executes and persists the complete isolated Review Handoff", async () => {
+    const validation = {
+      commentId: "validation-1",
+      author: { login: "delivery-bot", type: "Bot" as const },
+      envelope: {
+        schemaVersion: 1 as const,
+        kind: "validation" as const,
+        repository: "canxer314/obsidian-llm-wiki-cli",
+        ticketNumber: 66,
+        prNumber: 73,
+        round: 1,
+        transitionId: "validation-1",
+        inputRevision: INITIAL,
+        disposition: "succeeded",
+        workflowRunId: "run-2",
+        workflowRunAttempt: 1,
+        commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ],
+      },
+      narrative: "",
+    };
+    const initial = snapshot({
+      targetBranchRevision: INITIAL,
+      repositoryInstructions: "Repository instructions",
+      domainDocuments: [{ path: "CONTEXT.md", content: "Domain" }],
+      architectureDecisions: [{ path: "docs/adr/0001.md", content: "Decision" }],
+      pullRequests: [{ ...snapshot().pullRequests[0]!, diff: "diff --git a/a b/a\n+change" }],
+      controlComments: [...snapshot().controlComments, validation],
+    });
+    const narrative = [
+      "## Verdict", "approved", "", "## Standards", "No findings.", "", "## Spec", "No findings.",
+      "", "## Interactions", "None.", "", "## Constraints", "None.",
+    ].join("\n");
+    const fake = fakePorts(initial);
+    let reviewRequest: Parameters<NonNullable<ManagedPullRequestContinuationPorts["runReview"]>>[0] | undefined;
+    let recorded: Parameters<ManagedPullRequestContinuationPorts["recordControlComment"]>[0] | undefined;
+    fake.ports.runReview = async (request) => {
+      reviewRequest = request;
+      return {
+        kind: "review",
+        status: "succeeded",
+        revision: request.headRevision,
+        baseRevision: request.baseRevision,
+        round: request.round,
+        disposition: "approved",
+        narrative,
+        capabilities: request.capabilities,
+      };
+    };
+    fake.ports.recordControlComment = async (record) => {
+      recorded = record;
+      return { created: true };
+    };
+
+    const result = await continueManagedPullRequest({
+      repository: initial.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-3", attempt: 1 },
+    }, fake.ports);
+
+    expect(reviewRequest).toMatchObject({
+      headRevision: INITIAL,
+      baseRevision: INITIAL,
+      round: 1,
+      diff: "diff --git a/a b/a\n+change",
+      capabilities: { sourceReadOnly: true, canEdit: false, githubCredentials: false },
+    });
+    expect(recorded).toMatchObject({
+      narrative,
+      envelope: {
+        kind: "review-handoff",
+        inputRevision: INITIAL,
+        baseRevision: INITIAL,
+        disposition: "approved",
+      },
+    });
+    expect(result).toMatchObject({ status: "selected", transition: { kind: "record-review-handoff" } });
+  });
+
+  it("does not persist stage evidence after the PR head changes", async () => {
+    const initial = snapshot({ targetBranchRevision: INITIAL });
+    const fake = fakePorts(initial);
+    fake.ports.runValidation = async (request) => ({
+      kind: "validation",
+      status: "succeeded",
+      revision: request.revision,
+      round: request.round,
+      commands: request.checks.map((check, index) => ({
+        command: check.command,
+        exitCode: 0,
+        checkId: `check-${index}`,
+        timedOut: false,
+      })),
+    });
+    let reconstructCount = 0;
+    fake.ports.reconstruct = async () => {
+      reconstructCount += 1;
+      return reconstructCount === 1
+        ? { snapshot: initial }
+        : { snapshot: { ...initial, pullRequests: [{ ...initial.pullRequests[0]!, headRevision: SYNCHRONIZED }] } };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: initial.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-2", attempt: 1 },
+    }, fake.ports)).rejects.toThrow("Revision changed before stage evidence was persisted");
+    expect(fake.calls.some((call) => call.startsWith("comment:validation"))).toBe(false);
   });
 
   it("synchronizes the one authenticated Managed PR instead of creating another PR", async () => {
