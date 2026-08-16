@@ -23,6 +23,15 @@ function signingMaterial() {
   });
 }
 
+async function rejectionMessage(operation: () => Promise<unknown>): Promise<string> {
+  try {
+    await operation();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error("Expected operation to reject");
+}
+
 const appResponse = () => new Response(JSON.stringify({
   id: 12345,
   slug: "afk-delivery-canary",
@@ -313,14 +322,15 @@ describe("GitHub App installation token", () => {
       repository: "canxer314/obsidian-llm-wiki-cli",
       privateKeyFile: "private-key.pem",
     }), { mode: 0o644 });
+    await chmod(configFile, 0o644);
 
-    await expect(loadGitHubAppTokenConfig(configFile)).rejects.toThrow(
+    expect(await rejectionMessage(() => loadGitHubAppTokenConfig(configFile))).toBe(
       "GitHub App credential files must not be accessible by group or other users",
     );
 
     await chmod(configFile, 0o600);
     await chmod(privateKeyFile, 0o640);
-    await expect(loadGitHubAppTokenConfig(configFile)).rejects.toThrow(
+    expect(await rejectionMessage(() => loadGitHubAppTokenConfig(configFile))).toBe(
       "GitHub App credential files must not be accessible by group or other users",
     );
   });
