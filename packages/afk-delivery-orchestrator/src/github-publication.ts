@@ -55,7 +55,10 @@ export function createGitHubContinuationEffects(input: {
   repository: string;
   trustedActor: { login: string; type: "Bot" | "App" };
   command?: Command;
-}): Pick<ManagedPullRequestContinuationPorts, "recordControlComment" | "recordNeedsHuman"> {
+}): Pick<
+  ManagedPullRequestContinuationPorts,
+  "recordControlComment" | "recordNeedsHuman" | "createFollowUpIssue" | "recordMergeReport" | "mergeExactRevision"
+> {
   const command = input.command ?? defaultCommand;
   async function recordExists(prNumber: number, idempotencyKey: string): Promise<boolean> {
     const raw = await command("gh", [
@@ -76,6 +79,66 @@ export function createGitHubContinuationEffects(input: {
     ]);
   }
   return {
+    async createFollowUpIssue(record) {
+      const marker = `<!-- afk-effect:${record.idempotencyKey} -->`;
+      const search = await command("gh", [
+        "issue", "list", "--repo", input.repository, "--state", "all", "--limit", "100",
+        "--search", `in:body \"${marker}\"`, "--json", "number,url,body",
+      ]);
+      const existing = (JSON.parse(search || "[]") as Array<{ number: number; url: string; body: string }>)
+        .find((issue) => issue.body.includes(marker));
+      if (existing !== undefined) return { number: existing.number, url: existing.url, created: false };
+      const title = record.observation.replace(/^F-[1-9]\d*:\s*/u, "").slice(0, 120);
+      const body = [
+        marker,
+        record.observation,
+        "",
+        `Source Delivery Ticket: #${record.ticketNumber}`,
+        `Source Managed PR: #${record.prNumber}`,
+        "",
+        "This follow-up is intentionally not authorized for AFK Delivery.",
+      ].join("\n");
+      const url = await command("gh", [
+        "issue", "create", "--repo", input.repository, "--title", title, "--body", body,
+      ]);
+      const match = /\/issues\/(\d+)\/?$/u.exec(url.trim());
+      if (match?.[1] === undefined) throw new Error("GitHub did not return the follow-up issue number");
+      return { number: Number(match[1]), url: url.trim(), created: true };
+    },
+    async recordMergeReport(record) {
+      if (await recordExists(record.prNumber, record.idempotencyKey)) return { created: false };
+      const marker = `<!-- afk-effect:${record.idempotencyKey} -->`;
+      await post(record.prNumber, [
+        marker,
+        envelopeComment(record.envelope as Parameters<typeof envelopeComment>[0], record.narrative),
+      ].join("\n"));
+      return { created: true };
+    },
+    async mergeExactRevision(record) {
+      const raw = await command("gh", [
+        "pr", "view", String(record.prNumber), "--repo", input.repository,
+        "--json", "state,headRefOid,mergedAt",
+      ]);
+      const pr = JSON.parse(raw) as {
+        state: "OPEN" | "CLOSED" | "MERGED";
+        headRefOid: string;
+        mergedAt: string | null;
+      };
+      if (pr.state === "MERGED" && pr.mergedAt !== null) return { merged: false };
+      if (pr.state !== "OPEN" || pr.headRefOid !== record.exactRevision) {
+        throw new Error("GitHub PR is not open at the proven exact Revision");
+      }
+      const strategy = {
+        merge: "--merge",
+        squash: "--squash",
+        rebase: "--rebase",
+      }[record.strategy];
+      await command("gh", [
+        "pr", "merge", String(record.prNumber), "--repo", input.repository,
+        strategy, "--match-head-commit", record.exactRevision,
+      ]);
+      return { merged: true };
+    },
     async recordControlComment(record) {
       if (await recordExists(record.prNumber, record.idempotencyKey)) return { created: false };
       const marker = `<!-- afk-effect:${record.idempotencyKey} -->`;

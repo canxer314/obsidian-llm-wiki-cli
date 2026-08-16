@@ -181,6 +181,38 @@ export interface ValidationRequest {
   }>;
 }
 
+export interface MergeReport {
+  repository: string;
+  ticketNumber: number;
+  prNumber: number;
+  baseRevision: Revision;
+  headRevision: Revision;
+  validatedRevision: Revision;
+  approvedRevision: Revision;
+  validationRound: number;
+  reviewRound: number;
+  validationEvidence: {
+    transitionId: string;
+    commands: ValidationCommandResult[];
+  };
+  reviewRounds: Array<{
+    transitionId: string;
+    round: number;
+    revision: Revision;
+    disposition: "approved" | "changes-required" | "unable-to-review";
+  }>;
+  repairRounds: Array<{
+    transitionId: string;
+    round: number;
+    inputRevision: Revision;
+    outputRevision: Revision;
+  }>;
+  followUpIssues: Array<{ number: number; url: string }>;
+  remainingNonBlockingObservations: string[];
+  mergeStrategy: RepositoryPolicy["mergeStrategy"];
+  workflowRun: WorkflowRunIdentity;
+}
+
 export type StageOutcome =
   | {
       kind: "implementation";
@@ -293,6 +325,7 @@ export interface ModeledEffect {
   validationRequest?: ValidationRequest;
   reviewRequest?: ReviewRequest;
   repairRequest?: RepairRequest;
+  mergeReport?: MergeReport;
 }
 
 export interface DeliveryTransitionResult {
@@ -380,6 +413,44 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
   return value as unknown as ControlEnvelope;
 }
 
+function mergeReportNarrativeIsComplete(
+  narrative: string,
+  envelope: ControlEnvelope,
+  policy: RepositoryPolicy,
+): boolean {
+  const headings = [
+    "Validation Evidence",
+    "Review Rounds",
+    "Repair Rounds",
+    "Follow-up Issues",
+    "Remaining Non-blocking Observations",
+  ];
+  const actualHeadings = [...narrative.matchAll(/^## (.+?)\s*$/gmu)].map((match) => match[1]);
+  if (actualHeadings.length !== headings.length ||
+      actualHeadings.some((heading, index) => heading !== headings[index])) return false;
+  const requiredLines = [
+    "# AFK Delivery Merge Report",
+    `- Repository: \`${envelope.repository}\``,
+    `- Delivery Ticket: #${envelope.ticketNumber}`,
+    `- Managed PR: #${envelope.prNumber}`,
+    `- Base Revision: \`${envelope.baseRevision}\``,
+    `- Current Head Revision: \`${envelope.inputRevision}\``,
+    `- Successfully Validated Revision: \`${envelope.inputRevision}\``,
+    `- Independently Approved Revision: \`${envelope.inputRevision}\``,
+    `- Merge Strategy: \`${policy.mergeStrategy}\``,
+    `- Workflow Run: \`${envelope.workflowRunId}\` attempt ${envelope.workflowRunAttempt}`,
+  ];
+  return envelope.baseRevision !== undefined && envelope.workflowRunAttempt !== undefined &&
+    requiredLines.every((line) => narrative.split("\n").includes(line)) &&
+    headings.every((heading, index) => {
+      const start = narrative.indexOf(`## ${heading}`);
+      const end = index + 1 < headings.length
+        ? narrative.indexOf(`## ${headings[index + 1]}`, start)
+        : narrative.length;
+      return start >= 0 && narrative.slice(start + heading.length + 3, end).trim().length > 0;
+    });
+}
+
 function actorIsTrusted(
   actor: AuthenticatedControlComment["author"],
   policy: RepositoryPolicy,
@@ -417,6 +488,12 @@ function authenticateHistory(
       )
     )) {
       return { records, narratives, invalidReason: `trusted review handoff ${comment.commentId} contradicts its Control Envelope or current base Revision` };
+    }
+    if (envelope.kind === "merge-report" && (
+      envelope.disposition !== "ready" || envelope.baseRevision !== pr?.baseRevision ||
+      !mergeReportNarrativeIsComplete(comment.narrative, envelope, policy)
+    )) {
+      return { records, narratives, invalidReason: `trusted Merge Report ${comment.commentId} is incomplete or contradicts its Control Envelope` };
     }
     parsed.push({ commentId: comment.commentId, envelope, narrative: comment.narrative });
   }
@@ -791,6 +868,61 @@ function latest(records: ControlEnvelope[], kind: ControlKind): ControlEnvelope 
   return records.filter((record) => record.kind === kind).at(-1);
 }
 
+function nonBlockingReviewObservations(narrative: string): string[] {
+  return [...narrative.matchAll(/^### (F-[1-9]\d*)\s*$([\s\S]*?)(?=^### F-[1-9]\d*\s*$|^## (?:Interactions|Constraints)\s*$)/gmu)]
+    .map((match) => `${match[1]}: ${(match[2] ?? "").trim().replace(/\s+/gu, " ")}`)
+    .filter((observation) => !observation.endsWith(":"));
+}
+
+function buildMergeReport(
+  input: DeliveryTransitionInput,
+  pr: ImplementationPullRequestSnapshot,
+  records: ControlEnvelope[],
+  narratives: Map<string, string>,
+  validation: ControlEnvelope,
+  review: ControlEnvelope,
+): MergeReport {
+  return {
+    repository: input.snapshot.repository,
+    ticketNumber: input.snapshot.ticket.number,
+    prNumber: pr.number,
+    baseRevision: pr.baseRevision,
+    headRevision: pr.headRevision,
+    validatedRevision: validation.inputRevision,
+    approvedRevision: review.inputRevision,
+    validationRound: validation.round,
+    reviewRound: review.round,
+    validationEvidence: {
+      transitionId: validation.transitionId,
+      commands: validation.commands ?? [],
+    },
+    reviewRounds: records
+      .filter((record) => record.kind === "review-handoff")
+      .map((record) => ({
+        transitionId: record.transitionId,
+        round: record.round,
+        revision: record.inputRevision,
+        disposition: record.disposition as MergeReport["reviewRounds"][number]["disposition"],
+      })),
+    repairRounds: records
+      .filter((record): record is ControlEnvelope & { outputRevision: Revision } =>
+        record.kind === "repair-handoff" && record.disposition === "succeeded" && record.outputRevision !== undefined
+      )
+      .map((record) => ({
+        transitionId: record.transitionId,
+        round: record.round,
+        inputRevision: record.inputRevision,
+        outputRevision: record.outputRevision,
+      })),
+    followUpIssues: [],
+    remainingNonBlockingObservations: nonBlockingReviewObservations(
+      narratives.get(review.transitionId) ?? "",
+    ),
+    mergeStrategy: input.policy.mergeStrategy,
+    workflowRun: input.workflowRun,
+  };
+}
+
 function reviewFindingSignature(narrative: string): string | undefined {
   const findings = [...narrative.matchAll(/^### (F-[1-9]\d*)\s*$([\s\S]*?)(?=^### F-[1-9]\d*\s*$|^## (?:Interactions|Constraints)\s*$)/gmu)]
     .map((match) => match[2]?.trim().replace(/\s+/gu, " ") ?? "");
@@ -1133,7 +1265,19 @@ export function selectDeliveryTransition(
   const mergeReport = latest(currentRecords, "merge-report");
 
   if (mergeReport !== undefined) {
-    if (!pr.mergeable || !pr.requiredChecksPass) {
+    const recordsAfterReport = history.records.slice(history.records.indexOf(mergeReport) + 1);
+    if (
+      validation === undefined || !requiredValidationPassed(validation, policy, ticket) ||
+      review === undefined || review.disposition !== "approved" ||
+      validation.inputRevision !== currentRevision || review.inputRevision !== currentRevision ||
+      validation.round !== review.round || review.round > policy.maximumRepairRounds + 1 ||
+      recordsAfterReport.some((record) =>
+        record.kind === "validation" || record.kind === "review-handoff" || record.kind === "repair-handoff"
+      )
+    ) {
+      return needsHuman(input, "trusted merge evidence changed after the Merge Report", pr);
+    }
+    if (pr.mergeable !== true || !pr.requiredChecksPass) {
       return needsHuman(input, "merge gates changed after the Merge Report", pr);
     }
     const selected = transition(input, "merge", { pr, inputRevision: currentRevision });
@@ -1183,7 +1327,7 @@ export function selectDeliveryTransition(
       validationRequest: validationRequest(input, currentRevision, selected.round),
     }]);
   }
-  if (!requiredValidationPassed(validation, policy, ticket)) {
+  if (validation === undefined || !requiredValidationPassed(validation, policy, ticket)) {
     const selected = transition(input, "validate", { pr, round: 1, inputRevision: currentRevision });
     return result(input, selected, [{
       kind: "run-validation",
@@ -1213,5 +1357,9 @@ export function selectDeliveryTransition(
   const selected = transition(input, "prepare-merge", {
     pr, round: review.round, inputRevision: currentRevision,
   });
-  return result(input, selected, [{ kind: "record-merge-report", exactRevision: currentRevision }]);
+  return result(input, selected, [{
+    kind: "record-merge-report",
+    exactRevision: currentRevision,
+    mergeReport: buildMergeReport(input, pr, history.records, history.narratives, validation, review),
+  }]);
 }

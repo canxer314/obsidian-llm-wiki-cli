@@ -45,8 +45,16 @@ Minimal machine-readable metadata embedded in a trusted workflow comment that id
 _Avoid_: Structured review, finding summary
 
 **Merge Report**:
-The final trusted PR comment that records the reviewed and validated Revision, review and repair history, validation evidence, outstanding follow-ups, and autonomous merge decision.
+The final authenticated PR comment published before merge. It records ticket and PR identities, base and head Revisions, successful validation evidence, independent review and repair rounds, linked follow-ups, remaining non-blocking observations, deterministic merge strategy, and workflow run. Publishing it does not authorize merge by itself: the worker reconstructs all gates and rechecks the PR head afterward.
 _Avoid_: Approval comment, release notes
+
+**Proven Revision**:
+The one exact commit for which the current Managed PR head, latest successful validation, and latest independent approval are identical. Only a Proven Revision may be passed to the deterministic exact-head merge operation.
+_Avoid_: Approved branch, latest green commit
+
+**Follow-up Issue**:
+An issue created idempotently from an actionable non-blocking review observation and linked to its source Delivery Ticket and Managed PR. Creation records future work but never adds `ready-for-agent` or otherwise authorizes AFK Delivery.
+_Avoid_: Automatic Delivery Ticket, deferred blocker
 
 **Delivery Worker**:
 A machine capable of performing one or more AFK Delivery transitions. Workers share no required local state and coordinate through authenticated GitHub state and distributed mutual exclusion.

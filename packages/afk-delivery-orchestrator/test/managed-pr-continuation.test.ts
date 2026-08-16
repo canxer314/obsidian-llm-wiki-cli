@@ -118,6 +118,50 @@ function repairSnapshot(overrides: Partial<AuthenticatedGitHubSnapshot> = {}): A
   return { ...base, ...overrides };
 }
 
+function approvedSnapshot(overrides: Partial<AuthenticatedGitHubSnapshot> = {}): AuthenticatedGitHubSnapshot {
+  const initial = snapshot({
+    targetBranchRevision: INITIAL,
+    repositoryInstructions: "Repository instructions",
+    domainDocuments: [{ path: "CONTEXT.md", content: "Domain" }],
+    architectureDecisions: [{ path: "docs/adr/0001.md", content: "Decision" }],
+    pullRequests: [{ ...snapshot().pullRequests[0]!, baseRevision: INITIAL, diff: "diff --git a/a b/a\n+change" }],
+  });
+  return {
+    ...initial,
+    controlComments: [
+      ...initial.controlComments,
+      {
+        commentId: "validation-1",
+        author: { login: "delivery-bot", type: "Bot" as const },
+        envelope: {
+          schemaVersion: 1 as const, kind: "validation" as const, repository: initial.repository,
+          ticketNumber: 66, prNumber: 73, round: 1, transitionId: "validation-1", inputRevision: INITIAL,
+          disposition: "succeeded", workflowRunId: "run-2", workflowRunAttempt: 1,
+          commands: [
+            { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+            { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+          ],
+        },
+        narrative: "",
+      },
+      {
+        commentId: "review-1",
+        author: { login: "delivery-bot", type: "Bot" as const },
+        envelope: {
+          schemaVersion: 1 as const, kind: "review-handoff" as const, repository: initial.repository,
+          ticketNumber: 66, prNumber: 73, round: 1, transitionId: "review-1", inputRevision: INITIAL,
+          baseRevision: INITIAL, disposition: "approved", workflowRunId: "run-2", workflowRunAttempt: 1,
+        },
+        narrative: [
+          "## Verdict", "approved", "", "## Standards", "No findings.", "", "## Spec", "No findings.",
+          "", "## Interactions", "None.", "", "## Constraints", "None.",
+        ].join("\n"),
+      },
+    ],
+    ...overrides,
+  };
+}
+
 function fakePorts(initial: AuthenticatedGitHubSnapshot): {
   ports: ManagedPullRequestContinuationPorts;
   calls: string[];
@@ -893,6 +937,137 @@ describe("Managed PR continuation", () => {
       workflowRun: { id: "run-2", attempt: 1 },
     }, fake.ports)).rejects.toThrow("Revision changed before stage evidence was persisted");
     expect(fake.calls.some((call) => call.startsWith("comment:validation"))).toBe(false);
+  });
+
+  it("publishes the complete Merge Report, rechecks GitHub, and merges only the proven exact Revision", async () => {
+    let current = approvedSnapshot();
+    const fake = fakePorts(current);
+    const calls: string[] = [];
+    fake.ports.reconstruct = async () => {
+      calls.push("reconstruct");
+      return { snapshot: current };
+    };
+    fake.ports.recordMergeReport = async (record) => {
+      calls.push(`report:${record.report.headRevision}:${record.strategy}`);
+      current = {
+        ...current,
+        controlComments: [...current.controlComments, {
+          commentId: "merge-report-1",
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: record.envelope,
+          narrative: record.narrative,
+        }],
+      };
+      return { created: true };
+    };
+    fake.ports.mergeExactRevision = async (request) => {
+      calls.push(`merge:${request.exactRevision}:${request.strategy}`);
+      return { merged: true };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: current.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-merge" },
+      policy,
+      workflowRun: { id: "run-merge", attempt: 1 },
+    }, fake.ports)).resolves.toMatchObject({
+      status: "merged",
+      prNumber: 73,
+      exactRevision: INITIAL,
+      reportCreated: true,
+    });
+    expect(calls).toEqual([
+      "reconstruct",
+      `report:${INITIAL}:squash`,
+      "reconstruct",
+      `merge:${INITIAL}:squash`,
+    ]);
+  });
+
+  it.each([
+    ["closed ticket", (value: AuthenticatedGitHubSnapshot) => ({ ...value, ticket: { ...value.ticket, open: false } })],
+    ["removed authorization", (value: AuthenticatedGitHubSnapshot) => ({ ...value, ticket: { ...value.ticket, labels: [] } })],
+    ["new blocker", (value: AuthenticatedGitHubSnapshot) => ({ ...value, ticket: { ...value.ticket, openBlockerNumbers: [65] } })],
+    ["AFK prohibition", (value: AuthenticatedGitHubSnapshot) => ({ ...value, ticket: { ...value.ticket, labels: ["ready-for-agent", "afk:prohibited"] } })],
+    ["second Managed PR", (value: AuthenticatedGitHubSnapshot) => ({ ...value, pullRequests: [...value.pullRequests, { ...value.pullRequests[0]!, number: 74 }] })],
+    ["failed required checks", (value: AuthenticatedGitHubSnapshot) => ({ ...value, pullRequests: value.pullRequests.map((pr) => ({ ...pr, requiredChecksPass: false })) })],
+    ["unknown mergeability", (value: AuthenticatedGitHubSnapshot) => ({ ...value, pullRequests: value.pullRequests.map((pr) => ({ ...pr, mergeable: "unknown" as const })) })],
+    ["new changes-required history", (value: AuthenticatedGitHubSnapshot) => ({
+      ...value,
+      controlComments: [...value.controlComments, {
+        commentId: "late-review",
+        author: { login: "delivery-bot", type: "Bot" as const },
+        envelope: {
+          schemaVersion: 1 as const, kind: "review-handoff" as const, repository: value.repository,
+          ticketNumber: 66, prNumber: 73, round: 1, transitionId: "late-review", inputRevision: INITIAL,
+          baseRevision: INITIAL, disposition: "changes-required", workflowRunId: "run-late", workflowRunAttempt: 1,
+        },
+        narrative: CHANGES_REQUIRED_REVIEW,
+      }],
+    })],
+  ] as const)("fails closed when %s appears after Merge Report publication", async (_name, mutate) => {
+    let current = approvedSnapshot();
+    const fake = fakePorts(current);
+    let mergeCalls = 0;
+    let needsHumanCalls = 0;
+    fake.ports.reconstruct = async () => ({ snapshot: current });
+    fake.ports.recordMergeReport = async (record) => {
+      current = mutate({
+        ...current,
+        controlComments: [...current.controlComments, {
+          commentId: "merge-report-1",
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: record.envelope,
+          narrative: record.narrative,
+        }],
+      });
+      return { created: true };
+    };
+    fake.ports.mergeExactRevision = async () => {
+      mergeCalls += 1;
+      return { merged: true };
+    };
+    fake.ports.recordNeedsHuman = async () => {
+      needsHumanCalls += 1;
+      return { created: true };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: current.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-merge" },
+      policy,
+      workflowRun: { id: "run-merge", attempt: 1 },
+    }, fake.ports)).resolves.toMatchObject({ status: "needs-human" });
+    expect({ mergeCalls, needsHumanCalls }).toEqual({ mergeCalls: 0, needsHumanCalls: 1 });
+  });
+
+  it("aborts merge when the PR head changes after Merge Report publication", async () => {
+    let current = approvedSnapshot();
+    const fake = fakePorts(current);
+    let mergeCalls = 0;
+    fake.ports.reconstruct = async () => ({ snapshot: current });
+    fake.ports.recordMergeReport = async () => {
+      current = {
+        ...current,
+        pullRequests: current.pullRequests.map((pr) => ({ ...pr, headRevision: SYNCHRONIZED })),
+      };
+      return { created: true };
+    };
+    fake.ports.mergeExactRevision = async () => {
+      mergeCalls += 1;
+      return { merged: true };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: current.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-merge" },
+      policy,
+      workflowRun: { id: "run-merge", attempt: 1 },
+    }, fake.ports)).resolves.toMatchObject({ status: "needs-human" });
+    expect(mergeCalls).toBe(0);
   });
 
   it("synchronizes the one authenticated Managed PR instead of creating another PR", async () => {

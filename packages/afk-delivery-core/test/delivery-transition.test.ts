@@ -90,7 +90,7 @@ function envelope(
     disposition: kind === "review-handoff" ? "approved" : "succeeded",
     workflowRunId: "run-99",
     workflowRunAttempt: 1,
-    ...(kind === "review-handoff" ? { baseRevision: BASE_REVISION } : {}),
+    ...(kind === "review-handoff" || kind === "merge-report" ? { baseRevision: BASE_REVISION } : {}),
     ...overrides,
   };
 }
@@ -117,6 +117,26 @@ function reviewNarrative(
   ].join("\n");
 }
 
+function mergeReportNarrative(revision = HEAD_REVISION): string {
+  return [
+    "# AFK Delivery Merge Report", "",
+    "- Repository: `canxer314/obsidian-llm-wiki-cli`",
+    "- Delivery Ticket: #63",
+    "- Managed PR: #70",
+    `- Base Revision: \`${BASE_REVISION}\``,
+    `- Current Head Revision: \`${revision}\``,
+    `- Successfully Validated Revision: \`${revision}\``,
+    `- Independently Approved Revision: \`${revision}\``,
+    "- Merge Strategy: `squash`",
+    "- Workflow Run: `run-99` attempt 1", "",
+    "## Validation Evidence", "- `npm test` — check `test`, exit 0, timed out: no", "",
+    "## Review Rounds", `- Round 1: approved for \`${revision}\` (\`transition-review-handoff\`)`, "",
+    "## Repair Rounds", "- None", "",
+    "## Follow-up Issues", "- None", "",
+    "## Remaining Non-blocking Observations", "- None",
+  ].join("\n");
+}
+
 function trustedRecord(
   kind: Parameters<typeof envelope>[0],
   overrides: Record<string, unknown> = {},
@@ -128,7 +148,9 @@ function trustedRecord(
     envelope: controlEnvelope,
     narrative: kind === "review-handoff"
       ? reviewNarrative(controlEnvelope.disposition as "approved" | "changes-required" | "unable-to-review")
-      : `Complete ${kind} narrative\n`,
+      : kind === "merge-report"
+        ? mergeReportNarrative(controlEnvelope.inputRevision)
+        : `Complete ${kind} narrative\n`,
   };
 }
 
@@ -383,7 +405,25 @@ describe("selectDeliveryTransition", () => {
         trustedRecord("review-handoff", { disposition: "approved" }),
       ],
     });
-    expect(selectDeliveryTransition(input(approved)).transition.kind).toBe("prepare-merge");
+    const mergePreparation = selectDeliveryTransition(input(approved));
+    expect(mergePreparation.transition.kind).toBe("prepare-merge");
+    expect(mergePreparation.effects).toMatchObject([{
+      kind: "record-merge-report",
+      exactRevision: HEAD_REVISION,
+      mergeReport: {
+        repository: "canxer314/obsidian-llm-wiki-cli",
+        ticketNumber: 63,
+        prNumber: 70,
+        baseRevision: BASE_REVISION,
+        headRevision: HEAD_REVISION,
+        validatedRevision: HEAD_REVISION,
+        approvedRevision: HEAD_REVISION,
+        validationRound: 1,
+        reviewRound: 1,
+        mergeStrategy: "squash",
+        workflowRun: { id: "run-100", attempt: 1 },
+      },
+    }]);
 
     const prepared = selectDeliveryTransition(input(approved, {
       kind: "merge-preparation",
@@ -975,6 +1015,66 @@ describe("selectDeliveryTransition", () => {
       controlComments,
     })));
     expect(result.transition.kind).toBe("needs-human");
+  });
+
+  it("carries approved non-blocking findings into Merge Report preparation", () => {
+    const approvedNarrative = [
+      "## Verdict", "approved", "", "## Standards", "No blocking findings.", "", "## Spec",
+      "### F-9", "Document the recovery timeout in the operator runbook.", "", "## Interactions", "None.",
+      "", "## Constraints", "This observation is actionable but does not block the proven Revision.",
+    ].join("\n");
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ] }),
+        { ...trustedRecord("review-handoff", { disposition: "approved" }), narrative: approvedNarrative },
+      ],
+    })));
+
+    expect(result.effects[0]?.mergeReport?.remainingNonBlockingObservations).toEqual([
+      "F-9: Document the recovery timeout in the operator runbook.",
+    ]);
+  });
+
+  it("fails closed when trusted history changes after the Merge Report", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ] }),
+        trustedRecord("review-handoff", { transitionId: "review-approved", disposition: "approved" }),
+        trustedRecord("merge-report", { disposition: "ready" }),
+        trustedRecord("review-handoff", { transitionId: "review-late", disposition: "changes-required" }),
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({ kind: "needs-human" });
+    expect(result.effects.some((effect) => effect.kind === "merge-exact-revision")).toBe(false);
+  });
+
+  it("fails closed when a trusted Merge Report is incomplete", () => {
+    const report = trustedRecord("merge-report", { disposition: "ready" });
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("validation", { commands: [
+          { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+        ] }),
+        trustedRecord("review-handoff", { disposition: "approved" }),
+        { ...report, narrative: "Incomplete report" },
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({ kind: "needs-human" });
   });
 
   it("merges only the exact Revision after a trusted Merge Report", () => {

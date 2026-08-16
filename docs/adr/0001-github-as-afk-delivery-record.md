@@ -10,4 +10,4 @@ AFK delivery may move between independent machines, so GitHub issues, native dep
 
 ## Consequences
 
-Every review, repair, validation, and merge decision must identify the exact PR Revision it applies to. Workers reconstruct progress from GitHub and fail closed when the handoff chain is incomplete, unauthenticated, or stale. Local state may improve diagnostics or performance but is never authoritative.
+Every review, repair, validation, and merge decision must identify the exact PR Revision it applies to. The complete authenticated Merge Report is posted before merge, then authorization and the PR head are reconstructed again; the report cannot authorize a stale head. Linked follow-up issues and all publication effects use durable identities so retries reuse them, while the exact-head merge precondition prevents replay from merging a different Revision. Workers reconstruct progress from GitHub and fail closed when the handoff chain is incomplete, unauthenticated, stale, contradictory, or ambiguous. Local state may improve diagnostics or performance but is never authoritative.

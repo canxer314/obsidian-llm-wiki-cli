@@ -61,6 +61,116 @@ describe("GitHub Managed PR publication adapter", () => {
     expect(posts[0]).toContain("<!-- afk-effect:effect-1 -->");
   });
 
+  it("publishes an authenticated Merge Report once and merges with an exact-head precondition", async () => {
+    const head = "a".repeat(40);
+    const mergeCalls: string[][] = [];
+    const posts: string[] = [];
+    let trustedReportExists = false;
+    let merged = false;
+    const effects = createGitHubContinuationEffects({
+      repository: "owner/repo",
+      trustedActor: { login: "delivery-bot", type: "Bot" },
+      command: async (_file, args) => {
+        if (args[0] === "api" && args[1]?.endsWith("/comments")) {
+          return trustedReportExists
+            ? JSON.stringify({
+                body: "<!-- afk-effect:report-effect -->",
+                author: { login: "delivery-bot", type: "Bot" },
+              })
+            : "";
+        }
+        if (args[0] === "pr" && args[1] === "comment") {
+          posts.push(args.at(-1) ?? "");
+          trustedReportExists = true;
+          return "";
+        }
+        if (args[0] === "pr" && args[1] === "view") {
+          return JSON.stringify({ state: merged ? "MERGED" : "OPEN", headRefOid: head, mergedAt: merged ? "2026-08-16T00:00:00Z" : null });
+        }
+        if (args[0] === "pr" && args[1] === "merge") {
+          mergeCalls.push(args);
+          merged = true;
+          return "";
+        }
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      },
+    });
+    const envelope: ControlEnvelope = {
+      schemaVersion: 1, kind: "merge-report", repository: "owner/repo", ticketNumber: 66,
+      prNumber: 73, round: 1, transitionId: "merge-report-1", inputRevision: head,
+      baseRevision: "b".repeat(40), disposition: "ready", workflowRunId: "run-merge", workflowRunAttempt: 1,
+    };
+    const report = {
+      repository: "owner/repo", ticketNumber: 66, prNumber: 73,
+      baseRevision: "b".repeat(40), headRevision: head, validatedRevision: head, approvedRevision: head,
+      validationRound: 1, reviewRound: 1,
+      validationEvidence: { transitionId: "validation-1", commands: [] },
+      reviewRounds: [], repairRounds: [], followUpIssues: [], remainingNonBlockingObservations: [],
+      mergeStrategy: "squash" as const, workflowRun: { id: "run-merge", attempt: 1 },
+    };
+
+    await expect(effects.recordMergeReport!({
+      prNumber: 73, envelope, report, narrative: "Complete report", strategy: "squash", idempotencyKey: "report-effect",
+    })).resolves.toEqual({ created: true });
+    await expect(effects.recordMergeReport!({
+      prNumber: 73, envelope, report, narrative: "Complete report", strategy: "squash", idempotencyKey: "report-effect",
+    })).resolves.toEqual({ created: false });
+    await expect(effects.mergeExactRevision!({
+      prNumber: 73, exactRevision: head, strategy: "squash", idempotencyKey: "merge-effect",
+    })).resolves.toEqual({ merged: true });
+    await expect(effects.mergeExactRevision!({
+      prNumber: 73, exactRevision: head, strategy: "squash", idempotencyKey: "merge-effect",
+    })).resolves.toEqual({ merged: false });
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toContain("Complete report");
+    expect(posts[0]).toContain('"kind":"merge-report"');
+    expect(mergeCalls).toEqual([[
+      "pr", "merge", "73", "--repo", "owner/repo", "--squash", "--match-head-commit", head,
+    ]]);
+  });
+
+  it("creates an idempotent linked follow-up without authorizing it for AFK Delivery", async () => {
+    const calls: string[][] = [];
+    let existing = false;
+    const effects = createGitHubContinuationEffects({
+      repository: "owner/repo",
+      trustedActor: { login: "delivery-bot", type: "Bot" },
+      command: async (_file, args) => {
+        calls.push(args);
+        if (args[0] === "issue" && args[1] === "list") {
+          return existing
+            ? JSON.stringify([{ number: 91, url: "https://github.com/owner/repo/issues/91", body: "<!-- afk-effect:follow-up-1 -->" }])
+            : "[]";
+        }
+        if (args[0] === "issue" && args[1] === "create") {
+          existing = true;
+          return "https://github.com/owner/repo/issues/91";
+        }
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      },
+    });
+    const input = {
+      ticketNumber: 66,
+      prNumber: 73,
+      observation: "F-9: Document the recovery timeout.",
+      idempotencyKey: "follow-up-1",
+    };
+
+    await expect(effects.createFollowUpIssue!(input)).resolves.toEqual({
+      number: 91, url: "https://github.com/owner/repo/issues/91", created: true,
+    });
+    await expect(effects.createFollowUpIssue!(input)).resolves.toEqual({
+      number: 91, url: "https://github.com/owner/repo/issues/91", created: false,
+    });
+    const create = calls.find((args) => args[0] === "issue" && args[1] === "create");
+    expect(create).toBeDefined();
+    expect(create).not.toContain("--label");
+    expect(create?.join(" ")).not.toContain("ready-for-agent");
+    expect(create?.at(-1)).toContain("Source Delivery Ticket: #66");
+    expect(create?.at(-1)).toContain("Source Managed PR: #73");
+  });
+
   it("records Needs Human with a trusted reason and evidence links", async () => {
     const posts: string[] = [];
     const effects = createGitHubContinuationEffects({
