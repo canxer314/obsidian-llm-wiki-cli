@@ -76,6 +76,7 @@ export interface ControlEnvelope {
   baseRevision?: Revision;
   reviewTransitionId?: string;
   commands?: ValidationCommandResult[];
+  mergeReport?: MergeReport;
 }
 
 export interface AuthenticatedControlComment {
@@ -179,6 +180,38 @@ export interface ValidationRequest {
     command: string;
     source: "repository-policy" | "delivery-ticket";
   }>;
+}
+
+export interface MergeReport {
+  repository: string;
+  ticketNumber: number;
+  prNumber: number;
+  baseRevision: Revision;
+  headRevision: Revision;
+  validatedRevision: Revision;
+  approvedRevision: Revision;
+  validationRound: number;
+  reviewRound: number;
+  validationEvidence: {
+    transitionId: string;
+    commands: ValidationCommandResult[];
+  };
+  reviewRounds: Array<{
+    transitionId: string;
+    round: number;
+    revision: Revision;
+    disposition: "approved" | "changes-required" | "unable-to-review";
+  }>;
+  repairRounds: Array<{
+    transitionId: string;
+    round: number;
+    inputRevision: Revision;
+    outputRevision: Revision;
+  }>;
+  followUpIssues: Array<{ number: number; url: string }>;
+  remainingNonBlockingObservations: string[];
+  mergeStrategy: RepositoryPolicy["mergeStrategy"];
+  workflowRun: WorkflowRunIdentity;
 }
 
 export type StageOutcome =
@@ -293,6 +326,7 @@ export interface ModeledEffect {
   validationRequest?: ValidationRequest;
   reviewRequest?: ReviewRequest;
   repairRequest?: RepairRequest;
+  mergeReport?: MergeReport;
 }
 
 export interface DeliveryTransitionResult {
@@ -321,12 +355,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isValidationCommand(value: unknown): value is ValidationCommandResult {
+  return isRecord(value) && typeof value.command === "string" &&
+    (Number.isInteger(value.exitCode) || value.exitCode === null) &&
+    typeof value.checkId === "string" &&
+    (value.timedOut === undefined || typeof value.timedOut === "boolean");
+}
+
+function isMergeReport(value: unknown): value is MergeReport {
+  if (!isRecord(value) || typeof value.repository !== "string" ||
+      !Number.isInteger(value.ticketNumber) || !Number.isInteger(value.prNumber) ||
+      typeof value.baseRevision !== "string" || !REVISION_PATTERN.test(value.baseRevision) ||
+      typeof value.headRevision !== "string" || !REVISION_PATTERN.test(value.headRevision) ||
+      typeof value.validatedRevision !== "string" || !REVISION_PATTERN.test(value.validatedRevision) ||
+      typeof value.approvedRevision !== "string" || !REVISION_PATTERN.test(value.approvedRevision) ||
+      !Number.isInteger(value.validationRound) || !Number.isInteger(value.reviewRound) ||
+      !isRecord(value.validationEvidence) || typeof value.validationEvidence.transitionId !== "string" ||
+      !Array.isArray(value.validationEvidence.commands) ||
+      !value.validationEvidence.commands.every(isValidationCommand) ||
+      !Array.isArray(value.reviewRounds) || !value.reviewRounds.every((round) =>
+        isRecord(round) && typeof round.transitionId === "string" && Number.isInteger(round.round) &&
+        typeof round.revision === "string" && REVISION_PATTERN.test(round.revision) &&
+        ["approved", "changes-required", "unable-to-review"].includes(String(round.disposition))) ||
+      !Array.isArray(value.repairRounds) || !value.repairRounds.every((round) =>
+        isRecord(round) && typeof round.transitionId === "string" && Number.isInteger(round.round) &&
+        typeof round.inputRevision === "string" && REVISION_PATTERN.test(round.inputRevision) &&
+        typeof round.outputRevision === "string" && REVISION_PATTERN.test(round.outputRevision)) ||
+      !Array.isArray(value.followUpIssues) || !value.followUpIssues.every((issue) =>
+        isRecord(issue) && Number.isInteger(issue.number) && (issue.number as number) > 0 &&
+        typeof issue.url === "string" && issue.url.length > 0) ||
+      !Array.isArray(value.remainingNonBlockingObservations) ||
+      !value.remainingNonBlockingObservations.every((observation) => typeof observation === "string" && observation.length > 0) ||
+      !["merge", "squash", "rebase"].includes(String(value.mergeStrategy)) ||
+      !isRecord(value.workflowRun) || typeof value.workflowRun.id !== "string" ||
+      !Number.isInteger(value.workflowRun.attempt) || (value.workflowRun.attempt as number) < 1) return false;
+  return true;
+}
+
 export function parseControlEnvelope(value: unknown): ControlEnvelope | undefined {
   if (!isRecord(value)) return undefined;
   const allowedKeys = new Set([
     "schemaVersion", "kind", "repository", "ticketNumber", "prNumber", "targetBranch", "targetRevision", "round",
     "transitionId", "inputRevision", "outputRevision", "disposition", "workflowRunId",
-    "workflowRunAttempt", "baseRevision", "reviewTransitionId", "commands",
+    "workflowRunAttempt", "baseRevision", "reviewTransitionId", "commands", "mergeReport",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) return undefined;
   const requiredStrings = [
@@ -363,21 +434,96 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
     return undefined;
   }
   if (value.commands !== undefined) {
-    if (
-      !Array.isArray(value.commands) ||
-      !value.commands.every(
-        (command) =>
-          isRecord(command) &&
-          typeof command.command === "string" &&
-          (Number.isInteger(command.exitCode) || command.exitCode === null) &&
-          typeof command.checkId === "string" &&
-          (command.timedOut === undefined || typeof command.timedOut === "boolean"),
-      )
-    ) {
+    if (!Array.isArray(value.commands) || !value.commands.every(isValidationCommand)) {
       return undefined;
     }
   }
+  if (value.mergeReport !== undefined && !isMergeReport(value.mergeReport)) return undefined;
   return value as unknown as ControlEnvelope;
+}
+
+export function formatMergeReportNarrative(report: MergeReport): string {
+  const commands = report.validationEvidence.commands.map((command) =>
+    `- \`${command.command}\` — check \`${command.checkId}\`, exit ${command.exitCode}, timed out: ${command.timedOut === true ? "yes" : "no"}`
+  );
+  const reviews = report.reviewRounds.map((review) =>
+    `- Round ${review.round}: ${review.disposition} for \`${review.revision}\` (\`${review.transitionId}\`)`
+  );
+  const repairs = report.repairRounds.length === 0
+    ? ["- None"]
+    : report.repairRounds.map((repair) =>
+        `- Round ${repair.round}: \`${repair.inputRevision}\` to \`${repair.outputRevision}\` (\`${repair.transitionId}\`)`
+      );
+  const followUps = report.followUpIssues.length === 0
+    ? ["- None"]
+    : report.followUpIssues.map((issue) => `- #${issue.number}: ${issue.url}`);
+  const observations = report.remainingNonBlockingObservations.length === 0
+    ? ["- None"]
+    : report.remainingNonBlockingObservations.map((observation) => `- ${observation}`);
+  return [
+    "# AFK Delivery Merge Report", "",
+    `- Repository: \`${report.repository}\``,
+    `- Delivery Ticket: #${report.ticketNumber}`,
+    `- Managed PR: #${report.prNumber}`,
+    `- Base Revision: \`${report.baseRevision}\``,
+    `- Current Head Revision: \`${report.headRevision}\``,
+    `- Successfully Validated Revision: \`${report.validatedRevision}\``,
+    `- Independently Approved Revision: \`${report.approvedRevision}\``,
+    `- Merge Strategy: \`${report.mergeStrategy}\``,
+    `- Workflow Run: \`${report.workflowRun.id}\` attempt ${report.workflowRun.attempt}`, "",
+    "## Validation Evidence", ...commands, "",
+    "## Review Rounds", ...reviews, "",
+    "## Repair Rounds", ...repairs, "",
+    "## Follow-up Issues", ...followUps, "",
+    "## Remaining Non-blocking Observations", ...observations,
+  ].join("\n");
+}
+
+function mergeReportMatchesHistory(
+  report: MergeReport,
+  narrative: string,
+  envelope: ControlEnvelope,
+  policy: RepositoryPolicy,
+  pr: ImplementationPullRequestSnapshot,
+  history: Array<{ envelope: ControlEnvelope; narrative: string }>,
+): boolean {
+  const validation = history.filter(({ envelope: record }) =>
+    record.kind === "validation" && record.inputRevision === envelope.inputRevision
+  ).at(-1)?.envelope;
+  const review = history.filter(({ envelope: record }) =>
+    record.kind === "review-handoff" && record.inputRevision === envelope.inputRevision
+  ).at(-1)?.envelope;
+  const reviewRounds = history.filter(({ envelope: record }) => record.kind === "review-handoff")
+    .map(({ envelope: record }) => ({
+      transitionId: record.transitionId,
+      round: record.round,
+      revision: record.inputRevision,
+      disposition: record.disposition,
+    }));
+  const repairRounds = history.filter(({ envelope: record }) =>
+    record.kind === "repair-handoff" && record.disposition === "succeeded" && record.outputRevision !== undefined
+  ).map(({ envelope: record }) => ({
+    transitionId: record.transitionId,
+    round: record.round,
+    inputRevision: record.inputRevision,
+    outputRevision: record.outputRevision!,
+  }));
+  const observations = review === undefined ? [] : nonBlockingReviewObservations(
+    history.find(({ envelope: record }) => record.transitionId === review.transitionId)?.narrative ?? "",
+  );
+  return validation !== undefined && review !== undefined &&
+    report.repository === envelope.repository && report.ticketNumber === envelope.ticketNumber &&
+    report.prNumber === envelope.prNumber && report.baseRevision === pr.baseRevision &&
+    report.headRevision === envelope.inputRevision && report.validatedRevision === validation.inputRevision &&
+    report.approvedRevision === review.inputRevision && report.validationRound === validation.round &&
+    report.reviewRound === review.round && report.validationEvidence.transitionId === validation.transitionId &&
+    JSON.stringify(report.validationEvidence.commands) === JSON.stringify(validation.commands ?? []) &&
+    JSON.stringify(report.reviewRounds) === JSON.stringify(reviewRounds) &&
+    JSON.stringify(report.repairRounds) === JSON.stringify(repairRounds) &&
+    JSON.stringify(report.remainingNonBlockingObservations) === JSON.stringify(observations) &&
+    report.mergeStrategy === policy.mergeStrategy && report.workflowRun.id === envelope.workflowRunId &&
+    report.workflowRun.attempt === envelope.workflowRunAttempt &&
+    narrative === formatMergeReportNarrative(report);
 }
 
 function actorIsTrusted(
@@ -417,6 +563,13 @@ function authenticateHistory(
       )
     )) {
       return { records, narratives, invalidReason: `trusted review handoff ${comment.commentId} contradicts its Control Envelope or current base Revision` };
+    }
+    if (envelope.kind === "merge-report" && (
+      envelope.disposition !== "ready" || envelope.baseRevision !== pr?.baseRevision ||
+      envelope.workflowRunAttempt === undefined || envelope.mergeReport === undefined || pr === undefined ||
+      !mergeReportMatchesHistory(envelope.mergeReport, comment.narrative, envelope, policy, pr, parsed)
+    )) {
+      return { records, narratives, invalidReason: `trusted Merge Report ${comment.commentId} is incomplete or contradicts its Control Envelope` };
     }
     parsed.push({ commentId: comment.commentId, envelope, narrative: comment.narrative });
   }
@@ -791,6 +944,61 @@ function latest(records: ControlEnvelope[], kind: ControlKind): ControlEnvelope 
   return records.filter((record) => record.kind === kind).at(-1);
 }
 
+function nonBlockingReviewObservations(narrative: string): string[] {
+  return [...narrative.matchAll(/^### (F-[1-9]\d*)\s*$([\s\S]*?)(?=^### F-[1-9]\d*\s*$|^## (?:Interactions|Constraints)\s*$)/gmu)]
+    .map((match) => `${match[1]}: ${(match[2] ?? "").trim().replace(/\s+/gu, " ")}`)
+    .filter((observation) => !observation.endsWith(":"));
+}
+
+function buildMergeReport(
+  input: DeliveryTransitionInput,
+  pr: ImplementationPullRequestSnapshot,
+  records: ControlEnvelope[],
+  narratives: Map<string, string>,
+  validation: ControlEnvelope,
+  review: ControlEnvelope,
+): MergeReport {
+  return {
+    repository: input.snapshot.repository,
+    ticketNumber: input.snapshot.ticket.number,
+    prNumber: pr.number,
+    baseRevision: pr.baseRevision,
+    headRevision: pr.headRevision,
+    validatedRevision: validation.inputRevision,
+    approvedRevision: review.inputRevision,
+    validationRound: validation.round,
+    reviewRound: review.round,
+    validationEvidence: {
+      transitionId: validation.transitionId,
+      commands: validation.commands ?? [],
+    },
+    reviewRounds: records
+      .filter((record) => record.kind === "review-handoff")
+      .map((record) => ({
+        transitionId: record.transitionId,
+        round: record.round,
+        revision: record.inputRevision,
+        disposition: record.disposition as MergeReport["reviewRounds"][number]["disposition"],
+      })),
+    repairRounds: records
+      .filter((record): record is ControlEnvelope & { outputRevision: Revision } =>
+        record.kind === "repair-handoff" && record.disposition === "succeeded" && record.outputRevision !== undefined
+      )
+      .map((record) => ({
+        transitionId: record.transitionId,
+        round: record.round,
+        inputRevision: record.inputRevision,
+        outputRevision: record.outputRevision,
+      })),
+    followUpIssues: [],
+    remainingNonBlockingObservations: nonBlockingReviewObservations(
+      narratives.get(review.transitionId) ?? "",
+    ),
+    mergeStrategy: input.policy.mergeStrategy,
+    workflowRun: input.workflowRun,
+  };
+}
+
 function reviewFindingSignature(narrative: string): string | undefined {
   const findings = [...narrative.matchAll(/^### (F-[1-9]\d*)\s*$([\s\S]*?)(?=^### F-[1-9]\d*\s*$|^## (?:Interactions|Constraints)\s*$)/gmu)]
     .map((match) => match[2]?.trim().replace(/\s+/gu, " ") ?? "");
@@ -1130,10 +1338,28 @@ export function selectDeliveryTransition(
   const review = currentReview?.workflowRunAttempt === undefined || currentReview.baseRevision === undefined
     ? undefined
     : currentReview;
+  const unresolvedChangesRequired = currentRecords.some((record) =>
+    record.kind === "review-handoff" && record.disposition === "changes-required"
+  );
+  if (review?.disposition === "approved" && unresolvedChangesRequired) {
+    return needsHuman(input, "trusted review history has unresolved changes-required evidence for the current Revision", pr);
+  }
   const mergeReport = latest(currentRecords, "merge-report");
 
   if (mergeReport !== undefined) {
-    if (!pr.mergeable || !pr.requiredChecksPass) {
+    const recordsAfterReport = history.records.slice(history.records.indexOf(mergeReport) + 1);
+    if (
+      validation === undefined || !requiredValidationPassed(validation, policy, ticket) ||
+      review === undefined || review.disposition !== "approved" ||
+      validation.inputRevision !== currentRevision || review.inputRevision !== currentRevision ||
+      validation.round !== review.round || review.round > policy.maximumRepairRounds + 1 ||
+      recordsAfterReport.some((record) =>
+        record.kind === "validation" || record.kind === "review-handoff" || record.kind === "repair-handoff"
+      )
+    ) {
+      return needsHuman(input, "trusted merge evidence changed after the Merge Report", pr);
+    }
+    if (pr.mergeable !== true || !pr.requiredChecksPass) {
       return needsHuman(input, "merge gates changed after the Merge Report", pr);
     }
     const selected = transition(input, "merge", { pr, inputRevision: currentRevision });
@@ -1183,7 +1409,7 @@ export function selectDeliveryTransition(
       validationRequest: validationRequest(input, currentRevision, selected.round),
     }]);
   }
-  if (!requiredValidationPassed(validation, policy, ticket)) {
+  if (validation === undefined || !requiredValidationPassed(validation, policy, ticket)) {
     const selected = transition(input, "validate", { pr, round: 1, inputRevision: currentRevision });
     return result(input, selected, [{
       kind: "run-validation",
@@ -1213,5 +1439,9 @@ export function selectDeliveryTransition(
   const selected = transition(input, "prepare-merge", {
     pr, round: review.round, inputRevision: currentRevision,
   });
-  return result(input, selected, [{ kind: "record-merge-report", exactRevision: currentRevision }]);
+  return result(input, selected, [{
+    kind: "record-merge-report",
+    exactRevision: currentRevision,
+    mergeReport: buildMergeReport(input, pr, history.records, history.narratives, validation, review),
+  }]);
 }

@@ -1,8 +1,10 @@
 import {
+  formatMergeReportNarrative,
   selectDeliveryTransition,
   type AuthenticatedGitHubSnapshot,
   type ControlEnvelope,
   type DeliveryLeaseResult,
+  type MergeReport,
   type RepairRequest,
   type RepositoryPolicy,
   type WorkflowRunIdentity,
@@ -80,6 +82,27 @@ export interface ManagedPullRequestContinuationPorts {
   runValidation?(input: ValidationRequest): Promise<Extract<StageOutcome, { kind: "validation" }>>;
   runReview?(input: ReviewRequest): Promise<Extract<StageOutcome, { kind: "review" }>>;
   runRepair?(input: RepairRequest): Promise<Extract<StageOutcome, { kind: "repair" }>>;
+  createFollowUpIssue?(input: {
+    ticketNumber: number;
+    prNumber: number;
+    observation: string;
+    idempotencyKey: string;
+  }): Promise<{ number: number; url: string; created: boolean }>;
+  recordMergeReport?(input: {
+    prNumber: number;
+    envelope: ControlEnvelope;
+    report: MergeReport;
+    narrative: string;
+    strategy: RepositoryPolicy["mergeStrategy"];
+    idempotencyKey: string;
+  }): Promise<{ created: boolean }>;
+  mergeExactRevision?(input: {
+    prNumber: number;
+    exactRevision: string;
+    strategy: RepositoryPolicy["mergeStrategy"];
+    idempotencyKey: string;
+    authorize(): Promise<boolean>;
+  }): Promise<{ merged: boolean; authorizationFailed?: boolean }>;
   recordControlComment(input: {
     prNumber: number;
     envelope: ControlEnvelope;
@@ -107,6 +130,13 @@ export type ManagedPullRequestContinuationResult =
       recordCreated: boolean;
     }
   | {
+      status: "merged";
+      prNumber: number;
+      exactRevision: string;
+      reportCreated: boolean;
+      merged: boolean;
+    }
+  | {
       status: "selected";
       transition: ReturnType<typeof selectDeliveryTransition>["transition"];
     }
@@ -117,6 +147,205 @@ function evidenceLink(request: ManagedPullRequestContinuationRequest, prNumber?:
     ? `issues/${request.ticketNumber}`
     : `pull/${prNumber}`;
   return `https://github.com/${request.repository}/${subject}`;
+}
+
+
+
+async function persistNeedsHuman(
+  request: ManagedPullRequestContinuationRequest,
+  ports: ManagedPullRequestContinuationPorts,
+  selected: ReturnType<typeof selectDeliveryTransition>,
+): Promise<Extract<ManagedPullRequestContinuationResult, { status: "needs-human" }>> {
+  const effect = selected.effects[0];
+  if (effect === undefined || selected.transition.reason === undefined) {
+    throw new Error("Needs Human transition is missing its durable effect");
+  }
+  const recorded = await ports.recordNeedsHuman({
+    ticketNumber: request.ticketNumber,
+    ...(selected.transition.prNumber === undefined ? {} : { prNumber: selected.transition.prNumber }),
+    reason: selected.transition.reason,
+    evidenceLinks: [evidenceLink(request, selected.transition.prNumber)],
+    ...(effect.envelope === undefined ? {} : { envelope: effect.envelope }),
+    idempotencyKey: effect.idempotencyKey,
+  });
+  return { status: "needs-human", reason: selected.transition.reason, recordCreated: recorded.created };
+}
+
+async function persistMergeAbort(
+  request: ManagedPullRequestContinuationRequest,
+  ports: ManagedPullRequestContinuationPorts,
+  input: { prNumber: number; revision: string; round: number; transitionId: string; reason: string },
+): Promise<Extract<ManagedPullRequestContinuationResult, { status: "needs-human" }>> {
+  const envelope: ControlEnvelope = {
+    schemaVersion: 1,
+    kind: "needs-human",
+    repository: request.repository,
+    ticketNumber: request.ticketNumber,
+    prNumber: input.prNumber,
+    round: input.round,
+    transitionId: `${input.transitionId}:merge-abort`,
+    inputRevision: input.revision,
+    disposition: "recorded",
+    workflowRunId: request.workflowRun.id,
+    workflowRunAttempt: request.workflowRun.attempt,
+  };
+  const recorded = await ports.recordNeedsHuman({
+    ticketNumber: request.ticketNumber,
+    prNumber: input.prNumber,
+    reason: input.reason,
+    evidenceLinks: [evidenceLink(request, input.prNumber)],
+    envelope,
+    idempotencyKey: `${envelope.transitionId}:record-needs-human`,
+  });
+  return { status: "needs-human", reason: input.reason, recordCreated: recorded.created };
+}
+
+async function exactMergeIsStillAuthorized(
+  request: ManagedPullRequestContinuationRequest,
+  ports: ManagedPullRequestContinuationPorts,
+  prNumber: number,
+  revision: string,
+): Promise<boolean> {
+  const current = await ports.reconstruct();
+  verifySnapshot(request, current.snapshot);
+  const selected = selectDeliveryTransition({
+    snapshot: current.snapshot,
+    lease: request.lease,
+    policy: request.policy,
+    workflowRun: request.workflowRun,
+  });
+  return selected.transition.kind === "merge" && selected.transition.prNumber === prNumber &&
+    selected.transition.inputRevision === revision && selected.effects[0]?.kind === "merge-exact-revision" &&
+    selected.effects[0].exactRevision === revision;
+}
+
+async function consumeMergeEffects(
+  request: ManagedPullRequestContinuationRequest,
+  ports: ManagedPullRequestContinuationPorts,
+  selected: ReturnType<typeof selectDeliveryTransition>,
+): Promise<ManagedPullRequestContinuationResult | undefined> {
+  const effect = selected.effects[0];
+  const prNumber = selected.transition.prNumber;
+  const revision = selected.transition.inputRevision;
+  if (effect === undefined || prNumber === undefined || revision === undefined) return undefined;
+  if (effect.kind === "record-merge-report") {
+    if (ports.recordMergeReport === undefined || ports.mergeExactRevision === undefined ||
+        effect.mergeReport === undefined || effect.exactRevision !== revision ||
+        effect.mergeReport.headRevision !== revision ||
+        effect.mergeReport.validatedRevision !== revision ||
+        effect.mergeReport.approvedRevision !== revision) {
+      throw new Error("Merge Report effect is incomplete or not bound to one proven exact Revision");
+    }
+    const report = {
+      ...effect.mergeReport,
+      followUpIssues: [...effect.mergeReport.followUpIssues],
+    };
+    if (report.remainingNonBlockingObservations.length > 0) {
+      if (ports.createFollowUpIssue === undefined) {
+        throw new Error("Merge Report observations require the follow-up issue port");
+      }
+      for (const [index, observation] of report.remainingNonBlockingObservations.entries()) {
+        const followUp = await ports.createFollowUpIssue({
+          ticketNumber: request.ticketNumber,
+          prNumber,
+          observation,
+          idempotencyKey: `${effect.idempotencyKey}:follow-up:${index}`,
+        });
+        report.followUpIssues.push({ number: followUp.number, url: followUp.url });
+      }
+    }
+    const envelope: ControlEnvelope = {
+      schemaVersion: 1,
+      kind: "merge-report",
+      repository: request.repository,
+      ticketNumber: request.ticketNumber,
+      prNumber,
+      round: selected.transition.round,
+      transitionId: selected.transition.transitionId,
+      inputRevision: revision,
+      disposition: "ready",
+      workflowRunId: request.workflowRun.id,
+      workflowRunAttempt: request.workflowRun.attempt,
+      mergeReport: report,
+      baseRevision: report.baseRevision,
+    };
+    const reportRecord = await ports.recordMergeReport({
+      prNumber,
+      envelope,
+      report,
+      narrative: formatMergeReportNarrative(report),
+      strategy: request.policy.mergeStrategy,
+      idempotencyKey: effect.idempotencyKey,
+    });
+    const refreshed = await ports.reconstruct();
+    verifySnapshot(request, refreshed.snapshot);
+    const refreshedPr = refreshed.snapshot.pullRequests.find((candidate) => candidate.number === prNumber);
+    if (refreshedPr?.headRevision !== revision) {
+      return persistMergeAbort(request, ports, {
+        prNumber,
+        revision,
+        round: selected.transition.round,
+        transitionId: selected.transition.transitionId,
+        reason: "PR Revision changed after Merge Report publication",
+      });
+    }
+    const merge = selectDeliveryTransition({
+      snapshot: refreshed.snapshot,
+      lease: request.lease,
+      policy: request.policy,
+      workflowRun: request.workflowRun,
+    });
+    if (merge.transition.kind === "needs-human") return persistNeedsHuman(request, ports, merge);
+    const mergeEffect = merge.effects[0];
+    if (merge.transition.kind !== "merge" || merge.transition.prNumber !== prNumber ||
+        merge.transition.inputRevision !== revision || mergeEffect?.kind !== "merge-exact-revision" ||
+        mergeEffect.exactRevision !== revision) {
+      const reason = `Merge Report no longer authorizes merge: ${merge.transition.reason ?? merge.transition.kind}`;
+      return persistMergeAbort(request, ports, {
+        prNumber,
+        revision,
+        round: selected.transition.round,
+        transitionId: selected.transition.transitionId,
+        reason,
+      });
+    }
+    const merged = await ports.mergeExactRevision({
+      prNumber,
+      exactRevision: revision,
+      strategy: request.policy.mergeStrategy,
+      idempotencyKey: mergeEffect.idempotencyKey,
+      authorize: () => exactMergeIsStillAuthorized(request, ports, prNumber, revision),
+    });
+    if (merged.authorizationFailed === true) {
+      return persistMergeAbort(request, ports, {
+        prNumber, revision, round: selected.transition.round,
+        transitionId: selected.transition.transitionId,
+        reason: "Merge authorization changed immediately before GitHub mutation",
+      });
+    }
+    return { status: "merged", prNumber, exactRevision: revision, reportCreated: reportRecord.created, merged: merged.merged };
+  }
+  if (effect.kind === "merge-exact-revision") {
+    if (ports.mergeExactRevision === undefined || effect.exactRevision !== revision) {
+      throw new Error("merge effect is incomplete or not bound to the selected Revision");
+    }
+    const merged = await ports.mergeExactRevision({
+      prNumber,
+      exactRevision: revision,
+      strategy: request.policy.mergeStrategy,
+      idempotencyKey: effect.idempotencyKey,
+      authorize: () => exactMergeIsStillAuthorized(request, ports, prNumber, revision),
+    });
+    if (merged.authorizationFailed === true) {
+      return persistMergeAbort(request, ports, {
+        prNumber, revision, round: selected.transition.round,
+        transitionId: selected.transition.transitionId,
+        reason: "Merge authorization changed immediately before GitHub mutation",
+      });
+    }
+    return { status: "merged", prNumber, exactRevision: revision, reportCreated: false, merged: merged.merged };
+  }
+  return undefined;
 }
 
 async function persistSynchronization(
@@ -354,21 +583,11 @@ export async function continueManagedPullRequest(
 
   const consumed = await consumeSelectedStageEffect(request, ports, reconstructed.snapshot, selected);
   if (consumed !== undefined) return consumed;
+  const merged = await consumeMergeEffects(request, ports, selected);
+  if (merged !== undefined) return merged;
 
   if (selected.transition.kind === "needs-human") {
-    const effect = selected.effects[0];
-    if (effect === undefined || selected.transition.reason === undefined) {
-      throw new Error("Needs Human transition is missing its durable effect");
-    }
-    const recorded = await ports.recordNeedsHuman({
-      ticketNumber: request.ticketNumber,
-      ...(selected.transition.prNumber === undefined ? {} : { prNumber: selected.transition.prNumber }),
-      reason: selected.transition.reason,
-      evidenceLinks: [evidenceLink(request, selected.transition.prNumber)],
-      ...(effect.envelope === undefined ? {} : { envelope: effect.envelope }),
-      idempotencyKey: effect.idempotencyKey,
-    });
-    return { status: "needs-human", reason: selected.transition.reason, recordCreated: recorded.created };
+    return persistNeedsHuman(request, ports, selected);
   }
 
   let intent: ControlEnvelope | undefined;

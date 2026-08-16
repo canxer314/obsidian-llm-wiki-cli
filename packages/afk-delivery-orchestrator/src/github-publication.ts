@@ -55,7 +55,10 @@ export function createGitHubContinuationEffects(input: {
   repository: string;
   trustedActor: { login: string; type: "Bot" | "App" };
   command?: Command;
-}): Pick<ManagedPullRequestContinuationPorts, "recordControlComment" | "recordNeedsHuman"> {
+}): Pick<
+  ManagedPullRequestContinuationPorts,
+  "recordControlComment" | "recordNeedsHuman" | "createFollowUpIssue" | "recordMergeReport" | "mergeExactRevision"
+> {
   const command = input.command ?? defaultCommand;
   async function recordExists(prNumber: number, idempotencyKey: string): Promise<boolean> {
     const raw = await command("gh", [
@@ -76,6 +79,71 @@ export function createGitHubContinuationEffects(input: {
     ]);
   }
   return {
+    async createFollowUpIssue(record) {
+      const marker = `<!-- afk-effect:${record.idempotencyKey} -->`;
+      const sourceTicket = `Source Delivery Ticket: #${record.ticketNumber}`;
+      const sourcePr = `Source Managed PR: #${record.prNumber}`;
+      const raw = await command("gh", [
+        "api", `repos/${input.repository}/issues?state=all&per_page=100`, "--paginate",
+        "--jq", ".[] | {number, html_url, body, user: {login: .user.login, type: .user.type}}",
+      ]);
+      const existing = parseJsonLines<{
+        number: number;
+        html_url: string;
+        body: string;
+        user: { login: string; type: "Bot" | "App" | "User" };
+      }>(raw).find((issue) =>
+        issue.user.login === input.trustedActor.login && issue.user.type === input.trustedActor.type &&
+        issue.body.includes(marker) && issue.body.includes(sourceTicket) && issue.body.includes(sourcePr)
+      );
+      if (existing !== undefined) {
+        return { number: existing.number, url: existing.html_url, created: false };
+      }
+      const title = record.observation.replace(/^F-[1-9]\d*:\s*/u, "").slice(0, 120);
+      const body = [marker, record.observation, "", sourceTicket, sourcePr, "",
+        "This follow-up is intentionally not authorized for AFK Delivery."].join("\n");
+      const url = await command("gh", [
+        "issue", "create", "--repo", input.repository, "--title", title, "--body", body,
+      ]);
+      const match = /\/issues\/(\d+)\/?$/u.exec(url.trim());
+      if (match?.[1] === undefined) throw new Error("GitHub did not return the follow-up issue number");
+      return { number: Number(match[1]), url: url.trim(), created: true };
+    },
+    async recordMergeReport(record) {
+      if (await recordExists(record.prNumber, record.idempotencyKey)) return { created: false };
+      const marker = `<!-- afk-effect:${record.idempotencyKey} -->`;
+      await post(record.prNumber, [
+        marker,
+        envelopeComment(record.envelope as Parameters<typeof envelopeComment>[0], record.narrative),
+      ].join("\n"));
+      return { created: true };
+    },
+    async mergeExactRevision(record) {
+      const raw = await command("gh", [
+        "pr", "view", String(record.prNumber), "--repo", input.repository,
+        "--json", "state,headRefOid,mergedAt",
+      ]);
+      const pr = JSON.parse(raw) as {
+        state: "OPEN" | "CLOSED" | "MERGED";
+        headRefOid: string;
+        mergedAt: string | null;
+      };
+      if (pr.state === "MERGED" && pr.mergedAt !== null) return { merged: false };
+      if (pr.state !== "OPEN" || pr.headRefOid !== record.exactRevision) {
+        throw new Error("GitHub PR is not open at the proven exact Revision");
+      }
+      if (!await record.authorize()) return { merged: false, authorizationFailed: true };
+      const strategy = {
+        merge: "--merge",
+        squash: "--squash",
+        rebase: "--rebase",
+      }[record.strategy];
+      await command("gh", [
+        "pr", "merge", String(record.prNumber), "--repo", input.repository,
+        strategy, "--match-head-commit", record.exactRevision,
+      ]);
+      return { merged: true };
+    },
     async recordControlComment(record) {
       if (await recordExists(record.prNumber, record.idempotencyKey)) return { created: false };
       const marker = `<!-- afk-effect:${record.idempotencyKey} -->`;

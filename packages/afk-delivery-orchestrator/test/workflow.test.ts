@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 const workflowPath = new URL("../../../.github/workflows/afk-delivery.yml", import.meta.url);
+const deliveryDockerfilePath = new URL("../../../.sandcastle/Dockerfile", import.meta.url);
+const packagePath = new URL("../../../package.json", import.meta.url);
 
 describe("AFK Delivery workflow contract", () => {
   it("uses scheduled and manual triggers with the same bounded dispatch path", async () => {
@@ -48,6 +50,18 @@ describe("AFK Delivery workflow contract", () => {
     expect(discovery).toContain("AFK_TARGET_BRANCH: master");
     expect(discovery).toContain("AFK_RECOVERY_SCAN_LIMIT:");
     expect(workflow).not.toMatch(/if:.*(?:managed|synchroniz|continu)/iu);
+  });
+
+  it("uses repository-root paths for the delivery image build context", async () => {
+    const dockerfile = await readFile(deliveryDockerfilePath, "utf8");
+    const packageDocument = JSON.parse(await readFile(packagePath, "utf8")) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(packageDocument.scripts["sandcastle:docker:build"]).toContain("-f .sandcastle/Dockerfile .");
+    for (const path of ["verify-integrity.mjs", "skills.lock", "skills", "entrypoint.mjs", "verify-model.mjs"]) {
+      expect(dockerfile).toContain(`COPY .sandcastle/${path} `);
+    }
   });
 
   it("runs preflight before fresh reconstruction and bounded transition dispatch", async () => {
