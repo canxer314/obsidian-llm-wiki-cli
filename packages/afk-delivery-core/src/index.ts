@@ -74,6 +74,7 @@ export interface ControlEnvelope {
   workflowRunId: string;
   workflowRunAttempt?: number;
   baseRevision?: Revision;
+  reviewTransitionId?: string;
   commands?: ValidationCommandResult[];
 }
 
@@ -96,6 +97,37 @@ export interface ReviewerCapabilities {
   canPush: boolean;
   canComment: boolean;
   githubCredentials: boolean;
+}
+
+export type RepairFindingDisposition = {
+  findingId: string;
+  disposition: "addressed" | "intentionally-unaddressed" | "blocked";
+  rationale: string;
+};
+
+export interface RepairerCapabilities {
+  sourceReadOnly: false;
+  canEdit: true;
+  canCommit: true;
+  canPush: false;
+  canComment: false;
+  canApprove: false;
+  githubCredentials: false;
+}
+
+export interface RepairRequest {
+  ticket: DeliveryTicketSnapshot & { body: string };
+  prNumber: number;
+  headBranch: string;
+  round: number;
+  rejectedRevision: Revision;
+  reviewTransitionId: string;
+  reviewHandoff: string;
+  repositoryPolicy: RepositoryPolicy;
+  repositoryInstructions: string;
+  domainDocuments: RepositoryDocument[];
+  architectureDecisions: RepositoryDocument[];
+  capabilities: RepairerCapabilities;
 }
 
 export interface ReviewRequest {
@@ -188,7 +220,9 @@ export type StageOutcome =
       inputRevision: Revision;
       outputRevision: Revision;
       round: number;
+      reviewTransitionId: string;
       narrative: string;
+      findings: RepairFindingDisposition[];
       findingsComplete: boolean;
     }
   | {
@@ -258,6 +292,7 @@ export interface ModeledEffect {
   exactRevision?: Revision;
   validationRequest?: ValidationRequest;
   reviewRequest?: ReviewRequest;
+  repairRequest?: RepairRequest;
 }
 
 export interface DeliveryTransitionResult {
@@ -267,6 +302,7 @@ export interface DeliveryTransitionResult {
 
 interface TrustedHistory {
   records: ControlEnvelope[];
+  narratives: Map<string, string>;
   invalidReason?: string;
 }
 
@@ -290,7 +326,7 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
   const allowedKeys = new Set([
     "schemaVersion", "kind", "repository", "ticketNumber", "prNumber", "targetBranch", "targetRevision", "round",
     "transitionId", "inputRevision", "outputRevision", "disposition", "workflowRunId",
-    "workflowRunAttempt", "baseRevision", "commands",
+    "workflowRunAttempt", "baseRevision", "reviewTransitionId", "commands",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) return undefined;
   const requiredStrings = [
@@ -319,6 +355,8 @@ export function parseControlEnvelope(value: unknown): ControlEnvelope | undefine
     !REVISION_PATTERN.test(value.inputRevision as string) ||
     (value.baseRevision !== undefined &&
       (typeof value.baseRevision !== "string" || !REVISION_PATTERN.test(value.baseRevision))) ||
+    (value.reviewTransitionId !== undefined &&
+      (typeof value.reviewTransitionId !== "string" || value.reviewTransitionId.length === 0)) ||
     (value.outputRevision !== undefined &&
       (typeof value.outputRevision !== "string" || !REVISION_PATTERN.test(value.outputRevision)))
   ) {
@@ -358,13 +396,14 @@ function authenticateHistory(
   predecessorRevision?: Revision,
 ): TrustedHistory {
   const records: ControlEnvelope[] = [];
+  const narratives = new Map<string, string>();
   const identities = new Map<string, string>();
   const parsed: Array<{ commentId: string; envelope: ControlEnvelope; narrative: string }> = [];
   for (const comment of snapshot.controlComments) {
     if (!actorIsTrusted(comment.author, policy)) continue;
     const envelope = parseControlEnvelope(comment.envelope);
     if (envelope === undefined) {
-      return { records, invalidReason: `trusted control comment ${comment.commentId} has a malformed or unsupported envelope` };
+      return { records, narratives, invalidReason: `trusted control comment ${comment.commentId} has a malformed or unsupported envelope` };
     }
     const legacyReview = envelope.kind === "review-handoff" &&
       envelope.workflowRunAttempt === undefined && envelope.baseRevision === undefined;
@@ -377,7 +416,7 @@ function authenticateHistory(
         envelope.disposition as "approved" | "changes-required" | "unable-to-review",
       )
     )) {
-      return { records, invalidReason: `trusted review handoff ${comment.commentId} contradicts its Control Envelope or current base Revision` };
+      return { records, narratives, invalidReason: `trusted review handoff ${comment.commentId} contradicts its Control Envelope or current base Revision` };
     }
     parsed.push({ commentId: comment.commentId, envelope, narrative: comment.narrative });
   }
@@ -418,29 +457,45 @@ function authenticateHistory(
       (envelope.kind === "managed-pr" && envelope.disposition === "adopted" &&
         (envelope.targetBranch !== policy.targetBranch || pr.targetBranch !== envelope.targetBranch))
     ) {
-      return { records, invalidReason: `trusted control comment ${commentId} does not match the GitHub snapshot` };
+      return { records, narratives, invalidReason: `trusted control comment ${commentId} does not match the GitHub snapshot` };
     }
     const applicableRevision = envelope.outputRevision ?? envelope.inputRevision;
     if (!connectedRevisions.has(applicableRevision)) {
-      return { records, invalidReason: `trusted control comment ${commentId} is not part of the authenticated Revision chain` };
+      return { records, narratives, invalidReason: `trusted control comment ${commentId} is not part of the authenticated Revision chain` };
     }
     if (
       (envelope.kind === "repair-handoff" || envelope.kind === "synchronization") &&
       envelope.outputRevision === undefined &&
-      !(envelope.kind === "synchronization" && envelope.disposition === "started" &&
-        envelope.targetRevision !== undefined)
+      !(
+        (envelope.kind === "synchronization" && envelope.disposition === "started" &&
+          envelope.targetRevision !== undefined) ||
+        (envelope.kind === "repair-handoff" && envelope.disposition === "started")
+      )
     ) {
-      return { records, invalidReason: `trusted control comment ${commentId} is missing its output Revision` };
+      return { records, narratives, invalidReason: `trusted control comment ${commentId} is missing its output Revision` };
+    }
+    if (envelope.kind === "repair-handoff") {
+      const review = parsed.find((entry) =>
+        entry.envelope.kind === "review-handoff" &&
+        entry.envelope.transitionId === envelope.reviewTransitionId &&
+        entry.envelope.disposition === "changes-required" &&
+        entry.envelope.round === envelope.round &&
+        entry.envelope.inputRevision === envelope.inputRevision
+      );
+      if (review === undefined) {
+        return { records, narratives, invalidReason: `trusted repair handoff ${commentId} is not bound to its authenticated review handoff` };
+      }
     }
     const canonical = JSON.stringify(envelope);
     const previous = identities.get(envelope.transitionId);
     if (previous !== undefined && previous !== canonical) {
-      return { records, invalidReason: `transition ${envelope.transitionId} has contradictory trusted records` };
+      return { records, narratives, invalidReason: `transition ${envelope.transitionId} has contradictory trusted records` };
     }
     identities.set(envelope.transitionId, canonical);
     records.push(envelope);
+    narratives.set(envelope.transitionId, parsed.find((entry) => entry.commentId === commentId)!.narrative);
   }
-  return { records };
+  return { records, narratives };
 }
 
 function stableTransitionId(parts: Array<string | number | undefined>): string {
@@ -529,6 +584,7 @@ function controlEnvelope(
   disposition: string,
   commands?: ValidationCommandResult[],
   baseRevision?: Revision,
+  reviewTransitionId?: string,
 ): ControlEnvelope {
   if (selected.prNumber === undefined || selected.inputRevision === undefined) {
     throw new Error("control records require a PR and input Revision");
@@ -547,6 +603,7 @@ function controlEnvelope(
     workflowRunId: input.workflowRun.id,
     workflowRunAttempt: input.workflowRun.attempt,
     ...(baseRevision === undefined ? {} : { baseRevision }),
+    ...(reviewTransitionId === undefined ? {} : { reviewTransitionId }),
     ...(commands === undefined ? {} : { commands }),
   };
 }
@@ -647,6 +704,55 @@ function reviewNarrativeMatchesDisposition(
   return sections.every((section) => section.length > 0) && sections[0] === disposition;
 }
 
+const REPAIRER_CAPABILITIES: RepairerCapabilities = {
+  sourceReadOnly: false,
+  canEdit: true,
+  canCommit: true,
+  canPush: false,
+  canComment: false,
+  canApprove: false,
+  githubCredentials: false,
+};
+
+function completeDocuments(documents: RepositoryDocument[] | undefined): documents is RepositoryDocument[] {
+  return documents !== undefined && documents.length > 0 && documents.every((document) =>
+    document.path.trim().length > 0 && document.content.trim().length > 0
+  );
+}
+
+function buildRepairRequest(
+  input: DeliveryTransitionInput,
+  pr: ImplementationPullRequestSnapshot,
+  review: ControlEnvelope,
+  reviewHandoff: string | undefined,
+): RepairRequest | undefined {
+  const { snapshot } = input;
+  if (
+    snapshot.ticket.body === undefined || snapshot.ticket.body.trim().length === 0 ||
+    snapshot.repositoryInstructions === undefined || snapshot.repositoryInstructions.trim().length === 0 ||
+    !completeDocuments(snapshot.domainDocuments) ||
+    !completeDocuments(snapshot.architectureDecisions) ||
+    pr.headBranch === undefined || pr.headBranch.trim().length === 0 ||
+    reviewHandoff === undefined ||
+    !reviewNarrativeMatchesDisposition(reviewHandoff, "changes-required") ||
+    repairFindingIds(reviewHandoff) === undefined
+  ) return undefined;
+  return {
+    ticket: { ...snapshot.ticket, body: snapshot.ticket.body },
+    prNumber: pr.number,
+    headBranch: pr.headBranch,
+    round: review.round,
+    rejectedRevision: review.inputRevision,
+    reviewTransitionId: review.transitionId,
+    reviewHandoff,
+    repositoryPolicy: input.policy,
+    repositoryInstructions: snapshot.repositoryInstructions,
+    domainDocuments: snapshot.domainDocuments,
+    architectureDecisions: snapshot.architectureDecisions,
+    capabilities: REPAIRER_CAPABILITIES,
+  };
+}
+
 function buildReviewRequest(
   input: DeliveryTransitionInput,
   pr: ImplementationPullRequestSnapshot,
@@ -685,10 +791,101 @@ function latest(records: ControlEnvelope[], kind: ControlKind): ControlEnvelope 
   return records.filter((record) => record.kind === kind).at(-1);
 }
 
+function reviewFindingSignature(narrative: string): string | undefined {
+  const findings = [...narrative.matchAll(/^### (F-[1-9]\d*)\s*$([\s\S]*?)(?=^### F-[1-9]\d*\s*$|^## (?:Interactions|Constraints)\s*$)/gmu)]
+    .map((match) => match[2]?.trim().replace(/\s+/gu, " ") ?? "");
+  return findings.length > 0 ? findings.join("\n") : undefined;
+}
+
+function repairFindingIds(reviewHandoff: string): string[] | undefined {
+  const ids = [...reviewHandoff.matchAll(/^### (F-[1-9]\d*)\s*$/gmu)].map((match) => match[1]!);
+  return ids.length > 0 && new Set(ids).size === ids.length ? ids : undefined;
+}
+
+export function parseRepairHandoffNarrative(
+  narrative: string,
+  reviewHandoff: string,
+  outputRevision: string,
+): { findingsComplete: true; findings: RepairFindingDisposition[]; narrative: string } | undefined {
+  const expectedIds = repairFindingIds(reviewHandoff);
+  const normalized = narrative.trim();
+  const expectedHeadings = ["Changes", "Preserved Behavior", "Finding Dispositions", "Validation", "Resulting Revision"];
+  const allHeadings = [...normalized.matchAll(/^## ([^\n]+?)\s*$/gmu)].map((match) => match[1]);
+  const headingPattern = /^## (Changes|Preserved Behavior|Finding Dispositions|Validation|Resulting Revision)\s*$/gmu;
+  const matches = [...normalized.matchAll(headingPattern)];
+  if (expectedIds === undefined || matches[0]?.index !== 0 ||
+      allHeadings.length !== expectedHeadings.length ||
+      allHeadings.some((heading, index) => heading !== expectedHeadings[index]) ||
+      matches.length !== expectedHeadings.length ||
+      matches.some((match, index) => match[1] !== expectedHeadings[index])) return undefined;
+
+  const sections = new Map<string, string>();
+  for (const [index, match] of matches.entries()) {
+    const content = normalized.slice(
+      (match.index ?? 0) + match[0].length,
+      matches[index + 1]?.index ?? normalized.length,
+    ).trim();
+    if (content.length === 0) return undefined;
+    sections.set(match[1]!, content);
+  }
+  if (sections.get("Resulting Revision") !== outputRevision) return undefined;
+
+  const dispositions = sections.get("Finding Dispositions")!;
+  const findingPattern = /^### (F-[1-9]\d*)\s*$/gmu;
+  const findingMatches = [...dispositions.matchAll(findingPattern)];
+  const actualIds = findingMatches.map((match) => match[1]!);
+  if (actualIds.length !== expectedIds.length || new Set(actualIds).size !== actualIds.length ||
+      actualIds.some((id, index) => id !== expectedIds[index])) return undefined;
+
+  const findings: RepairFindingDisposition[] = [];
+  for (const [index, match] of findingMatches.entries()) {
+    const content = dispositions.slice(
+      (match.index ?? 0) + match[0].length,
+      findingMatches[index + 1]?.index ?? dispositions.length,
+    ).trim();
+    const [disposition, ...rationale] = content.split("\n");
+    const rationaleText = rationale.join("\n").trim();
+    if (!(["addressed", "intentionally-unaddressed", "blocked"].includes(disposition ?? "")) ||
+        rationaleText.length === 0) return undefined;
+    findings.push({
+      findingId: match[1]!,
+      disposition: disposition as RepairFindingDisposition["disposition"],
+      rationale: rationaleText,
+    });
+  }
+  return { findingsComplete: true, findings, narrative: normalized };
+}
+
+function repairOutcomeIsComplete(
+  stage: Extract<StageOutcome, { kind: "repair" }>,
+  records: ControlEnvelope[],
+  narratives: Map<string, string>,
+): boolean {
+  const review = records.find((record) =>
+    record.kind === "review-handoff" && record.disposition === "changes-required" &&
+    record.transitionId === stage.reviewTransitionId &&
+    record.round === stage.round && record.inputRevision === stage.inputRevision
+  );
+  const reviewHandoff = review === undefined ? undefined : narratives.get(review.transitionId);
+  const parsed = reviewHandoff === undefined
+    ? undefined
+    : parseRepairHandoffNarrative(stage.narrative, reviewHandoff, stage.outputRevision);
+  return parsed !== undefined && stage.findingsComplete &&
+    stage.findings.length === parsed.findings.length &&
+    stage.findings.every((finding, index) => {
+      const narrativeFinding = parsed.findings[index];
+      return narrativeFinding !== undefined &&
+        finding.findingId === narrativeFinding.findingId &&
+        finding.disposition === narrativeFinding.disposition &&
+        finding.rationale === narrativeFinding.rationale;
+    });
+}
+
 function processStageOutcome(
   input: DeliveryTransitionInput,
   pr: ImplementationPullRequestSnapshot | undefined,
   records: ControlEnvelope[],
+  narratives: Map<string, string>,
 ): DeliveryTransitionResult | undefined {
   const stage = input.stageOutcome;
   if (stage === undefined) return undefined;
@@ -792,7 +989,8 @@ function processStageOutcome(
     }]);
   }
   if (stage.kind === "repair") {
-    if (!stage.findingsComplete || stage.outputRevision !== pr.headRevision || stage.inputRevision === stage.outputRevision) {
+    if (!stage.findingsComplete || !repairOutcomeIsComplete(stage, records, narratives) ||
+        stage.outputRevision !== pr.headRevision || stage.inputRevision === stage.outputRevision) {
       return needsHuman(input, "repair mapping is incomplete or not bound to the current changed Revision", pr);
     }
     const selected = transition(input, "record-repair-handoff", {
@@ -800,7 +998,15 @@ function processStageOutcome(
     });
     return result(input, selected, [{
       kind: "record-control-comment",
-      envelope: controlEnvelope(input, selected, "repair-handoff", "succeeded"),
+      envelope: controlEnvelope(
+        input,
+        selected,
+        "repair-handoff",
+        "succeeded",
+        undefined,
+        undefined,
+        stage.reviewTransitionId,
+      ),
       narrative: redactHandoffNarrative(stage.narrative),
     }]);
   }
@@ -863,11 +1069,11 @@ export function selectDeliveryTransition(
     ? input.stageOutcome.inputRevision
     : undefined;
   const history = pr === undefined
-    ? { records: [] }
+    ? { records: [], narratives: new Map<string, string>() }
     : authenticateHistory(snapshot, policy, pr, predecessorRevision);
   if (history.invalidReason !== undefined) return needsHuman(input, history.invalidReason, pr);
 
-  const stageResult = processStageOutcome(input, pr, history.records);
+  const stageResult = processStageOutcome(input, pr, history.records, history.narratives);
   if (stageResult !== undefined) return stageResult;
 
   if (pr === undefined) {
@@ -883,6 +1089,16 @@ export function selectDeliveryTransition(
   }
   if (latest(history.records, "managed-pr") === undefined) {
     return needsHuman(input, "the Implementation PR is not authenticated as Managed", pr);
+  }
+  const unfinishedRepair = history.records.find((record) =>
+    record.kind === "repair-handoff" && record.disposition === "started" &&
+    !history.records.some((later) =>
+      later.kind === "repair-handoff" && later.disposition === "succeeded" &&
+      later.round === record.round && later.inputRevision === record.inputRevision
+    )
+  );
+  if (unfinishedRepair !== undefined) {
+    return needsHuman(input, "a repair attempt was interrupted before its complete handoff was authenticated", pr);
   }
   const unfinishedSynchronization = history.records.find((record) =>
     record.kind === "synchronization" && record.disposition === "started" &&
@@ -924,13 +1140,40 @@ export function selectDeliveryTransition(
     return result(input, selected, [{ kind: "merge-exact-revision", exactRevision: currentRevision }]);
   }
   if (review?.disposition === "changes-required") {
-    if (review.round >= policy.maximumRepairRounds) {
+    const currentSignature = reviewFindingSignature(history.narratives.get(review.transitionId) ?? "");
+    const repeatedFindingSet = currentSignature !== undefined && history.records.some((record) =>
+      record.kind === "review-handoff" && record.disposition === "changes-required" &&
+      record.transitionId !== review.transitionId && record.round < review.round &&
+      reviewFindingSignature(history.narratives.get(record.transitionId) ?? "") === currentSignature
+    );
+    if (repeatedFindingSet) {
+      return needsHuman(input, "the same review findings recurred after repair", pr);
+    }
+    if (review.round > policy.maximumRepairRounds) {
       return needsHuman(input, "maximum repair rounds exhausted", pr);
+    }
+    const request = buildRepairRequest(input, pr, review, history.narratives.get(review.transitionId));
+    if (request === undefined) {
+      return needsHuman(input, "repair context is incomplete or contradicts the Review Handoff", pr);
     }
     const selected = transition(input, "repair", {
       pr, round: review.round, inputRevision: currentRevision,
     });
-    return result(input, selected, [{ kind: "run-repair", exactRevision: currentRevision }]);
+    return result(input, selected, [{
+      kind: "run-repair",
+      exactRevision: currentRevision,
+      repairRequest: request,
+      envelope: controlEnvelope(
+        input,
+        selected,
+        "repair-handoff",
+        "started",
+        undefined,
+        undefined,
+        review.transitionId,
+      ),
+      narrative: `Repair round ${review.round} started for rejected Revision ${currentRevision}.`,
+    }]);
   }
   if (repair !== undefined && repair.outputRevision === currentRevision && validation === undefined) {
     const selected = transition(input, "validate", { pr, round: repair.round + 1, inputRevision: currentRevision });

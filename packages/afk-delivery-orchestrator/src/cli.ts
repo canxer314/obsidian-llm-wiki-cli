@@ -17,6 +17,7 @@ import {
   createGitSynchronizationPorts,
   createLocalConflictResolutionPorts,
   createLocalImplementationPorts,
+  createLocalRepairPorts,
   createLocalReviewPorts,
   createLocalValidationPorts,
   createManagedPullRequestReconstructor,
@@ -27,6 +28,7 @@ import {
   implementationTransitionId,
   reconstructDeliveryTicket,
   runConflictResolutionStage,
+  runRepairStage,
   runReviewStage,
   runValidationStage,
   runWorkerPreflight,
@@ -107,7 +109,7 @@ function repositoryPolicy(targetBranch: string, actor: ReturnType<typeof trusted
       .split("\n").filter(Boolean),
     reviewSkill: {
       path: "/home/agent/.claude/skills/code-review/SKILL.md",
-      revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+      revision: "sha256:bab450f3b140af9327d945cf9bb12dc5c68bc0381f9afb1aea42083709fa5035",
     },
     mergeStrategy: "squash",
   };
@@ -331,6 +333,12 @@ async function implement(ticketNumber: number): Promise<void> {
   const actor = trustedActor();
   const policy = repositoryPolicy(targetBranch, actor);
   const boundedStagePolicy = stagePolicy();
+  const repairStagePolicy = {
+    ...boundedStagePolicy,
+    maximumInfrastructureAttempts: Number(
+      process.env.AFK_REPAIR_INFRASTRUCTURE_ATTEMPTS ?? "2",
+    ),
+  };
   const recovery = createGitHubManagedPullRequestRecoveryPorts({ repository });
   const reconstructor = createManagedPullRequestReconstructor({
     repository,
@@ -363,6 +371,13 @@ async function implement(ticketNumber: number): Promise<void> {
     modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
   });
   const localValidation = createLocalValidationPorts({ repositoryUrl });
+  const localRepair = createLocalRepairPorts({
+    repositoryPath,
+    image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
+    claudeSettingsPath: containerClaudeSettingsPath(),
+    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
+    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+  });
   const localReview = createLocalReviewPorts({
     reviewerLauncher: resolve(repositoryPath, ".sandcastle/run-reviewer.sh"),
     modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
@@ -387,6 +402,7 @@ async function implement(ticketNumber: number): Promise<void> {
       Number(process.env.AFK_VALIDATION_COMMAND_TIMEOUT_MS ?? "900000"),
       localValidation,
     ),
+    runRepair: async (request) => runRepairStage(request, repairStagePolicy, localRepair),
     runReview: async (request) => runReviewStage(
       request,
       Number(process.env.AFK_REVIEW_TIMEOUT_MS ?? "1830000"),

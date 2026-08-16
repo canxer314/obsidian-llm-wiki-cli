@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-function redactAgentOutput(narrative: string): string {
+export function redactAgentOutput(narrative: string): string {
   return narrative
     .replace(/^(Authorization\s*:\s*)(?:Bearer\s+|token\s+)?\S+\s*$/gimu, "$1[REDACTED]")
     .replace(/\b(?:gh[oprsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/gu, "[REDACTED]");

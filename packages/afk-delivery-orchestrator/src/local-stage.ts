@@ -13,6 +13,8 @@ import type {
   ImplementationStageRequest,
   ImplementationWorktree,
 } from "./implementation.js";
+import type { RepairRequest } from "@llm-wiki/afk-delivery-core";
+import type { RepairStagePorts } from "./repair.js";
 import type { ReviewStagePorts, ValidationStagePorts } from "./validation-review.js";
 import { buildImplementationContainerCommand } from "./sandcastle.js";
 
@@ -161,6 +163,58 @@ export function createLocalConflictResolutionPorts(input: {
   };
 }
 
+export function createLocalRepairPorts(input: {
+  repositoryPath: string;
+  image: string;
+  claudeSettingsPath: string;
+  modelGatewayUrl: string;
+  modelGatewayToken: string;
+}): RepairStagePorts {
+  const agentPorts = createLocalImplementationPorts(input);
+  const repositoryUrls = new Map<string, string>();
+  return {
+    async createWorktree(request: RepairRequest): Promise<ImplementationWorktree> {
+      const directory = await mkdtemp(join(tmpdir(), `afk-repair-pr-${request.prNumber}-`));
+      try {
+        const { stdout: repositoryUrl } = await execFileAsync("git", [
+          "-C", input.repositoryPath, "remote", "get-url", "origin",
+        ]);
+        await execFileAsync("git", ["clone", "--no-checkout", repositoryUrl.trim(), directory]);
+        await execFileAsync("git", ["-C", directory, "checkout", "-B", request.headBranch, request.rejectedRevision]);
+        const { stdout: exact } = await execFileAsync("git", ["-C", directory, "rev-parse", "HEAD"]);
+        if (exact.trim() !== request.rejectedRevision) {
+          throw new Error("repair worktree is not the exact rejected Revision");
+        }
+        await execFileAsync("git", ["-C", directory, "remote", "remove", "origin"]);
+        repositoryUrls.set(directory, repositoryUrl.trim());
+        return { path: directory, branch: request.headBranch, baseRevision: request.rejectedRevision };
+      } catch (error) {
+        await rm(directory, { recursive: true, force: true });
+        throw error;
+      }
+    },
+    runAgent: agentPorts.runAgent,
+    async resolveHeadRevision(worktreePath) {
+      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+      return stdout.trim();
+    },
+    async publishRevision(request) {
+      const destination = `refs/heads/${request.headBranch}`;
+      const repositoryUrl = repositoryUrls.get(request.worktreePath);
+      if (repositoryUrl === undefined) throw new Error("repair publication repository is unavailable");
+      await execFileAsync("git", [
+        "-C", request.worktreePath, "push", repositoryUrl,
+        `${request.outputRevision}:${destination}`,
+        `--force-with-lease=${destination}:${request.expectedHeadRevision}`,
+      ]);
+    },
+    async removeWorktree(worktree) {
+      repositoryUrls.delete(worktree.path);
+      await rm(worktree.path, { recursive: true, force: true });
+    },
+  };
+}
+
 export function createLocalValidationPorts(input: { repositoryUrl: string }): ValidationStagePorts {
   return {
     async createDetachedClone(revision) {
@@ -172,6 +226,7 @@ export function createLocalValidationPorts(input: { repositoryUrl: string }): Va
         await execFileAsync("git", ["clone", "--no-checkout", input.repositoryUrl, directory]);
         await execFileAsync("git", ["-C", directory, "fetch", "--no-tags", "origin", revision]);
         await execFileAsync("git", ["-C", directory, "checkout", "--detach", revision]);
+        await execFileAsync("git", ["-C", directory, "remote", "remove", "origin"]);
         await execFileAsync("npm", ["ci", "--ignore-scripts"], {
           cwd: directory,
           env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "/tmp", CI: "true" },
