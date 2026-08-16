@@ -15,7 +15,8 @@ if [[ ! -f "$settings_path" ]]; then
   exit 2
 fi
 
-image="${AFK_DELIVERY_IMAGE:-afk-delivery:smoke}"
+delivery_image="${AFK_DELIVERY_IMAGE:-sandcastle:obsidian-llm-wiki-cli}"
+reviewer_image="${AFK_REVIEWER_IMAGE:-sandcastle:obsidian-llm-wiki-cli-reviewer}"
 model="${AFK_MODEL:-fable}"
 context_window="${AFK_CONTEXT_WINDOW:-372000}"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,51 +36,30 @@ case "$MODEL_GATEWAY_URL" in
   http://localhost:*|http://127.0.0.1:*) runtime_network_args=(--network host) ;;
 esac
 
-build_args=(--tag "$image")
-for name in HTTP_PROXY HTTPS_PROXY NO_PROXY; do
-  if [[ -n "${!name:-}" ]]; then
-    build_args+=(--build-arg "$name=${!name}")
-  fi
-done
-if [[ "${HTTP_PROXY:-}${HTTPS_PROXY:-}" == *"127.0.0.1:"* ||
-      "${HTTP_PROXY:-}${HTTPS_PROXY:-}" == *"localhost:"* ]]; then
-  build_args+=(--network host)
-fi
-docker build "${build_args[@]}" "$script_directory"
+docker image inspect "$delivery_image" "$reviewer_image" >/dev/null
 
-docker run --rm --entrypoint sh "$image" -c '
+docker run --rm --entrypoint sh "$delivery_image" -c '
   test "$(id -u)" != 0
   test ! -e /var/run/docker.sock
+  test ! -e "$HOME/.config/gh"
+  test ! -e "$HOME/.ssh"
+  test ! -e "$HOME/.claude.json"
+  test ! -e "$HOME/.claude/settings.json"
+  test -z "${GITHUB_TOKEN:-}${GH_TOKEN:-}"
   while IFS="=" read -r name expected; do
     actual="$(sha256sum "/opt/afk-delivery/skills/${name%.sha256}/SKILL.md" | cut -d" " -f1)"
     test "$actual" = "$expected"
   done < /opt/afk-delivery/skills.lock
-  test ! -e "$HOME/.config/gh"
-  test ! -e "$HOME/.ssh"
-  test -z "${GITHUB_TOKEN:-}${GH_TOKEN:-}"
 '
 
-docker run --rm \
-  "${runtime_network_args[@]}" \
-  --add-host host.docker.internal:host-gateway \
-  --env MODEL_GATEWAY_URL \
-  --env MODEL_GATEWAY_TOKEN \
-  --env AFK_MODEL="$model" \
-  --env AFK_CONTEXT_WINDOW="$context_window" \
-  --entrypoint sh \
-  "$image" -c '
-    export ANTHROPIC_AUTH_TOKEN="$MODEL_GATEWAY_TOKEN"
-    curl --fail --silent --show-error \
-      --header "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
-      "$MODEL_GATEWAY_URL/v1/models" |
-      node /opt/afk-delivery/verify-model.mjs "$AFK_MODEL" "$AFK_CONTEXT_WINDOW"
-  '
-
-printf '%s' 'Read the repository README and reply with exactly READ_ONLY_OK. Do not edit files or run commands.' |
+printf '%s' 'Read the repository README and reply with exactly IMPLEMENTATION_READ_ONLY_OK. Do not edit files or run commands.' |
   docker run --rm -i \
     "${runtime_network_args[@]}" \
     --read-only \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges \
     --cpus 1 \
+    --pids-limit=256 \
     --add-host host.docker.internal:host-gateway \
     --mount "type=bind,source=$repository_root,target=/workspace,readonly" \
     --mount "type=bind,source=$settings_path,target=/opt/afk-delivery/settings.json,readonly" \
@@ -90,4 +70,38 @@ printf '%s' 'Read the repository README and reply with exactly READ_ONLY_OK. Do 
     --env AFK_MODEL="$model" \
     --env AFK_CONTEXT_WINDOW="$context_window" \
     --env AFK_MAX_ITERATIONS=3 \
-    "$image" | grep -F 'READ_ONLY_OK'
+    "$delivery_image" | grep -F 'IMPLEMENTATION_READ_ONLY_OK'
+
+docker run --rm --entrypoint sh "$reviewer_image" -c '
+  test "$(id -u)" != 0
+  test ! -e /var/run/docker.sock
+  test ! -e "$HOME/.config/gh"
+  test ! -e "$HOME/.ssh"
+  test ! -e "$HOME/.claude.json"
+  test ! -e "$HOME/.claude/settings.json"
+  test -z "${GITHUB_TOKEN:-}${GH_TOKEN:-}"
+'
+
+printf '%s' 'Reply with exactly REVIEW_READ_ONLY_OK. Do not use tools.' |
+  docker run --rm -i \
+    "${runtime_network_args[@]}" \
+    --read-only \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges \
+    --cpus 1 \
+    --pids-limit=256 \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+    --tmpfs /home/agent/.claude/runtime:rw,noexec,nosuid,nodev,size=64m \
+    --env ANTHROPIC_BASE_URL="$MODEL_GATEWAY_URL" \
+    --env ANTHROPIC_AUTH_TOKEN="$MODEL_GATEWAY_TOKEN" \
+    --entrypoint claude \
+    "$reviewer_image" \
+      --bare \
+      --print \
+      --model claude-opus-5 \
+      --effort low \
+      --tools '' \
+      --permission-mode dontAsk \
+      --no-session-persistence \
+      --strict-mcp-config \
+      --mcp-config '{"mcpServers":{}}' | grep -F 'REVIEW_READ_ONLY_OK'

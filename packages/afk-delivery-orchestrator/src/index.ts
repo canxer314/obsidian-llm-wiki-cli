@@ -1,5 +1,7 @@
+export * from "./commissioning-preflight.js";
 export * from "./conflict-resolution.js";
 export * from "./git-synchronization.js";
+export * from "./github-app-token.js";
 export * from "./github-publication.js";
 export * from "./implementation.js";
 export * from "./local-stage.js";
@@ -7,6 +9,7 @@ export * from "./managed-pr-continuation.js";
 export * from "./managed-pr-recovery.js";
 export * from "./managed-pr.js";
 export * from "./new-implementation.js";
+export * from "./preflight-adapters.js";
 export * from "./repair.js";
 export * from "./sandcastle.js";
 export * from "./validation-review.js";
@@ -23,7 +26,9 @@ export type PreflightCheckName =
   | "docker"
   | "model-gateway"
   | "delivery-image"
+  | "reviewer-image"
   | "pinned-skills"
+  | "container-settings"
   | "github-authentication"
   | "repository-access"
   | "writable-workspace";

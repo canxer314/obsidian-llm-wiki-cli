@@ -21,14 +21,25 @@ Set repository variables:
 
 - `AFK_DELIVERY_IMAGE`: immutable delivery image reference, preferably a digest.
 - `AFK_REVIEWER_IMAGE`: immutable reviewer image reference, preferably a digest.
-- `AFK_DELIVERY_ACTOR`: login of the dedicated GitHub App or bot identity.
-- `AFK_DELIVERY_ACTOR_TYPE`: `App` or `Bot`, matching GitHub's API response.
 
-Set repository secrets:
+Do not store the GitHub App private key or model gateway credential in repository secrets, variables, artifacts, Issue comments, or PR comments. The repository-scoped runner service loads these local-only values:
 
-- `AFK_DELIVERY_TOKEN`: short-lived installation token or bot token for the configured identity.
-- `MODEL_GATEWAY_URL`: cc-switch/model-gateway endpoint reachable from the runner and stage containers.
-- `MODEL_GATEWAY_TOKEN`: gateway credential supplied only to the container launcher.
+- `GITHUB_REPOSITORY`: the fixed `owner/repository` installation target.
+- `AFK_GITHUB_APP_CONFIG`: optional path to the App config; defaults to `~/.config/afk-delivery/github-app.json`.
+- `AFK_CLAUDE_SETTINGS`: optional path to the mode `0600` container-only Claude settings; defaults to `~/.claude/settings-docker.json`. Its `env` object carries `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` for the local gateway.
+
+Both the App config and private key must be mode `0600`. `privateKeyFile` must be a relative path whose resolved target remains inside the config directory; absolute paths, `..` escapes, and escaping symlinks are rejected. The config stores only identifiers and that local relative path:
+
+```json
+{
+  "appId": "12345",
+  "installationId": 67890,
+  "repository": "owner/repository",
+  "privateKeyFile": "private-key.pem"
+}
+```
+
+Each discovery job and each bounded delivery job calls `afk-delivery app-token`. The helper verifies `GET /app`, checks the configured App ID and selected-repository installation, derives the canonical `<slug>[bot]` actor, requests a fresh installation token, and rejects the token unless its authenticated actor matches and its complete repository visibility is exactly the configured repository. Preflight repeats the actor and repository-scope verification before work. The helper masks the token before writing it to the step output. The workflow does not persist checkout credentials; deterministic Git mutations use a process-scoped `gh auth git-credential` helper, while stage launchers receive only model-gateway fields.
 
 The workflow maps the model gateway into isolated stages; it must not expose GitHub credentials through that gateway. Configure cc-switch so the workflow's selected model alias resolves deterministically, and verify connectivity with the worker preflight before enabling the schedule. A gateway outage is a preflight or stage failure, never permission to skip review or validation.
 
@@ -45,7 +56,31 @@ Use a repository-scoped GitHub App when possible. The discovery job needs read a
 - Pull requests: read and write, to create/adopt Managed PRs, publish authenticated control records and Merge Reports, and merge.
 - Checks/statuses and metadata: read, to reconstruct required-check and mergeability evidence.
 
-The App identity must exactly match `AFK_DELIVERY_ACTOR` and `AFK_DELIVERY_ACTOR_TYPE`. Branch protection must permit that identity to use the configured merge strategy after required checks pass. Do not grant administration, Actions-management, secrets, organization, or package permissions unless a separate reviewed requirement needs them.
+The App identity is verified from the App JWT response and must match the configured App ID. The helper exports the API actor as `<slug>[bot]` with type `Bot`; the workflow uses those values for trusted control records. Branch protection must permit that identity to use the configured merge strategy after required checks pass. Do not grant administration, Actions-management, secrets, organization, or package permissions unless a separate reviewed requirement needs them.
+
+## Commissioning sequence
+
+Before registering or starting the runner, disable `.github/workflows/afk-delivery.yml`, cancel every historical queued run, and add `afk:prohibited` without removing `ready-for-agent` from all existing Delivery Tickets. Register the runner at repository scope, add the `afk-delivery` label, and configure its service environment with the local values above.
+
+With no eligible Delivery Ticket, run:
+
+```sh
+npm ci
+npm run build
+npm run typecheck
+npm test
+GITHUB_REPOSITORY=owner/repository \
+AFK_DELIVERY_IMAGE=<delivery-image> \
+AFK_REVIEWER_IMAGE=<reviewer-image> \
+AFK_DELIVERY_SKILL_MANIFEST=.sandcastle/skills.lock \
+  npm exec -w @llm-wiki/afk-delivery-orchestrator -- \
+    afk-delivery commissioning-preflight
+AFK_CONTAINER_SMOKE=1 npm run test:container-smoke -w @llm-wiki/afk-delivery-orchestrator
+```
+
+`commissioning-preflight` loads the local App configuration, mints one fresh installation token, and consumes it in the same process. It passes the token directly to the identity and repository-scope API requests and only to the repository-access `gh` child process; it does not write the token to disk, print it, or add it to the parent process environment. The regular workflow continues to use `app-token` followed by `preflight` through masked, job-scoped step outputs.
+
+Preflight verifies Docker, the local model gateway, both images, pinned skills, container settings, the verified App actor, repository access, and a writable workspace. The smoke runs both stage images read-only and fails if either can see GitHub credentials, a Docker socket, host GitHub/SSH state, or host Claude configuration. Do not enable the workflow until every command succeeds. Enabling the workflow is separate from authorizing a canary: all existing tickets remain prohibited, and a canary must wait for its native blocker to close.
 
 ## Schedule and Delivery Lease
 
@@ -111,4 +146,4 @@ Never delete trusted records, forge idempotency markers, force-push a Managed PR
 
 To stop intake safely, disable the schedule and add `afk:prohibited` to tickets that must not progress. Wait for active lease holders to complete. Keep the runner, Git refs, and GitHub comments intact. Rotate the App and model-gateway credentials if compromise is suspected, then rebuild both images from reviewed sources.
 
-Before restart, run repository verification and both image builds, restore gateway health, confirm the trusted actor identity with `gh api user`, and manually dispatch one workflow. Inspect reconstruction and the next bounded transition before re-enabling the schedule. A restart is a replay from GitHub state, not a continuation of a local agent session.
+Before restart, run repository verification, restore gateway health, confirm the GitHub App ID/slug through `afk-delivery app-token`, and run preflight plus both image smokes. Then manually dispatch one workflow. Inspect reconstruction and the next bounded transition before re-enabling the schedule. A restart is a replay from GitHub state, not a continuation of a local agent session.

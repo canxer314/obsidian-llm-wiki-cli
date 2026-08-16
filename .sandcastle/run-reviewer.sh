@@ -91,5 +91,5 @@ exec timeout --signal=TERM --kill-after=30 "${timeout_seconds}" \
       --permission-mode dontAsk \
       --no-session-persistence \
       --strict-mcp-config \
-      --mcp-config '{}' \
+      --mcp-config '{"mcpServers":{}}' \
       '/code-review Review only the complete immutable evidence bundle at /review/input.json. Return the full Review Handoff without summarization.'

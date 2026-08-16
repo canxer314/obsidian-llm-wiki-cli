@@ -3,10 +3,15 @@
 import type { RepositoryPolicy } from "@llm-wiki/afk-delivery-core";
 import { execFile } from "node:child_process";
 
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import {
+  issueGitHubAppToken,
+  loadGitHubAppTokenConfig,
+  verifyGitHubInstallationToken,
+} from "./github-app-token.js";
 import {
   adoptManagedPullRequest,
   continueManagedPullRequest,
@@ -27,11 +32,16 @@ import {
   executeNewImplementationTransition,
   implementationTransitionId,
   reconstructDeliveryTicket,
+  readPinnedSkillsManifestFromImage,
+  runCommissioningPreflight,
   runConflictResolutionStage,
   runRepairStage,
   runReviewStage,
   runValidationStage,
   runWorkerPreflight,
+  validateContainerClaudeSettings,
+  viewRepositoryWithCredential,
+  type GitHubAppCredential,
   type GitHubReadPort,
   type PreflightCheck,
   type PromptDocument,
@@ -45,8 +55,15 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-async function command(file: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync(file, args, { timeout: 30_000 });
+async function command(
+  file: string,
+  args: string[],
+  environment?: Record<string, string>,
+): Promise<string> {
+  const { stdout } = await execFileAsync(file, args, {
+    timeout: 30_000,
+    ...(environment === undefined ? {} : { env: { ...process.env, ...environment } }),
+  });
   return stdout.trim();
 }
 
@@ -115,39 +132,104 @@ function repositoryPolicy(targetBranch: string, actor: ReturnType<typeof trusted
   };
 }
 
-function preflightChecks(): PreflightCheck[] {
+async function modelGatewayConfig(): Promise<{ url: string; token: string }> {
+  const path = containerClaudeSettingsPath();
+  if (((await stat(path)).mode & 0o077) !== 0) {
+    throw new Error("container Claude settings must not be accessible by group or other users");
+  }
+  const content = await readFile(path, "utf8");
+  validateContainerClaudeSettings(content);
+  const environment = (JSON.parse(content) as { env?: Record<string, unknown> }).env;
+  const url = environment?.ANTHROPIC_BASE_URL;
+  const token = environment?.ANTHROPIC_AUTH_TOKEN;
+  if (typeof url !== "string" || url.length === 0 || typeof token !== "string" || token.length === 0) {
+    throw new Error("container Claude settings must configure the model gateway");
+  }
+  return { url, token };
+}
+
+function preflightChecks(credential?: GitHubAppCredential): PreflightCheck[] {
+  let gateway: { url: string; token: string } | undefined;
   return [
     { name: "docker", check: async () => { await command("docker", ["info", "--format", "{{.ServerVersion}}"]); return { ok: true }; } },
+    { name: "container-settings", check: async () => {
+      gateway = await modelGatewayConfig();
+      return { ok: true };
+    } },
     { name: "model-gateway", check: async (signal) => {
-      const url = new URL("/v1/models", requiredEnvironment("MODEL_GATEWAY_URL"));
-      const response = await fetch(url, signal === undefined ? {} : { signal });
+      if (gateway === undefined) throw new Error("container settings were not checked");
+      const url = new URL("/v1/models", gateway.url);
+      const response = await fetch(url, {
+        ...(signal === undefined ? {} : { signal }),
+        headers: { authorization: `Bearer ${gateway.token}` },
+      });
       return response.ok ? { ok: true } : { ok: false, reason: `gateway returned ${response.status}` };
     } },
     { name: "delivery-image", check: async () => {
       await command("docker", ["image", "inspect", requiredEnvironment("AFK_DELIVERY_IMAGE")]);
       return { ok: true };
     } },
+    { name: "reviewer-image", check: async () => {
+      await command("docker", ["image", "inspect", requiredEnvironment("AFK_REVIEWER_IMAGE")]);
+      return { ok: true };
+    } },
     { name: "pinned-skills", check: async () => {
-      const actual = await command("docker", ["run", "--rm", "--network", "none", requiredEnvironment("AFK_DELIVERY_IMAGE"), "cat", "/opt/afk-delivery/skills.lock"]);
+      const actual = await readPinnedSkillsManifestFromImage(
+        requiredEnvironment("AFK_DELIVERY_IMAGE"),
+        command,
+      );
       const expected = await readFile(requiredEnvironment("AFK_DELIVERY_SKILL_MANIFEST"), "utf8");
       return actual === expected.trim()
         ? { ok: true }
         : { ok: false, reason: "image skill versions do not match the pinned manifest" };
     } },
     { name: "github-authentication", check: async () => {
-      const viewer = JSON.parse(await command("gh", ["api", "user"])) as { login?: unknown; type?: unknown };
-      const allowedLogin = requiredEnvironment("AFK_DELIVERY_ACTOR");
-      return viewer.login === allowedLogin && (viewer.type === "Bot" || viewer.type === "App")
-        ? { ok: true }
-        : { ok: false, reason: "GitHub credential is not the configured bot/App identity" };
+      const actor = credential === undefined ? trustedActor() : {
+        login: credential.actorLogin,
+        type: credential.actorType,
+      };
+      await verifyGitHubInstallationToken({
+        token: credential?.token ?? requiredEnvironment("GITHUB_TOKEN"),
+        repository: repositoryParts().fullName,
+        actorLogin: actor.login,
+      });
+      return { ok: true };
     } },
-    { name: "repository-access", check: async () => { await command("gh", ["repo", "view", repositoryParts().fullName, "--json", "nameWithOwner"]); return { ok: true }; } },
+    { name: "repository-access", check: async () => {
+      if (credential === undefined) {
+        await command("gh", ["repo", "view", repositoryParts().fullName, "--json", "nameWithOwner"]);
+      } else {
+        await viewRepositoryWithCredential(repositoryParts().fullName, credential.token, command);
+      }
+      return { ok: true };
+    } },
     { name: "writable-workspace", check: async () => {
       const directory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "afk-delivery-"));
       try { await writeFile(join(directory, "probe"), "ok", "utf8"); } finally { await rm(directory, { recursive: true, force: true }); }
       return { ok: true };
     } },
   ];
+}
+
+async function appToken(): Promise<void> {
+  const repository = repositoryParts().fullName;
+  const result = await issueGitHubAppToken(
+    await loadGitHubAppTokenConfig(),
+    { expectedRepository: repository },
+  );
+  if (process.env.GITHUB_OUTPUT !== undefined) {
+    process.stdout.write(`::add-mask::${result.token}\n`);
+    await writeOutput("token", result.token);
+    await writeOutput("expires_at", result.expiresAt);
+    await writeOutput("actor_login", result.actorLogin);
+    await writeOutput("actor_type", result.actorType);
+  }
+  process.stdout.write(`${JSON.stringify({
+    status: "issued",
+    expiresAt: result.expiresAt,
+    actorLogin: result.actorLogin,
+    actorType: result.actorType,
+  })}\n`);
 }
 
 async function loadFrontier() {
@@ -183,6 +265,27 @@ async function discover(): Promise<void> {
 
 async function preflight(): Promise<void> {
   const result = await runWorkerPreflight(preflightChecks());
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result.status !== "ready") process.exitCode = 1;
+}
+
+async function commissioningPreflight(): Promise<void> {
+  const repository = repositoryParts().fullName;
+  const result = await runCommissioningPreflight({
+    expectedRepository: repository,
+    issueCredential: async (expectedRepository) => {
+      const credential = await issueGitHubAppToken(
+        await loadGitHubAppTokenConfig(),
+        { expectedRepository },
+      );
+      return {
+        token: credential.token,
+        actorLogin: credential.actorLogin,
+        actorType: credential.actorType,
+      };
+    },
+    preflight: async (credential) => runWorkerPreflight(preflightChecks(credential)),
+  });
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.status !== "ready") process.exitCode = 1;
 }
@@ -307,6 +410,7 @@ async function implement(ticketNumber: number): Promise<void> {
     throw new Error(reconstructedTicket.reason);
   }
   const repositoryPath = resolve(process.env.GITHUB_WORKSPACE ?? process.cwd());
+  const gateway = await modelGatewayConfig();
   const targetBranch = process.env.AFK_TARGET_BRANCH ?? "master";
   const rawTicket = await command("gh", [
     "issue", "view", String(ticketNumber), "--repo", repository,
@@ -367,21 +471,21 @@ async function implement(ticketNumber: number): Promise<void> {
     repositoryPath,
     image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
     claudeSettingsPath: containerClaudeSettingsPath(),
-    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    modelGatewayUrl: gateway.url,
+    modelGatewayToken: gateway.token,
   });
   const localValidation = createLocalValidationPorts({ repositoryUrl });
   const localRepair = createLocalRepairPorts({
     repositoryPath,
     image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
     claudeSettingsPath: containerClaudeSettingsPath(),
-    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    modelGatewayUrl: gateway.url,
+    modelGatewayToken: gateway.token,
   });
   const localReview = createLocalReviewPorts({
     reviewerLauncher: resolve(repositoryPath, ".sandcastle/run-reviewer.sh"),
-    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    modelGatewayUrl: gateway.url,
+    modelGatewayToken: gateway.token,
     reviewerImage: requiredEnvironment("AFK_REVIEWER_IMAGE"),
   });
   const continuation = await continueManagedPullRequest({
@@ -448,8 +552,8 @@ async function implement(ticketNumber: number): Promise<void> {
       repositoryPath,
       image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
       claudeSettingsPath: containerClaudeSettingsPath(),
-      modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-      modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+      modelGatewayUrl: gateway.url,
+      modelGatewayToken: gateway.token,
     }),
     publication,
   });
@@ -458,8 +562,10 @@ async function implement(ticketNumber: number): Promise<void> {
 }
 
 const [operation, argument, secondArgument] = process.argv.slice(2);
-if (operation === "discover") await discover();
+if (operation === "app-token") await appToken();
+else if (operation === "discover") await discover();
 else if (operation === "preflight") await preflight();
+else if (operation === "commissioning-preflight") await commissioningPreflight();
 else if (operation === "adopt" && /^\d+$/u.test(argument ?? "") && /^\d+$/u.test(secondArgument ?? "")) {
   await adopt(Number(argument), Number(secondArgument));
 } else if ((operation === "reconstruct" || operation === "dispatch" || operation === "implement") && /^\d+$/u.test(argument ?? "")) {
@@ -468,5 +574,5 @@ else if (operation === "adopt" && /^\d+$/u.test(argument ?? "") && /^\d+$/u.test
   else if (operation === "dispatch") await dispatch(ticketNumber);
   else await implement(ticketNumber);
 } else {
-  throw new Error("usage: afk-delivery <discover|preflight|adopt TICKET PR|reconstruct TICKET|dispatch TICKET|implement TICKET>");
+  throw new Error("usage: afk-delivery <app-token|discover|preflight|commissioning-preflight|adopt TICKET PR|reconstruct TICKET|dispatch TICKET|implement TICKET>");
 }

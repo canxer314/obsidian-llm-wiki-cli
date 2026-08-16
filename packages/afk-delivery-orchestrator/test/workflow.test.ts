@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 const workflowPath = new URL("../../../.github/workflows/afk-delivery.yml", import.meta.url);
+const prWorkflowPath = new URL("../../../.github/workflows/pr-quality.yml", import.meta.url);
+const smokePath = new URL("../../../.sandcastle/smoke.sh", import.meta.url);
 const deliveryDockerfilePath = new URL("../../../.sandcastle/Dockerfile", import.meta.url);
 const packagePath = new URL("../../../package.json", import.meta.url);
 
@@ -73,5 +75,53 @@ describe("AFK Delivery workflow contract", () => {
     expect(preflight).toBeGreaterThan(0);
     expect(reconstruct).toBeGreaterThan(preflight);
     expect(transition).toBeGreaterThan(reconstruct);
+  });
+
+  it("mints a fresh repository installation token for discovery and bounded delivery", async () => {
+    const workflow = await readFile(workflowPath, "utf8");
+
+    expect(workflow.match(/afk-delivery app-token/gu)).toHaveLength(2);
+    expect(workflow).not.toContain("AFK_GITHUB_APP_PRIVATE_KEY");
+    expect(workflow).not.toContain("AFK_GITHUB_APP_INSTALLATION_ID:");
+    expect(workflow).not.toContain("secrets.AFK_DELIVERY_TOKEN");
+    expect(workflow).not.toContain("secrets.MODEL_GATEWAY_TOKEN");
+    expect(workflow).not.toContain("MODEL_GATEWAY_TOKEN:");
+    expect(workflow).toContain("persist-credentials: false");
+    expect(workflow).toContain("GIT_CONFIG_VALUE_0: \"!gh auth git-credential\"");
+  });
+
+  it("keeps short-lived GitHub authority out of agent stage configuration", async () => {
+    const workflow = await readFile(workflowPath, "utf8");
+    const implementation = workflow.slice(workflow.indexOf("name: Implement or continue Managed PR"));
+
+    expect(implementation).toContain("GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}");
+    expect(implementation).not.toContain("AFK_GITHUB_APP_PRIVATE_KEY");
+    expect(implementation).not.toContain("AFK_GITHUB_APP_INSTALLATION_ID");
+    expect(implementation).not.toContain("GITHUB_TOKEN_FILE");
+  });
+
+  it("provides a credential-free GitHub-hosted PR quality gate", async () => {
+    const workflow = await readFile(prWorkflowPath, "utf8");
+
+    expect(workflow).toContain("pull_request:");
+    expect(workflow).toContain("runs-on: ubuntu-latest");
+    expect(workflow).toContain("npm ci");
+    expect(workflow).toContain("npm run build");
+    expect(workflow).toContain("npm run typecheck");
+    expect(workflow).toContain("npm test");
+    expect(workflow).not.toContain("self-hosted");
+    expect(workflow).not.toMatch(/AFK_|MODEL_GATEWAY|secrets\./u);
+  });
+
+  it("smokes both stage images without host or GitHub authority", async () => {
+    const smoke = await readFile(smokePath, "utf8");
+
+    expect(smoke).toContain("AFK_DELIVERY_IMAGE");
+    expect(smoke).toContain("AFK_REVIEWER_IMAGE");
+    expect(smoke.match(/test ! -e \/var\/run\/docker\.sock/gu)).toHaveLength(2);
+    expect(smoke.split('test -z "${GITHUB_TOKEN:-}${GH_TOKEN:-}"')).toHaveLength(3);
+    expect(smoke).toContain("test ! -e \"$HOME/.claude.json\"");
+    expect(smoke).toContain("IMPLEMENTATION_READ_ONLY_OK");
+    expect(smoke).toContain("REVIEW_READ_ONLY_OK");
   });
 });

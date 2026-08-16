@@ -6,8 +6,10 @@ import {
 
 const requiredChecks = [
   "docker",
+  "container-settings",
   "model-gateway",
   "delivery-image",
+  "reviewer-image",
   "pinned-skills",
   "github-authentication",
   "repository-access",
@@ -38,9 +40,9 @@ describe("runWorkerPreflight", () => {
       status: "not-ready",
       failedCheck: "delivery-image",
       reason: "delivery-image unavailable",
-      checks: ["docker", "model-gateway", "delivery-image"],
+      checks: ["docker", "container-settings", "model-gateway", "delivery-image"],
     });
-    expect(configured[3]?.check).not.toHaveBeenCalled();
+    expect(configured[4]?.check).not.toHaveBeenCalled();
   });
 
   it("fails closed when a check throws", async () => {
