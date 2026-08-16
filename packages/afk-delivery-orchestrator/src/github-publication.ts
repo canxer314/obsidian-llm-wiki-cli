@@ -81,23 +81,27 @@ export function createGitHubContinuationEffects(input: {
   return {
     async createFollowUpIssue(record) {
       const marker = `<!-- afk-effect:${record.idempotencyKey} -->`;
-      const search = await command("gh", [
-        "issue", "list", "--repo", input.repository, "--state", "all", "--limit", "100",
-        "--search", `in:body \"${marker}\"`, "--json", "number,url,body",
+      const sourceTicket = `Source Delivery Ticket: #${record.ticketNumber}`;
+      const sourcePr = `Source Managed PR: #${record.prNumber}`;
+      const raw = await command("gh", [
+        "api", `repos/${input.repository}/issues?state=all&per_page=100`, "--paginate",
+        "--jq", ".[] | {number, html_url, body, user: {login: .user.login, type: .user.type}}",
       ]);
-      const existing = (JSON.parse(search || "[]") as Array<{ number: number; url: string; body: string }>)
-        .find((issue) => issue.body.includes(marker));
-      if (existing !== undefined) return { number: existing.number, url: existing.url, created: false };
+      const existing = parseJsonLines<{
+        number: number;
+        html_url: string;
+        body: string;
+        user: { login: string; type: "Bot" | "App" | "User" };
+      }>(raw).find((issue) =>
+        issue.user.login === input.trustedActor.login && issue.user.type === input.trustedActor.type &&
+        issue.body.includes(marker) && issue.body.includes(sourceTicket) && issue.body.includes(sourcePr)
+      );
+      if (existing !== undefined) {
+        return { number: existing.number, url: existing.html_url, created: false };
+      }
       const title = record.observation.replace(/^F-[1-9]\d*:\s*/u, "").slice(0, 120);
-      const body = [
-        marker,
-        record.observation,
-        "",
-        `Source Delivery Ticket: #${record.ticketNumber}`,
-        `Source Managed PR: #${record.prNumber}`,
-        "",
-        "This follow-up is intentionally not authorized for AFK Delivery.",
-      ].join("\n");
+      const body = [marker, record.observation, "", sourceTicket, sourcePr, "",
+        "This follow-up is intentionally not authorized for AFK Delivery."].join("\n");
       const url = await command("gh", [
         "issue", "create", "--repo", input.repository, "--title", title, "--body", body,
       ]);
@@ -128,6 +132,7 @@ export function createGitHubContinuationEffects(input: {
       if (pr.state !== "OPEN" || pr.headRefOid !== record.exactRevision) {
         throw new Error("GitHub PR is not open at the proven exact Revision");
       }
+      if (!await record.authorize()) return { merged: false, authorizationFailed: true };
       const strategy = {
         merge: "--merge",
         squash: "--squash",

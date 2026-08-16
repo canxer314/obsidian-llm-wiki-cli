@@ -1,4 +1,5 @@
 import {
+  formatMergeReportNarrative,
   selectDeliveryTransition,
   type AuthenticatedGitHubSnapshot,
   type ControlEnvelope,
@@ -100,7 +101,8 @@ export interface ManagedPullRequestContinuationPorts {
     exactRevision: string;
     strategy: RepositoryPolicy["mergeStrategy"];
     idempotencyKey: string;
-  }): Promise<{ merged: boolean }>;
+    authorize(): Promise<boolean>;
+  }): Promise<{ merged: boolean; authorizationFailed?: boolean }>;
   recordControlComment(input: {
     prNumber: number;
     envelope: ControlEnvelope;
@@ -147,53 +149,7 @@ function evidenceLink(request: ManagedPullRequestContinuationRequest, prNumber?:
   return `https://github.com/${request.repository}/${subject}`;
 }
 
-function mergeReportNarrative(report: MergeReport): string {
-  const commands = report.validationEvidence.commands.map((command) =>
-    `- \`${command.command}\` — check \`${command.checkId}\`, exit ${command.exitCode}, timed out: ${command.timedOut === true ? "yes" : "no"}`
-  );
-  const reviews = report.reviewRounds.map((review) =>
-    `- Round ${review.round}: ${review.disposition} for \`${review.revision}\` (\`${review.transitionId}\`)`
-  );
-  const repairs = report.repairRounds.length === 0
-    ? ["- None"]
-    : report.repairRounds.map((repair) =>
-        `- Round ${repair.round}: \`${repair.inputRevision}\` to \`${repair.outputRevision}\` (\`${repair.transitionId}\`)`
-      );
-  const followUps = report.followUpIssues.length === 0
-    ? ["- None"]
-    : report.followUpIssues.map((issue) => `- #${issue.number}: ${issue.url}`);
-  const observations = report.remainingNonBlockingObservations.length === 0
-    ? ["- None"]
-    : report.remainingNonBlockingObservations.map((observation) => `- ${observation}`);
-  return [
-    "# AFK Delivery Merge Report",
-    "",
-    `- Repository: \`${report.repository}\``,
-    `- Delivery Ticket: #${report.ticketNumber}`,
-    `- Managed PR: #${report.prNumber}`,
-    `- Base Revision: \`${report.baseRevision}\``,
-    `- Current Head Revision: \`${report.headRevision}\``,
-    `- Successfully Validated Revision: \`${report.validatedRevision}\``,
-    `- Independently Approved Revision: \`${report.approvedRevision}\``,
-    `- Merge Strategy: \`${report.mergeStrategy}\``,
-    `- Workflow Run: \`${report.workflowRun.id}\` attempt ${report.workflowRun.attempt}`,
-    "",
-    "## Validation Evidence",
-    ...commands,
-    "",
-    "## Review Rounds",
-    ...reviews,
-    "",
-    "## Repair Rounds",
-    ...repairs,
-    "",
-    "## Follow-up Issues",
-    ...followUps,
-    "",
-    "## Remaining Non-blocking Observations",
-    ...observations,
-  ].join("\n");
-}
+
 
 async function persistNeedsHuman(
   request: ManagedPullRequestContinuationRequest,
@@ -244,6 +200,25 @@ async function persistMergeAbort(
   return { status: "needs-human", reason: input.reason, recordCreated: recorded.created };
 }
 
+async function exactMergeIsStillAuthorized(
+  request: ManagedPullRequestContinuationRequest,
+  ports: ManagedPullRequestContinuationPorts,
+  prNumber: number,
+  revision: string,
+): Promise<boolean> {
+  const current = await ports.reconstruct();
+  verifySnapshot(request, current.snapshot);
+  const selected = selectDeliveryTransition({
+    snapshot: current.snapshot,
+    lease: request.lease,
+    policy: request.policy,
+    workflowRun: request.workflowRun,
+  });
+  return selected.transition.kind === "merge" && selected.transition.prNumber === prNumber &&
+    selected.transition.inputRevision === revision && selected.effects[0]?.kind === "merge-exact-revision" &&
+    selected.effects[0].exactRevision === revision;
+}
+
 async function consumeMergeEffects(
   request: ManagedPullRequestContinuationRequest,
   ports: ManagedPullRequestContinuationPorts,
@@ -291,13 +266,14 @@ async function consumeMergeEffects(
       disposition: "ready",
       workflowRunId: request.workflowRun.id,
       workflowRunAttempt: request.workflowRun.attempt,
+      mergeReport: report,
       baseRevision: report.baseRevision,
     };
     const reportRecord = await ports.recordMergeReport({
       prNumber,
       envelope,
       report,
-      narrative: mergeReportNarrative(report),
+      narrative: formatMergeReportNarrative(report),
       strategy: request.policy.mergeStrategy,
       idempotencyKey: effect.idempotencyKey,
     });
@@ -338,7 +314,15 @@ async function consumeMergeEffects(
       exactRevision: revision,
       strategy: request.policy.mergeStrategy,
       idempotencyKey: mergeEffect.idempotencyKey,
+      authorize: () => exactMergeIsStillAuthorized(request, ports, prNumber, revision),
     });
+    if (merged.authorizationFailed === true) {
+      return persistMergeAbort(request, ports, {
+        prNumber, revision, round: selected.transition.round,
+        transitionId: selected.transition.transitionId,
+        reason: "Merge authorization changed immediately before GitHub mutation",
+      });
+    }
     return { status: "merged", prNumber, exactRevision: revision, reportCreated: reportRecord.created, merged: merged.merged };
   }
   if (effect.kind === "merge-exact-revision") {
@@ -350,7 +334,15 @@ async function consumeMergeEffects(
       exactRevision: revision,
       strategy: request.policy.mergeStrategy,
       idempotencyKey: effect.idempotencyKey,
+      authorize: () => exactMergeIsStillAuthorized(request, ports, prNumber, revision),
     });
+    if (merged.authorizationFailed === true) {
+      return persistMergeAbort(request, ports, {
+        prNumber, revision, round: selected.transition.round,
+        transitionId: selected.transition.transitionId,
+        reason: "Merge authorization changed immediately before GitHub mutation",
+      });
+    }
     return { status: "merged", prNumber, exactRevision: revision, reportCreated: false, merged: merged.merged };
   }
   return undefined;

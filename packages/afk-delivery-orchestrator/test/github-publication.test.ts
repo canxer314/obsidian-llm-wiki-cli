@@ -117,9 +117,11 @@ describe("GitHub Managed PR publication adapter", () => {
     })).resolves.toEqual({ created: false });
     await expect(effects.mergeExactRevision!({
       prNumber: 73, exactRevision: head, strategy: "squash", idempotencyKey: "merge-effect",
+      authorize: async () => true,
     })).resolves.toEqual({ merged: true });
     await expect(effects.mergeExactRevision!({
       prNumber: 73, exactRevision: head, strategy: "squash", idempotencyKey: "merge-effect",
+      authorize: async () => true,
     })).resolves.toEqual({ merged: false });
 
     expect(posts).toHaveLength(1);
@@ -130,6 +132,72 @@ describe("GitHub Managed PR publication adapter", () => {
     ]]);
   });
 
+  it("rechecks complete authorization immediately before the GitHub merge mutation", async () => {
+    const head = "a".repeat(40);
+    const calls: string[][] = [];
+    const effects = createGitHubContinuationEffects({
+      repository: "owner/repo",
+      trustedActor: { login: "delivery-bot", type: "Bot" },
+      command: async (_file, args) => {
+        calls.push(args);
+        if (args[0] === "pr" && args[1] === "view") {
+          return JSON.stringify({ state: "OPEN", headRefOid: head, mergedAt: null });
+        }
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      },
+    });
+    let authorizationChecks = 0;
+
+    await expect(effects.mergeExactRevision!({
+      prNumber: 73, exactRevision: head, strategy: "squash", idempotencyKey: "merge-effect",
+      authorize: async () => {
+        authorizationChecks += 1;
+        return false;
+      },
+    })).resolves.toEqual({ merged: false, authorizationFailed: true });
+
+    expect(authorizationChecks).toBe(1);
+    expect(calls.some((args) => args[0] === "pr" && args[1] === "merge")).toBe(false);
+  });
+
+  it("ignores forged follow-up markers and scans every result page before creating", async () => {
+    const calls: string[][] = [];
+    const effects = createGitHubContinuationEffects({
+      repository: "owner/repo",
+      trustedActor: { login: "delivery-bot", type: "Bot" },
+      command: async (_file, args) => {
+        calls.push(args);
+        if (args[0] === "api" && args[1]?.includes("/issues?")) {
+          return [
+            JSON.stringify({
+              number: 90, html_url: "https://github.com/owner/repo/issues/90",
+              body: "<!-- afk-effect:follow-up-2 -->\nSource Delivery Ticket: #66\nSource Managed PR: #73",
+              user: { login: "mallory", type: "User" },
+            }),
+            JSON.stringify({
+              number: 91, html_url: "https://github.com/owner/repo/issues/91",
+              body: "<!-- afk-effect:follow-up-2 -->\nSource Delivery Ticket: #66\nSource Managed PR: #73",
+              user: { login: "delivery-bot", type: "Bot" },
+            }),
+          ].join("\n");
+        }
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      },
+    });
+
+    await expect(effects.createFollowUpIssue!({
+      ticketNumber: 66, prNumber: 73,
+      observation: "F-9: Document the recovery timeout.", idempotencyKey: "follow-up-2",
+    })).resolves.toEqual({
+      number: 91, url: "https://github.com/owner/repo/issues/91", created: false,
+    });
+    expect(calls[0]).toEqual([
+      "api", "repos/owner/repo/issues?state=all&per_page=100", "--paginate",
+      "--jq", ".[] | {number, html_url, body, user: {login: .user.login, type: .user.type}}",
+    ]);
+    expect(calls.some((args) => args[0] === "issue" && args[1] === "create")).toBe(false);
+  });
+
   it("creates an idempotent linked follow-up without authorizing it for AFK Delivery", async () => {
     const calls: string[][] = [];
     let existing = false;
@@ -138,10 +206,14 @@ describe("GitHub Managed PR publication adapter", () => {
       trustedActor: { login: "delivery-bot", type: "Bot" },
       command: async (_file, args) => {
         calls.push(args);
-        if (args[0] === "issue" && args[1] === "list") {
+        if (args[0] === "api" && args[1]?.includes("/issues?")) {
           return existing
-            ? JSON.stringify([{ number: 91, url: "https://github.com/owner/repo/issues/91", body: "<!-- afk-effect:follow-up-1 -->" }])
-            : "[]";
+            ? JSON.stringify({
+                number: 91, html_url: "https://github.com/owner/repo/issues/91",
+                body: "<!-- afk-effect:follow-up-1 -->\nSource Delivery Ticket: #66\nSource Managed PR: #73",
+                user: { login: "delivery-bot", type: "Bot" },
+              })
+            : "";
         }
         if (args[0] === "issue" && args[1] === "create") {
           existing = true;
