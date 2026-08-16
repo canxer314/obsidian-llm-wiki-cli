@@ -18,6 +18,8 @@ jobs:
       tickets: ${{ steps.frontier.outputs.tickets }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24.14.0
@@ -28,22 +30,25 @@ jobs:
           npm run build
           npm run typecheck
           npm test
+      - id: app-token
+        name: Mint short-lived GitHub App token
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery app-token
       - name: Worker preflight
         env:
-          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
-          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
-          MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
+          AFK_REVIEWER_IMAGE: ${{ vars.AFK_REVIEWER_IMAGE }}
           AFK_DELIVERY_SKILL_MANIFEST: .sandcastle/skills.lock
-          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
+          AFK_DELIVERY_ACTOR: ${{ steps.app-token.outputs.actor_login }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery preflight
       - id: frontier
         name: Discover Delivery Frontier
         env:
-          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
-          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
-          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
-          AFK_DELIVERY_ACTOR_TYPE: ${{ vars.AFK_DELIVERY_ACTOR_TYPE || 'Bot' }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          AFK_DELIVERY_ACTOR: ${{ steps.app-token.outputs.actor_login }}
+          AFK_DELIVERY_ACTOR_TYPE: ${{ steps.app-token.outputs.actor_type }}
           AFK_TARGET_BRANCH: master
           AFK_RECOVERY_SCAN_LIMIT: "100"
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery discover
@@ -68,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24.14.0
@@ -79,19 +84,22 @@ jobs:
           npm run build
           npm run typecheck
           npm test
+      - id: app-token
+        name: Mint short-lived GitHub App token
+        run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery app-token
       - name: Worker preflight
         env:
-          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
-          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
-          MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
+          AFK_REVIEWER_IMAGE: ${{ vars.AFK_REVIEWER_IMAGE }}
           AFK_DELIVERY_SKILL_MANIFEST: .sandcastle/skills.lock
-          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
+          AFK_DELIVERY_ACTOR: ${{ steps.app-token.outputs.actor_login }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery preflight
       - id: current
         name: Reconstruct current GitHub state
         env:
-          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery reconstruct ${{ matrix.ticket }}
       - id: transition
         name: Dispatch one bounded transition
@@ -102,16 +110,17 @@ jobs:
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery dispatch ${{ matrix.ticket }}
       - name: Implement or continue Managed PR
         env:
-          GITHUB_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
-          GH_TOKEN: ${{ secrets.AFK_DELIVERY_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: credential.https://github.com.helper
+          GIT_CONFIG_VALUE_0: "!gh auth git-credential"
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-          MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
-          MODEL_GATEWAY_TOKEN: ${{ secrets.MODEL_GATEWAY_TOKEN }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
           AFK_REVIEWER_IMAGE: ${{ vars.AFK_REVIEWER_IMAGE }}
-          AFK_DELIVERY_ACTOR: ${{ vars.AFK_DELIVERY_ACTOR }}
-          AFK_DELIVERY_ACTOR_TYPE: ${{ vars.AFK_DELIVERY_ACTOR_TYPE || 'Bot' }}
+          AFK_DELIVERY_ACTOR: ${{ steps.app-token.outputs.actor_login }}
+          AFK_DELIVERY_ACTOR_TYPE: ${{ steps.app-token.outputs.actor_type }}
           AFK_REPOSITORY_INSTRUCTIONS: ${{ github.workspace }}/CLAUDE.md
           AFK_DOMAIN_DOCUMENTS: ${{ github.workspace }}/docs/agents/domain.md:${{ github.workspace }}/docs/contexts/afk-delivery/CONTEXT.md
           AFK_ARCHITECTURE_DECISIONS: ${{ github.workspace }}/docs/adr/0001-github-as-afk-delivery-record.md:${{ github.workspace }}/docs/adr/0001-managed-pr-implementation-boundary.md:${{ github.workspace }}/docs/adr/0002-autonomous-merge-for-ready-delivery-tickets.md

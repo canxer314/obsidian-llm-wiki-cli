@@ -3,10 +3,14 @@
 import type { RepositoryPolicy } from "@llm-wiki/afk-delivery-core";
 import { execFile } from "node:child_process";
 
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import {
+  issueGitHubAppToken,
+  loadGitHubAppTokenConfig,
+} from "./github-app-token.js";
 import {
   adoptManagedPullRequest,
   continueManagedPullRequest,
@@ -32,6 +36,7 @@ import {
   runReviewStage,
   runValidationStage,
   runWorkerPreflight,
+  validateContainerClaudeSettings,
   type GitHubReadPort,
   type PreflightCheck,
   type PromptDocument,
@@ -115,16 +120,39 @@ function repositoryPolicy(targetBranch: string, actor: ReturnType<typeof trusted
   };
 }
 
-function preflightChecks(): PreflightCheck[] {
+async function modelGatewayConfig(): Promise<{ url: string; token: string }> {
+  const path = containerClaudeSettingsPath();
+  if (((await stat(path)).mode & 0o077) !== 0) {
+    throw new Error("container Claude settings must not be accessible by group or other users");
+  }
+  const content = await readFile(path, "utf8");
+  validateContainerClaudeSettings(content);
+  const environment = (JSON.parse(content) as { env?: Record<string, unknown> }).env;
+  const url = environment?.ANTHROPIC_BASE_URL;
+  const token = environment?.ANTHROPIC_AUTH_TOKEN;
+  if (typeof url !== "string" || url.length === 0 || typeof token !== "string" || token.length === 0) {
+    throw new Error("container Claude settings must configure the model gateway");
+  }
+  return { url, token };
+}
+
+function preflightChecks(gateway: { url: string; token: string }): PreflightCheck[] {
   return [
     { name: "docker", check: async () => { await command("docker", ["info", "--format", "{{.ServerVersion}}"]); return { ok: true }; } },
     { name: "model-gateway", check: async (signal) => {
-      const url = new URL("/v1/models", requiredEnvironment("MODEL_GATEWAY_URL"));
-      const response = await fetch(url, signal === undefined ? {} : { signal });
+      const url = new URL("/v1/models", gateway.url);
+      const response = await fetch(url, {
+        ...(signal === undefined ? {} : { signal }),
+        headers: { authorization: `Bearer ${gateway.token}` },
+      });
       return response.ok ? { ok: true } : { ok: false, reason: `gateway returned ${response.status}` };
     } },
     { name: "delivery-image", check: async () => {
       await command("docker", ["image", "inspect", requiredEnvironment("AFK_DELIVERY_IMAGE")]);
+      return { ok: true };
+    } },
+    { name: "reviewer-image", check: async () => {
+      await command("docker", ["image", "inspect", requiredEnvironment("AFK_REVIEWER_IMAGE")]);
       return { ok: true };
     } },
     { name: "pinned-skills", check: async () => {
@@ -134,12 +162,15 @@ function preflightChecks(): PreflightCheck[] {
         ? { ok: true }
         : { ok: false, reason: "image skill versions do not match the pinned manifest" };
     } },
+    { name: "container-settings", check: async () => {
+      validateContainerClaudeSettings(await readFile(containerClaudeSettingsPath(), "utf8"));
+      return { ok: true };
+    } },
     { name: "github-authentication", check: async () => {
-      const viewer = JSON.parse(await command("gh", ["api", "user"])) as { login?: unknown; type?: unknown };
-      const allowedLogin = requiredEnvironment("AFK_DELIVERY_ACTOR");
-      return viewer.login === allowedLogin && (viewer.type === "Bot" || viewer.type === "App")
+      const actor = trustedActor();
+      return actor.login.endsWith("[bot]") && actor.type === "Bot"
         ? { ok: true }
-        : { ok: false, reason: "GitHub credential is not the configured bot/App identity" };
+        : { ok: false, reason: "GitHub credential is not the verified App bot identity" };
     } },
     { name: "repository-access", check: async () => { await command("gh", ["repo", "view", repositoryParts().fullName, "--json", "nameWithOwner"]); return { ok: true }; } },
     { name: "writable-workspace", check: async () => {
@@ -148,6 +179,27 @@ function preflightChecks(): PreflightCheck[] {
       return { ok: true };
     } },
   ];
+}
+
+async function appToken(): Promise<void> {
+  const repository = repositoryParts().fullName;
+  const result = await issueGitHubAppToken(
+    await loadGitHubAppTokenConfig(),
+    { expectedRepository: repository },
+  );
+  if (process.env.GITHUB_OUTPUT !== undefined) {
+    process.stdout.write(`::add-mask::${result.token}\n`);
+    await writeOutput("token", result.token);
+    await writeOutput("expires_at", result.expiresAt);
+    await writeOutput("actor_login", result.actorLogin);
+    await writeOutput("actor_type", result.actorType);
+  }
+  process.stdout.write(`${JSON.stringify({
+    status: "issued",
+    expiresAt: result.expiresAt,
+    actorLogin: result.actorLogin,
+    actorType: result.actorType,
+  })}\n`);
 }
 
 async function loadFrontier() {
@@ -182,7 +234,7 @@ async function discover(): Promise<void> {
 }
 
 async function preflight(): Promise<void> {
-  const result = await runWorkerPreflight(preflightChecks());
+  const result = await runWorkerPreflight(preflightChecks(await modelGatewayConfig()));
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.status !== "ready") process.exitCode = 1;
 }
@@ -307,6 +359,7 @@ async function implement(ticketNumber: number): Promise<void> {
     throw new Error(reconstructedTicket.reason);
   }
   const repositoryPath = resolve(process.env.GITHUB_WORKSPACE ?? process.cwd());
+  const gateway = await modelGatewayConfig();
   const targetBranch = process.env.AFK_TARGET_BRANCH ?? "master";
   const rawTicket = await command("gh", [
     "issue", "view", String(ticketNumber), "--repo", repository,
@@ -367,21 +420,21 @@ async function implement(ticketNumber: number): Promise<void> {
     repositoryPath,
     image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
     claudeSettingsPath: containerClaudeSettingsPath(),
-    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    modelGatewayUrl: gateway.url,
+    modelGatewayToken: gateway.token,
   });
   const localValidation = createLocalValidationPorts({ repositoryUrl });
   const localRepair = createLocalRepairPorts({
     repositoryPath,
     image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
     claudeSettingsPath: containerClaudeSettingsPath(),
-    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    modelGatewayUrl: gateway.url,
+    modelGatewayToken: gateway.token,
   });
   const localReview = createLocalReviewPorts({
     reviewerLauncher: resolve(repositoryPath, ".sandcastle/run-reviewer.sh"),
-    modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-    modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+    modelGatewayUrl: gateway.url,
+    modelGatewayToken: gateway.token,
     reviewerImage: requiredEnvironment("AFK_REVIEWER_IMAGE"),
   });
   const continuation = await continueManagedPullRequest({
@@ -448,8 +501,8 @@ async function implement(ticketNumber: number): Promise<void> {
       repositoryPath,
       image: requiredEnvironment("AFK_DELIVERY_IMAGE"),
       claudeSettingsPath: containerClaudeSettingsPath(),
-      modelGatewayUrl: requiredEnvironment("MODEL_GATEWAY_URL"),
-      modelGatewayToken: requiredEnvironment("MODEL_GATEWAY_TOKEN"),
+      modelGatewayUrl: gateway.url,
+      modelGatewayToken: gateway.token,
     }),
     publication,
   });
@@ -458,7 +511,8 @@ async function implement(ticketNumber: number): Promise<void> {
 }
 
 const [operation, argument, secondArgument] = process.argv.slice(2);
-if (operation === "discover") await discover();
+if (operation === "app-token") await appToken();
+else if (operation === "discover") await discover();
 else if (operation === "preflight") await preflight();
 else if (operation === "adopt" && /^\d+$/u.test(argument ?? "") && /^\d+$/u.test(secondArgument ?? "")) {
   await adopt(Number(argument), Number(secondArgument));
@@ -468,5 +522,5 @@ else if (operation === "adopt" && /^\d+$/u.test(argument ?? "") && /^\d+$/u.test
   else if (operation === "dispatch") await dispatch(ticketNumber);
   else await implement(ticketNumber);
 } else {
-  throw new Error("usage: afk-delivery <discover|preflight|adopt TICKET PR|reconstruct TICKET|dispatch TICKET|implement TICKET>");
+  throw new Error("usage: afk-delivery <app-token|discover|preflight|adopt TICKET PR|reconstruct TICKET|dispatch TICKET|implement TICKET>");
 }

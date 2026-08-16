@@ -71,6 +71,7 @@ describe("Sandcastle reviewer image", () => {
     expect(launcher).toContain("--tools Read");
     expect(launcher).toContain("--permission-mode dontAsk");
     expect(launcher).toContain("--no-session-persistence");
+    expect(launcher).toContain("'{\"mcpServers\":{}}'");
     expect(launcher).not.toMatch(/GITHUB_TOKEN|GH_TOKEN|SSH_AUTH_SOCK|docker\.sock/gu);
   });
 

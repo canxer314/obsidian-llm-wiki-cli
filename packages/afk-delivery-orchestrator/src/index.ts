@@ -1,5 +1,6 @@
 export * from "./conflict-resolution.js";
 export * from "./git-synchronization.js";
+export * from "./github-app-token.js";
 export * from "./github-publication.js";
 export * from "./implementation.js";
 export * from "./local-stage.js";
@@ -23,7 +24,9 @@ export type PreflightCheckName =
   | "docker"
   | "model-gateway"
   | "delivery-image"
+  | "reviewer-image"
   | "pinned-skills"
+  | "container-settings"
   | "github-authentication"
   | "repository-access"
   | "writable-workspace";
