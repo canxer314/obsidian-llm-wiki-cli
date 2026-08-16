@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import {
   issueGitHubAppToken,
   loadGitHubAppTokenConfig,
+  verifyGitHubInstallationToken,
 } from "./github-app-token.js";
 import {
   adoptManagedPullRequest,
@@ -136,10 +137,16 @@ async function modelGatewayConfig(): Promise<{ url: string; token: string }> {
   return { url, token };
 }
 
-function preflightChecks(gateway: { url: string; token: string }): PreflightCheck[] {
+function preflightChecks(): PreflightCheck[] {
+  let gateway: { url: string; token: string } | undefined;
   return [
     { name: "docker", check: async () => { await command("docker", ["info", "--format", "{{.ServerVersion}}"]); return { ok: true }; } },
+    { name: "container-settings", check: async () => {
+      gateway = await modelGatewayConfig();
+      return { ok: true };
+    } },
     { name: "model-gateway", check: async (signal) => {
+      if (gateway === undefined) throw new Error("container settings were not checked");
       const url = new URL("/v1/models", gateway.url);
       const response = await fetch(url, {
         ...(signal === undefined ? {} : { signal }),
@@ -162,15 +169,14 @@ function preflightChecks(gateway: { url: string; token: string }): PreflightChec
         ? { ok: true }
         : { ok: false, reason: "image skill versions do not match the pinned manifest" };
     } },
-    { name: "container-settings", check: async () => {
-      validateContainerClaudeSettings(await readFile(containerClaudeSettingsPath(), "utf8"));
-      return { ok: true };
-    } },
     { name: "github-authentication", check: async () => {
       const actor = trustedActor();
-      return actor.login.endsWith("[bot]") && actor.type === "Bot"
-        ? { ok: true }
-        : { ok: false, reason: "GitHub credential is not the verified App bot identity" };
+      await verifyGitHubInstallationToken({
+        token: requiredEnvironment("GITHUB_TOKEN"),
+        repository: repositoryParts().fullName,
+        actorLogin: actor.login,
+      });
+      return { ok: true };
     } },
     { name: "repository-access", check: async () => { await command("gh", ["repo", "view", repositoryParts().fullName, "--json", "nameWithOwner"]); return { ok: true }; } },
     { name: "writable-workspace", check: async () => {
@@ -234,7 +240,7 @@ async function discover(): Promise<void> {
 }
 
 async function preflight(): Promise<void> {
-  const result = await runWorkerPreflight(preflightChecks(await modelGatewayConfig()));
+  const result = await runWorkerPreflight(preflightChecks());
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.status !== "ready") process.exitCode = 1;
 }

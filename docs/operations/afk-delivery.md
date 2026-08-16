@@ -28,7 +28,7 @@ Do not store the GitHub App private key or model gateway credential in repositor
 - `AFK_GITHUB_APP_CONFIG`: optional path to the App config; defaults to `~/.config/afk-delivery/github-app.json`.
 - `AFK_CLAUDE_SETTINGS`: optional path to the mode `0600` container-only Claude settings; defaults to `~/.claude/settings-docker.json`. Its `env` object carries `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` for the local gateway.
 
-Both the App config and private key must be mode `0600`. The config stores only identifiers and a path relative to the config file:
+Both the App config and private key must be mode `0600`. `privateKeyFile` must be a relative path whose resolved target remains inside the config directory; absolute paths, `..` escapes, and escaping symlinks are rejected. The config stores only identifiers and that local relative path:
 
 ```json
 {
@@ -39,7 +39,7 @@ Both the App config and private key must be mode `0600`. The config stores only 
 }
 ```
 
-Each discovery job and each bounded delivery job calls `afk-delivery app-token`. The helper verifies `GET /app`, checks the configured App ID, derives the canonical `<slug>[bot]` actor, and requests a new repository-limited installation token. It masks the token before writing it to the step output. The workflow does not persist checkout credentials; deterministic Git mutations use a process-scoped `gh auth git-credential` helper, while stage launchers receive only model-gateway fields.
+Each discovery job and each bounded delivery job calls `afk-delivery app-token`. The helper verifies `GET /app`, checks the configured App ID and selected-repository installation, derives the canonical `<slug>[bot]` actor, and requests a new repository-limited installation token. Preflight then uses that token to verify the installation actor and that exactly the configured repository is visible. The helper masks the token before writing it to the step output. The workflow does not persist checkout credentials; deterministic Git mutations use a process-scoped `gh auth git-credential` helper, while stage launchers receive only model-gateway fields.
 
 The workflow maps the model gateway into isolated stages; it must not expose GitHub credentials through that gateway. Configure cc-switch so the workflow's selected model alias resolves deterministically, and verify connectivity with the worker preflight before enabling the schedule. A gateway outage is a preflight or stage failure, never permission to skip review or validation.
 

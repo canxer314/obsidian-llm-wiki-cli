@@ -1,7 +1,7 @@
 import { createSign } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export interface GitHubAppTokenConfig {
   appId: string;
@@ -48,7 +48,15 @@ export async function loadGitHubAppTokenConfig(
       typeof value.repository !== "string" || typeof value.privateKeyFile !== "string") {
     throw new Error("GitHub App configuration is incomplete");
   }
-  const privateKeyPath = resolve(dirname(configPath), value.privateKeyFile);
+  if (isAbsolute(value.privateKeyFile)) {
+    throw new Error("GitHub App private key must use a path relative to the configuration file");
+  }
+  const configDirectory = await realpath(dirname(configPath));
+  const privateKeyPath = await realpath(resolve(configDirectory, value.privateKeyFile));
+  const privateKeyRelative = relative(configDirectory, privateKeyPath);
+  if (privateKeyRelative === "" || privateKeyRelative.startsWith("..") || isAbsolute(privateKeyRelative)) {
+    throw new Error("GitHub App private key must remain inside the configuration directory");
+  }
   await restrictedFile(privateKeyPath);
   return {
     appId: value.appId,
@@ -83,6 +91,40 @@ function repositoryName(repository: string): string {
   return parts[1] as string;
 }
 
+export async function verifyGitHubInstallationToken(input: {
+  token: string;
+  repository: string;
+  actorLogin: string;
+}, request: typeof fetch = fetch): Promise<void> {
+  const headers = {
+    accept: "application/vnd.github+json",
+    authorization: `Bearer ${input.token}`,
+    "x-github-api-version": "2026-03-10",
+    "user-agent": "afk-delivery-worker",
+  };
+  const installationResponse = await request("https://api.github.com/installation", { headers });
+  if (!installationResponse.ok) {
+    throw new Error(`GitHub installation identity request failed with status ${installationResponse.status}`);
+  }
+  const installation: unknown = await installationResponse.json();
+  const slug = (installation as { app_slug?: unknown }).app_slug;
+  if ((installation as { repository_selection?: unknown }).repository_selection !== "selected" ||
+      typeof slug !== "string" || `${slug}[bot]` !== input.actorLogin) {
+    throw new Error("GitHub credential is not the configured repository App identity");
+  }
+
+  const repositoriesResponse = await request("https://api.github.com/installation/repositories?per_page=100", { headers });
+  if (!repositoriesResponse.ok) {
+    throw new Error(`GitHub installation repositories request failed with status ${repositoriesResponse.status}`);
+  }
+  const value: unknown = await repositoriesResponse.json();
+  const repositories = (value as { repositories?: unknown }).repositories;
+  if (!Array.isArray(repositories) || repositories.length !== 1 ||
+      (repositories[0] as { full_name?: unknown }).full_name !== input.repository) {
+    throw new Error("GitHub App installation is not limited to the configured repository");
+  }
+}
+
 export async function issueGitHubAppToken(
   config: GitHubAppTokenConfig,
   dependencies: GitHubAppTokenDependencies = {},
@@ -111,6 +153,17 @@ export async function issueGitHubAppToken(
   const slug = (app as { slug?: unknown }).slug;
   if (String(id) !== config.appId || typeof slug !== "string" || !/^[A-Za-z0-9-]+$/u.test(slug)) {
     throw new Error("GitHub App identity does not match the configured App id");
+  }
+  const installationResponse = await request(
+    `https://api.github.com/app/installations/${config.installationId}`,
+    { headers },
+  );
+  if (!installationResponse.ok) {
+    throw new Error(`GitHub App installation request failed with status ${installationResponse.status}`);
+  }
+  const installation: unknown = await installationResponse.json();
+  if ((installation as { repository_selection?: unknown }).repository_selection !== "selected") {
+    throw new Error("GitHub App installation must be limited to selected repositories");
   }
   const response = await request(
     `https://api.github.com/app/installations/${config.installationId}/access_tokens`,
