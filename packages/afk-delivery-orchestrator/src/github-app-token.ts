@@ -102,14 +102,16 @@ export async function verifyGitHubInstallationToken(input: {
     "x-github-api-version": "2026-03-10",
     "user-agent": "afk-delivery-worker",
   };
-  const installationResponse = await request("https://api.github.com/installation", { headers });
-  if (!installationResponse.ok) {
-    throw new Error(`GitHub installation identity request failed with status ${installationResponse.status}`);
+  const viewerResponse = await request("https://api.github.com/graphql", {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ query: "query { viewer { login } }" }),
+  });
+  if (!viewerResponse.ok) {
+    throw new Error(`GitHub credential identity request failed with status ${viewerResponse.status}`);
   }
-  const installation: unknown = await installationResponse.json();
-  const slug = (installation as { app_slug?: unknown }).app_slug;
-  if ((installation as { repository_selection?: unknown }).repository_selection !== "selected" ||
-      typeof slug !== "string" || `${slug}[bot]` !== input.actorLogin) {
+  const viewer: unknown = await viewerResponse.json();
+  if ((viewer as { data?: { viewer?: { login?: unknown } } }).data?.viewer?.login !== input.actorLogin) {
     throw new Error("GitHub credential is not the configured repository App identity");
   }
 
@@ -118,6 +120,9 @@ export async function verifyGitHubInstallationToken(input: {
     throw new Error(`GitHub installation repositories request failed with status ${repositoriesResponse.status}`);
   }
   const value: unknown = await repositoriesResponse.json();
+  if ((value as { repository_selection?: unknown }).repository_selection !== "selected") {
+    throw new Error("GitHub App installation is not limited to selected repositories");
+  }
   const repositories = (value as { repositories?: unknown }).repositories;
   if (!Array.isArray(repositories) || repositories.length !== 1 ||
       (repositories[0] as { full_name?: unknown }).full_name !== input.repository) {
@@ -135,7 +140,7 @@ export async function issueGitHubAppToken(
   if (dependencies.expectedRepository !== undefined && config.repository !== dependencies.expectedRepository) {
     throw new Error("GitHub App installation is not configured for this repository");
   }
-  const repository = repositoryName(config.repository);
+  repositoryName(config.repository);
   const request = dependencies.request ?? fetch;
   const jwt = appJwt(config, (dependencies.now ?? (() => new Date()))());
   const headers = {
@@ -170,7 +175,6 @@ export async function issueGitHubAppToken(
     {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ repositories: [repository] }),
     },
   );
   if (!response.ok) {
@@ -182,5 +186,11 @@ export async function issueGitHubAppToken(
   if (typeof token !== "string" || token.length === 0 || typeof expiresAt !== "string" || expiresAt.length === 0) {
     throw new Error("GitHub App token response was incomplete");
   }
-  return { token, expiresAt, actorLogin: `${slug}[bot]`, actorType: "Bot" };
+  const actorLogin = `${slug}[bot]`;
+  await verifyGitHubInstallationToken({
+    token,
+    repository: config.repository,
+    actorLogin,
+  }, request);
+  return { token, expiresAt, actorLogin, actorType: "Bot" };
 }

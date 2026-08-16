@@ -39,7 +39,7 @@ Both the App config and private key must be mode `0600`. `privateKeyFile` must b
 }
 ```
 
-Each discovery job and each bounded delivery job calls `afk-delivery app-token`. The helper verifies `GET /app`, checks the configured App ID and selected-repository installation, derives the canonical `<slug>[bot]` actor, and requests a new repository-limited installation token. Preflight then uses that token to verify the installation actor and that exactly the configured repository is visible. The helper masks the token before writing it to the step output. The workflow does not persist checkout credentials; deterministic Git mutations use a process-scoped `gh auth git-credential` helper, while stage launchers receive only model-gateway fields.
+Each discovery job and each bounded delivery job calls `afk-delivery app-token`. The helper verifies `GET /app`, checks the configured App ID and selected-repository installation, derives the canonical `<slug>[bot]` actor, requests a fresh installation token, and rejects the token unless its authenticated actor matches and its complete repository visibility is exactly the configured repository. Preflight repeats the actor and repository-scope verification before work. The helper masks the token before writing it to the step output. The workflow does not persist checkout credentials; deterministic Git mutations use a process-scoped `gh auth git-credential` helper, while stage launchers receive only model-gateway fields.
 
 The workflow maps the model gateway into isolated stages; it must not expose GitHub credentials through that gateway. Configure cc-switch so the workflow's selected model alias resolves deterministically, and verify connectivity with the worker preflight before enabling the schedule. A gateway outage is a preflight or stage failure, never permission to skip review or validation.
 
@@ -69,10 +69,16 @@ npm ci
 npm run build
 npm run typecheck
 npm test
-npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery app-token
-npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery preflight
+GITHUB_REPOSITORY=owner/repository \
+AFK_DELIVERY_IMAGE=<delivery-image> \
+AFK_REVIEWER_IMAGE=<reviewer-image> \
+AFK_DELIVERY_SKILL_MANIFEST=.sandcastle/skills.lock \
+  npm exec -w @llm-wiki/afk-delivery-orchestrator -- \
+    afk-delivery commissioning-preflight
 AFK_CONTAINER_SMOKE=1 npm run test:container-smoke -w @llm-wiki/afk-delivery-orchestrator
 ```
+
+`commissioning-preflight` loads the local App configuration, mints one fresh installation token, and consumes it in the same process. It passes the token directly to the identity and repository-scope API requests and only to the repository-access `gh` child process; it does not write the token to disk, print it, or add it to the parent process environment. The regular workflow continues to use `app-token` followed by `preflight` through masked, job-scoped step outputs.
 
 Preflight verifies Docker, the local model gateway, both images, pinned skills, container settings, the verified App actor, repository access, and a writable workspace. The smoke runs both stage images read-only and fails if either can see GitHub credentials, a Docker socket, host GitHub/SSH state, or host Claude configuration. Do not enable the workflow until every command succeeds. Enabling the workflow is separate from authorizing a canary: all existing tickets remain prohibited, and a canary must wait for its native blocker to close.
 

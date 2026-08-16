@@ -39,15 +39,26 @@ const tokenResponse = (token: string) => new Response(JSON.stringify({
 }), { status: 201, headers: { "content-type": "application/json" } });
 
 describe("GitHub App installation token", () => {
-  it("signs a fresh App JWT and limits every token request to the configured repository", async () => {
+  it("signs a fresh App JWT and verifies every full installation token against the configured repository", async () => {
     const keys = signingMaterial();
+    const viewerResponse = () => new Response(JSON.stringify({
+      data: { viewer: { login: "afk-delivery-canary[bot]" } },
+    }), { status: 200 });
+    const repositoriesResponse = () => new Response(JSON.stringify({
+      repository_selection: "selected",
+      repositories: [{ full_name: "canxer314/obsidian-llm-wiki-cli" }],
+    }), { status: 200 });
     const request = vi.fn()
       .mockResolvedValueOnce(appResponse())
       .mockResolvedValueOnce(installationResponse())
       .mockResolvedValueOnce(tokenResponse("installation-token-one"))
+      .mockResolvedValueOnce(viewerResponse())
+      .mockResolvedValueOnce(repositoriesResponse())
       .mockResolvedValueOnce(appResponse())
       .mockResolvedValueOnce(installationResponse())
-      .mockResolvedValueOnce(tokenResponse("installation-token-two"));
+      .mockResolvedValueOnce(tokenResponse("installation-token-two"))
+      .mockResolvedValueOnce(viewerResponse())
+      .mockResolvedValueOnce(repositoriesResponse());
     const config = {
       appId: "12345",
       installationId: 67890,
@@ -76,13 +87,13 @@ describe("GitHub App installation token", () => {
       actorLogin: "afk-delivery-canary[bot]",
       actorType: "Bot",
     });
-    expect(request).toHaveBeenCalledTimes(6);
+    expect(request).toHaveBeenCalledTimes(10);
     const tokenCalls = request.mock.calls.filter(([url]) => String(url).includes("/access_tokens")) as Array<[string, RequestInit]>;
     expect(tokenCalls).toHaveLength(2);
     for (const [url, init] of tokenCalls) {
       expect(url).toBe("https://api.github.com/app/installations/67890/access_tokens");
       expect(init.method).toBe("POST");
-      expect(JSON.parse(String(init.body))).toEqual({ repositories: ["obsidian-llm-wiki-cli"] });
+      expect(init.body).toBeUndefined();
       const authorization = new Headers(init.headers).get("authorization");
       const jwt = authorization?.replace("Bearer ", "") ?? "";
       const [header, payload, signature] = jwt.split(".");
@@ -98,6 +109,34 @@ describe("GitHub App installation token", () => {
     }
     expect(new Headers(tokenCalls[0]?.[1].headers).get("authorization"))
       .not.toBe(new Headers(tokenCalls[1]?.[1].headers).get("authorization"));
+  });
+
+  it("rejects a token issued from an App installation that includes another repository", async () => {
+    const keys = signingMaterial();
+    const request = vi.fn()
+      .mockResolvedValueOnce(appResponse())
+      .mockResolvedValueOnce(installationResponse())
+      .mockResolvedValueOnce(tokenResponse("installation-token"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { viewer: { login: "afk-delivery-canary[bot]" } },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        repository_selection: "selected",
+        repositories: [
+          { full_name: "canxer314/obsidian-llm-wiki-cli" },
+          { full_name: "canxer314/other" },
+        ],
+      }), { status: 200 }));
+
+    await expect(issueGitHubAppToken({
+      appId: "12345",
+      installationId: 67890,
+      repository: "canxer314/obsidian-llm-wiki-cli",
+      privateKey: keys.privateKey,
+    }, {
+      now: () => new Date("2026-08-16T14:00:00Z"),
+      request,
+    })).rejects.toThrow("GitHub App installation is not limited to the configured repository");
   });
 
   it("fails closed without disclosing signing material or token-shaped response fields", async () => {
@@ -138,13 +177,13 @@ describe("GitHub App installation token", () => {
     }
   });
 
-  it("verifies the installation token actor and its single configured repository", async () => {
+  it("verifies the installation token actor, selected scope, and single configured repository", async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        app_slug: "afk-delivery-canary",
-        repository_selection: "selected",
+        data: { viewer: { login: "afk-delivery-canary[bot]" } },
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
+        repository_selection: "selected",
         repositories: [{ full_name: "canxer314/obsidian-llm-wiki-cli" }],
       }), { status: 200 }));
 
@@ -154,15 +193,39 @@ describe("GitHub App installation token", () => {
       actorLogin: "afk-delivery-canary[bot]",
     }, request)).resolves.toBeUndefined();
     expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      "https://api.github.com/graphql",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      "https://api.github.com/installation/repositories?per_page=100",
+      expect.any(Object),
+    );
+  });
+
+  it("rejects an installation token whose viewer is not the configured App actor", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { viewer: { login: "another-app[bot]" } },
+      }), { status: 200 }));
+
+    await expect(verifyGitHubInstallationToken({
+      token: "installation-token",
+      repository: "canxer314/obsidian-llm-wiki-cli",
+      actorLogin: "afk-delivery-canary[bot]",
+    }, request)).rejects.toThrow("GitHub credential is not the configured repository App identity");
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an installation token that can access more than the configured repository", async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        app_slug: "afk-delivery-canary",
-        repository_selection: "selected",
+        data: { viewer: { login: "afk-delivery-canary[bot]" } },
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
+        repository_selection: "selected",
         repositories: [
           { full_name: "canxer314/obsidian-llm-wiki-cli" },
           { full_name: "canxer314/other" },
@@ -174,6 +237,23 @@ describe("GitHub App installation token", () => {
       repository: "canxer314/obsidian-llm-wiki-cli",
       actorLogin: "afk-delivery-canary[bot]",
     }, request)).rejects.toThrow("GitHub App installation is not limited to the configured repository");
+  });
+
+  it("rejects a token whose installation is not limited to selected repositories", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { viewer: { login: "afk-delivery-canary[bot]" } },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        repository_selection: "all",
+        repositories: [{ full_name: "canxer314/obsidian-llm-wiki-cli" }],
+      }), { status: 200 }));
+
+    await expect(verifyGitHubInstallationToken({
+      token: "installation-token",
+      repository: "canxer314/obsidian-llm-wiki-cli",
+      actorLogin: "afk-delivery-canary[bot]",
+    }, request)).rejects.toThrow("GitHub App installation is not limited to selected repositories");
   });
 
   it("rejects an App installation that is not repository-scoped", async () => {

@@ -32,12 +32,16 @@ import {
   executeNewImplementationTransition,
   implementationTransitionId,
   reconstructDeliveryTicket,
+  readPinnedSkillsManifestFromImage,
+  runCommissioningPreflight,
   runConflictResolutionStage,
   runRepairStage,
   runReviewStage,
   runValidationStage,
   runWorkerPreflight,
   validateContainerClaudeSettings,
+  viewRepositoryWithCredential,
+  type GitHubAppCredential,
   type GitHubReadPort,
   type PreflightCheck,
   type PromptDocument,
@@ -51,8 +55,15 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-async function command(file: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync(file, args, { timeout: 30_000 });
+async function command(
+  file: string,
+  args: string[],
+  environment?: Record<string, string>,
+): Promise<string> {
+  const { stdout } = await execFileAsync(file, args, {
+    timeout: 30_000,
+    ...(environment === undefined ? {} : { env: { ...process.env, ...environment } }),
+  });
   return stdout.trim();
 }
 
@@ -137,7 +148,7 @@ async function modelGatewayConfig(): Promise<{ url: string; token: string }> {
   return { url, token };
 }
 
-function preflightChecks(): PreflightCheck[] {
+function preflightChecks(credential?: GitHubAppCredential): PreflightCheck[] {
   let gateway: { url: string; token: string } | undefined;
   return [
     { name: "docker", check: async () => { await command("docker", ["info", "--format", "{{.ServerVersion}}"]); return { ok: true }; } },
@@ -163,22 +174,35 @@ function preflightChecks(): PreflightCheck[] {
       return { ok: true };
     } },
     { name: "pinned-skills", check: async () => {
-      const actual = await command("docker", ["run", "--rm", "--network", "none", requiredEnvironment("AFK_DELIVERY_IMAGE"), "cat", "/opt/afk-delivery/skills.lock"]);
+      const actual = await readPinnedSkillsManifestFromImage(
+        requiredEnvironment("AFK_DELIVERY_IMAGE"),
+        command,
+      );
       const expected = await readFile(requiredEnvironment("AFK_DELIVERY_SKILL_MANIFEST"), "utf8");
       return actual === expected.trim()
         ? { ok: true }
         : { ok: false, reason: "image skill versions do not match the pinned manifest" };
     } },
     { name: "github-authentication", check: async () => {
-      const actor = trustedActor();
+      const actor = credential === undefined ? trustedActor() : {
+        login: credential.actorLogin,
+        type: credential.actorType,
+      };
       await verifyGitHubInstallationToken({
-        token: requiredEnvironment("GITHUB_TOKEN"),
+        token: credential?.token ?? requiredEnvironment("GITHUB_TOKEN"),
         repository: repositoryParts().fullName,
         actorLogin: actor.login,
       });
       return { ok: true };
     } },
-    { name: "repository-access", check: async () => { await command("gh", ["repo", "view", repositoryParts().fullName, "--json", "nameWithOwner"]); return { ok: true }; } },
+    { name: "repository-access", check: async () => {
+      if (credential === undefined) {
+        await command("gh", ["repo", "view", repositoryParts().fullName, "--json", "nameWithOwner"]);
+      } else {
+        await viewRepositoryWithCredential(repositoryParts().fullName, credential.token, command);
+      }
+      return { ok: true };
+    } },
     { name: "writable-workspace", check: async () => {
       const directory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "afk-delivery-"));
       try { await writeFile(join(directory, "probe"), "ok", "utf8"); } finally { await rm(directory, { recursive: true, force: true }); }
@@ -241,6 +265,27 @@ async function discover(): Promise<void> {
 
 async function preflight(): Promise<void> {
   const result = await runWorkerPreflight(preflightChecks());
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result.status !== "ready") process.exitCode = 1;
+}
+
+async function commissioningPreflight(): Promise<void> {
+  const repository = repositoryParts().fullName;
+  const result = await runCommissioningPreflight({
+    expectedRepository: repository,
+    issueCredential: async (expectedRepository) => {
+      const credential = await issueGitHubAppToken(
+        await loadGitHubAppTokenConfig(),
+        { expectedRepository },
+      );
+      return {
+        token: credential.token,
+        actorLogin: credential.actorLogin,
+        actorType: credential.actorType,
+      };
+    },
+    preflight: async (credential) => runWorkerPreflight(preflightChecks(credential)),
+  });
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.status !== "ready") process.exitCode = 1;
 }
@@ -520,6 +565,7 @@ const [operation, argument, secondArgument] = process.argv.slice(2);
 if (operation === "app-token") await appToken();
 else if (operation === "discover") await discover();
 else if (operation === "preflight") await preflight();
+else if (operation === "commissioning-preflight") await commissioningPreflight();
 else if (operation === "adopt" && /^\d+$/u.test(argument ?? "") && /^\d+$/u.test(secondArgument ?? "")) {
   await adopt(Number(argument), Number(secondArgument));
 } else if ((operation === "reconstruct" || operation === "dispatch" || operation === "implement") && /^\d+$/u.test(argument ?? "")) {
@@ -528,5 +574,5 @@ else if (operation === "adopt" && /^\d+$/u.test(argument ?? "") && /^\d+$/u.test
   else if (operation === "dispatch") await dispatch(ticketNumber);
   else await implement(ticketNumber);
 } else {
-  throw new Error("usage: afk-delivery <app-token|discover|preflight|adopt TICKET PR|reconstruct TICKET|dispatch TICKET|implement TICKET>");
+  throw new Error("usage: afk-delivery <app-token|discover|preflight|commissioning-preflight|adopt TICKET PR|reconstruct TICKET|dispatch TICKET|implement TICKET>");
 }
