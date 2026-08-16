@@ -20,7 +20,7 @@ Review the complete diff independently along both axes:
 1. **Standards**: identify violations of supplied repository instructions and relevant domain or architecture constraints.
 2. **Spec**: identify missing or partial acceptance criteria, incorrect behavior, scope creep, and unhandled failure scenarios from the Delivery Ticket.
 
-For every finding, preserve:
+For every finding, use a unique stable heading in review order (`### F-1`, `### F-2`, ...), then preserve:
 
 - affected file and location;
 - concrete failure scenario;

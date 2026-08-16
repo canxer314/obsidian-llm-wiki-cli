@@ -12,6 +12,7 @@ import {
 const HEAD_REVISION = "a".repeat(40);
 const BASE_REVISION = "b".repeat(40);
 const ADVANCED_REVISION = "c".repeat(40);
+const SECOND_REPAIR_REVISION = "d".repeat(40);
 
 const policy: RepositoryPolicy = {
   schemaVersion: 1,
@@ -24,7 +25,7 @@ const policy: RepositoryPolicy = {
   requiredValidationCommands: ["npm test", "npm run typecheck"],
   reviewSkill: {
     path: "/home/agent/.claude/skills/code-review/SKILL.md",
-    revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+    revision: "sha256:bab450f3b140af9327d945cf9bb12dc5c68bc0381f9afb1aea42083709fa5035",
   },
   mergeStrategy: "squash",
 };
@@ -64,6 +65,7 @@ function managedPr(headRevision = HEAD_REVISION) {
     ticketNumber: 63,
     open: true,
     targetBranch: "master",
+    headBranch: "afk/ticket-63",
     headRevision,
     baseRevision: BASE_REVISION,
     mergeable: true as const,
@@ -307,14 +309,55 @@ describe("selectDeliveryTransition", () => {
     expect(review.transition.kind).toBe("record-review-handoff");
     expect(review.effects[0]?.narrative).toBe(reviewNarrative("changes-required", "Full rationale and failure scenario."));
 
+    const changesRequiredNarrative = [
+      "## Verdict", "changes-required", "", "## Standards", "### F-1", "The retry path duplicates the control comment.",
+      "", "## Spec", "No findings.", "", "## Interactions", "None.", "", "## Constraints", "None.",
+    ].join("\n");
     const changesRequired = snapshot({
-      pullRequests: [managedPr()],
+      repositoryInstructions: "# Repository instructions\nRun tests.",
+      domainDocuments: [{ path: "docs/contexts/afk-delivery/CONTEXT.md", content: "# AFK Delivery" }],
+      architectureDecisions: [{ path: "docs/adr/0001-github-as-afk-delivery-record.md", content: "# ADR" }],
+      ticket: {
+        number: 63,
+        open: true,
+        labels: ["ready-for-agent"],
+        openBlockerNumbers: [],
+        dependencyDataComplete: true,
+        body: "Complete delivery ticket specification",
+      },
+      pullRequests: [{ ...managedPr(), diff: "diff --git a/a.ts b/a.ts\n+complete diff" }],
       controlComments: [
         ...validated.controlComments,
-        trustedRecord("review-handoff", { disposition: "changes-required" }),
+        {
+          ...trustedRecord("review-handoff", { disposition: "changes-required" }),
+          narrative: changesRequiredNarrative,
+        },
       ],
     });
-    expect(selectDeliveryTransition(input(changesRequired)).transition.kind).toBe("repair");
+    const repair = selectDeliveryTransition(input(changesRequired));
+    expect(repair.transition.kind).toBe("repair");
+    expect(repair.effects).toMatchObject([{
+      kind: "run-repair",
+      exactRevision: HEAD_REVISION,
+      repairRequest: {
+        ticket: { number: 63, body: "Complete delivery ticket specification" },
+        round: 1,
+        rejectedRevision: HEAD_REVISION,
+        reviewHandoff: changesRequiredNarrative,
+        repositoryInstructions: "# Repository instructions\nRun tests.",
+        domainDocuments: [{ path: "docs/contexts/afk-delivery/CONTEXT.md", content: "# AFK Delivery" }],
+        architectureDecisions: [{ path: "docs/adr/0001-github-as-afk-delivery-record.md", content: "# ADR" }],
+        capabilities: {
+          sourceReadOnly: false,
+          canEdit: true,
+          canCommit: true,
+          canPush: false,
+          canComment: false,
+          canApprove: false,
+          githubCredentials: false,
+        },
+      },
+    }]);
 
     const repaired = selectDeliveryTransition(input({
       ...changesRequired,
@@ -325,11 +368,13 @@ describe("selectDeliveryTransition", () => {
       inputRevision: HEAD_REVISION,
       outputRevision: ADVANCED_REVISION,
       round: 1,
-      narrative: "## Repair\nEvery finding mapped",
+      reviewTransitionId: "transition-review-handoff",
+      narrative: "## Changes\nFixed findings\n\n## Preserved Behavior\nPreserved validation\n\n## Finding Dispositions\n### F-1\naddressed\nFixed the finding.\n\n## Validation\nnpm test\n\n## Resulting Revision\n" + ADVANCED_REVISION,
+      findings: [{ findingId: "F-1", disposition: "addressed", rationale: "Fixed the finding." }],
       findingsComplete: true,
     }));
     expect(repaired.transition.kind).toBe("record-repair-handoff");
-    expect(repaired.effects[0]?.narrative).toBe("## Repair\nEvery finding mapped");
+    expect(repaired.effects[0]?.narrative).toContain("## Finding Dispositions");
 
     const approved = snapshot({
       pullRequests: [managedPr()],
@@ -498,7 +543,7 @@ describe("selectDeliveryTransition", () => {
         diff: "diff --git a/a.ts b/a.ts\n+complete diff",
         skill: {
           path: "/home/agent/.claude/skills/code-review/SKILL.md",
-          revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+          revision: "sha256:bab450f3b140af9327d945cf9bb12dc5c68bc0381f9afb1aea42083709fa5035",
         },
         capabilities: {
           sourceReadOnly: true,
@@ -736,7 +781,9 @@ describe("selectDeliveryTransition", () => {
       pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+repair" }],
       controlComments: [
         trustedRecord("managed-pr"),
+        trustedRecord("review-handoff", { disposition: "changes-required" }),
         trustedRecord("repair-handoff", {
+          reviewTransitionId: "transition-review-handoff",
           inputRevision: HEAD_REVISION,
           outputRevision: ADVANCED_REVISION,
           round: 1,
@@ -764,7 +811,9 @@ describe("selectDeliveryTransition", () => {
       pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+repair" }],
       controlComments: [
         trustedRecord("managed-pr"),
+        trustedRecord("review-handoff", { disposition: "changes-required" }),
         trustedRecord("repair-handoff", {
+          reviewTransitionId: "transition-review-handoff",
           inputRevision: HEAD_REVISION,
           outputRevision: ADVANCED_REVISION,
           round: 1,
@@ -822,6 +871,7 @@ describe("selectDeliveryTransition", () => {
         ] }),
         trustedRecord("review-handoff", { disposition: "changes-required" }),
         trustedRecord("repair-handoff", {
+          reviewTransitionId: "transition-review-handoff",
           inputRevision: HEAD_REVISION,
           outputRevision: ADVANCED_REVISION,
           disposition: "succeeded",
@@ -852,7 +902,8 @@ describe("selectDeliveryTransition", () => {
     })).transition.kind).toBe("needs-human");
     expect(selectDeliveryTransition(input(managed, {
       kind: "repair", status: "succeeded", inputRevision: HEAD_REVISION, outputRevision: ADVANCED_REVISION,
-      round: 1, narrative: "partial", findingsComplete: false,
+      round: 1, narrative: "partial", findings: [], findingsComplete: false,
+      reviewTransitionId: "transition-review-handoff",
     })).transition.kind).toBe("needs-human");
   });
 
@@ -946,12 +997,215 @@ describe("selectDeliveryTransition", () => {
     ]);
   });
 
+  it("does not restart a repair after its authenticated intent was interrupted", () => {
+    const result = selectDeliveryTransition(input(snapshot({
+      pullRequests: [managedPr()],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        trustedRecord("review-handoff", { disposition: "changes-required" }),
+        trustedRecord("repair-handoff", {
+          reviewTransitionId: "transition-review-handoff",
+          transitionId: "repair-started",
+          disposition: "started",
+          outputRevision: undefined,
+        }),
+      ],
+    })));
+
+    expect(result.transition).toMatchObject({
+      kind: "needs-human",
+      reason: "a repair attempt was interrupted before its complete handoff was authenticated",
+    });
+    expect(result.effects.some((effect) => effect.kind === "run-repair")).toBe(false);
+  });
+
+  it("fails closed when repeated findings show repair inability or oscillation", () => {
+    const first = [
+      "## Verdict", "changes-required", "", "## Standards", "### F-1", "Retry duplicates the comment.",
+      "", "## Spec", "No findings.", "", "## Interactions", "None.", "", "## Constraints", "None.",
+    ].join("\n");
+    const second = first.replace("F-1", "F-2");
+    const value = reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+repair" }],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        { ...trustedRecord("review-handoff", { transitionId: "review-1", disposition: "changes-required" }), narrative: first },
+        trustedRecord("repair-handoff", {
+          reviewTransitionId: "review-1", inputRevision: HEAD_REVISION,
+          outputRevision: ADVANCED_REVISION, round: 1,
+        }),
+        trustedRecord("validation", {
+          inputRevision: ADVANCED_REVISION,
+          round: 2,
+          commands: [
+            { command: "npm test", exitCode: 0, checkId: "test-2", timedOut: false },
+            { command: "npm run typecheck", exitCode: 0, checkId: "types-2", timedOut: false },
+          ],
+        }),
+        { ...trustedRecord("review-handoff", {
+          transitionId: "review-2", inputRevision: ADVANCED_REVISION, round: 2, disposition: "changes-required",
+        }), narrative: second },
+      ],
+    });
+
+    const result = selectDeliveryTransition(input(value));
+    expect(result.transition).toMatchObject({
+      kind: "needs-human",
+      reason: "the same review findings recurred after repair",
+    });
+  });
+
+  it("rejects a Repair Handoff whose narrative contradicts its structured finding dispositions", () => {
+    const review = [
+      "## Verdict", "changes-required", "", "## Standards", "### F-1", "Retry duplicates the comment.",
+      "", "## Spec", "No findings.", "", "## Interactions", "None.", "", "## Constraints", "None.",
+    ].join("\n");
+    const contradictoryHandoff = [
+      "## Changes", "Changed retry identity.", "", "## Preserved Behavior", "Recovery remains intact.",
+      "", "## Finding Dispositions", "### F-1", "blocked", "The repair cannot be completed.",
+      "", "## Validation", "npm test", "", "## Resulting Revision", ADVANCED_REVISION,
+    ].join("\n");
+    const result = selectDeliveryTransition(input(reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+repair" }],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        { ...trustedRecord("review-handoff", { disposition: "changes-required" }), narrative: review },
+      ],
+    }), {
+      kind: "repair", status: "succeeded", inputRevision: HEAD_REVISION,
+      outputRevision: ADVANCED_REVISION, round: 1, narrative: contradictoryHandoff,
+      reviewTransitionId: "transition-review-handoff",
+      findings: [{ findingId: "F-1", disposition: "addressed", rationale: "Retry identity is stable." }],
+      findingsComplete: true,
+    }));
+
+    expect(result.transition).toMatchObject({
+      kind: "needs-human",
+      reason: "repair mapping is incomplete or not bound to the current changed Revision",
+    });
+  });
+
+  it("rejects a repair outcome bound to a different authenticated Review Handoff", () => {
+    const first = [
+      "## Verdict", "changes-required", "", "## Standards", "### F-1", "Retry duplicates comments.",
+      "", "## Spec", "No findings.", "", "## Interactions", "None.", "", "## Constraints", "None.",
+    ].join("\n");
+    const duplicate = first.replace("F-1", "F-2").replace("duplicates comments", "drops evidence");
+    const result = selectDeliveryTransition(input(reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+repair" }],
+      controlComments: [
+        trustedRecord("managed-pr"),
+        { ...trustedRecord("review-handoff", { transitionId: "review-1", disposition: "changes-required" }), narrative: first },
+        { ...trustedRecord("review-handoff", { transitionId: "review-duplicate", disposition: "changes-required" }), narrative: duplicate },
+      ],
+    }), {
+      kind: "repair", status: "succeeded", inputRevision: HEAD_REVISION,
+      outputRevision: ADVANCED_REVISION, round: 1, reviewTransitionId: "review-1",
+      narrative: [
+        "## Changes", "Fixed retry identity.", "", "## Preserved Behavior", "Evidence remains intact.",
+        "", "## Finding Dispositions", "### F-1", "addressed", "Retry identity is stable.",
+        "", "## Validation", "npm test", "", "## Resulting Revision", ADVANCED_REVISION,
+      ].join("\n"),
+      findings: [{ findingId: "F-1", disposition: "addressed", rationale: "Retry identity is stable." }],
+      findingsComplete: true,
+    }));
+
+    expect(result.transition.kind).toBe("record-repair-handoff");
+    expect(result.effects[0]?.envelope).toMatchObject({ reviewTransitionId: "review-1" });
+  });
+
+  it("allows a second repair for genuinely new findings and then requires round-three validation", () => {
+    const firstReview = [
+      "## Verdict", "changes-required", "", "## Standards", "### F-1", "Retry duplicates the comment.",
+      "", "## Spec", "No findings.", "", "## Interactions", "None.", "", "## Constraints", "None.",
+    ].join("\n");
+    const secondReview = [
+      "## Verdict", "changes-required", "", "## Standards", "### F-2", "Repair drops the audit timestamp.",
+      "", "## Spec", "No findings.", "", "## Interactions", "None.", "", "## Constraints", "None.",
+    ].join("\n");
+    const history = [
+      trustedRecord("managed-pr"),
+      { ...trustedRecord("review-handoff", { transitionId: "review-1", disposition: "changes-required" }), narrative: firstReview },
+      trustedRecord("repair-handoff", {
+        transitionId: "repair-1", reviewTransitionId: "review-1",
+        inputRevision: HEAD_REVISION, outputRevision: ADVANCED_REVISION, round: 1,
+      }),
+      trustedRecord("validation", {
+        transitionId: "validation-2", inputRevision: ADVANCED_REVISION, round: 2,
+        commands: [
+          { command: "npm test", exitCode: 0, checkId: "test-2", timedOut: false },
+          { command: "npm run typecheck", exitCode: 0, checkId: "types-2", timedOut: false },
+        ],
+      }),
+      { ...trustedRecord("review-handoff", {
+        transitionId: "review-2", inputRevision: ADVANCED_REVISION, round: 2, disposition: "changes-required",
+      }), narrative: secondReview },
+    ];
+    const secondRepair = selectDeliveryTransition(input(reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(ADVANCED_REVISION), diff: "diff --git a/a b/a\n+first repair" }],
+      controlComments: history,
+    })));
+
+    expect(secondRepair.transition).toMatchObject({
+      kind: "repair",
+      round: 2,
+      inputRevision: ADVANCED_REVISION,
+    });
+    expect(secondRepair.effects[0]?.repairRequest).toMatchObject({
+      round: 2,
+      rejectedRevision: ADVANCED_REVISION,
+      reviewTransitionId: "review-2",
+      reviewHandoff: secondReview,
+    });
+
+    const secondHandoff = [
+      "## Changes", "Preserved the audit timestamp.", "", "## Preserved Behavior", "Retry identity remains stable.",
+      "", "## Finding Dispositions", "### F-2", "addressed", "The timestamp is retained.",
+      "", "## Validation", "npm test", "", "## Resulting Revision", SECOND_REPAIR_REVISION,
+    ].join("\n");
+    const recorded = selectDeliveryTransition(input(reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(SECOND_REPAIR_REVISION), diff: "diff --git a/a b/a\n+second repair" }],
+      controlComments: history,
+    }), {
+      kind: "repair", status: "succeeded", inputRevision: ADVANCED_REVISION,
+      outputRevision: SECOND_REPAIR_REVISION, round: 2, narrative: secondHandoff,
+      reviewTransitionId: "review-2",
+      findings: [{ findingId: "F-2", disposition: "addressed", rationale: "The timestamp is retained." }],
+      findingsComplete: true,
+    }));
+    expect(recorded.effects[0]?.envelope).toMatchObject({
+      reviewTransitionId: "review-2",
+    });
+    expect(recorded.transition).toMatchObject({
+      kind: "record-repair-handoff",
+      round: 2,
+      outputRevision: SECOND_REPAIR_REVISION,
+    });
+
+    const next = selectDeliveryTransition(input(reviewContextSnapshot({
+      pullRequests: [{ ...managedPr(SECOND_REPAIR_REVISION), diff: "diff --git a/a b/a\n+second repair" }],
+      controlComments: [
+        ...history,
+        trustedRecord("repair-handoff", {
+          transitionId: "repair-2", reviewTransitionId: "review-2",
+          inputRevision: ADVANCED_REVISION,
+          outputRevision: SECOND_REPAIR_REVISION, round: 2,
+        }),
+      ],
+    })));
+    expect(next.transition).toMatchObject({
+      kind: "validate",
+      round: 3,
+      inputRevision: SECOND_REPAIR_REVISION,
+    });
+  });
+
   it("fails closed when the repair bound is exhausted", () => {
     const result = selectDeliveryTransition(input(snapshot({
       pullRequests: [managedPr()],
       controlComments: [
         trustedRecord("managed-pr"),
-        trustedRecord("review-handoff", { round: 2, disposition: "changes-required" }),
+        trustedRecord("review-handoff", { round: 3, disposition: "changes-required" }),
       ],
     })));
     expect(result.transition.kind).toBe("needs-human");

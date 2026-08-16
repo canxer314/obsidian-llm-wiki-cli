@@ -49,7 +49,7 @@ const valid =
   typeof bundle.diff === "string" && bundle.diff.startsWith("diff --git ") &&
   Number.isInteger(bundle.round) && bundle.round >= 1 &&
   bundle.skill?.path === "/home/agent/.claude/skills/code-review/SKILL.md" &&
-  bundle.skill?.revision === "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0" &&
+  bundle.skill?.revision === "sha256:bab450f3b140af9327d945cf9bb12dc5c68bc0381f9afb1aea42083709fa5035" &&
   JSON.stringify(bundle.capabilities) === JSON.stringify(expectedCapabilities);
 if (!valid) process.exit(1);
 NODE

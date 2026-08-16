@@ -88,16 +88,23 @@ export function createGitHubContinuationEffects(input: {
     async recordNeedsHuman(record) {
       const subjectNumber = record.prNumber ?? record.ticketNumber;
       if (await recordExists(subjectNumber, record.idempotencyKey)) return { created: false };
+      const evidence = [
+        "",
+        "Evidence:",
+        ...record.evidenceLinks.map((link) => `- ${link}`),
+      ];
       const body = record.envelope === undefined
         ? [
             `<!-- afk-effect:${record.idempotencyKey} -->`,
             `AFK Delivery needs human intervention for Delivery Ticket #${record.ticketNumber}.`,
             "",
             record.reason,
+            ...evidence,
           ].join("\n")
         : [
             `<!-- afk-effect:${record.idempotencyKey} -->`,
             envelopeComment(record.envelope as Parameters<typeof envelopeComment>[0], record.reason),
+            ...evidence,
           ].join("\n");
       if (record.prNumber === undefined) {
         await command("gh", [

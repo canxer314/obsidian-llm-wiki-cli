@@ -3,6 +3,7 @@ import {
   type AuthenticatedGitHubSnapshot,
   type ControlEnvelope,
   type DeliveryLeaseResult,
+  type RepairRequest,
   type RepositoryPolicy,
   type WorkflowRunIdentity,
   type ValidationRequest,
@@ -78,6 +79,7 @@ export interface ManagedPullRequestContinuationPorts {
   }>;
   runValidation?(input: ValidationRequest): Promise<Extract<StageOutcome, { kind: "validation" }>>;
   runReview?(input: ReviewRequest): Promise<Extract<StageOutcome, { kind: "review" }>>;
+  runRepair?(input: RepairRequest): Promise<Extract<StageOutcome, { kind: "repair" }>>;
   recordControlComment(input: {
     prNumber: number;
     envelope: ControlEnvelope;
@@ -88,6 +90,7 @@ export interface ManagedPullRequestContinuationPorts {
     ticketNumber: number;
     prNumber?: number;
     reason: string;
+    evidenceLinks: string[];
     envelope?: ControlEnvelope;
     idempotencyKey: string;
   }): Promise<{ created: boolean }>;
@@ -108,6 +111,13 @@ export type ManagedPullRequestContinuationResult =
       transition: ReturnType<typeof selectDeliveryTransition>["transition"];
     }
   | { status: "needs-human"; reason: string; recordCreated: boolean };
+
+function evidenceLink(request: ManagedPullRequestContinuationRequest, prNumber?: number): string {
+  const subject = prNumber === undefined
+    ? `issues/${request.ticketNumber}`
+    : `pull/${prNumber}`;
+  return `https://github.com/${request.repository}/${subject}`;
+}
 
 async function persistSynchronization(
   request: ManagedPullRequestContinuationRequest,
@@ -230,6 +240,68 @@ async function consumeSelectedStageEffect(
     });
     return { status: "selected", transition: recorded.transition };
   }
+  if (effect.kind === "run-repair") {
+    if (ports.runRepair === undefined || effect.repairRequest === undefined) {
+      throw new Error("repair effect is missing its stage port or request");
+    }
+    if (effect.repairRequest.rejectedRevision !== revision || effect.exactRevision !== revision) {
+      throw new Error("repair effect is not bound to the rejected Revision");
+    }
+    if (effect.repairRequest.round !== selected.transition.round) {
+      throw new Error("repair effect is not bound to the selected review round");
+    }
+    if (effect.envelope === undefined || effect.envelope.disposition !== "started") {
+      throw new Error("repair effect is missing its authenticated start intent");
+    }
+    await ports.recordControlComment({
+      prNumber,
+      envelope: effect.envelope,
+      ...(effect.narrative === undefined ? {} : { narrative: effect.narrative }),
+      idempotencyKey: effect.idempotencyKey,
+    });
+    const outcome = await ports.runRepair(effect.repairRequest);
+    const refreshed = await ports.reconstruct();
+    if (outcome.status !== "succeeded") {
+      const possiblePublishedRevision = outcome.outputRevision !== revision
+        ? outcome.outputRevision
+        : revision;
+      verifyStageSnapshot(request, refreshed.snapshot, prNumber, possiblePublishedRevision);
+      const failed = selectDeliveryTransition({
+        snapshot: refreshed.snapshot, lease: request.lease, policy: request.policy, workflowRun: request.workflowRun,
+        stageOutcome: outcome,
+      });
+      const needsHumanEffect = failed.effects[0];
+      if (failed.transition.kind !== "needs-human" || failed.transition.reason === undefined ||
+          needsHumanEffect?.kind !== "record-needs-human") {
+        throw new Error("fresh GitHub reconstruction did not fail closed after repair failure");
+      }
+      const record = await ports.recordNeedsHuman({
+        ticketNumber: request.ticketNumber,
+        prNumber,
+        reason: failed.transition.reason,
+        evidenceLinks: [evidenceLink(request, prNumber)],
+        ...(needsHumanEffect.envelope === undefined ? {} : { envelope: needsHumanEffect.envelope }),
+        idempotencyKey: needsHumanEffect.idempotencyKey,
+      });
+      return { status: "needs-human", reason: failed.transition.reason, recordCreated: record.created };
+    }
+    if (outcome.inputRevision !== revision || outcome.outputRevision === revision) {
+      throw new Error("repair did not produce a new Revision from the rejected Revision");
+    }
+    verifyStageSnapshot(request, refreshed.snapshot, prNumber, outcome.outputRevision);
+    const recorded = selectDeliveryTransition({
+      snapshot: refreshed.snapshot, lease: request.lease, policy: request.policy, workflowRun: request.workflowRun,
+      stageOutcome: outcome,
+    });
+    const record = recorded.effects[0];
+    if (record?.kind !== "record-control-comment" || record.envelope === undefined) {
+      throw new Error("fresh GitHub reconstruction rejected Repair Handoff");
+    }
+    await ports.recordControlComment({
+      prNumber, envelope: record.envelope, ...(record.narrative === undefined ? {} : { narrative: record.narrative }), idempotencyKey: record.idempotencyKey,
+    });
+    return { status: "selected", transition: recorded.transition };
+  }
   return undefined;
 }
 
@@ -292,6 +364,7 @@ export async function continueManagedPullRequest(
       ticketNumber: request.ticketNumber,
       ...(selected.transition.prNumber === undefined ? {} : { prNumber: selected.transition.prNumber }),
       reason: selected.transition.reason,
+      evidenceLinks: [evidenceLink(request, selected.transition.prNumber)],
       ...(effect.envelope === undefined ? {} : { envelope: effect.envelope }),
       idempotencyKey: effect.idempotencyKey,
     });
@@ -400,6 +473,7 @@ export async function continueManagedPullRequest(
         ticketNumber: request.ticketNumber,
         prNumber,
         reason,
+        evidenceLinks: [evidenceLink(request, prNumber)],
         envelope: needsHumanEnvelope,
         idempotencyKey: `${needsHumanEnvelope.transitionId}:record-needs-human`,
       });

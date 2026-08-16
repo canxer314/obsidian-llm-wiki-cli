@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 
-const REVIEW_SKILL_SHA256 = "29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0";
+const REVIEW_SKILL_SHA256 = "bab450f3b140af9327d945cf9bb12dc5c68bc0381f9afb1aea42083709fa5035";
 
 async function repositoryPath(path: string): Promise<string> {
   return new URL(`../../../${path}`, import.meta.url).pathname;

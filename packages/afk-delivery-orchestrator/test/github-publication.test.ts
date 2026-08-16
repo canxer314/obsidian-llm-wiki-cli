@@ -61,6 +61,33 @@ describe("GitHub Managed PR publication adapter", () => {
     expect(posts[0]).toContain("<!-- afk-effect:effect-1 -->");
   });
 
+  it("records Needs Human with a trusted reason and evidence links", async () => {
+    const posts: string[] = [];
+    const effects = createGitHubContinuationEffects({
+      repository: "owner/repo",
+      trustedActor: { login: "delivery-bot", type: "Bot" },
+      command: async (_file, args) => {
+        if (args[0] === "api") return "";
+        if (args[0] === "pr" && args[1] === "comment") {
+          posts.push(args.at(-1) ?? "");
+          return "";
+        }
+        throw new Error(`unexpected command: ${args.join(" ")}`);
+      },
+    });
+
+    await effects.recordNeedsHuman({
+      ticketNumber: 68,
+      prNumber: 73,
+      reason: "repair worktree infrastructure retries exhausted after 2 attempts",
+      evidenceLinks: ["https://github.com/owner/repo/pull/73"],
+      idempotencyKey: "repair-needs-human",
+    });
+
+    expect(posts[0]).toContain("repair worktree infrastructure retries exhausted after 2 attempts");
+    expect(posts[0]).toContain("Evidence:\n- https://github.com/owner/repo/pull/73");
+  });
+
   it("performs a bounded open-PR recovery scan and hydrates native ticket links and comments", async () => {
     const calls: Array<{ file: string; args: string[] }> = [];
     const command = async (file: string, args: string[]): Promise<string> => {

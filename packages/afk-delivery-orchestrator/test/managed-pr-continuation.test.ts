@@ -11,6 +11,12 @@ import {
 const INITIAL = "a".repeat(40);
 const TARGET = "b".repeat(40);
 const SYNCHRONIZED = "c".repeat(40);
+const CHANGES_REQUIRED_REVIEW = [
+  "## Verdict", "changes-required", "", "## Standards", "### F-1\nRetry duplicates the comment.",
+  "", "## Spec", "No additional findings.", "", "## Interactions", "Preserve recovery.",
+  "", "## Constraints", "Do not weaken validation.",
+].join("\n");
+const REPAIR_HANDOFF = "## Changes\nFixed retry identity.\n\n## Preserved Behavior\nRecovery remains unchanged.\n\n## Finding Dispositions\n### F-1\naddressed\ncomment identity is stable\n\n## Validation\nnpm test\n\n## Resulting Revision\n" + SYNCHRONIZED;
 
 const policy: RepositoryPolicy = {
   schemaVersion: 1,
@@ -23,7 +29,7 @@ const policy: RepositoryPolicy = {
   requiredValidationCommands: ["npm test", "npm run typecheck"],
   reviewSkill: {
     path: "/home/agent/.claude/skills/code-review/SKILL.md",
-    revision: "sha256:29f1ac715f1a2acb97a694b958531a032249ab0ad662aa28b40ba54c4bdb2ab0",
+    revision: "sha256:bab450f3b140af9327d945cf9bb12dc5c68bc0381f9afb1aea42083709fa5035",
   },
   mergeStrategy: "squash",
 };
@@ -72,6 +78,44 @@ function snapshot(overrides: Partial<AuthenticatedGitHubSnapshot> = {}): Authent
     }],
     ...overrides,
   };
+}
+
+function repairSnapshot(overrides: Partial<AuthenticatedGitHubSnapshot> = {}): AuthenticatedGitHubSnapshot {
+  const base = snapshot({
+    targetBranchRevision: INITIAL,
+    repositoryInstructions: "Repository instructions",
+    domainDocuments: [{ path: "CONTEXT.md", content: "Domain" }],
+    architectureDecisions: [{ path: "docs/adr/0001.md", content: "Decision" }],
+    pullRequests: [{ ...snapshot().pullRequests[0]!, diff: "diff --git a/a b/a\n+change" }],
+    controlComments: [
+      ...snapshot().controlComments,
+      {
+        commentId: "validation-1",
+        author: { login: "delivery-bot", type: "Bot" as const },
+        envelope: {
+          schemaVersion: 1 as const, kind: "validation" as const, repository: "canxer314/obsidian-llm-wiki-cli",
+          ticketNumber: 66, prNumber: 73, round: 1, transitionId: "validation-1", inputRevision: INITIAL,
+          disposition: "succeeded", workflowRunId: "run-2", workflowRunAttempt: 1,
+          commands: [
+            { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+            { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+          ],
+        },
+        narrative: "",
+      },
+      {
+        commentId: "review-1",
+        author: { login: "delivery-bot", type: "Bot" as const },
+        envelope: {
+          schemaVersion: 1 as const, kind: "review-handoff" as const, repository: "canxer314/obsidian-llm-wiki-cli",
+          ticketNumber: 66, prNumber: 73, round: 1, transitionId: "review-1", inputRevision: INITIAL,
+          baseRevision: INITIAL, disposition: "changes-required", workflowRunId: "run-2", workflowRunAttempt: 1,
+        },
+        narrative: CHANGES_REQUIRED_REVIEW,
+      },
+    ],
+  });
+  return { ...base, ...overrides };
 }
 
 function fakePorts(initial: AuthenticatedGitHubSnapshot): {
@@ -463,6 +507,359 @@ describe("Managed PR continuation", () => {
       },
     });
     expect(result).toMatchObject({ status: "selected", transition: { kind: "record-review-handoff" } });
+  });
+
+  it("executes repair from the rejected Revision and persists its complete handoff after fresh reconstruction", async () => {
+    const reviewNarrative = CHANGES_REQUIRED_REVIEW;
+    const initial = snapshot({
+      targetBranchRevision: INITIAL,
+      repositoryInstructions: "Repository instructions",
+      domainDocuments: [{ path: "CONTEXT.md", content: "Domain" }],
+      architectureDecisions: [{ path: "docs/adr/0001.md", content: "Decision" }],
+      controlComments: [
+        ...snapshot().controlComments,
+        {
+          commentId: "validation-1",
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: {
+            schemaVersion: 1 as const, kind: "validation" as const, repository: "canxer314/obsidian-llm-wiki-cli",
+            ticketNumber: 66, prNumber: 73, round: 1, transitionId: "validation-1", inputRevision: INITIAL,
+            disposition: "succeeded", workflowRunId: "run-2", workflowRunAttempt: 1,
+            commands: [
+              { command: "npm test", exitCode: 0, checkId: "test", timedOut: false },
+              { command: "npm run typecheck", exitCode: 0, checkId: "types", timedOut: false },
+            ],
+          },
+          narrative: "",
+        },
+        {
+          commentId: "review-1",
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: {
+            schemaVersion: 1 as const, kind: "review-handoff" as const, repository: "canxer314/obsidian-llm-wiki-cli",
+            ticketNumber: 66, prNumber: 73, round: 1, transitionId: "review-1", inputRevision: INITIAL,
+            baseRevision: INITIAL, disposition: "changes-required", workflowRunId: "run-2", workflowRunAttempt: 1,
+          },
+          narrative: reviewNarrative,
+        },
+      ],
+    });
+    let current = initial;
+    const fake = fakePorts(initial);
+    fake.ports.reconstruct = async () => ({ snapshot: current });
+    let repairRequest: Parameters<NonNullable<ManagedPullRequestContinuationPorts["runRepair"]>>[0] | undefined;
+    let recorded: Parameters<ManagedPullRequestContinuationPorts["recordControlComment"]>[0] | undefined;
+    let commentSequence = 0;
+    const repairHandoff = REPAIR_HANDOFF;
+    fake.ports.runRepair = async (request) => {
+      repairRequest = request;
+      current = {
+        ...current,
+        pullRequests: current.pullRequests.map((pr) => ({ ...pr, headRevision: SYNCHRONIZED })),
+      };
+      return {
+        kind: "repair", status: "succeeded", inputRevision: INITIAL, outputRevision: SYNCHRONIZED,
+        round: 1, narrative: repairHandoff,
+        reviewTransitionId: request.reviewTransitionId,
+        findings: [{ findingId: "F-1", disposition: "addressed", rationale: "comment identity is stable" }],
+        findingsComplete: true,
+      };
+    };
+    fake.ports.recordControlComment = async (record) => {
+      recorded = record;
+      commentSequence += 1;
+      current = {
+        ...current,
+        controlComments: [...current.controlComments, {
+          commentId: `repair-${commentSequence}`,
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: record.envelope,
+          narrative: record.narrative ?? "",
+        }],
+      };
+      return { created: true };
+    };
+
+    const result = await continueManagedPullRequest({
+      repository: initial.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-3", attempt: 1 },
+    }, fake.ports);
+
+    expect(repairRequest).toMatchObject({
+      rejectedRevision: INITIAL,
+      reviewHandoff: reviewNarrative,
+      repositoryInstructions: "Repository instructions",
+      capabilities: { canEdit: true, canCommit: true, canPush: false, canApprove: false, githubCredentials: false },
+    });
+    expect(recorded).toMatchObject({
+      narrative: repairHandoff,
+      envelope: { kind: "repair-handoff", inputRevision: INITIAL, outputRevision: SYNCHRONIZED, round: 1 },
+    });
+    expect(result).toMatchObject({ status: "selected", transition: { kind: "record-repair-handoff" } });
+  });
+
+  it("does not run repair when its durable start intent cannot be recorded", async () => {
+    const initial = repairSnapshot();
+    const fake = fakePorts(initial);
+    let repairCalls = 0;
+    fake.ports.recordControlComment = async () => {
+      throw new Error("GitHub comment unavailable");
+    };
+    fake.ports.runRepair = async () => {
+      repairCalls += 1;
+      throw new Error("repair must not run without durable intent");
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: initial.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-3", attempt: 1 },
+    }, fake.ports)).rejects.toThrow("GitHub comment unavailable");
+    expect(repairCalls).toBe(0);
+  });
+
+  it("records Needs Human after a failed repair without publishing a Repair Handoff", async () => {
+    let current = repairSnapshot();
+    const fake = fakePorts(current);
+    const controlKinds: string[] = [];
+    let needsHumanReason = "";
+    fake.ports.reconstruct = async () => ({ snapshot: current });
+    fake.ports.recordControlComment = async (record) => {
+      controlKinds.push(`${record.envelope.kind}:${record.envelope.disposition}`);
+      current = {
+        ...current,
+        controlComments: [...current.controlComments, {
+          commentId: `control-${controlKinds.length}`,
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: record.envelope,
+          narrative: record.narrative ?? "",
+        }],
+      };
+      return { created: true };
+    };
+    fake.ports.runRepair = async (request) => ({
+      kind: "repair", status: "failed", inputRevision: request.rejectedRevision,
+      outputRevision: request.rejectedRevision, round: request.round,
+      reviewTransitionId: request.reviewTransitionId,
+      narrative: "repair agent exited with 1", findings: [], findingsComplete: false,
+    });
+    fake.ports.recordNeedsHuman = async (record) => {
+      needsHumanReason = record.reason;
+      return { created: true };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: current.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-3", attempt: 1 },
+    }, fake.ports)).resolves.toMatchObject({
+      status: "needs-human",
+      reason: "repair stage did not succeed",
+    });
+    expect(controlKinds).toEqual(["repair-handoff:started"]);
+    expect(needsHumanReason).toBe("repair stage did not succeed");
+  });
+
+  it("records Needs Human when publication may have succeeded before its response was lost", async () => {
+    let current = repairSnapshot();
+    const fake = fakePorts(current);
+    let needsHuman = 0;
+    fake.ports.reconstruct = async () => ({ snapshot: current });
+    fake.ports.recordControlComment = async (record) => {
+      current = {
+        ...current,
+        controlComments: [...current.controlComments, {
+          commentId: "repair-start",
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: record.envelope,
+          narrative: record.narrative ?? "",
+        }],
+      };
+      return { created: true };
+    };
+    fake.ports.runRepair = async (request) => {
+      current = {
+        ...current,
+        pullRequests: current.pullRequests.map((pr) => ({ ...pr, headRevision: SYNCHRONIZED })),
+      };
+      return {
+        kind: "repair", status: "failed", inputRevision: request.rejectedRevision,
+        outputRevision: SYNCHRONIZED, round: request.round,
+        reviewTransitionId: request.reviewTransitionId,
+        narrative: "repair publication infrastructure failure", findings: [], findingsComplete: false,
+      };
+    };
+    fake.ports.recordNeedsHuman = async () => {
+      needsHuman += 1;
+      return { created: true };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: current.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-3", attempt: 1 },
+    }, fake.ports)).resolves.toMatchObject({ status: "needs-human" });
+    expect(needsHuman).toBe(1);
+  });
+
+  it("does not publish a Repair Handoff when repair leaves the head unchanged", async () => {
+    const initial = repairSnapshot();
+    const fake = fakePorts(initial);
+    const controlKinds: string[] = [];
+    fake.ports.recordControlComment = async (record) => {
+      controlKinds.push(`${record.envelope.kind}:${record.envelope.disposition}`);
+      return { created: true };
+    };
+    fake.ports.runRepair = async (request) => ({
+      kind: "repair", status: "succeeded", inputRevision: request.rejectedRevision,
+      outputRevision: request.rejectedRevision, round: request.round,
+      reviewTransitionId: request.reviewTransitionId,
+      narrative: REPAIR_HANDOFF.replace(SYNCHRONIZED, INITIAL),
+      findings: [{ findingId: "F-1", disposition: "addressed", rationale: "comment identity is stable" }],
+      findingsComplete: true,
+    });
+
+    await expect(continueManagedPullRequest({
+      repository: initial.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-1" },
+      policy,
+      workflowRun: { id: "run-3", attempt: 1 },
+    }, fake.ports)).rejects.toThrow("repair did not produce a new Revision");
+    expect(controlKinds).toEqual(["repair-handoff:started"]);
+  });
+
+  it.each([
+    ["after the agent committed but before publication", INITIAL],
+    ["after publication but before reconstruction", SYNCHRONIZED],
+  ])("does not duplicate repair on retry %s", async (_boundary, currentHead) => {
+    const initial = repairSnapshot();
+    const started = initial.controlComments.concat({
+      commentId: "repair-started",
+      author: { login: "delivery-bot", type: "Bot" as const },
+      envelope: {
+        schemaVersion: 1 as const,
+        kind: "repair-handoff" as const,
+        repository: initial.repository,
+        ticketNumber: 66,
+        prNumber: 73,
+        round: 1,
+        transitionId: "repair-started",
+        inputRevision: INITIAL,
+        disposition: "started",
+        workflowRunId: "run-3",
+        workflowRunAttempt: 1,
+        reviewTransitionId: "review-1",
+      },
+      narrative: "Repair started.",
+    });
+    const retry = {
+      ...initial,
+      pullRequests: initial.pullRequests.map((pr) => ({ ...pr, headRevision: currentHead })),
+      controlComments: started,
+    };
+    const fake = fakePorts(retry);
+    let repairCalls = 0;
+    let needsHumanCalls = 0;
+    fake.ports.runRepair = async () => {
+      repairCalls += 1;
+      throw new Error("repair must not run twice");
+    };
+    fake.ports.recordNeedsHuman = async () => {
+      needsHumanCalls += 1;
+      return { created: true };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: retry.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-retry" },
+      policy,
+      workflowRun: { id: "run-4", attempt: 2 },
+    }, fake.ports)).resolves.toMatchObject({ status: "needs-human" });
+    expect(repairCalls).toBe(0);
+    expect(needsHumanCalls).toBe(1);
+  });
+
+  it("continues with fresh validation when the Repair Handoff write response was lost", async () => {
+    const initial = repairSnapshot();
+    const recovered = {
+      ...initial,
+      pullRequests: initial.pullRequests.map((pr) => ({
+        ...pr,
+        headRevision: SYNCHRONIZED,
+        diff: "diff --git a/a b/a\n+repaired",
+      })),
+      controlComments: [
+        ...initial.controlComments,
+        {
+          commentId: "repair-started",
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: {
+            schemaVersion: 1 as const, kind: "repair-handoff" as const,
+            repository: initial.repository, ticketNumber: 66, prNumber: 73, round: 1,
+            transitionId: "repair-started", inputRevision: INITIAL, disposition: "started",
+            workflowRunId: "run-3", workflowRunAttempt: 1, reviewTransitionId: "review-1",
+          },
+          narrative: "Repair started.",
+        },
+        {
+          commentId: "repair-succeeded",
+          author: { login: "delivery-bot", type: "Bot" as const },
+          envelope: {
+            schemaVersion: 1 as const, kind: "repair-handoff" as const,
+            repository: initial.repository, ticketNumber: 66, prNumber: 73, round: 1,
+            transitionId: "repair-succeeded", inputRevision: INITIAL, outputRevision: SYNCHRONIZED,
+            disposition: "succeeded", workflowRunId: "run-3", workflowRunAttempt: 1,
+            reviewTransitionId: "review-1",
+          },
+          narrative: REPAIR_HANDOFF,
+        },
+      ],
+    };
+    const fake = fakePorts(recovered);
+    let repairCalls = 0;
+    let validationCalls = 0;
+    const recordedKinds: string[] = [];
+    fake.ports.runRepair = async () => {
+      repairCalls += 1;
+      throw new Error("repair must not run twice");
+    };
+    fake.ports.runValidation = async (request) => {
+      validationCalls += 1;
+      return {
+        kind: "validation", status: "succeeded", revision: request.revision, round: request.round,
+        commands: request.checks.map((check, index) => ({
+          command: check.command, exitCode: 0, checkId: `recovered-${index}`, timedOut: false,
+        })),
+      };
+    };
+    fake.ports.recordControlComment = async (record) => {
+      recordedKinds.push(record.envelope.kind);
+      return { created: true };
+    };
+
+    await expect(continueManagedPullRequest({
+      repository: recovered.repository,
+      ticketNumber: 66,
+      lease: { status: "acquired", leaseId: "lease-retry" },
+      policy,
+      workflowRun: { id: "run-4", attempt: 2 },
+    }, fake.ports)).resolves.toMatchObject({
+      status: "selected",
+      transition: { kind: "record-validation", round: 2 },
+    });
+    expect({ repairCalls, validationCalls }).toEqual({ repairCalls: 0, validationCalls: 1 });
+    expect(recordedKinds).toEqual(["validation"]);
   });
 
   it("does not persist stage evidence after the PR head changes", async () => {
