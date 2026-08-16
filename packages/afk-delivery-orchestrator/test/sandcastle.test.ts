@@ -36,6 +36,10 @@ describe("Sandcastle implementation container", () => {
       expect(containerClaudeSettingsPath("/etc/afk/claude.json", "/home/runner")).toBe(
         "/etc/afk/claude.json",
       );
+      process.env.AFK_CLAUDE_SETTINGS = "/srv/afk/settings-docker.json";
+      expect(containerClaudeSettingsPath(undefined, "/home/runner")).toBe(
+        "/srv/afk/settings-docker.json",
+      );
     } finally {
       if (original === undefined) delete process.env.AFK_CLAUDE_SETTINGS;
       else process.env.AFK_CLAUDE_SETTINGS = original;
