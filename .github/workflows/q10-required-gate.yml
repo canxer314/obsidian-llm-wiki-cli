@@ -1,0 +1,27 @@
+name: Q10 Required Gate
+
+on:
+  pull_request:
+    branches:
+      - prototype/q10-actions-gate-base
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: q10-required-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hold pending state when requested
+        run: |
+          hold=$(tr -d '\r\n' < .github/q10-prototype/hold-seconds)
+          printf 'hold_seconds=%s\n' "$hold"
+          sleep "$hold"
+      - name: Produce controlled result
+        run: |
+          expected=$(tr -d '\r\n' < .github/q10-prototype/expected-result)
+          printf 'expected=%s\n' "$expected"
+          test "$expected" = pass

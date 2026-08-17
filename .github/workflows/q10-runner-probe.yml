@@ -1,0 +1,26 @@
+name: Q10 Runner Probe
+
+on:
+  push:
+    branches:
+      - prototype/q10-actions-probe
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: q10-runner-probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report runner metadata
+        run: |
+          printf 'run_id=%s attempt=%s runner=%s os=%s arch=%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
+      - name: Produce controlled result
+        run: |
+          expected=$(tr -d '\r\n' < .github/q10-prototype/expected-result)
+          printf 'expected=%s\n' "$expected"
+          test "$expected" = pass
