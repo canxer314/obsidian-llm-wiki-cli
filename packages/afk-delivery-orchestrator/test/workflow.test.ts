@@ -66,6 +66,14 @@ describe("AFK Delivery workflow contract", () => {
     }
   });
 
+  it("passes the pinned skill manifest as a repository-root path", async () => {
+    const workflow = await readFile(workflowPath, "utf8");
+
+    expect(workflow.match(/AFK_DELIVERY_SKILL_MANIFEST: \$\{\{ github\.workspace \}\}\/\.sandcastle\/skills\.lock/gu))
+      .toHaveLength(2);
+    expect(workflow).not.toContain("AFK_DELIVERY_SKILL_MANIFEST: .sandcastle/skills.lock");
+  });
+
   it("runs preflight before fresh reconstruction and bounded transition dispatch", async () => {
     const workflow = await readFile(workflowPath, "utf8");
     const preflight = workflow.indexOf("name: Worker preflight");
