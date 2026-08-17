@@ -1,0 +1,24 @@
+name: Q10 Runner Burst
+
+on:
+  push:
+    branches:
+      - prototype/q10-actions-burst
+
+permissions:
+  contents: read
+
+jobs:
+  burst:
+    name: q10-burst-${{ matrix.slot }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - name: Hold runner briefly
+        run: |
+          printf 'slot=%s runner=%s\n' "${{ matrix.slot }}" "$RUNNER_NAME"
+          sleep 5
