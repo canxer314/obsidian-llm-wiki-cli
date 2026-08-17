@@ -39,7 +39,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
           AFK_REVIEWER_IMAGE: ${{ vars.AFK_REVIEWER_IMAGE }}
-          AFK_DELIVERY_SKILL_MANIFEST: .sandcastle/skills.lock
+          AFK_DELIVERY_SKILL_MANIFEST: ${{ github.workspace }}/.sandcastle/skills.lock
           AFK_DELIVERY_ACTOR: ${{ steps.app-token.outputs.actor_login }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery preflight
       - id: frontier
@@ -93,7 +93,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           AFK_DELIVERY_IMAGE: ${{ vars.AFK_DELIVERY_IMAGE }}
           AFK_REVIEWER_IMAGE: ${{ vars.AFK_REVIEWER_IMAGE }}
-          AFK_DELIVERY_SKILL_MANIFEST: .sandcastle/skills.lock
+          AFK_DELIVERY_SKILL_MANIFEST: ${{ github.workspace }}/.sandcastle/skills.lock
           AFK_DELIVERY_ACTOR: ${{ steps.app-token.outputs.actor_login }}
         run: npm exec -w @llm-wiki/afk-delivery-orchestrator -- afk-delivery preflight
       - id: current
