@@ -99,7 +99,7 @@ export async function checkPullRequestLocalQuality(
 
   const result = await runLocalQuality(revision, host);
   const currentRevision = await github.getPullRequestHead(pullRequestNumber);
-  if (result.status === "success" && currentRevision !== revision) {
+  if (currentRevision !== revision) {
     const staleResult = terminalResult(
       "error",
       "setup",

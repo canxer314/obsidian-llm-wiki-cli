@@ -156,6 +156,32 @@ describe("Sandcastle repair orchestration", () => {
     expect(runReview).toHaveBeenCalledTimes(gate === "review" ? 1 : 0);
   });
 
+  it("supplies descriptive quality feedback when the command produced no output", async () => {
+    const repairedSha = sha("b");
+    const repair = vi.fn().mockResolvedValue({ ...pullRequest, headSha: repairedSha });
+
+    await processReadyPlan({
+      pullRequest,
+      runLocalQuality: vi.fn()
+        .mockResolvedValueOnce({
+          status: "failure",
+          revision: pullRequest.headSha,
+          stage: "test",
+        })
+        .mockResolvedValueOnce(quality("success", repairedSha)),
+      runReview: vi.fn().mockResolvedValue(review("success", repairedSha)),
+      repair,
+    });
+
+    expect(repair).toHaveBeenCalledWith(expect.objectContaining({
+      feedback: {
+        source: "local-quality",
+        stage: "test",
+        output: "Local quality failed during test without command output",
+      },
+    }));
+  });
+
   it("redacts secrets before passing bounded quality or review feedback to repair", async () => {
     const repairedSha = sha("b");
     const secret = `ghp_${"x".repeat(30)}`;

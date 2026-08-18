@@ -62,7 +62,9 @@ function qualityFeedback(
   return {
     source: "local-quality",
     stage: result.stage,
-    ...(result.output === undefined ? {} : { output: redact(result.output) }),
+    output: redact(
+      result.output ?? `Local quality failed during ${result.stage} without command output`,
+    ),
   };
 }
 
@@ -79,6 +81,16 @@ function reviewFeedback(
   };
 }
 
+function acceptRepair(
+  previous: VerifiedPullRequest,
+  repaired: VerifiedPullRequest,
+): VerifiedPullRequest {
+  if (repaired.number !== previous.number || repaired.headSha === previous.headSha) {
+    throw new Error("Implementer repair must push a new SHA to the same Pull Request");
+  }
+  return repaired;
+}
+
 export async function processReadyPlan(
   options: RepairOrchestratorOptions,
 ): Promise<RepairOrchestratorResult> {
@@ -92,15 +104,14 @@ export async function processReadyPlan(
         return { pullRequest, localQuality, repairsUsed };
       }
       repairsUsed += 1;
-      const repaired = await options.repair({
+      pullRequest = acceptRepair(
         pullRequest,
-        attempt: repairsUsed as 1 | 2,
-        feedback: qualityFeedback(localQuality),
-      });
-      if (repaired.number !== pullRequest.number || repaired.headSha === pullRequest.headSha) {
-        throw new Error("Implementer repair must push a new SHA to the same Pull Request");
-      }
-      pullRequest = repaired;
+        await options.repair({
+          pullRequest,
+          attempt: repairsUsed as 1 | 2,
+          feedback: qualityFeedback(localQuality),
+        }),
+      );
       continue;
     }
 
@@ -109,14 +120,13 @@ export async function processReadyPlan(
       return { pullRequest, localQuality, review, repairsUsed };
     }
     repairsUsed += 1;
-    const repaired = await options.repair({
+    pullRequest = acceptRepair(
       pullRequest,
-      attempt: repairsUsed as 1 | 2,
-      feedback: reviewFeedback(review),
-    });
-    if (repaired.number !== pullRequest.number || repaired.headSha === pullRequest.headSha) {
-      throw new Error("Implementer repair must push a new SHA to the same Pull Request");
-    }
-    pullRequest = repaired;
+      await options.repair({
+        pullRequest,
+        attempt: repairsUsed as 1 | 2,
+        feedback: reviewFeedback(review),
+      }),
+    );
   }
 }
