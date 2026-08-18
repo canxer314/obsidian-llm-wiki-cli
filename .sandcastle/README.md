@@ -53,6 +53,21 @@ blocking reason, whether automation configuration changes are allowed, and the f
 Issue context for a later Implementer session. Missing, free-text, mismatched-Issue,
 or otherwise invalid output fails closed.
 
+A ready plan runs in a separate Implementer Agent Session, which creates the
+Issue branch and Draft Pull Request. Sandcastle then runs deterministic local
+quality against the exact Pull Request head and publishes
+`sandcastle/local-quality`. Only a successful result for that same revision can
+start a fresh, read-only Reviewer Agent Session. The Reviewer checks out that
+full commit SHA, returns a schema-validated `Approved` or `Changes requested`
+verdict with a summary and findings, and must not create commits.
+
+Review startup publishes `sandcastle/review=pending`. `Approved` maps to
+`success`, `Changes requested` maps to `failure`, and session, schema, or stale
+SHA results map to `error`. Every completed attempt leaves a regular Pull
+Request comment with its reviewed revision. Sandcastle reads the Pull Request
+head before starting and after the Reviewer returns, so a result for an
+outdated head cannot publish success.
+
 ## Runtime verification
 
 The provider uses Docker host networking so a container can reach CC-Switch on

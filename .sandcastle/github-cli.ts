@@ -10,6 +10,7 @@ import type {
   LocalQualityCommitStatus,
   LocalQualityGithubPort,
 } from "./local-quality.ts";
+import type { ReviewCommitStatus, ReviewGithubPort } from "./review.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -81,7 +82,8 @@ const isAutomationPath = (path: string): boolean =>
 export class GithubCliPort implements
   SandcastleGithubPort,
   ImplementerGithubPort,
-  LocalQualityGithubPort {
+  LocalQualityGithubPort,
+  ReviewGithubPort {
   private readonly execute: Execute;
 
   constructor(execute: Execute = executeFile) {
@@ -101,7 +103,9 @@ export class GithubCliPort implements
     return stdout.trim();
   }
 
-  async publishCommitStatus(status: LocalQualityCommitStatus): Promise<void> {
+  async publishCommitStatus(
+    status: LocalQualityCommitStatus | ReviewCommitStatus,
+  ): Promise<void> {
     await this.execute("gh", [
       "api",
       `repos/{owner}/{repo}/statuses/${status.revision}`,
@@ -113,6 +117,19 @@ export class GithubCliPort implements
       `state=${status.state}`,
       "-f",
       `description=${status.description}`,
+    ]);
+  }
+
+  async addPullRequestComment(
+    pullRequestNumber: number,
+    body: string,
+  ): Promise<void> {
+    await this.execute("gh", [
+      "pr",
+      "comment",
+      String(pullRequestNumber),
+      "--body",
+      body,
     ]);
   }
 

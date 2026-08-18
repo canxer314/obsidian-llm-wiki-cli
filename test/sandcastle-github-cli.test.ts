@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { GithubCliPort, GithubVerificationError } from "../.sandcastle/github-cli.js";
 import type { LocalQualityCommitStatus } from "../.sandcastle/local-quality.js";
+import type { ReviewCommitStatus } from "../.sandcastle/review.js";
 
 const encodedFile = (filename: string, previousFilename = ""): string =>
   Buffer.from(JSON.stringify([filename, previousFilename])).toString("base64");
@@ -33,6 +34,31 @@ describe("Sandcastle GitHub CLI adapter", () => {
       "api", "repos/{owner}/{repo}/statuses/abc123", "--method", "POST",
       "-f", "context=sandcastle/local-quality", "-f", "state=pending",
       "-f", "description=Local quality checks started",
+    ]);
+  });
+
+  it("publishes review status and a regular Pull Request comment", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = new GithubCliPort(execute);
+    const status: ReviewCommitStatus = {
+      revision: "abc123",
+      context: "sandcastle/review",
+      state: "failure",
+      description: "Independent review requested changes",
+    };
+
+    await github.publishCommitStatus(status);
+    await github.addPullRequestComment(321, "## Sandcastle review: Changes requested");
+
+    expect(execute.mock.calls).toEqual([
+      ["gh", [
+        "api", "repos/{owner}/{repo}/statuses/abc123", "--method", "POST",
+        "-f", "context=sandcastle/review", "-f", "state=failure",
+        "-f", "description=Independent review requested changes",
+      ]],
+      ["gh", [
+        "pr", "comment", "321", "--body", "## Sandcastle review: Changes requested",
+      ]],
     ]);
   });
 
