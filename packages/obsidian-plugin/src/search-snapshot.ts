@@ -381,16 +381,19 @@ export class SearchSnapshotRefreshCoordinator {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #builds: Promise<void> = Promise.resolve();
   #waiters: Array<{ resolve(): void; reject(error: unknown): void }> = [];
+  #disposed = false;
 
   constructor(manager: SearchSnapshotManager) {
     this.#manager = manager;
   }
 
   schedule(): void {
+    if (this.#disposed) return;
     this.#manager.invalidate();
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
+      if (this.#disposed) return;
       const waiters = this.#waiters.splice(0);
       const build = this.#builds.then(() => this.#manager.rebuild());
       this.#builds = build.catch(() => undefined);
@@ -403,6 +406,7 @@ export class SearchSnapshotRefreshCoordinator {
   }
 
   async whenIdle(): Promise<void> {
+    if (this.#disposed) throw new Error("Search Snapshot refresh coordinator is disposed");
     do {
       if (this.#timer === undefined) {
         await this.#builds;
@@ -416,8 +420,12 @@ export class SearchSnapshotRefreshCoordinator {
   }
 
   dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
+    const error = new Error("Search Snapshot refresh coordinator is disposed");
+    this.#waiters.splice(0).forEach(({ reject }) => reject(error));
   }
 }
 

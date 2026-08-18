@@ -177,6 +177,27 @@ describe("Search Snapshot publication", () => {
     await expect(unknownProfile.rebuild()).rejects.toThrow("reference profile");
   });
 
+  it("rejects a pending barrier and cancels its scheduled rebuild when disposed", async () => {
+    vi.useFakeTimers();
+    try {
+      const files = new Map([["source.md", new TextEncoder().encode("old")]]);
+      const manager = new SearchSnapshotManager(source(files));
+      await manager.rebuild();
+      const rebuild = vi.spyOn(manager, "rebuild");
+      const coordinator = new SearchSnapshotRefreshCoordinator(manager);
+
+      coordinator.schedule();
+      const barrier = coordinator.whenIdle();
+      coordinator.dispose();
+
+      await expect(barrier).rejects.toThrow("refresh coordinator is disposed");
+      await vi.runAllTimersAsync();
+      expect(rebuild).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("invalidates new discovery until semantic evidence stays quiet for 250 ms", async () => {
     vi.useFakeTimers();
     try {
