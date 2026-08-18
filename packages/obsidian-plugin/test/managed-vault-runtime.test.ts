@@ -1120,6 +1120,39 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await runtime.unload();
   });
 
+  it("ends a pending successor snapshot barrier when the runtime unloads", async () => {
+    vi.useFakeTimers();
+    try {
+      const listMarkdownPaths = vi.fn(async () => ["note.md"]);
+      const runtime = new ManagedVaultBridgeRuntime({
+        vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+        settings: { load: async () => undefined, save: async () => undefined },
+        searchDataSource: {
+          listMarkdownPaths,
+          readBinary: async () => new TextEncoder().encode("old"),
+        },
+        createBridge: ({ port }) => fakeBridge(port),
+        createVaultId: () => "vault-a",
+        selectInitialPort: () => 27123,
+      });
+      await runtime.load();
+
+      const publication = runtime.publishSuccessorSearchSnapshot([
+        { path: "note.md", contentVersion: "missing", requireSemanticMatch: true },
+      ]);
+      await vi.runOnlyPendingTimersAsync();
+      expect(listMarkdownPaths).toHaveBeenCalledTimes(2);
+
+      await runtime.unload();
+      await expect(publication).rejects.toThrow(/runtime.*unload|lifecycle/u);
+
+      await vi.runAllTimersAsync();
+      expect(listMarkdownPaths).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("tolerates an unchanged note without semantic observation but rejects a stale one", async () => {
     const version = (content: string) =>
       `sha256:${createHash("sha256").update(content).digest("hex")}`;
