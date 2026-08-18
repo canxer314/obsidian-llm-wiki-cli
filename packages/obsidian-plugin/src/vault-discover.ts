@@ -45,15 +45,26 @@ function containsText(content: string, search: string, caseSensitive: boolean): 
 }
 
 function pathGlobMatches(path: string, glob: string): boolean {
-  const expression = glob
-    .split("**")
-    .map((part) =>
-      part
-        .replace(/[.+^${}()|[\]\\]/gu, "\\$&")
-        .replace(/\*/gu, "[^/]*")
-        .replace(/\?/gu, "[^/]"),
-    )
-    .join(".*");
+  let expression = "";
+  for (let index = 0; index < glob.length; index += 1) {
+    const character = glob[index]!;
+    if (character === "*" && glob[index + 1] === "*") {
+      const startsDirectorySegment = index === 0 || glob[index - 1] === "/";
+      if (startsDirectorySegment && glob[index + 2] === "/") {
+        expression += "(?:[^/]+/)*";
+        index += 2;
+      } else {
+        expression += ".*";
+        index += 1;
+      }
+    } else if (character === "*") {
+      expression += "[^/]*";
+    } else if (character === "?") {
+      expression += "[^/]";
+    } else {
+      expression += character.replace(/[.+^${}()|[\]\\]/gu, "\\$&");
+    }
+  }
   return new RegExp(`^${expression}$`, "u").test(path);
 }
 
