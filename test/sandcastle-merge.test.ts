@@ -5,6 +5,7 @@ import {
   type MergeGithubPort,
   type MergePullRequestState,
 } from "../.sandcastle/merge.js";
+import { processReadyPlan } from "../.sandcastle/repair-orchestrator.js";
 
 const revision = "a".repeat(40);
 const successorRevision = "b".repeat(40);
@@ -52,6 +53,60 @@ const gates = {
 };
 
 describe("Sandcastle exact-head merge", () => {
+  it("squash merges the conflict-repaired SHA only after both gates rerun", async () => {
+    const conflictHead = "c".repeat(40);
+    const targetSha = "d".repeat(40);
+    const repairedPullRequest = { ...pullRequest, headSha: conflictHead };
+    const synchronize = vi.fn()
+      .mockResolvedValueOnce({
+        status: "conflict" as const,
+        pullRequest,
+        targetBranch: "master",
+        targetSha,
+        summary: "Target master conflicts with the Issue branch",
+      })
+      .mockResolvedValue({
+        status: "unchanged" as const,
+        pullRequest: repairedPullRequest,
+      });
+    const localQuality = { status: "success" as const, revision: conflictHead };
+    const review = {
+      status: "success" as const,
+      revision: conflictHead,
+      verdict: "Approved" as const,
+      summary: "Looks good.",
+      findings: [],
+    };
+    const runLocalQuality = vi.fn().mockResolvedValue(localQuality);
+    const runReview = vi.fn().mockResolvedValue(review);
+    const orchestration = await processReadyPlan({
+      pullRequest,
+      synchronize,
+      runLocalQuality,
+      runReview,
+      repair: vi.fn(),
+      mergeConflict: vi.fn().mockResolvedValue(repairedPullRequest),
+    });
+    const mergeGithub = github(state({
+      headRefName: "sandcastle/issue-110",
+      headSha: conflictHead,
+    }));
+
+    expect(orchestration.terminalFailure).toBeUndefined();
+    expect(orchestration.review).toEqual(review);
+    await mergeVerifiedPullRequest({
+      issueNumber: 110,
+      pullRequest: orchestration.pullRequest,
+      localQuality: orchestration.localQuality,
+      review: orchestration.review!,
+      github: mergeGithub,
+    });
+
+    expect(runLocalQuality).toHaveBeenCalledWith(repairedPullRequest);
+    expect(runReview).toHaveBeenCalledWith(repairedPullRequest, localQuality);
+    expect(mergeGithub.squashMergePullRequest).toHaveBeenCalledWith(321, conflictHead);
+  });
+
   it("squash merges the twice-approved revision and deletes its remote branch", async () => {
     const mergeGithub = github();
 

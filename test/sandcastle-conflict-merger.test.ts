@@ -44,7 +44,9 @@ describe("Sandcastle conflict Merger", () => {
     expect(agentRequest.maxIterations).toBe(1);
     expect(agentRequest.prompt).toContain(request.pullRequest.headSha);
     expect(agentRequest.prompt).toContain(request.targetSha);
-    expect(agentRequest.prompt).toContain("git merge");
+    expect(agentRequest.prompt).toContain(`git fetch origin ${request.targetBranch}`);
+    expect(agentRequest.prompt).toContain(`confirm FETCH_HEAD is exactly ${request.targetSha}`);
+    expect(agentRequest.prompt).toContain(`git merge ${request.targetSha}`);
     expect(agentRequest.prompt).toContain("Do not rebase or force-push");
     expect(agentRequest.prompt).not.toContain("gh pr create");
   });

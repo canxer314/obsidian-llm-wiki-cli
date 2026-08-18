@@ -29,7 +29,7 @@ The Issue branch ${branch} is at ${request.pullRequest.headSha}. The latest ${re
 
 ${request.summary}
 
-Work only on branch ${branch}. Confirm HEAD is exactly ${request.pullRequest.headSha}, fetch ${request.targetSha}, and run git merge ${request.targetSha}. Resolve only the merge conflicts, preserving both sides' intended behavior. Run the relevant tests, commit the merge, run gh auth setup-git, and run git push origin ${branch}. The push must produce one new normal merge commit whose first parent is ${request.pullRequest.headSha} and second parent is ${request.targetSha}. Do not rebase or force-push. Do not create or modify Pull Requests.
+Work only on branch ${branch}. Confirm HEAD is exactly ${request.pullRequest.headSha}. Run git fetch origin ${request.targetBranch}, confirm FETCH_HEAD is exactly ${request.targetSha}, and run git merge ${request.targetSha}. Resolve only the merge conflicts, preserving both sides' intended behavior. Run the relevant tests, commit the merge, run gh auth setup-git, and run git push origin ${branch}. The push must produce one new normal merge commit whose first parent is ${request.pullRequest.headSha} and second parent is ${request.targetSha}. Do not rebase or force-push. Do not create or modify Pull Requests.
 `;
 
 export function createSandcastleMergerSession(options: {
