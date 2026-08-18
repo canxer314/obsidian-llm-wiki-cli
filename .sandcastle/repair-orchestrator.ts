@@ -5,6 +5,22 @@ import type { ReviewerFinding, ReviewerOutput } from "./reviewer-session.js";
 import { redact } from "./redaction.ts";
 
 const MAX_REPAIRS = 2;
+const MAX_SYNCHRONIZATIONS = 2;
+
+export type TargetSyncResult =
+  | {
+    readonly status: "unchanged" | "synced";
+    readonly pullRequest: VerifiedPullRequest;
+  }
+  | {
+    readonly status: "outdated";
+    readonly pullRequest: VerifiedPullRequest;
+  }
+  | {
+    readonly status: "conflict";
+    readonly pullRequest: VerifiedPullRequest;
+    readonly summary: string;
+  };
 
 export type RepairFeedback =
   | {
@@ -26,6 +42,10 @@ export interface RepairRequest {
 
 export interface RepairOrchestratorOptions {
   readonly pullRequest: VerifiedPullRequest;
+  readonly synchronize?: (
+    pullRequest: VerifiedPullRequest,
+    allowPush: boolean,
+  ) => Promise<TargetSyncResult>;
   readonly runLocalQuality: (
     pullRequest: VerifiedPullRequest,
   ) => Promise<LocalQualityResult & { readonly revision: string }>;
@@ -46,6 +66,7 @@ export type RepairOrchestratorResult = {
   readonly pullRequest: VerifiedPullRequest;
   readonly localQuality: LocalQualityResult & { readonly revision: string };
   readonly repairsUsed: number;
+  readonly synchronizationsUsed?: number;
   readonly review?: ReviewResult;
   readonly terminalFailure?: TerminalFailure;
 };
@@ -124,8 +145,59 @@ export async function processReadyPlan(
 ): Promise<RepairOrchestratorResult> {
   let pullRequest = options.pullRequest;
   let repairsUsed = 0;
+  let synchronizationsUsed = 0;
+  let needsPreGateSynchronization = true;
+
+  const synchronizationFields = () => synchronizationsUsed === 0
+    ? {}
+    : { synchronizationsUsed };
+
+  const synchronize = async (): Promise<"unchanged" | "synced" | TerminalFailure> => {
+    if (options.synchronize === undefined) return "unchanged";
+    const result = await options.synchronize(
+      pullRequest,
+      synchronizationsUsed < MAX_SYNCHRONIZATIONS,
+    );
+    if (result.status === "unchanged") return "unchanged";
+    if (result.status === "outdated") {
+      return {
+        stage: "target-sync:budget-exhausted",
+        revision: pullRequest.headSha,
+        summary: "Target branch kept changing during synchronization",
+      };
+    }
+    if (result.status === "conflict") {
+      return {
+        stage: "target-sync:conflict",
+        revision: pullRequest.headSha,
+        summary: redact(result.summary),
+      };
+    }
+    synchronizationsUsed += 1;
+    pullRequest = acceptRepair(pullRequest, result.pullRequest);
+    return "synced";
+  };
 
   for (;;) {
+    const synchronization = needsPreGateSynchronization
+      ? await synchronize()
+      : "unchanged";
+    needsPreGateSynchronization = true;
+    if (typeof synchronization !== "string") {
+      return {
+        pullRequest,
+        localQuality: {
+          status: "error",
+          stage: "setup",
+          revision: pullRequest.headSha,
+          output: synchronization.summary,
+        },
+        repairsUsed,
+        ...synchronizationFields(),
+        terminalFailure: synchronization,
+      };
+    }
+
     const localQuality = await options.runLocalQuality(pullRequest);
     if (localQuality.status !== "success") {
       if (localQuality.status === "error" || repairsUsed === MAX_REPAIRS) {
@@ -152,12 +224,30 @@ export async function processReadyPlan(
     }
 
     const review = await options.runReview(pullRequest, localQuality);
+    if (review.status === "success") {
+      const postReviewSynchronization = await synchronize();
+      if (postReviewSynchronization === "synced") {
+        needsPreGateSynchronization = false;
+        continue;
+      }
+      if (typeof postReviewSynchronization !== "string") {
+        return {
+          pullRequest,
+          localQuality,
+          review,
+          repairsUsed,
+          ...synchronizationFields(),
+          terminalFailure: postReviewSynchronization,
+        };
+      }
+    }
     if (review.status !== "failure") {
       return {
         pullRequest,
         localQuality,
         review,
         repairsUsed,
+        ...synchronizationFields(),
         ...(review.status === "error"
           ? { terminalFailure: reviewTerminalFailure(review, false) }
           : {}),

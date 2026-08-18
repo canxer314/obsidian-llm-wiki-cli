@@ -38,6 +38,116 @@ function review(
 }
 
 describe("Sandcastle repair orchestration", () => {
+  it("reruns both gates from a clean target sync SHA", async () => {
+    const syncedPullRequest = { ...pullRequest, headSha: sha("b") };
+    const synchronize = vi.fn()
+      .mockResolvedValueOnce({ status: "synced" as const, pullRequest: syncedPullRequest })
+      .mockResolvedValue({ status: "unchanged" as const, pullRequest: syncedPullRequest });
+    const runLocalQuality = vi.fn().mockResolvedValue(
+      quality("success", syncedPullRequest.headSha),
+    );
+    const runReview = vi.fn().mockResolvedValue(
+      review("success", syncedPullRequest.headSha),
+    );
+
+    await expect(processReadyPlan({
+      pullRequest,
+      synchronize,
+      runLocalQuality,
+      runReview,
+      repair: vi.fn(),
+    })).resolves.toMatchObject({
+      pullRequest: syncedPullRequest,
+      localQuality: { status: "success", revision: syncedPullRequest.headSha },
+      review: { status: "success", revision: syncedPullRequest.headSha },
+      synchronizationsUsed: 1,
+    });
+
+    expect(runLocalQuality).toHaveBeenCalledOnce();
+    expect(runLocalQuality).toHaveBeenCalledWith(syncedPullRequest);
+    expect(runReview).toHaveBeenCalledOnce();
+    expect(synchronize).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns a target conflict through terminal failure without running gates or repair", async () => {
+    const runLocalQuality = vi.fn();
+    const runReview = vi.fn();
+    const repair = vi.fn();
+
+    await expect(processReadyPlan({
+      pullRequest,
+      synchronize: vi.fn().mockResolvedValue({
+        status: "conflict",
+        pullRequest,
+        summary: "Target master conflicts with the Issue branch",
+      }),
+      runLocalQuality,
+      runReview,
+      repair,
+    })).resolves.toMatchObject({
+      pullRequest,
+      repairsUsed: 0,
+      terminalFailure: {
+        stage: "target-sync:conflict",
+        revision: pullRequest.headSha,
+        summary: "Target master conflicts with the Issue branch",
+      },
+    });
+
+    expect(runLocalQuality).not.toHaveBeenCalled();
+    expect(runReview).not.toHaveBeenCalled();
+    expect(repair).not.toHaveBeenCalled();
+  });
+
+  it("stops after two target synchronizations instead of looping forever", async () => {
+    const revisions = [sha("a"), sha("b"), sha("c"), sha("d")];
+    const synchronize = vi.fn()
+      .mockResolvedValueOnce({
+        status: "synced" as const,
+        pullRequest: { ...pullRequest, headSha: revisions[1]! },
+      })
+      .mockResolvedValueOnce({
+        status: "synced" as const,
+        pullRequest: { ...pullRequest, headSha: revisions[2]! },
+      })
+      .mockResolvedValueOnce({
+        status: "outdated" as const,
+        pullRequest: { ...pullRequest, headSha: revisions[2]! },
+      });
+    const runLocalQuality = vi.fn()
+      .mockResolvedValueOnce(quality("success", revisions[1]!))
+      .mockResolvedValueOnce(quality("success", revisions[2]!));
+    const runReview = vi.fn()
+      .mockResolvedValueOnce(review("success", revisions[1]!))
+      .mockResolvedValueOnce(review("success", revisions[2]!));
+
+    await expect(processReadyPlan({
+      pullRequest,
+      synchronize,
+      runLocalQuality,
+      runReview,
+      repair: vi.fn(),
+    })).resolves.toMatchObject({
+      pullRequest: { headSha: revisions[2] },
+      repairsUsed: 0,
+      synchronizationsUsed: 2,
+      terminalFailure: {
+        stage: "target-sync:budget-exhausted",
+        revision: revisions[2],
+      },
+    });
+
+    expect(runLocalQuality.mock.calls.map(([pr]) => pr.headSha)).toEqual(
+      revisions.slice(1, 3),
+    );
+    expect(synchronize.mock.calls.map(([, allowPush]) => allowPush)).toEqual([
+      true,
+      true,
+      false,
+    ]);
+    expect(runReview).toHaveBeenCalledTimes(2);
+  });
+
   it("repairs a local quality failure and reruns both gates from the new SHA", async () => {
     const repairedSha = sha("b");
     const runLocalQuality = vi.fn()
