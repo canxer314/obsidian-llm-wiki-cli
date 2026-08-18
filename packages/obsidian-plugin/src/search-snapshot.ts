@@ -381,43 +381,81 @@ export class SearchSnapshotRefreshCoordinator {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #builds: Promise<void> = Promise.resolve();
   #waiters: Array<{ resolve(): void; reject(error: unknown): void }> = [];
+  #disposed = false;
 
   constructor(manager: SearchSnapshotManager) {
     this.#manager = manager;
   }
 
   schedule(): void {
+    if (this.#disposed) return;
     this.#manager.invalidate();
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
-      const waiters = this.#waiters.splice(0);
-      const build = this.#builds.then(() => this.#manager.rebuild());
+      if (this.#disposed) return;
+      const waiters = [...this.#waiters];
+      const build = this.#builds.then(() => {
+        if (!this.#disposed) return this.#manager.rebuild();
+      });
       this.#builds = build.catch(() => undefined);
       void build.then(
-        () => waiters.forEach(({ resolve }) => resolve()),
-        (error) => waiters.forEach(({ reject }) => reject(error)),
+        () => waiters.forEach((waiter) => this.#resolve(waiter)),
+        (error) => waiters.forEach((waiter) => this.#reject(waiter, error)),
       );
     }, SEARCH_SNAPSHOT_QUIET_WINDOW_MS);
     this.#timer.unref?.();
   }
 
   async whenIdle(): Promise<void> {
+    if (this.#disposed) throw new Error("Search Snapshot refresh coordinator is disposed");
     do {
       if (this.#timer === undefined) {
-        await this.#builds;
+        await this.#awaitBuilds();
       } else {
         await new Promise<void>((resolve, reject) => {
           this.#waiters.push({ resolve, reject });
         });
       }
     } while (this.#timer !== undefined);
-    await this.#builds;
+    await this.#awaitBuilds();
   }
 
   dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
+    const error = new Error("Search Snapshot refresh coordinator is disposed");
+    this.#waiters.splice(0).forEach(({ reject }) => reject(error));
+  }
+
+  #awaitBuilds(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const waiter = { resolve, reject };
+      this.#waiters.push(waiter);
+      void this.#builds.then(
+        () => this.#resolve(waiter),
+        (error) => this.#reject(waiter, error),
+      );
+    });
+  }
+
+  #resolve(waiter: { resolve(): void; reject(error: unknown): void }): void {
+    const index = this.#waiters.indexOf(waiter);
+    if (index < 0) return;
+    this.#waiters.splice(index, 1);
+    waiter.resolve();
+  }
+
+  #reject(
+    waiter: { resolve(): void; reject(error: unknown): void },
+    error: unknown,
+  ): void {
+    const index = this.#waiters.indexOf(waiter);
+    if (index < 0) return;
+    this.#waiters.splice(index, 1);
+    waiter.reject(error);
   }
 }
 
