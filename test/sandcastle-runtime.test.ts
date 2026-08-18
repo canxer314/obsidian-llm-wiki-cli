@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import * as sandboxModule from "../.sandcastle/sandbox.js";
+
 const root = resolve(import.meta.dirname, "..");
 const dockerfile = readFileSync(resolve(root, ".sandcastle/Dockerfile"), "utf8");
 const sandboxConfig = readFileSync(
@@ -20,13 +22,20 @@ const packageJson = JSON.parse(
 };
 
 describe("Sandcastle Docker runtime", () => {
+  it("exposes only the validated startup path", () => {
+    expect(Object.keys(sandboxModule).sort()).toEqual([
+      "loadSandboxStartup",
+      "sandboxHooks",
+    ]);
+  });
+
   it("uses the repository's Node.js 24 runtime floor", () => {
     expect(packageJson.engines?.node).toBe(">=24.14.0");
     expect(dockerfile).toMatch(/^FROM node:24\.14\.0-bookworm$/m);
   });
 
   it("uses host networking", () => {
-    expect(sandboxConfig).toMatch(/docker\(\{ network: ["']host["'] \}\)/);
+    expect(sandboxConfig).toMatch(/docker\(\{ network: ["']host["'], env:/);
   });
 
   it("installs lockfile dependencies inside each sandbox", () => {
