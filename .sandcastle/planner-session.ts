@@ -11,7 +11,7 @@ import type { PlannerAgentSession } from "./planner.js";
 const plannerPrompt = (issueNumber: number) => `
 Plan only GitHub Issue #${issueNumber} in this repository.
 
-Use GitHub CLI to read the latest Issue directly with gh issue view ${issueNumber}. Read its title, body, labels, and all comments before planning. Do not select, inspect, or plan another Issue. Determine whether dependencies or missing decisions block implementation. Determine whether the Issue explicitly permits changes to Sandcastle or GitHub automation configuration.
+Use GitHub CLI to read the latest Issue directly with gh issue view ${issueNumber} --comments. Read its title, body, labels, and all comments before planning. Do not select, inspect, or plan another Issue. Determine whether dependencies or missing decisions block implementation. Determine whether the Issue explicitly permits changes to Sandcastle or GitHub automation configuration.
 
 Return one JSON object inside <plan> tags. Include status (ready or blocked), implementationSummary, blockingReason (null when ready), allowsAutomationChanges, and the complete Issue context you read: number, title, body, label names, and every comment's author and body.
 `;

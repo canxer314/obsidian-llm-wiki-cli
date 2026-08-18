@@ -50,7 +50,7 @@ describe("Sandcastle Planner session adapter", () => {
     const request = runAgent.mock.calls[0]![0];
     expect(createAgent).toHaveBeenCalledWith("planner-model");
     expect(request.agent).toEqual({ name: "fake-agent" });
-    expect(request.prompt).toContain("gh issue view 101");
+    expect(request.prompt).toContain("gh issue view 101 --comments");
     expect(request.prompt).toContain("body, labels, and all comments");
     expect(request.prompt).toContain("<plan>");
     expect(request.prompt).not.toContain(output.issue.body);
