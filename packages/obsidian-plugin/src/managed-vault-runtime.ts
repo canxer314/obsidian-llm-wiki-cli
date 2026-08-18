@@ -197,7 +197,7 @@ export class ManagedVaultBridgeRuntime {
   #pendingPathChange: PathChangeEvidence | undefined;
   #snapshots: SearchSnapshotManager | undefined;
   #snapshotRefresh: SearchSnapshotRefreshCoordinator | undefined;
-  #snapshotSignals: Array<() => void> = [];
+  #snapshotSignals: Array<(error?: Error) => void> = [];
 
   constructor(options: ManagedVaultBridgeRuntimeOptions) {
     this.#options = options;
@@ -275,22 +275,32 @@ export class ManagedVaultBridgeRuntime {
     while (true) {
       try {
         await refresh.whenIdle();
-      } catch {
+      } catch (error) {
+        if (this.#snapshotRefresh !== refresh) {
+          throw new Error("Search Snapshot barrier ended because the runtime unloaded", {
+            cause: error,
+          });
+        }
         // A failed build leaves readiness unavailable; the barrier keeps waiting
         // for a later host event until the deadline rather than failing open.
+      }
+      if (this.#snapshotRefresh !== refresh) {
+        throw new Error("Search Snapshot barrier ended because the runtime unloaded");
       }
       if (matches()) return;
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         throw new Error("Successor Search Snapshot target evidence did not match");
       }
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, remaining);
         timer.unref?.();
-        this.#snapshotSignals.push(() => {
+        const signal = (error?: Error) => {
           clearTimeout(timer);
-          resolve();
-        });
+          if (error === undefined) resolve();
+          else reject(error);
+        };
+        this.#snapshotSignals.push(signal);
       });
     }
   }
@@ -579,8 +589,13 @@ export class ManagedVaultBridgeRuntime {
     const bridge = this.#bridge;
     this.#bridge = undefined;
     this.#snapshots = undefined;
-    this.#snapshotRefresh?.dispose();
+    const refresh = this.#snapshotRefresh;
     this.#snapshotRefresh = undefined;
+    const lifecycleError = new Error(
+      "Search Snapshot barrier ended because the runtime unloaded",
+    );
+    for (const signal of this.#snapshotSignals.splice(0)) signal(lifecycleError);
+    refresh?.dispose();
     if (bridge !== undefined) await bridge.stop();
     await this.#options.changeSetExecution?.close?.();
   }
