@@ -141,10 +141,17 @@ export class GithubCliPort implements
     ]);
     const targetSha = targetOutput.trim();
 
-    await this.execute("git", ["fetch", "--no-tags", "origin", `refs/heads/${metadata.baseRefName}`]);
-    const { stdout: fetchedTargetOutput } = await this.execute("git", ["rev-parse", "FETCH_HEAD"]);
-    await this.execute("git", ["fetch", "--no-tags", "origin", `refs/heads/${metadata.headRefName}`]);
-    const { stdout: fetchedHeadOutput } = await this.execute("git", ["rev-parse", "FETCH_HEAD"]);
+    const targetRef = `refs/sandcastle/sync/${pullRequest.number}/target`;
+    const headRef = `refs/sandcastle/sync/${pullRequest.number}/head`;
+    await this.execute("git", [
+      "fetch",
+      "--no-tags",
+      "origin",
+      `+refs/heads/${metadata.baseRefName}:${targetRef}`,
+      `+refs/heads/${metadata.headRefName}:${headRef}`,
+    ]);
+    const { stdout: fetchedTargetOutput } = await this.execute("git", ["rev-parse", targetRef]);
+    const { stdout: fetchedHeadOutput } = await this.execute("git", ["rev-parse", headRef]);
     const fetchedTargetSha = fetchedTargetOutput.trim();
     const fetchedHeadSha = fetchedHeadOutput.trim();
     if (fetchedTargetSha !== targetSha || fetchedHeadSha !== pullRequest.headSha) {

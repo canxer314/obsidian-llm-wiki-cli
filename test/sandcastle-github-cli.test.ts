@@ -79,7 +79,6 @@ describe("Sandcastle GitHub CLI adapter", () => {
       .mockResolvedValueOnce({ stdout: `${targetHead}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${targetHead}\n`, stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${oldHead}\n`, stderr: "" })
       .mockRejectedValueOnce(Object.assign(new Error("not ancestor"), { code: 1 }))
       .mockResolvedValueOnce({ stdout: `${tree}\n`, stderr: "" })
@@ -104,10 +103,13 @@ describe("Sandcastle GitHub CLI adapter", () => {
     expect(execute.mock.calls).toEqual([
       ["gh", ["pr", "view", "321", "--json", "baseRefName,headRefName,headRefOid"]],
       ["gh", ["api", "repos/{owner}/{repo}/git/ref/heads/master", "--jq", ".object.sha"]],
-      ["git", ["fetch", "--no-tags", "origin", "refs/heads/master"]],
-      ["git", ["rev-parse", "FETCH_HEAD"]],
-      ["git", ["fetch", "--no-tags", "origin", "refs/heads/sandcastle/issue-109"]],
-      ["git", ["rev-parse", "FETCH_HEAD"]],
+      ["git", [
+        "fetch", "--no-tags", "origin",
+        "+refs/heads/master:refs/sandcastle/sync/321/target",
+        "+refs/heads/sandcastle/issue-109:refs/sandcastle/sync/321/head",
+      ]],
+      ["git", ["rev-parse", "refs/sandcastle/sync/321/target"]],
+      ["git", ["rev-parse", "refs/sandcastle/sync/321/head"]],
       ["git", ["merge-base", "--is-ancestor", targetHead, oldHead]],
       ["git", ["merge-tree", "--write-tree", oldHead, targetHead]],
       ["git", ["commit-tree", tree, "-p", oldHead, "-p", targetHead, "-m", "Merge master into sandcastle/issue-109"]],
@@ -131,7 +133,6 @@ describe("Sandcastle GitHub CLI adapter", () => {
       .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${head}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" });
     const github = new GithubCliPort(execute);
@@ -163,7 +164,6 @@ describe("Sandcastle GitHub CLI adapter", () => {
       .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${head}\n`, stderr: "" })
       .mockRejectedValueOnce(Object.assign(new Error("not ancestor"), { code: 1 }));
     const github = new GithubCliPort(execute);
@@ -196,7 +196,6 @@ describe("Sandcastle GitHub CLI adapter", () => {
       .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${head}\n`, stderr: "" })
       .mockRejectedValueOnce(Object.assign(new Error("not ancestor"), { code: 1 }))
       .mockRejectedValueOnce(Object.assign(new Error("CONFLICT"), { code: 1 }));
@@ -232,7 +231,6 @@ describe("Sandcastle GitHub CLI adapter", () => {
       .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${changedTarget}\n`, stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${head}\n`, stderr: "" });
     const github = new GithubCliPort(execute);
 
