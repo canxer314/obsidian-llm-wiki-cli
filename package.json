@@ -10,9 +10,11 @@
     "build": "npm run build -w @llm-wiki/vault-contracts && npm run build -w @llm-wiki/obsidian-vault-bridge",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:sandbox": "bash .sandcastle/smoke-test.sh"
   },
   "devDependencies": {
+    "@ai-hero/sandcastle": "^0.12.0",
     "@types/node": "^24.10.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
