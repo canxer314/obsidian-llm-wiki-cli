@@ -114,9 +114,24 @@ describe("Sandcastle CLI", () => {
       state: "OPEN",
       labels: ["documentation", "Sandcastle"],
     });
-    const startPlanner = vi.fn();
+    const plan = {
+      status: "ready" as const,
+      implementationSummary: "Implement the target Issue.",
+      blockingReason: null,
+      allowsAutomationChanges: false,
+      issue: {
+        number: 100,
+        title: "Target",
+        body: "Do the work.",
+        labels: ["Sandcastle"],
+        comments: [],
+      },
+    };
+    const startPlanner = vi.fn().mockResolvedValue(plan);
 
-    await runSandcastleCli(["--issue", "100"], { github, startPlanner });
+    await expect(
+      runSandcastleCli(["--issue", "100"], { github, startPlanner }),
+    ).resolves.toEqual(plan);
 
     expect(github.ensureLabel).toHaveBeenCalledWith("sandcastle:failed");
     expect(startPlanner).toHaveBeenCalledWith(100);
