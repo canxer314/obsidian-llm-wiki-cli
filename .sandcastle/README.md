@@ -68,6 +68,13 @@ Request comment with its reviewed revision. Sandcastle reads the Pull Request
 head before starting and after the Reviewer returns, so a result for an
 outdated head cannot publish success.
 
+A local quality `failure` or Reviewer `Changes requested` verdict can start a
+fresh Implementer repair session. Both failure sources share one budget of two
+repairs, so a run evaluates at most three implementation revisions. Each repair
+receives only bounded, redacted output or structured findings, must push a new
+SHA to the existing Pull Request, and restarts local quality before review.
+Infrastructure and Reviewer `error` results stop without consuming a repair.
+
 ## Runtime verification
 
 The provider uses Docker host networking so a container can reach CC-Switch on
