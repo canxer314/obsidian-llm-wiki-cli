@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
+import { resolve } from "node:path";
+
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
+import { runDockerLocalQuality } from "./docker-local-quality-host.ts";
 import { GithubCliPort } from "./github-cli.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { implementIssue } from "./implementer.ts";
@@ -28,12 +31,21 @@ try {
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
       });
-      return implementIssue({
+      const pullRequest = await implementIssue({
         plan,
         model: startup.models.implementer,
         session: implementerSession,
         github,
       });
+      const repositoryPath = resolve(import.meta.dirname, "..");
+      const localQuality = await runDockerLocalQuality(pullRequest.headSha, {
+        repositoryPath,
+        worktreeRoot: resolve(import.meta.dirname, "worktrees"),
+        runId: `sandcastle-quality-${issueNumber}`,
+        uid: process.getuid?.() ?? 1000,
+        gid: process.getgid?.() ?? 1000,
+      });
+      return { pullRequest, localQuality };
     },
   });
   if (result !== undefined) console.log(JSON.stringify(result));
