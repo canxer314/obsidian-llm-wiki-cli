@@ -16,12 +16,25 @@ function githubPort(): FailureGithubPort {
 }
 
 describe("Sandcastle failure-aware workflow", () => {
-  it.each(["planner", "implementer"])(
-    "finalizes a %s exception on the Issue without retrying the workflow",
-    async (stage) => {
+  it.each([
+    { stage: "startup", hasPullRequest: false },
+    { stage: "planner", hasPullRequest: false },
+    { stage: "implementer", hasPullRequest: false },
+    { stage: "local-quality", hasPullRequest: true },
+    { stage: "reviewer", hasPullRequest: true },
+    { stage: "repair", hasPullRequest: true },
+  ])(
+    "finalizes a $stage exception without retrying the workflow",
+    async ({ stage, hasPullRequest }) => {
       const github = githubPort();
-      const run = vi.fn(async (progress: { enter(stage: string): void }) => {
-        progress.enter(stage);
+      const run = vi.fn(async (progress: {
+        enter(stage: string, pullRequest?: { number: number; headSha: string; url: string }): void;
+      }) => {
+        progress.enter(stage, hasPullRequest ? {
+          number: 321,
+          headSha: "a".repeat(40),
+          url: "https://github.com/example/repo/pull/321",
+        } : undefined);
         throw new Error(`${stage} failed`);
       });
 
@@ -35,8 +48,13 @@ describe("Sandcastle failure-aware workflow", () => {
       });
 
       expect(run).toHaveBeenCalledOnce();
-      expect(github.addIssueComment).toHaveBeenCalledOnce();
-      expect(github.addPullRequestComment).not.toHaveBeenCalled();
+      if (hasPullRequest) {
+        expect(github.addPullRequestComment).toHaveBeenCalledOnce();
+        expect(github.addIssueComment).not.toHaveBeenCalled();
+      } else {
+        expect(github.addIssueComment).toHaveBeenCalledOnce();
+        expect(github.addPullRequestComment).not.toHaveBeenCalled();
+      }
     },
   );
 

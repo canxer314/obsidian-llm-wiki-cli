@@ -4,7 +4,11 @@ import { resolve } from "node:path";
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { createDockerLocalQualityHost } from "./docker-local-quality-host.ts";
-import { runFailureAwareWorkflow } from "./failure-workflow.ts";
+import { finalizeFailure } from "./failure-finalizer.ts";
+import {
+  runFailureAwareWorkflow,
+  SandcastleWorkflowError,
+} from "./failure-workflow.ts";
 import { GithubCliPort } from "./github-cli.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
@@ -23,6 +27,16 @@ try {
   const github = new GithubCliPort();
   const result = await runSandcastleCli(process.argv.slice(2), {
     github,
+    handleFailure: async (issueNumber, stage, error) => {
+      const finalization = await finalizeFailure({
+        issueNumber,
+        stage,
+        summary: error instanceof Error ? error.message : String(error),
+      }, github);
+      if (finalization.failures.length > 0) {
+        throw new SandcastleWorkflowError(stage, finalization.failures, { cause: error });
+      }
+    },
     processIssue: async (issueNumber) => runFailureAwareWorkflow<
       PlannerOutput | RepairOrchestratorResult
     >({

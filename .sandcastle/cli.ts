@@ -22,6 +22,11 @@ export interface SandcastleGithubPort {
 export interface SandcastleCliDependencies<TResult = unknown> {
   readonly github: SandcastleGithubPort;
   readonly processIssue: (issueNumber: number) => Promise<TResult>;
+  readonly handleFailure?: (
+    issueNumber: number,
+    stage: "claim",
+    error: unknown,
+  ) => Promise<void>;
 }
 
 interface CliOptions {
@@ -88,7 +93,13 @@ export async function runSandcastleCli<TResult>(
     );
   }
 
-  const claimed = await dependencies.github.claimIssue(issueNumber);
+  let claimed: boolean;
+  try {
+    claimed = await dependencies.github.claimIssue(issueNumber);
+  } catch (error) {
+    await dependencies.handleFailure?.(issueNumber, "claim", error);
+    throw error;
+  }
   if (!claimed) return;
 
   return dependencies.processIssue(issueNumber);

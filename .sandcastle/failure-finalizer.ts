@@ -1,4 +1,4 @@
-const MAX_SUMMARY_LENGTH = 20_000;
+import { redact } from "./redaction.ts";
 
 export interface FailureContext {
   readonly issueNumber: number;
@@ -19,18 +19,7 @@ export interface FailureFinalizationResult {
   readonly failures: readonly string[];
 }
 
-export function redactFailureSummary(text: string): string {
-  return text
-    .replace(
-      /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gu,
-      "[REDACTED]",
-    )
-    .replace(
-      /((?:token|password|secret|api[_-]?key|authorization)\s*[:=]\s*)([^\s,;]+)/giu,
-      "$1[REDACTED]",
-    )
-    .slice(0, MAX_SUMMARY_LENGTH);
-}
+export const redactFailureSummary = redact;
 
 function failureComment(context: FailureContext): string {
   const lines = [
@@ -54,19 +43,28 @@ export async function finalizeFailure(
   github: FailureGithubPort,
 ): Promise<FailureFinalizationResult> {
   const failures: string[] = [];
-  const operations: readonly [string, () => Promise<void>][] = [
-    ["comment", () => context.pullRequestNumber === undefined
-      ? github.addIssueComment(context.issueNumber, failureComment(context))
-      : github.addPullRequestComment(context.pullRequestNumber, failureComment(context))],
-    ["remove-label", () => github.removeIssueLabel(context.issueNumber, "Sandcastle")],
-    ["add-label", () => github.addIssueLabel(context.issueNumber, "sandcastle:failed")],
-  ];
+  const comment = context.pullRequestNumber === undefined
+    ? github.addIssueComment(context.issueNumber, failureComment(context))
+    : github.addPullRequestComment(context.pullRequestNumber, failureComment(context));
+  try {
+    await comment;
+  } catch (error) {
+    failures.push(`comment: ${errorMessage(error)}`);
+  }
 
-  for (const [name, operation] of operations) {
+  let failureLabelAdded = false;
+  try {
+    await github.addIssueLabel(context.issueNumber, "sandcastle:failed");
+    failureLabelAdded = true;
+  } catch (error) {
+    failures.push(`add-label: ${errorMessage(error)}`);
+  }
+
+  if (failureLabelAdded) {
     try {
-      await operation();
+      await github.removeIssueLabel(context.issueNumber, "Sandcastle");
     } catch (error) {
-      failures.push(`${name}: ${errorMessage(error)}`);
+      failures.push(`remove-label: ${errorMessage(error)}`);
     }
   }
   return { failures };

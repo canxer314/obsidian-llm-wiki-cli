@@ -2,9 +2,9 @@ import type { VerifiedPullRequest } from "./implementer.js";
 import type { LocalQualityResult } from "./local-quality.js";
 import type { ReviewResult } from "./review.js";
 import type { ReviewerFinding, ReviewerOutput } from "./reviewer-session.js";
+import { redact } from "./redaction.ts";
 
 const MAX_REPAIRS = 2;
-const MAX_FEEDBACK_LENGTH = 20_000;
 
 export type RepairFeedback =
   | {
@@ -49,19 +49,6 @@ export type RepairOrchestratorResult = {
   readonly review?: ReviewResult;
   readonly terminalFailure?: TerminalFailure;
 };
-
-function redact(text: string): string {
-  return text
-    .replace(
-      /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gu,
-      "[REDACTED]",
-    )
-    .replace(
-      /((?:token|password|secret|api[_-]?key|authorization)\s*[:=]\s*)([^\s,;]+)/giu,
-      "$1[REDACTED]",
-    )
-    .slice(0, MAX_FEEDBACK_LENGTH);
-}
 
 function qualityFeedback(
   result: Exclude<LocalQualityResult, { status: "success" }>,
