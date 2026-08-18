@@ -114,6 +114,96 @@ describe("vault_discover over a real Vault source", () => {
     );
   });
 
+  it("matches a globstar directory prefix at zero or more levels", async () => {
+    const vault = mutableVault({
+      "root.md": "root",
+      "one/child.md": "one",
+      "one/two/deep.md": "deep",
+    });
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+
+    const result = await new VaultDiscoverService(snapshots).execute(
+      input({ path: { glob: "**/*.md" } }, 100, false),
+    );
+
+    expect(result).toMatchObject({
+      items: [
+        { path: "one/child.md" },
+        { path: "one/two/deep.md" },
+        { path: "root.md" },
+      ],
+    });
+  });
+
+  it("matches a globstar between path segments at zero or more levels", async () => {
+    const vault = mutableVault({
+      "a/b.md": "zero",
+      "a/x/b.md": "one",
+      "a/x/y/b.md": "many",
+      "a/x/other.md": "other",
+    });
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+
+    const result = await new VaultDiscoverService(snapshots).execute(
+      input({ path: { glob: "a/**/b.md" } }, 100, false),
+    );
+
+    expect(result).toMatchObject({
+      items: [
+        { path: "a/b.md" },
+        { path: "a/x/b.md" },
+        { path: "a/x/y/b.md" },
+      ],
+    });
+  });
+
+  it("preserves globstar behavior when it shares a path segment", async () => {
+    const vault = mutableVault({
+      "foo/bar.md": "empty",
+      "foo-x/bar.md": "same segment",
+      "foo/x/bar.md": "directory",
+    });
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+
+    const result = await new VaultDiscoverService(snapshots).execute(
+      input({ path: { glob: "foo**/bar.md" } }, 100, false),
+    );
+
+    expect(result).toMatchObject({
+      items: [
+        { path: "foo-x/bar.md" },
+        { path: "foo/bar.md" },
+        { path: "foo/x/bar.md" },
+      ],
+    });
+  });
+
+  it("keeps star and question mark within a single path segment", async () => {
+    const vault = mutableVault({
+      "a/one.md": "one",
+      "a/two.md": "two",
+      "a/x/deep.md": "deep",
+    });
+    const snapshots = new SearchSnapshotManager(vault.source);
+    await snapshots.rebuild();
+    const discover = new VaultDiscoverService(snapshots);
+
+    const star = await discover.execute(
+      input({ path: { glob: "a/*.md" } }, 100, false),
+    );
+    expect(star).toMatchObject({
+      items: [{ path: "a/one.md" }, { path: "a/two.md" }],
+    });
+
+    const question = await discover.execute(
+      input({ path: { glob: "a/???.md" } }, 100, false),
+    );
+    expect(question).toMatchObject({ items: [{ path: "a/one.md" }, { path: "a/two.md" }] });
+  });
+
   it("discovers canonical path and filename matches in deterministic order", async () => {
     const vault = mutableVault({
       "zeta/Bridge Notes.md": "one",
