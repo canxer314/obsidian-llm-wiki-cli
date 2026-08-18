@@ -37,6 +37,7 @@ export type SandcastleWatchEvent =
     readonly batchId: number;
     readonly issueNumber: number;
     readonly outcome: "success" | "failure";
+    readonly activeCount: number;
   };
 
 export interface SandcastleCliDependencies<TResult = unknown> {
@@ -96,10 +97,10 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
 const WATCH_INTERVAL_MS = 300_000;
 const MAX_ACTIVE_ISSUES = 2;
 
-async function runIssue<TResult>(
+async function claimEligibleIssue<TResult>(
   issueNumber: number,
   dependencies: SandcastleCliDependencies<TResult>,
-): Promise<TResult | undefined> {
+): Promise<boolean> {
   const issue = await dependencies.github.getIssue(issueNumber);
   if (issue === null) {
     throw new SandcastleCliError(`Issue #${issueNumber} does not exist`);
@@ -120,8 +121,14 @@ async function runIssue<TResult>(
     await dependencies.handleFailure?.(issueNumber, "claim", error);
     throw error;
   }
-  if (!claimed) return;
+  return claimed;
+}
 
+async function runIssue<TResult>(
+  issueNumber: number,
+  dependencies: SandcastleCliDependencies<TResult>,
+): Promise<TResult | undefined> {
+  if (!await claimEligibleIssue(issueNumber, dependencies)) return;
   return dependencies.processIssue(issueNumber);
 }
 
@@ -146,16 +153,24 @@ export async function runSandcastleCli<TResult>(
       const available = candidates.filter((issue) =>
         !active.has(issue.number) && !issue.labels.includes("sandcastle:failed")
       ).slice(0, MAX_ACTIVE_ISSUES - active.size);
-      if (available.length > 0) {
+      const claimed: SandcastleIssue[] = [];
+      for (const issue of available) {
+        try {
+          if (await claimEligibleIssue(issue.number, dependencies)) claimed.push(issue);
+        } catch {
+          // Claim failures are finalized independently and do not stop the batch.
+        }
+      }
+      if (claimed.length > 0) {
         batchId += 1;
         dependencies.recordWatchEvent?.({
           kind: "batch-started",
           batchId,
-          issueNumbers: available.map((issue) => issue.number),
+          issueNumbers: claimed.map((issue) => issue.number),
         });
       }
       const workflowBatchId = batchId;
-      for (const issue of available) {
+      for (const issue of claimed) {
         dependencies.recordWatchEvent?.({
           kind: "issue-started",
           batchId: workflowBatchId,
@@ -163,7 +178,7 @@ export async function runSandcastleCli<TResult>(
           activeCount: active.size + 1,
         });
         let outcome: "success" | "failure" = "success";
-        const workflow = runIssue(issue.number, dependencies)
+        const workflow = dependencies.processIssue(issue.number)
           .catch(() => {
             outcome = "failure";
           })
@@ -174,6 +189,7 @@ export async function runSandcastleCli<TResult>(
               batchId: workflowBatchId,
               issueNumber: issue.number,
               outcome,
+              activeCount: active.size,
             });
           });
         active.set(issue.number, workflow);

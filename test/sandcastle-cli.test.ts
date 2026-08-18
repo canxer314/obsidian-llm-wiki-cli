@@ -179,6 +179,7 @@ describe("Sandcastle CLI", () => {
       batchId: 1,
       issueNumber: 117,
       outcome: "failure",
+      activeCount: 1,
     }));
     issue116.resolve();
     await vi.waitFor(() => expect(events).toContainEqual({
@@ -186,6 +187,7 @@ describe("Sandcastle CLI", () => {
       batchId: 1,
       issueNumber: 116,
       outcome: "success",
+      activeCount: 0,
     }));
     firstWait.resolve();
     await expect(stopped).resolves.toBe(stop);
@@ -258,6 +260,7 @@ describe("Sandcastle CLI", () => {
       batchId: 1,
       issueNumber: 116,
       outcome: "success",
+      activeCount: 1,
     }));
     workflows.get(118)!.resolve();
     secondWait.resolve();
@@ -358,16 +361,19 @@ describe("Sandcastle CLI", () => {
       labels: ["Sandcastle"],
     });
     vi.mocked(github.claimIssue).mockResolvedValue(false);
+    const events: unknown[] = [];
     const stop = new Error("stop fake clock");
 
     await expect(runSandcastleCli(["--watch"], {
       github,
       processIssue: vi.fn(),
+      recordWatchEvent: (event) => events.push(event),
       sleep: vi.fn().mockRejectedValue(stop),
     })).rejects.toBe(stop);
 
     expect(github.getIssue).toHaveBeenCalledTimes(1);
     expect(github.claimIssue).toHaveBeenCalledWith(102);
+    expect(events).toEqual([]);
   });
 
   it.each([

@@ -35,7 +35,7 @@
 | --- | --- | --- |
 | 同一 watch 批次，活动数不超过二 | **未证明** | 没有 watch batch/active-count 日志；分支来源也不是 Sandcastle watch。 |
 | branches、PRs、Agent Sessions、repair counters、SHA statuses 相互隔离 | **部分通过** | PR #139/#140、head SHA 与状态互相独立；分支分别为 `worktree-implement-issue-117` 与 `worktree-issue-116-unload-snapshot-barrier`，违反确定性分支要求；无 Agent Session 与 counter 证据。 |
-| 每个新 SHA 分别获得两道 current-head 结果 | **未通过** | #117 的两个实现 SHA 均有两道结果；#116 的 `247d067...`、`55669fc...` 没有 status，只有最终同步 SHA 有两道成功结果。 |
+| 每个新 SHA 分别获得两道 current-head 结果 | **未通过** | GitHub combined-status API 对 #117 两个 SHA 分别返回两道结果；对 #116 的 `247d067...`、`55669fc...` 返回空 `statuses`，只有最终同步 SHA 返回两道成功结果。 |
 | 各自 exact-head squash merge，并由 Closes 关闭 | **通过** | PR #139 body 为 `Closes #117`，PR #140 body 为 `Closes #116`；两者 status rollup 均绑定最终 head，随后分别 squash merge 并关闭 Issue。 |
 | 一项失败不污染另一项，统一保留失败现场 | **未证明** | #117 的 review failure 后成功 repair，#116 不受其 SHA status 污染；但没有同一 orchestrator 批次或终局失败样本，无法验证统一失败保留策略。 |
 | 留存不含 secret 的时间线和结果 | **通过** | 本文记录公开 GitHub 元数据；不包含 token、路由或本机配置。 |
@@ -49,3 +49,5 @@
 5. 至少让一个候选经历可恢复失败；确认另一个候选的事件、状态与最终结果不改变。若制造终局失败，确认其 PR/branch/Issue 被保留并单独标记，而成功候选仍正常合并。
 
 仓库的 watch seam 现已输出上述批次与生命周期事件，且自动化测试覆盖同一批次双启动、峰值活动数为二，以及一个失败时另一个仍记录成功。
+
+逐 SHA 状态通过公开的 `GET /repos/canxer314/obsidian-llm-wiki-cli/commits/{sha}/status` 查询；本文记录的是 2026-08-18 的查询结果。空 `statuses` 数组视为该 SHA 未获得任何一道 Sandcastle status，而不是 pending gate。
