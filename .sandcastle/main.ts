@@ -2,27 +2,41 @@
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { GithubCliPort } from "./github-cli.ts";
+import { createSandcastleImplementerSession } from "./implementer-session.ts";
+import { implementIssue } from "./implementer.ts";
 import { createSandcastlePlannerSession } from "./planner-session.ts";
 import { planIssue } from "./planner.ts";
 import { loadSandboxStartup, sandboxHooks } from "./sandbox.ts";
 
 try {
-  const plan = await runSandcastleCli(process.argv.slice(2), {
-    github: new GithubCliPort(),
-    startPlanner: async (issueNumber) => {
+  const github = new GithubCliPort();
+  const result = await runSandcastleCli(process.argv.slice(2), {
+    github,
+    processIssue: async (issueNumber) => {
       const startup = await loadSandboxStartup();
-      const session = createSandcastlePlannerSession({
+      const plannerSession = createSandcastlePlannerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
       });
-      return planIssue({
+      const plan = await planIssue({
         issueNumber,
         model: startup.models.planner,
-        session,
+        session: plannerSession,
+      });
+      if (plan.status === "blocked") return plan;
+      const implementerSession = createSandcastleImplementerSession({
+        sandbox: startup.sandbox,
+        hooks: sandboxHooks,
+      });
+      return implementIssue({
+        plan,
+        model: startup.models.implementer,
+        session: implementerSession,
+        github,
       });
     },
   });
-  if (plan !== undefined) console.log(JSON.stringify(plan));
+  if (result !== undefined) console.log(JSON.stringify(result));
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);

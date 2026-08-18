@@ -17,27 +17,27 @@ function githubPort(): SandcastleGithubPort {
 describe("Sandcastle CLI", () => {
   it("requires an explicit Issue in the default mode without scanning the backlog", async () => {
     const github = githubPort();
-    const startPlanner = vi.fn();
+    const processIssue = vi.fn();
 
     await expect(
-      runSandcastleCli([], { github, startPlanner }),
+      runSandcastleCli([], { github, processIssue }),
     ).rejects.toMatchObject<SandcastleCliError>({
       message: "Missing required --issue <number>; use --watch to scan the backlog",
       exitCode: 2,
     });
 
     expect(github.getIssue).not.toHaveBeenCalled();
-    expect(startPlanner).not.toHaveBeenCalled();
+    expect(processIssue).not.toHaveBeenCalled();
   });
 
   it("rejects --issue and --watch together with a non-zero exit result", async () => {
     const github = githubPort();
-    const startPlanner = vi.fn();
+    const processIssue = vi.fn();
 
     await expect(
       runSandcastleCli(["--issue", "100", "--watch"], {
         github,
-        startPlanner,
+        processIssue,
       }),
     ).rejects.toMatchObject<SandcastleCliError>({
       message: "--issue and --watch cannot be used together",
@@ -45,7 +45,7 @@ describe("Sandcastle CLI", () => {
     });
 
     expect(github.getIssue).not.toHaveBeenCalled();
-    expect(startPlanner).not.toHaveBeenCalled();
+    expect(processIssue).not.toHaveBeenCalled();
   });
 
   it.each(["0", "-1", "1.5", "not-a-number"])(
@@ -56,7 +56,7 @@ describe("Sandcastle CLI", () => {
       await expect(
         runSandcastleCli(["--issue", value], {
           github,
-          startPlanner: vi.fn(),
+          processIssue: vi.fn(),
         }),
       ).rejects.toMatchObject<SandcastleCliError>({
         message: "--issue requires a positive integer",
@@ -72,7 +72,7 @@ describe("Sandcastle CLI", () => {
 
     await runSandcastleCli(["--watch"], {
       github,
-      startPlanner: vi.fn(),
+      processIssue: vi.fn(),
     });
 
     expect(github.ensureLabel).toHaveBeenCalledWith("sandcastle:failed");
@@ -98,15 +98,15 @@ describe("Sandcastle CLI", () => {
   ])("stops before Planner when the target $name", async ({ issue, message }) => {
     const github = githubPort();
     vi.mocked(github.getIssue).mockResolvedValue(issue);
-    const startPlanner = vi.fn();
+    const processIssue = vi.fn();
 
     await expect(
-      runSandcastleCli(["--issue", "100"], { github, startPlanner }),
+      runSandcastleCli(["--issue", "100"], { github, processIssue }),
     ).rejects.toMatchObject<SandcastleCliError>({ message, exitCode: 2 });
 
     expect(github.ensureLabel).toHaveBeenCalledWith("sandcastle:failed");
     expect(github.claimIssue).not.toHaveBeenCalled();
-    expect(startPlanner).not.toHaveBeenCalled();
+    expect(processIssue).not.toHaveBeenCalled();
   });
 
   it("skips Planner when the target is already claimed", async () => {
@@ -117,12 +117,12 @@ describe("Sandcastle CLI", () => {
       labels: ["Sandcastle"],
     });
     vi.mocked(github.claimIssue).mockResolvedValue(false);
-    const startPlanner = vi.fn();
+    const processIssue = vi.fn();
 
-    await runSandcastleCli(["--issue", "100"], { github, startPlanner });
+    await runSandcastleCli(["--issue", "100"], { github, processIssue });
 
     expect(github.claimIssue).toHaveBeenCalledWith(100);
-    expect(startPlanner).not.toHaveBeenCalled();
+    expect(processIssue).not.toHaveBeenCalled();
   });
 
   it("claims an eligible target before starting Planner", async () => {
@@ -145,13 +145,13 @@ describe("Sandcastle CLI", () => {
         comments: [],
       },
     };
-    const startPlanner = vi.fn().mockResolvedValue(plan);
+    const processIssue = vi.fn().mockResolvedValue(plan);
 
     await expect(
-      runSandcastleCli(["--issue", "100"], { github, startPlanner }),
+      runSandcastleCli(["--issue", "100"], { github, processIssue }),
     ).resolves.toEqual(plan);
 
     expect(github.claimIssue).toHaveBeenCalledWith(100);
-    expect(startPlanner).toHaveBeenCalledWith(100);
+    expect(processIssue).toHaveBeenCalledWith(100);
   });
 });
