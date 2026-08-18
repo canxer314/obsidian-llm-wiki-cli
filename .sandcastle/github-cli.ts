@@ -6,6 +6,10 @@ import type {
   ImplementerGithubPort,
   VerifiedPullRequest,
 } from "./implementer.ts";
+import type {
+  LocalQualityCommitStatus,
+  LocalQualityGithubPort,
+} from "./local-quality.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -74,11 +78,42 @@ const isAutomationPath = (path: string): boolean =>
   path === ".github/workflows" ||
   path.startsWith(".github/workflows/");
 
-export class GithubCliPort implements SandcastleGithubPort, ImplementerGithubPort {
+export class GithubCliPort implements
+  SandcastleGithubPort,
+  ImplementerGithubPort,
+  LocalQualityGithubPort {
   private readonly execute: Execute;
 
   constructor(execute: Execute = executeFile) {
     this.execute = execute;
+  }
+
+  async getPullRequestHead(pullRequestNumber: number): Promise<string> {
+    const { stdout } = await this.execute("gh", [
+      "pr",
+      "view",
+      String(pullRequestNumber),
+      "--json",
+      "headRefOid",
+      "--jq",
+      ".headRefOid",
+    ]);
+    return stdout.trim();
+  }
+
+  async publishCommitStatus(status: LocalQualityCommitStatus): Promise<void> {
+    await this.execute("gh", [
+      "api",
+      `repos/{owner}/{repo}/statuses/${status.revision}`,
+      "--method",
+      "POST",
+      "-f",
+      `context=${status.context}`,
+      "-f",
+      `state=${status.state}`,
+      "-f",
+      `description=${status.description}`,
+    ]);
   }
 
   async claimIssue(number: number): Promise<boolean> {

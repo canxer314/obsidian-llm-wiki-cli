@@ -1,11 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { GithubCliPort, GithubVerificationError } from "../.sandcastle/github-cli.js";
+import type { LocalQualityCommitStatus } from "../.sandcastle/local-quality.js";
 
 const encodedFile = (filename: string, previousFilename = ""): string =>
   Buffer.from(JSON.stringify([filename, previousFilename])).toString("base64");
 
 describe("Sandcastle GitHub CLI adapter", () => {
+  it("reads the exact Pull Request head SHA", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "abc123\n", stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await expect(github.getPullRequestHead(321)).resolves.toBe("abc123");
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "pr", "view", "321", "--json", "headRefOid", "--jq", ".headRefOid",
+    ]);
+  });
+
+  it("publishes local quality status to the requested commit SHA", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = new GithubCliPort(execute);
+    const status: LocalQualityCommitStatus = {
+      revision: "abc123",
+      context: "sandcastle/local-quality",
+      state: "pending",
+      description: "Local quality checks started",
+    };
+
+    await github.publishCommitStatus(status);
+
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "api", "repos/{owner}/{repo}/statuses/abc123", "--method", "POST",
+      "-f", "context=sandcastle/local-quality", "-f", "state=pending",
+      "-f", "description=Local quality checks started",
+    ]);
+  });
+
   it("atomically creates the deterministic remote branch from the default branch", async () => {
     const execute = vi
       .fn()
