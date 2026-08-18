@@ -9,6 +9,18 @@ export interface LocalQualityHost {
   dispose(): Promise<void>;
 }
 
+export interface LocalQualityCommitStatus {
+  readonly revision: string;
+  readonly context: "sandcastle/local-quality";
+  readonly state: "pending" | "success" | "failure" | "error";
+  readonly description: string;
+}
+
+export interface LocalQualityGithubPort {
+  getPullRequestHead(pullRequestNumber: number): Promise<string>;
+  publishCommitStatus(status: LocalQualityCommitStatus): Promise<void>;
+}
+
 type LocalQualityStage = "setup" | "build" | "typecheck" | "test";
 
 export type LocalQualityResult =
@@ -63,6 +75,51 @@ async function disposeResult(host: LocalQualityHost): Promise<LocalQualityResult
   } catch (error) {
     return errorResult("setup", error);
   }
+}
+
+function statusDescription(result: LocalQualityResult): string {
+  if (result.status === "success") return "Local quality checks passed";
+  return result.status === "failure"
+    ? `Local quality failed during ${result.stage}`
+    : `Local quality error during ${result.stage}`;
+}
+
+export async function checkPullRequestLocalQuality(
+  pullRequestNumber: number,
+  github: LocalQualityGithubPort,
+  host: LocalQualityHost,
+): Promise<LocalQualityResult & { readonly revision: string }> {
+  const revision = await github.getPullRequestHead(pullRequestNumber);
+  await github.publishCommitStatus({
+    revision,
+    context: "sandcastle/local-quality",
+    state: "pending",
+    description: "Local quality checks started",
+  });
+
+  const result = await runLocalQuality(revision, host);
+  const currentRevision = await github.getPullRequestHead(pullRequestNumber);
+  if (result.status === "success" && currentRevision !== revision) {
+    const staleResult = terminalResult(
+      "error",
+      "setup",
+      "Pull Request head changed during local quality checks",
+    );
+    await github.publishCommitStatus({
+      revision,
+      context: "sandcastle/local-quality",
+      state: "error",
+      description: "Local quality result stale after head changed",
+    });
+    return { ...staleResult, revision };
+  }
+  await github.publishCommitStatus({
+    revision,
+    context: "sandcastle/local-quality",
+    state: result.status,
+    description: statusDescription(result),
+  });
+  return { ...result, revision };
 }
 
 export async function runLocalQuality(
