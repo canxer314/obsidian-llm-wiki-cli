@@ -13,6 +13,9 @@ import type {
   LocalQualityCommitStatus,
   LocalQualityGithubPort,
 } from "./local-quality.ts";
+import type {
+  TargetSyncResult,
+} from "./repair-orchestrator.ts";
 import type { ReviewCommitStatus, ReviewGithubPort } from "./review.ts";
 
 const execFileAsync = promisify(execFile);
@@ -52,6 +55,12 @@ interface GhPullRequest {
 interface GhChangedFile {
   readonly filename: string;
   readonly previousFilename?: string;
+}
+
+interface GhSyncPullRequest {
+  readonly baseRefName: string;
+  readonly headRefName: string;
+  readonly headRefOid: string;
 }
 
 function decodeChangedFiles(output: string): GhChangedFile[] {
@@ -105,6 +114,94 @@ export class GithubCliPort implements
       ".headRefOid",
     ]);
     return stdout.trim();
+  }
+
+  async synchronizePullRequest(
+    pullRequest: VerifiedPullRequest,
+    allowPush = true,
+  ): Promise<TargetSyncResult> {
+    const { stdout: metadataOutput } = await this.execute("gh", [
+      "pr",
+      "view",
+      String(pullRequest.number),
+      "--json",
+      "baseRefName,headRefName,headRefOid",
+    ]);
+    const metadata = JSON.parse(metadataOutput) as GhSyncPullRequest;
+    if (metadata.headRefOid !== pullRequest.headSha) {
+      throw new GithubVerificationError(
+        `Pull Request #${pullRequest.number} head changed before target synchronization`,
+      );
+    }
+    const { stdout: targetOutput } = await this.execute("gh", [
+      "api",
+      `repos/{owner}/{repo}/git/ref/heads/${metadata.baseRefName}`,
+      "--jq",
+      ".object.sha",
+    ]);
+    const targetSha = targetOutput.trim();
+
+    await this.execute("git", ["fetch", "--no-tags", "origin", `refs/heads/${metadata.baseRefName}`]);
+    const { stdout: fetchedTargetOutput } = await this.execute("git", ["rev-parse", "FETCH_HEAD"]);
+    await this.execute("git", ["fetch", "--no-tags", "origin", `refs/heads/${metadata.headRefName}`]);
+    const { stdout: fetchedHeadOutput } = await this.execute("git", ["rev-parse", "FETCH_HEAD"]);
+    const fetchedTargetSha = fetchedTargetOutput.trim();
+    const fetchedHeadSha = fetchedHeadOutput.trim();
+    if (fetchedTargetSha !== targetSha || fetchedHeadSha !== pullRequest.headSha) {
+      throw new GithubVerificationError("Target or Pull Request head changed during fetch");
+    }
+
+    try {
+      await this.execute("git", ["merge-base", "--is-ancestor", targetSha, pullRequest.headSha]);
+      return { status: "unchanged", pullRequest };
+    } catch (error) {
+      if (!isExitCode(error, 1)) throw error;
+    }
+    if (!allowPush) return { status: "outdated", pullRequest };
+
+    let tree: string;
+    try {
+      const result = await this.execute("git", [
+        "merge-tree",
+        "--write-tree",
+        pullRequest.headSha,
+        targetSha,
+      ]);
+      tree = result.stdout.trim();
+    } catch (error) {
+      if (!isMergeConflict(error)) throw error;
+      return {
+        status: "conflict",
+        pullRequest,
+        summary: `Target ${metadata.baseRefName} conflicts with ${metadata.headRefName}`,
+      };
+    }
+    const { stdout: mergeOutput } = await this.execute("git", [
+      "commit-tree",
+      tree,
+      "-p",
+      pullRequest.headSha,
+      "-p",
+      targetSha,
+      "-m",
+      `Merge ${metadata.baseRefName} into ${metadata.headRefName}`,
+    ]);
+    const mergedSha = mergeOutput.trim();
+    await this.execute("git", [
+      "push",
+      "origin",
+      `${mergedSha}:refs/heads/${metadata.headRefName}`,
+    ]);
+    const currentHead = await this.getPullRequestHead(pullRequest.number);
+    if (currentHead !== mergedSha) {
+      throw new GithubVerificationError(
+        `Pull Request #${pullRequest.number} head changed during target synchronization`,
+      );
+    }
+    return {
+      status: "synced",
+      pullRequest: { ...pullRequest, headSha: mergedSha },
+    };
   }
 
   async publishCommitStatus(
@@ -373,6 +470,14 @@ export class GithubCliPort implements
       throw error;
     }
   }
+}
+
+function isExitCode(error: unknown, code: number): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function isMergeConflict(error: unknown): boolean {
+  return isExitCode(error, 1);
 }
 
 function errorStderr(error: unknown): string | null {

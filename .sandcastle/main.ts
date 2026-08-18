@@ -89,6 +89,10 @@ try {
       });
       const orchestration = await processReadyPlan({
         pullRequest,
+        synchronize: (currentPullRequest, allowPush) => {
+          progress.enter("target-sync", currentPullRequest);
+          return github.synchronizePullRequest(currentPullRequest, allowPush);
+        },
         runLocalQuality: (currentPullRequest) => {
           progress.enter("local-quality", currentPullRequest);
           return checkPullRequestLocalQuality(
