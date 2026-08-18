@@ -36,11 +36,18 @@ export interface RepairOrchestratorOptions {
   readonly repair: (request: RepairRequest) => Promise<VerifiedPullRequest>;
 }
 
+export interface TerminalFailure {
+  readonly stage: string;
+  readonly revision?: string;
+  readonly summary: string;
+}
+
 export type RepairOrchestratorResult = {
   readonly pullRequest: VerifiedPullRequest;
   readonly localQuality: LocalQualityResult & { readonly revision: string };
   readonly repairsUsed: number;
   readonly review?: ReviewResult;
+  readonly terminalFailure?: TerminalFailure;
 };
 
 function redact(text: string): string {
@@ -81,6 +88,40 @@ function reviewFeedback(
   };
 }
 
+function qualityTerminalFailure(
+  result: Exclude<LocalQualityResult, { status: "success" }> & { readonly revision: string },
+  budgetExhausted: boolean,
+): TerminalFailure {
+  return {
+    stage: `local-quality:${result.stage}${budgetExhausted ? ":repair-budget-exhausted" : ""}`,
+    revision: result.revision,
+    summary: redact(
+      result.output ?? `Local quality failed during ${result.stage} without command output`,
+    ),
+  };
+}
+
+function reviewTerminalFailure(
+  result: ReviewResult,
+  budgetExhausted: boolean,
+): TerminalFailure {
+  if (result.status === "error") {
+    return {
+      stage: "reviewer",
+      revision: result.revision,
+      summary: "Reviewer failed without a publishable verdict",
+    };
+  }
+  return {
+    stage: `reviewer${budgetExhausted ? ":repair-budget-exhausted" : ""}`,
+    revision: result.revision,
+    summary: redact([
+      result.summary,
+      ...result.findings.map((finding) => `${finding.summary}: ${finding.details}`),
+    ].join("\n\n")),
+  };
+}
+
 function acceptRepair(
   previous: VerifiedPullRequest,
   repaired: VerifiedPullRequest,
@@ -101,7 +142,15 @@ export async function processReadyPlan(
     const localQuality = await options.runLocalQuality(pullRequest);
     if (localQuality.status !== "success") {
       if (localQuality.status === "error" || repairsUsed === MAX_REPAIRS) {
-        return { pullRequest, localQuality, repairsUsed };
+        return {
+          pullRequest,
+          localQuality,
+          repairsUsed,
+          terminalFailure: qualityTerminalFailure(
+            localQuality,
+            repairsUsed === MAX_REPAIRS,
+          ),
+        };
       }
       repairsUsed += 1;
       pullRequest = acceptRepair(
@@ -116,8 +165,25 @@ export async function processReadyPlan(
     }
 
     const review = await options.runReview(pullRequest, localQuality);
-    if (review.status !== "failure" || repairsUsed === MAX_REPAIRS) {
-      return { pullRequest, localQuality, review, repairsUsed };
+    if (review.status !== "failure") {
+      return {
+        pullRequest,
+        localQuality,
+        review,
+        repairsUsed,
+        ...(review.status === "error"
+          ? { terminalFailure: reviewTerminalFailure(review, false) }
+          : {}),
+      };
+    }
+    if (repairsUsed === MAX_REPAIRS) {
+      return {
+        pullRequest,
+        localQuality,
+        review,
+        repairsUsed,
+        terminalFailure: reviewTerminalFailure(review, true),
+      };
     }
     repairsUsed += 1;
     pullRequest = acceptRepair(

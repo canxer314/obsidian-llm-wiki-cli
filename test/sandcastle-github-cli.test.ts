@@ -202,6 +202,21 @@ describe("Sandcastle GitHub CLI adapter", () => {
     await expect(github.claimIssue(102)).rejects.toBe(failure);
   });
 
+  it("publishes Issue diagnostics and edits failure labels", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await github.addIssueComment(108, "diagnosis");
+    await github.removeIssueLabel(108, "Sandcastle");
+    await github.addIssueLabel(108, "sandcastle:failed");
+
+    expect(execute.mock.calls).toEqual([
+      ["gh", ["issue", "comment", "108", "--body", "diagnosis"]],
+      ["gh", ["issue", "edit", "108", "--remove-label", "Sandcastle"]],
+      ["gh", ["issue", "edit", "108", "--add-label", "sandcastle:failed"]],
+    ]);
+  });
+
   it("idempotently creates or updates the failure label", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     const github = new GithubCliPort(execute);

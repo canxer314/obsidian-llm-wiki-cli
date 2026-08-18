@@ -127,14 +127,35 @@ describe("Sandcastle repair orchestration", () => {
       pullRequest: { headSha: revisions[2] },
       repairsUsed: 2,
       review: { status: "failure", revision: revisions[2] },
+      terminalFailure: {
+        stage: "reviewer:repair-budget-exhausted",
+        revision: revisions[2],
+        summary: "Changes are required.\n\nFix this: A concrete problem.",
+      },
     });
     expect(repair).toHaveBeenCalledTimes(2);
   });
 
   it.each([
-    { name: "local quality infrastructure error", gate: "quality" as const },
-    { name: "Reviewer error", gate: "review" as const },
-  ])("does not repair a $name", async ({ gate }) => {
+    {
+      name: "local quality infrastructure error",
+      gate: "quality" as const,
+      terminalFailure: {
+        stage: "local-quality:test",
+        revision: pullRequest.headSha,
+        summary: "test output",
+      },
+    },
+    {
+      name: "Reviewer error",
+      gate: "review" as const,
+      terminalFailure: {
+        stage: "reviewer",
+        revision: pullRequest.headSha,
+        summary: "Reviewer failed without a publishable verdict",
+      },
+    },
+  ])("does not repair a $name", async ({ gate, terminalFailure }) => {
     const runLocalQuality = vi.fn().mockResolvedValue(
       quality(gate === "quality" ? "error" : "success", pullRequest.headSha),
     );
@@ -151,7 +172,7 @@ describe("Sandcastle repair orchestration", () => {
       repair,
     });
 
-    expect(result).toMatchObject({ repairsUsed: 0 });
+    expect(result).toMatchObject({ repairsUsed: 0, terminalFailure });
     expect(repair).not.toHaveBeenCalled();
     expect(runReview).toHaveBeenCalledTimes(gate === "review" ? 1 : 0);
   });
