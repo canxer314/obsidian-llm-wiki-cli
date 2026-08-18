@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createDockerLocalQualityHost,
+  runDockerLocalQuality,
   type LocalQualityProcess,
 } from "../.sandcastle/docker-local-quality-host.js";
 
@@ -58,6 +59,44 @@ describe("Docker local quality host", () => {
     });
     process.run.mockRejectedValueOnce(new Error("Docker daemon disconnected"));
     await expect(host.run(["npm", "test"])).rejects.toThrow("Docker daemon disconnected");
+  });
+
+  it("provides a production entry point for one exact revision", async () => {
+    const process = processPort();
+
+    await expect(runDockerLocalQuality(revision, {
+      repositoryPath: "/repo",
+      worktreeRoot: "/worktrees",
+      runId: "quality-104",
+      uid: 1000,
+      gid: 1000,
+      process,
+    })).resolves.toEqual({ status: "success" });
+
+    expect(process.run.mock.calls.filter(([command, args]) =>
+      command === "docker" && args[0] === "exec"
+    )).toHaveLength(4);
+  });
+
+  it("reports real cleanup command failures after attempting all cleanup", async () => {
+    const process = processPort();
+    const host = createDockerLocalQualityHost({
+      repositoryPath: "/repo",
+      worktreeRoot: "/worktrees",
+      runId: "quality-104",
+      uid: 1000,
+      gid: 1000,
+      process,
+    });
+    await host.setup(revision);
+    process.run.mockResolvedValueOnce({ exitCode: 1, output: "container busy" });
+
+    await expect(host.dispose()).rejects.toThrow("container busy");
+    expect(process.run).toHaveBeenLastCalledWith(
+      "git",
+      ["worktree", "remove", "--force", "/worktrees/quality-104"],
+      { cwd: "/repo", allowFailure: true },
+    );
   });
 
   it("runs commands only inside the prepared container and disposes both resources", async () => {

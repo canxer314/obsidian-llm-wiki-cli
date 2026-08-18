@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 
-import type {
-  LocalQualityCommandResult,
-  LocalQualityHost,
+import {
+  runLocalQuality,
+  type LocalQualityCommandResult,
+  type LocalQualityHost,
+  type LocalQualityResult,
 } from "./local-quality.js";
 
 export interface LocalQualityProcessOptions {
@@ -92,7 +94,8 @@ export function createDockerLocalQualityHost(
   const image = options.image ?? "sandcastle:local-quality";
   const worktreePath = join(options.worktreeRoot, options.runId);
   const commandOptions = { cwd: options.repositoryPath } as const;
-  let prepared = false;
+  let worktreeCreated = false;
+  let containerCreated = false;
 
   return {
     setup: async (revision) => {
@@ -101,6 +104,7 @@ export function createDockerLocalQualityHost(
         ["worktree", "add", "--detach", worktreePath, revision],
         commandOptions,
       );
+      worktreeCreated = true;
       await process.run(
         "docker",
         [
@@ -136,10 +140,10 @@ export function createDockerLocalQualityHost(
         ],
         commandOptions,
       );
-      prepared = true;
+      containerCreated = true;
     },
     run: async (command) => {
-      if (!prepared) throw new Error("Local quality container is not prepared");
+      if (!containerCreated) throw new Error("Local quality container is not prepared");
       const result = await process.run(
         "docker",
         ["exec", options.runId, ...CONTAINER_COMMAND, ...command],
@@ -148,17 +152,33 @@ export function createDockerLocalQualityHost(
       return containerCommandResult(result.output ?? "");
     },
     dispose: async () => {
-      await process.run(
-        "docker",
-        ["rm", "--force", options.runId],
-        { ...commandOptions, allowFailure: true },
-      );
-      await process.run(
-        "git",
-        ["worktree", "remove", "--force", worktreePath],
-        { ...commandOptions, allowFailure: true },
-      );
-      prepared = false;
+      const failures: string[] = [];
+      if (containerCreated) {
+        const result = await process.run(
+          "docker",
+          ["rm", "--force", options.runId],
+          { ...commandOptions, allowFailure: true },
+        );
+        if (result.exitCode !== 0) failures.push(result.output ?? "Could not remove container");
+        containerCreated = false;
+      }
+      if (worktreeCreated) {
+        const result = await process.run(
+          "git",
+          ["worktree", "remove", "--force", worktreePath],
+          { ...commandOptions, allowFailure: true },
+        );
+        if (result.exitCode !== 0) failures.push(result.output ?? "Could not remove worktree");
+        worktreeCreated = false;
+      }
+      if (failures.length > 0) throw new Error(failures.join("; "));
     },
   };
+}
+
+export function runDockerLocalQuality(
+  revision: string,
+  options: DockerLocalQualityHostOptions,
+): Promise<LocalQualityResult> {
+  return runLocalQuality(revision, createDockerLocalQualityHost(options));
 }
