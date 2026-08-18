@@ -142,6 +142,128 @@ describe("Sandcastle CLI", () => {
     expect(github.listCandidateIssues).toHaveBeenCalledTimes(2);
   });
 
+  it("records one isolated watch batch when one of two Issues fails", async () => {
+    const github = githubPort();
+    vi.mocked(github.listCandidateIssues).mockResolvedValueOnce([
+      { number: 116, state: "OPEN", labels: ["Sandcastle"] },
+      { number: 117, state: "OPEN", labels: ["Sandcastle"] },
+    ]);
+    vi.mocked(github.getIssue).mockImplementation(async (number) => ({
+      number,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    }));
+    const issue116 = deferred();
+    const issue117 = deferred();
+    const processIssue = vi.fn((number: number) => {
+      if (number === 116) return issue116.promise.then(() => "merged");
+      return issue117.promise.then(() => Promise.reject(new Error("review failed")));
+    });
+    const events: unknown[] = [];
+    const stop = new Error("stop fake clock");
+    const firstWait = deferred();
+    const watching = runSandcastleCli(["--watch"], {
+      github,
+      processIssue,
+      recordWatchEvent: (event) => events.push(event),
+      sleep: vi.fn()
+        .mockReturnValueOnce(firstWait.promise)
+        .mockRejectedValueOnce(stop),
+    });
+    const stopped = watching.catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(processIssue).toHaveBeenCalledTimes(2));
+    issue117.resolve();
+    await vi.waitFor(() => expect(events).toContainEqual({
+      kind: "issue-finished",
+      batchId: 1,
+      issueNumber: 117,
+      outcome: "failure",
+    }));
+    issue116.resolve();
+    await vi.waitFor(() => expect(events).toContainEqual({
+      kind: "issue-finished",
+      batchId: 1,
+      issueNumber: 116,
+      outcome: "success",
+    }));
+    firstWait.resolve();
+    await expect(stopped).resolves.toBe(stop);
+
+    expect(events.slice(0, 3)).toEqual([
+      { kind: "batch-started", batchId: 1, issueNumbers: [116, 117] },
+      { kind: "issue-started", batchId: 1, issueNumber: 116, activeCount: 1 },
+      { kind: "issue-started", batchId: 1, issueNumber: 117, activeCount: 2 },
+    ]);
+    expect(events).not.toContainEqual(expect.objectContaining({ activeCount: 3 }));
+  });
+
+  it("keeps an in-flight Issue attributed to its starting batch", async () => {
+    const github = githubPort();
+    vi.mocked(github.listCandidateIssues)
+      .mockResolvedValueOnce([
+        { number: 116, state: "OPEN", labels: ["Sandcastle"] },
+        { number: 117, state: "OPEN", labels: ["Sandcastle"] },
+      ])
+      .mockResolvedValueOnce([
+        { number: 118, state: "OPEN", labels: ["Sandcastle"] },
+      ]);
+    vi.mocked(github.getIssue).mockImplementation(async (number) => ({
+      number,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    }));
+    const workflows = new Map([
+      [116, deferred()],
+      [117, deferred()],
+      [118, deferred()],
+    ]);
+    const events: unknown[] = [];
+    const firstWait = deferred();
+    const secondWait = deferred();
+    const stop = new Error("stop fake clock");
+    const watching = runSandcastleCli(["--watch"], {
+      github,
+      processIssue: (number) => workflows.get(number)!.promise,
+      recordWatchEvent: (event) => events.push(event),
+      sleep: vi.fn()
+        .mockReturnValueOnce(firstWait.promise)
+        .mockReturnValueOnce(secondWait.promise)
+        .mockRejectedValueOnce(stop),
+    });
+    const stopped = watching.catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(events).toContainEqual({
+      kind: "issue-started",
+      batchId: 1,
+      issueNumber: 117,
+      activeCount: 2,
+    }));
+    workflows.get(117)!.resolve();
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      kind: "issue-finished",
+      issueNumber: 117,
+    })));
+    firstWait.resolve();
+    await vi.waitFor(() => expect(events).toContainEqual({
+      kind: "issue-started",
+      batchId: 2,
+      issueNumber: 118,
+      activeCount: 2,
+    }));
+
+    workflows.get(116)!.resolve();
+    await vi.waitFor(() => expect(events).toContainEqual({
+      kind: "issue-finished",
+      batchId: 1,
+      issueNumber: 116,
+      outcome: "success",
+    }));
+    workflows.get(118)!.resolve();
+    secondWait.resolve();
+    await expect(stopped).resolves.toBe(stop);
+  });
+
   it("runs at most two candidate Issues concurrently", async () => {
     const github = githubPort();
     vi.mocked(github.listCandidateIssues)
