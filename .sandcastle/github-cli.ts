@@ -14,6 +14,10 @@ import type {
   LocalQualityGithubPort,
 } from "./local-quality.ts";
 import type {
+  MergeGithubPort,
+  MergePullRequestState,
+} from "./merge.ts";
+import type {
   TargetSyncResult,
 } from "./repair-orchestrator.ts";
 import type { ReviewCommitStatus, ReviewGithubPort } from "./review.ts";
@@ -96,11 +100,106 @@ export class GithubCliPort implements
   FailureGithubPort,
   ImplementerGithubPort,
   LocalQualityGithubPort,
+  MergeGithubPort,
   ReviewGithubPort {
   private readonly execute: Execute;
 
   constructor(execute: Execute = executeFile) {
     this.execute = execute;
+  }
+
+  async markPullRequestReady(pullRequestNumber: number): Promise<void> {
+    await this.execute("gh", ["pr", "ready", String(pullRequestNumber)]);
+  }
+
+  async getPullRequestForMerge(
+    pullRequestNumber: number,
+  ): Promise<MergePullRequestState> {
+    const { stdout: repositoryOutput } = await this.execute("gh", [
+      "repo",
+      "view",
+      "--json",
+      "nameWithOwner,defaultBranchRef",
+    ]);
+    const repository = JSON.parse(repositoryOutput) as GhRepository;
+    const [owner, name] = repository.nameWithOwner.split("/");
+    if (owner === undefined || name === undefined) {
+      throw new GithubVerificationError("GitHub repository identity is invalid");
+    }
+    const { stdout: pullRequestOutput } = await this.execute("gh", [
+      "api",
+      "graphql",
+      "-f",
+      "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){state,isDraft,baseRepository{nameWithOwner},headRepository{nameWithOwner},baseRefName,headRefName,headRefOid,mergeable,closingIssuesReferences(first:100){nodes{number}}}}}",
+      "-F",
+      `owner=${owner}`,
+      "-F",
+      `name=${name}`,
+      "-F",
+      `number=${pullRequestNumber}`,
+      "--jq",
+      ".data.repository.pullRequest",
+    ]);
+    const pullRequest = JSON.parse(pullRequestOutput) as {
+      readonly state: string;
+      readonly isDraft: boolean;
+      readonly baseRepository: { readonly nameWithOwner: string };
+      readonly headRepository: { readonly nameWithOwner: string };
+      readonly baseRefName: string;
+      readonly headRefName: string;
+      readonly headRefOid: string;
+      readonly mergeable: string;
+      readonly closingIssuesReferences: {
+        readonly nodes: readonly { readonly number: number }[];
+      };
+    };
+    return {
+      state: pullRequest.state,
+      isDraft: pullRequest.isDraft,
+      repository: repository.nameWithOwner,
+      defaultBranch: repository.defaultBranchRef.name,
+      baseRepository: pullRequest.baseRepository.nameWithOwner,
+      headRepository: pullRequest.headRepository.nameWithOwner,
+      baseRefName: pullRequest.baseRefName,
+      headRefName: pullRequest.headRefName,
+      headSha: pullRequest.headRefOid,
+      mergeable: pullRequest.mergeable,
+      closingIssueNumbers: pullRequest.closingIssuesReferences.nodes.map(
+        (issue) => issue.number,
+      ),
+    };
+  }
+
+  async squashMergePullRequest(
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+  ): Promise<{ readonly merged: boolean }> {
+    const { stdout } = await this.execute("gh", [
+      "api",
+      `repos/{owner}/{repo}/pulls/${pullRequestNumber}/merge`,
+      "--method",
+      "PUT",
+      "-f",
+      `sha=${expectedHeadSha}`,
+      "-f",
+      "merge_method=squash",
+      "--jq",
+      ".merged",
+    ]);
+    return { merged: stdout.trim() === "true" };
+  }
+
+  async deleteBranch(branch: string): Promise<void> {
+    try {
+      await this.execute("gh", [
+        "api",
+        `repos/{owner}/{repo}/git/refs/heads/${branch}`,
+        "--method",
+        "DELETE",
+      ]);
+    } catch (error) {
+      if (!isMissingReferenceError(error)) throw error;
+    }
   }
 
   async getPullRequestHead(pullRequestNumber: number): Promise<string> {
@@ -505,6 +604,14 @@ function errorStderr(error: unknown): string | null {
 
 function isExistingReferenceError(error: unknown): boolean {
   return errorStderr(error)?.includes("Reference already exists") ?? false;
+}
+
+function isMissingReferenceError(error: unknown): boolean {
+  const stderr = errorStderr(error);
+  return (
+    stderr?.includes("HTTP 404") === true &&
+    stderr.includes("Reference does not exist")
+  );
 }
 
 function isMissingIssueError(error: unknown): boolean {

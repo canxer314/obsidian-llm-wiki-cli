@@ -13,6 +13,7 @@ import { GithubCliPort } from "./github-cli.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
+import { mergeVerifiedPullRequest, type MergeVerifiedPullRequestResult } from "./merge.ts";
 import { planIssue, type PlannerOutput } from "./planner.ts";
 import {
   processReadyPlan,
@@ -38,7 +39,7 @@ try {
       }
     },
     processIssue: async (issueNumber) => runFailureAwareWorkflow<
-      PlannerOutput | RepairOrchestratorResult
+      PlannerOutput | RepairOrchestratorResult | MergeVerifiedPullRequestResult
     >({
       issueNumber,
       github,
@@ -125,12 +126,30 @@ try {
         });
         },
       });
-      return {
-        result: orchestration,
+      if (
+        orchestration.terminalFailure !== undefined ||
+        orchestration.localQuality.status !== "success" ||
+        orchestration.review?.status !== "success"
+      ) {
+        return {
+          result: orchestration,
+          pullRequest: orchestration.pullRequest,
+          ...(orchestration.terminalFailure === undefined
+            ? {}
+            : { terminalFailure: orchestration.terminalFailure }),
+        };
+      }
+      progress.enter("merge", orchestration.pullRequest);
+      const merged = await mergeVerifiedPullRequest({
+        issueNumber,
         pullRequest: orchestration.pullRequest,
-        ...(orchestration.terminalFailure === undefined
-          ? {}
-          : { terminalFailure: orchestration.terminalFailure }),
+        localQuality: orchestration.localQuality,
+        review: orchestration.review,
+        github,
+      });
+      return {
+        result: merged,
+        pullRequest: orchestration.pullRequest,
       };
       },
     }),

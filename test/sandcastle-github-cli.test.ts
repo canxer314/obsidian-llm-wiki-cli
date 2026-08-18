@@ -8,6 +8,95 @@ const encodedFile = (filename: string, previousFilename = ""): string =>
   Buffer.from(JSON.stringify([filename, previousFilename])).toString("base64");
 
 describe("Sandcastle GitHub CLI adapter", () => {
+  it("prepares, revalidates, exact-head squash merges, and deletes a Pull Request branch", async () => {
+    const revision = "a".repeat(40);
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          nameWithOwner: "example/repo",
+          defaultBranchRef: { name: "master" },
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          state: "OPEN",
+          isDraft: false,
+          baseRepository: { nameWithOwner: "example/repo" },
+          headRepository: { nameWithOwner: "example/repo" },
+          baseRefName: "master",
+          headRefName: "sandcastle/issue-110",
+          headRefOid: revision,
+          mergeable: "MERGEABLE",
+          closingIssuesReferences: { nodes: [{ number: 110 }] },
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: "true\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await github.markPullRequestReady(321);
+    await expect(github.getPullRequestForMerge(321)).resolves.toEqual({
+      state: "OPEN",
+      isDraft: false,
+      repository: "example/repo",
+      defaultBranch: "master",
+      baseRepository: "example/repo",
+      headRepository: "example/repo",
+      baseRefName: "master",
+      headRefName: "sandcastle/issue-110",
+      headSha: revision,
+      mergeable: "MERGEABLE",
+      closingIssueNumbers: [110],
+    });
+    await expect(github.squashMergePullRequest(321, revision)).resolves.toEqual({
+      merged: true,
+    });
+    await github.deleteBranch("sandcastle/issue-110");
+
+    expect(execute.mock.calls).toEqual([
+      ["gh", ["pr", "ready", "321"]],
+      ["gh", ["repo", "view", "--json", "nameWithOwner,defaultBranchRef"]],
+      ["gh", [
+        "api", "graphql", "-f",
+        "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){state,isDraft,baseRepository{nameWithOwner},headRepository{nameWithOwner},baseRefName,headRefName,headRefOid,mergeable,closingIssuesReferences(first:100){nodes{number}}}}}",
+        "-F", "owner=example", "-F", "name=repo", "-F", "number=321", "--jq",
+        ".data.repository.pullRequest",
+      ]],
+      ["gh", [
+        "api", "repos/{owner}/{repo}/pulls/321/merge", "--method", "PUT",
+        "-f", `sha=${revision}`, "-f", "merge_method=squash", "--jq", ".merged",
+      ]],
+      ["gh", [
+        "api", "repos/{owner}/{repo}/git/refs/heads/sandcastle/issue-110",
+        "--method", "DELETE",
+      ]],
+    ]);
+    expect(JSON.stringify(execute.mock.calls)).not.toContain("issue close");
+  });
+
+  it("treats an already deleted merged branch as success", async () => {
+    const missingRef = Object.assign(new Error("HTTP 404: Reference does not exist"), {
+      stderr: "gh: Reference does not exist (HTTP 404)",
+    });
+    const execute = vi.fn().mockRejectedValue(missingRef);
+    const github = new GithubCliPort(execute);
+
+    await expect(github.deleteBranch("sandcastle/issue-110")).resolves.toBeUndefined();
+  });
+
+  it("reports a non-merged exact-head response without deleting anything", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "false\n", stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await expect(github.squashMergePullRequest(321, "abc123")).resolves.toEqual({
+      merged: false,
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it("reads the exact Pull Request head SHA", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "abc123\n", stderr: "" });
     const github = new GithubCliPort(execute);
