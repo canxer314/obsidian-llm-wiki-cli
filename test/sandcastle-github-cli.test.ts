@@ -447,6 +447,40 @@ describe("Sandcastle GitHub CLI adapter", () => {
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["push"]));
   });
 
+  it("lists open Sandcastle Issues as watch candidates", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify([
+        {
+          number: 101,
+          state: "OPEN",
+          labels: [{ name: "Sandcastle" }, { name: "documentation" }],
+        },
+      ]),
+      stderr: "",
+    });
+    const github = new GithubCliPort(execute);
+
+    await expect(github.listCandidateIssues()).resolves.toEqual([
+      {
+        number: 101,
+        state: "OPEN",
+        labels: ["Sandcastle", "documentation"],
+      },
+    ]);
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "issue",
+      "list",
+      "--state",
+      "open",
+      "--label",
+      "Sandcastle",
+      "--json",
+      "number,state,labels",
+      "--limit",
+      "100",
+    ]);
+  });
+
   it("atomically creates the deterministic remote branch from the default branch", async () => {
     const execute = vi
       .fn()

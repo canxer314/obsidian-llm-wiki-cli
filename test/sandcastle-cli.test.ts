@@ -10,8 +10,20 @@ function githubPort(): SandcastleGithubPort {
   return {
     ensureLabel: vi.fn(),
     getIssue: vi.fn(),
+    listCandidateIssues: vi.fn().mockResolvedValue([]),
     claimIssue: vi.fn().mockResolvedValue(true),
   };
+}
+
+function deferred(): {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
 }
 
 describe("Sandcastle CLI", () => {
@@ -69,14 +81,171 @@ describe("Sandcastle CLI", () => {
 
   it("prepares the failure label when watch mode starts", async () => {
     const github = githubPort();
+    const stop = new Error("stop fake clock");
 
-    await runSandcastleCli(["--watch"], {
+    await expect(runSandcastleCli(["--watch"], {
       github,
       processIssue: vi.fn(),
-    });
+      sleep: vi.fn().mockRejectedValue(stop),
+    })).rejects.toBe(stop);
 
     expect(github.ensureLabel).toHaveBeenCalledWith("sandcastle:failed");
     expect(github.getIssue).not.toHaveBeenCalled();
+  });
+
+  it("polls immediately and then every five minutes in watch mode", async () => {
+    const github = githubPort();
+    const stop = new Error("stop fake clock");
+    const firstWait = deferred();
+    const sleep = vi
+      .fn<(milliseconds: number) => Promise<void>>()
+      .mockReturnValueOnce(firstWait.promise)
+      .mockRejectedValueOnce(stop);
+
+    const watching = runSandcastleCli(["--watch"], {
+      github,
+      processIssue: vi.fn(),
+      sleep,
+    });
+    await vi.waitFor(() => expect(github.listCandidateIssues).toHaveBeenCalledTimes(1));
+    expect(sleep).toHaveBeenNthCalledWith(1, 300_000);
+
+    firstWait.resolve();
+    await expect(watching).rejects.toBe(stop);
+    expect(github.listCandidateIssues).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(2, 300_000);
+  });
+
+  it("retries candidate discovery on the next tick after a transient failure", async () => {
+    const github = githubPort();
+    const failure = new Error("GitHub temporarily unavailable");
+    vi.mocked(github.listCandidateIssues)
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce([]);
+    const firstWait = deferred();
+    const stop = new Error("stop fake clock");
+    const sleep = vi
+      .fn<(milliseconds: number) => Promise<void>>()
+      .mockReturnValueOnce(firstWait.promise)
+      .mockRejectedValueOnce(stop);
+
+    const watching = runSandcastleCli(["--watch"], {
+      github,
+      processIssue: vi.fn(),
+      sleep,
+    });
+    const stopped = watching.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(sleep).toHaveBeenCalledWith(300_000));
+    firstWait.resolve();
+
+    await expect(stopped).resolves.toBe(stop);
+    expect(github.listCandidateIssues).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs at most two candidate Issues concurrently", async () => {
+    const github = githubPort();
+    vi.mocked(github.listCandidateIssues)
+      .mockResolvedValueOnce([
+        { number: 101, state: "OPEN", labels: ["Sandcastle"] },
+        { number: 102, state: "OPEN", labels: ["Sandcastle"] },
+        { number: 103, state: "OPEN", labels: ["Sandcastle"] },
+      ])
+      .mockResolvedValue([{ number: 103, state: "OPEN", labels: ["Sandcastle"] }]);
+    vi.mocked(github.getIssue).mockImplementation(async (number) => ({
+      number,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    }));
+    const workflows = new Map([
+      [101, deferred()],
+      [102, deferred()],
+      [103, deferred()],
+    ]);
+    const processIssue = vi.fn((number: number) => workflows.get(number)!.promise);
+    const stop = new Error("stop fake clock");
+    const firstWait = deferred();
+    const watching = runSandcastleCli(["--watch"], {
+      github,
+      processIssue,
+      sleep: vi
+        .fn<(milliseconds: number) => Promise<void>>()
+        .mockReturnValueOnce(firstWait.promise)
+        .mockRejectedValueOnce(stop),
+    });
+    const stopped = watching.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(processIssue).toHaveBeenCalledTimes(2));
+    expect(processIssue.mock.calls.map(([number]) => number)).toEqual([101, 102]);
+
+    workflows.get(101)!.resolve();
+    await vi.waitFor(() => expect(processIssue).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    firstWait.resolve();
+    await vi.waitFor(() => expect(processIssue).toHaveBeenCalledWith(103));
+    workflows.get(102)!.resolve();
+    workflows.get(103)!.resolve();
+    await expect(stopped).resolves.toBe(stop);
+  });
+
+  it("does not overlap polling ticks or restart an in-flight Issue", async () => {
+    const github = githubPort();
+    const firstPoll = deferred();
+    vi.mocked(github.listCandidateIssues)
+      .mockImplementationOnce(async () => {
+        await firstPoll.promise;
+        return [{ number: 101, state: "OPEN", labels: ["Sandcastle"] }];
+      })
+      .mockResolvedValue([{ number: 101, state: "OPEN", labels: ["Sandcastle"] }]);
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 101,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const workflow = deferred();
+    const processIssue = vi.fn().mockReturnValue(workflow.promise);
+    const firstWait = deferred();
+    const stop = new Error("stop fake clock");
+    const sleep = vi
+      .fn<(milliseconds: number) => Promise<void>>()
+      .mockReturnValueOnce(firstWait.promise)
+      .mockRejectedValueOnce(stop);
+
+    const watching = runSandcastleCli(["--watch"], { github, processIssue, sleep });
+    const stopped = watching.catch((error: unknown) => error);
+    await Promise.resolve();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(github.listCandidateIssues).toHaveBeenCalledTimes(1);
+
+    firstPoll.resolve();
+    await vi.waitFor(() => expect(processIssue).toHaveBeenCalledTimes(1));
+    firstWait.resolve();
+    await expect(stopped).resolves.toBe(stop);
+    expect(github.listCandidateIssues).toHaveBeenCalledTimes(2);
+    expect(processIssue).toHaveBeenCalledTimes(1);
+    workflow.resolve();
+  });
+
+  it("skips failed candidates and loses remote claim races without starting work", async () => {
+    const github = githubPort();
+    vi.mocked(github.listCandidateIssues).mockResolvedValue([
+      { number: 101, state: "OPEN", labels: ["Sandcastle", "sandcastle:failed"] },
+      { number: 102, state: "OPEN", labels: ["Sandcastle"] },
+    ]);
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 102,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    vi.mocked(github.claimIssue).mockResolvedValue(false);
+    const stop = new Error("stop fake clock");
+
+    await expect(runSandcastleCli(["--watch"], {
+      github,
+      processIssue: vi.fn(),
+      sleep: vi.fn().mockRejectedValue(stop),
+    })).rejects.toBe(stop);
+
+    expect(github.getIssue).toHaveBeenCalledTimes(1);
+    expect(github.claimIssue).toHaveBeenCalledWith(102);
   });
 
   it.each([
