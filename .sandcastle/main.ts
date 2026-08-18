@@ -6,8 +6,9 @@ import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { createDockerLocalQualityHost } from "./docker-local-quality-host.ts";
 import { GithubCliPort } from "./github-cli.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
-import { implementIssue } from "./implementer.ts";
+import { implementIssue, repairIssue } from "./implementer.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
+import { processReadyPlan } from "./repair-orchestrator.ts";
 import { reviewPullRequest } from "./review.ts";
 import { createSandcastleReviewerSession } from "./reviewer-session.ts";
 import { createSandcastlePlannerSession } from "./planner-session.ts";
@@ -40,35 +41,42 @@ try {
         session: implementerSession,
         github,
       });
-      const repositoryPath = resolve(import.meta.dirname, "..");
-      const qualityHost = createDockerLocalQualityHost({
-        repositoryPath,
+      const localQualityHostOptions = {
+        repositoryPath: resolve(import.meta.dirname, ".."),
         worktreeRoot: resolve(import.meta.dirname, "worktrees"),
         runId: `sandcastle-quality-${issueNumber}`,
         uid: process.getuid?.() ?? 1000,
         gid: process.getgid?.() ?? 1000,
-      });
-      const localQuality = await checkPullRequestLocalQuality(
-        pullRequest.number,
-        github,
-        qualityHost,
-      );
-      if (localQuality.status !== "success") {
-        return { pullRequest, localQuality };
-      }
+      };
       const reviewerSession = createSandcastleReviewerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
       });
-      const review = await reviewPullRequest({
-        pullRequestNumber: pullRequest.number,
-        revision: pullRequest.headSha,
-        localQuality,
-        model: startup.models.reviewer,
-        session: reviewerSession,
-        github,
+      return processReadyPlan({
+        pullRequest,
+        runLocalQuality: (currentPullRequest) => checkPullRequestLocalQuality(
+          currentPullRequest.number,
+          github,
+          createDockerLocalQualityHost(localQualityHostOptions),
+        ),
+        runReview: (currentPullRequest, localQuality) => reviewPullRequest({
+          pullRequestNumber: currentPullRequest.number,
+          revision: currentPullRequest.headSha,
+          localQuality,
+          model: startup.models.reviewer,
+          session: reviewerSession,
+          github,
+        }),
+        repair: ({ pullRequest: currentPullRequest, attempt, feedback }) => repairIssue({
+          plan,
+          model: startup.models.implementer,
+          session: implementerSession,
+          github,
+          pullRequest: currentPullRequest,
+          attempt,
+          feedback,
+        }),
       });
-      return { pullRequest, localQuality, review };
     },
   });
   if (result !== undefined) console.log(JSON.stringify(result));

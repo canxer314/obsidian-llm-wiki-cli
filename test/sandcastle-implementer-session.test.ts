@@ -65,4 +65,42 @@ describe("Sandcastle Implementer session adapter", () => {
     expect(request.prompt).toContain("Do not rebase or force-push");
     expect(request.prompt).toContain("Do not modify .sandcastle/ or .github/workflows/");
   });
+
+  it("runs a fresh bounded repair session without creating another Pull Request", async () => {
+    const runAgent = vi.fn().mockResolvedValue({
+      branch: "sandcastle/issue-103",
+      commits: [{ sha: "def456" }],
+    });
+    const session = createSandcastleImplementerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: { sandbox: { onSandboxReady: [] } },
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    await session.run({
+      model: "implementer-model",
+      branch: "sandcastle/issue-103",
+      plan,
+      repair: {
+        attempt: 2,
+        pullRequestNumber: 321,
+        revision: "a".repeat(40),
+        feedback: {
+          source: "review",
+          summary: "Changes are required.",
+          findings: [{ summary: "Fix this", details: "Handle the edge case." }],
+        },
+      },
+    });
+
+    const request = runAgent.mock.calls[0]![0];
+    expect(request.name).toBe("implementer-repair-issue-103-attempt-2");
+    expect(request.prompt).toContain("repair attempt 2 of 2");
+    expect(request.prompt).toContain("a".repeat(40));
+    expect(request.prompt).toContain("Handle the edge case.");
+    expect(request.prompt).toContain("git push origin sandcastle/issue-103");
+    expect(request.prompt).toContain("Do not create another Pull Request");
+    expect(request.prompt).not.toContain("gh pr create");
+  });
 });

@@ -87,6 +87,35 @@ describe("Sandcastle Pull Request local quality", () => {
     );
   });
 
+  it("invalidates a failed result when the Pull Request head changes during checks", async () => {
+    const qualityGithub = github();
+    vi.mocked(qualityGithub.getPullRequestHead)
+      .mockResolvedValueOnce(revision)
+      .mockResolvedValueOnce(successorRevision);
+    const qualityHost = {
+      ...host(),
+      run: vi.fn()
+        .mockResolvedValueOnce({ exitCode: 0 })
+        .mockResolvedValueOnce({ exitCode: 1, output: "old failure" }),
+    };
+
+    await expect(
+      checkPullRequestLocalQuality(321, qualityGithub, qualityHost),
+    ).resolves.toEqual({
+      status: "error",
+      stage: "setup",
+      output: "Pull Request head changed during local quality checks",
+      revision,
+    });
+
+    expect(vi.mocked(qualityGithub.publishCommitStatus).mock.calls.at(-1)?.[0]).toEqual({
+      revision,
+      context: "sandcastle/local-quality",
+      state: "error",
+      description: "Local quality result stale after head changed",
+    });
+  });
+
   it("invalidates a successful result when the Pull Request head changes during checks", async () => {
     const qualityHost = host();
     const qualityGithub = github();
