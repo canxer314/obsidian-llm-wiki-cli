@@ -3,6 +3,9 @@ import { promisify } from "node:util";
 
 import type { SandcastleGithubPort, SandcastleIssue } from "./cli.ts";
 import type {
+  FailureGithubPort,
+} from "./failure-finalizer.ts";
+import type {
   ImplementerGithubPort,
   VerifiedPullRequest,
 } from "./implementer.ts";
@@ -81,6 +84,7 @@ const isAutomationPath = (path: string): boolean =>
 
 export class GithubCliPort implements
   SandcastleGithubPort,
+  FailureGithubPort,
   ImplementerGithubPort,
   LocalQualityGithubPort,
   ReviewGithubPort {
@@ -130,6 +134,36 @@ export class GithubCliPort implements
       String(pullRequestNumber),
       "--body",
       body,
+    ]);
+  }
+
+  async addIssueComment(issueNumber: number, body: string): Promise<void> {
+    await this.execute("gh", [
+      "issue",
+      "comment",
+      String(issueNumber),
+      "--body",
+      body,
+    ]);
+  }
+
+  async removeIssueLabel(issueNumber: number, label: string): Promise<void> {
+    await this.execute("gh", [
+      "issue",
+      "edit",
+      String(issueNumber),
+      "--remove-label",
+      label,
+    ]);
+  }
+
+  async addIssueLabel(issueNumber: number, label: string): Promise<void> {
+    await this.execute("gh", [
+      "issue",
+      "edit",
+      String(issueNumber),
+      "--add-label",
+      label,
     ]);
   }
 

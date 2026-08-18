@@ -125,6 +125,26 @@ describe("Sandcastle CLI", () => {
     expect(processIssue).not.toHaveBeenCalled();
   });
 
+  it("finalizes a claim failure after the target was eligible", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const failure = new Error("local fetch failed after remote claim");
+    vi.mocked(github.claimIssue).mockRejectedValue(failure);
+    const handleFailure = vi.fn().mockResolvedValue(undefined);
+
+    await expect(runSandcastleCli(["--issue", "100"], {
+      github,
+      processIssue: vi.fn(),
+      handleFailure,
+    })).rejects.toBe(failure);
+
+    expect(handleFailure).toHaveBeenCalledWith(100, "claim", failure);
+  });
+
   it("claims an eligible target before starting Planner", async () => {
     const github = githubPort();
     vi.mocked(github.getIssue).mockResolvedValue({

@@ -75,6 +75,16 @@ receives only bounded, redacted output or structured findings, must push a new
 SHA to the existing Pull Request, and restarts local quality before review.
 Infrastructure and Reviewer `error` results stop without consuming a repair.
 
+Every unrecoverable stop, including a blocked Planner, an Agent Session or
+infrastructure error, and exhausted repair budget, leaves the Issue open and
+preserves the deterministic remote branch and any Draft Pull Request. Sandcastle
+posts a bounded, redacted diagnosis to the verified Pull Request when available
+or otherwise to the Issue. It then removes `Sandcastle` and adds
+`sandcastle:failed`, so a future watch implementation cannot claim the failure
+again. Comment and label operations are attempted independently; an incomplete
+finalization remains a failed process and does not start repair, review, or merge
+work.
+
 ## Runtime verification
 
 The provider uses Docker host networking so a container can reach CC-Switch on
