@@ -5,7 +5,10 @@ import {
   VaultDiscoverService,
   type SearchSnapshotDataSource,
 } from "../src/index.js";
-import { SearchSnapshotRefreshCoordinator } from "../src/search-snapshot.js";
+import {
+  SEARCH_SNAPSHOT_QUIET_WINDOW_MS,
+  SearchSnapshotRefreshCoordinator,
+} from "../src/search-snapshot.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -193,6 +196,60 @@ describe("Search Snapshot publication", () => {
       await expect(barrier).rejects.toThrow("refresh coordinator is disposed");
       await vi.runAllTimersAsync();
       expect(rebuild).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a barrier promptly when disposed during its rebuild", async () => {
+    vi.useFakeTimers();
+    try {
+      const rebuildStarted = deferred<void>();
+      const releaseRebuild = deferred<void>();
+      const manager = new SearchSnapshotManager(source(new Map()));
+      vi.spyOn(manager, "rebuild").mockImplementation(async () => {
+        rebuildStarted.resolve();
+        await releaseRebuild.promise;
+      });
+      const coordinator = new SearchSnapshotRefreshCoordinator(manager);
+
+      coordinator.schedule();
+      const barrier = coordinator.whenIdle();
+      await vi.advanceTimersByTimeAsync(SEARCH_SNAPSHOT_QUIET_WINDOW_MS);
+      await rebuildStarted.promise;
+      coordinator.dispose();
+
+      await expect(barrier).rejects.toThrow("refresh coordinator is disposed");
+      releaseRebuild.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not start a queued rebuild after disposal", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstRebuildStarted = deferred<void>();
+      const releaseFirstRebuild = deferred<void>();
+      const manager = new SearchSnapshotManager(source(new Map()));
+      const rebuild = vi.spyOn(manager, "rebuild")
+        .mockImplementationOnce(async () => {
+          firstRebuildStarted.resolve();
+          await releaseFirstRebuild.promise;
+        })
+        .mockImplementation(async () => undefined);
+      const coordinator = new SearchSnapshotRefreshCoordinator(manager);
+
+      coordinator.schedule();
+      await vi.advanceTimersByTimeAsync(SEARCH_SNAPSHOT_QUIET_WINDOW_MS);
+      await firstRebuildStarted.promise;
+      coordinator.schedule();
+      await vi.advanceTimersByTimeAsync(SEARCH_SNAPSHOT_QUIET_WINDOW_MS);
+      coordinator.dispose();
+      releaseFirstRebuild.resolve();
+      await vi.runAllTimersAsync();
+
+      expect(rebuild).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
