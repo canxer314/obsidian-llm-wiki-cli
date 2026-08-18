@@ -11,9 +11,11 @@ import {
 } from "./failure-workflow.ts";
 import { GithubCliPort } from "./github-cli.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
+import { mergeConflict } from "./conflict-merger.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
 import { mergeVerifiedPullRequest, type MergeVerifiedPullRequestResult } from "./merge.ts";
+import { createSandcastleMergerSession } from "./merger-session.ts";
 import { planIssue, type PlannerOutput } from "./planner.ts";
 import {
   processReadyPlan,
@@ -88,6 +90,10 @@ try {
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
       });
+      const mergerSession = createSandcastleMergerSession({
+        sandbox: startup.sandbox,
+        hooks: sandboxHooks,
+      });
       const orchestration = await processReadyPlan({
         pullRequest,
         synchronize: (currentPullRequest, allowPush) => {
@@ -124,6 +130,16 @@ try {
           attempt,
           feedback,
         });
+        },
+        mergeConflict: (request) => {
+          progress.enter("merger", request.pullRequest);
+          return mergeConflict({
+            issueNumber,
+            model: startup.models.implementer,
+            session: mergerSession,
+            github,
+            request,
+          });
         },
       });
       if (

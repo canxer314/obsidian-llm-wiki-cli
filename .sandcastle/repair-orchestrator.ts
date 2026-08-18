@@ -5,6 +5,7 @@ import type { ReviewerFinding, ReviewerOutput } from "./reviewer-session.js";
 import { redact } from "./redaction.ts";
 
 const MAX_REPAIRS = 2;
+const MAX_MERGER_REPAIRS = 2;
 const MAX_SYNCHRONIZATIONS = 2;
 
 export type TargetSyncResult =
@@ -19,8 +20,18 @@ export type TargetSyncResult =
   | {
     readonly status: "conflict";
     readonly pullRequest: VerifiedPullRequest;
+    readonly targetBranch?: string;
+    readonly targetSha?: string;
     readonly summary: string;
   };
+
+export interface MergerRequest {
+  readonly pullRequest: VerifiedPullRequest;
+  readonly attempt: 1 | 2;
+  readonly targetBranch: string;
+  readonly targetSha: string;
+  readonly summary: string;
+}
 
 export type RepairFeedback =
   | {
@@ -54,6 +65,7 @@ export interface RepairOrchestratorOptions {
     localQuality: LocalQualityResult & { readonly revision: string },
   ) => Promise<ReviewResult>;
   readonly repair: (request: RepairRequest) => Promise<VerifiedPullRequest>;
+  readonly mergeConflict?: (request: MergerRequest) => Promise<VerifiedPullRequest>;
 }
 
 export interface TerminalFailure {
@@ -66,6 +78,7 @@ export type RepairOrchestratorResult = {
   readonly pullRequest: VerifiedPullRequest;
   readonly localQuality: LocalQualityResult & { readonly revision: string };
   readonly repairsUsed: number;
+  readonly mergerRepairsUsed?: number;
   readonly synchronizationsUsed?: number;
   readonly review?: ReviewResult;
   readonly terminalFailure?: TerminalFailure;
@@ -145,9 +158,13 @@ export async function processReadyPlan(
 ): Promise<RepairOrchestratorResult> {
   let pullRequest = options.pullRequest;
   let repairsUsed = 0;
+  let mergerRepairsUsed = 0;
   let synchronizationsUsed = 0;
   let needsPreGateSynchronization = true;
 
+  const mergerFields = () => mergerRepairsUsed === 0
+    ? {}
+    : { mergerRepairsUsed };
   const synchronizationFields = () => synchronizationsUsed === 0
     ? {}
     : { synchronizationsUsed };
@@ -167,11 +184,36 @@ export async function processReadyPlan(
       };
     }
     if (result.status === "conflict") {
-      return {
-        stage: "target-sync:conflict",
-        revision: pullRequest.headSha,
-        summary: redact(result.summary),
-      };
+      if (
+        options.mergeConflict === undefined ||
+        result.targetBranch === undefined ||
+        result.targetSha === undefined
+      ) {
+        return {
+          stage: "target-sync:conflict",
+          revision: pullRequest.headSha,
+          summary: redact(result.summary),
+        };
+      }
+      if (mergerRepairsUsed === MAX_MERGER_REPAIRS) {
+        return {
+          stage: "target-sync:conflict-repair-budget-exhausted",
+          revision: pullRequest.headSha,
+          summary: redact(result.summary),
+        };
+      }
+      mergerRepairsUsed += 1;
+      pullRequest = acceptRepair(
+        pullRequest,
+        await options.mergeConflict({
+          pullRequest,
+          attempt: mergerRepairsUsed as 1 | 2,
+          targetBranch: result.targetBranch,
+          targetSha: result.targetSha,
+          summary: redact(result.summary),
+        }),
+      );
+      return "synced";
     }
     synchronizationsUsed += 1;
     pullRequest = acceptRepair(pullRequest, result.pullRequest);
@@ -193,6 +235,7 @@ export async function processReadyPlan(
           output: synchronization.summary,
         },
         repairsUsed,
+        ...mergerFields(),
         ...synchronizationFields(),
         terminalFailure: synchronization,
       };
@@ -205,6 +248,7 @@ export async function processReadyPlan(
           pullRequest,
           localQuality,
           repairsUsed,
+        ...mergerFields(),
           terminalFailure: qualityTerminalFailure(
             localQuality,
             repairsUsed === MAX_REPAIRS,
@@ -236,6 +280,7 @@ export async function processReadyPlan(
           localQuality,
           review,
           repairsUsed,
+        ...mergerFields(),
           ...synchronizationFields(),
           terminalFailure: postReviewSynchronization,
         };
@@ -247,6 +292,7 @@ export async function processReadyPlan(
         localQuality,
         review,
         repairsUsed,
+        ...mergerFields(),
         ...synchronizationFields(),
         ...(review.status === "error"
           ? { terminalFailure: reviewTerminalFailure(review, false) }
@@ -259,6 +305,7 @@ export async function processReadyPlan(
         localQuality,
         review,
         repairsUsed,
+        ...mergerFields(),
         terminalFailure: reviewTerminalFailure(review, true),
       };
     }

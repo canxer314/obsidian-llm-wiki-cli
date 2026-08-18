@@ -3,6 +3,9 @@ import { promisify } from "node:util";
 
 import type { SandcastleGithubPort, SandcastleIssue } from "./cli.ts";
 import type {
+  ConflictMergerGithubPort,
+} from "./conflict-merger.ts";
+import type {
   FailureGithubPort,
 } from "./failure-finalizer.ts";
 import type {
@@ -97,6 +100,7 @@ const isAutomationPath = (path: string): boolean =>
 
 export class GithubCliPort implements
   SandcastleGithubPort,
+  ConflictMergerGithubPort,
   FailureGithubPort,
   ImplementerGithubPort,
   LocalQualityGithubPort,
@@ -215,6 +219,83 @@ export class GithubCliPort implements
     return stdout.trim();
   }
 
+  async verifyConflictMerge(request: {
+    readonly issueNumber: number;
+    readonly pullRequest: VerifiedPullRequest;
+    readonly expectedHeadSha: string;
+    readonly targetBranch: string;
+    readonly targetSha: string;
+  }): Promise<VerifiedPullRequest> {
+    const { stdout: metadataOutput } = await this.execute("gh", [
+      "pr",
+      "view",
+      String(request.pullRequest.number),
+      "--json",
+      "baseRefName,headRefName,headRefOid",
+    ]);
+    const metadata = JSON.parse(metadataOutput) as GhSyncPullRequest;
+    const expectedBranch = `sandcastle/issue-${request.issueNumber}`;
+    if (
+      metadata.baseRefName !== request.targetBranch ||
+      metadata.headRefName !== expectedBranch ||
+      metadata.headRefOid !== request.expectedHeadSha
+    ) {
+      throw new GithubVerificationError("Merger did not update the expected Pull Request head");
+    }
+
+    const { stdout: targetOutput } = await this.execute("gh", [
+      "api",
+      `repos/{owner}/{repo}/git/ref/heads/${request.targetBranch}`,
+      "--jq",
+      ".object.sha",
+    ]);
+    if (targetOutput.trim() !== request.targetSha) {
+      throw new GithubVerificationError("Target branch changed during conflict repair");
+    }
+
+    const targetRef = `refs/sandcastle/merger/${request.pullRequest.number}/target`;
+    const headRef = `refs/sandcastle/merger/${request.pullRequest.number}/head`;
+    await this.execute("git", [
+      "fetch",
+      "--no-tags",
+      "origin",
+      `+refs/heads/${request.targetBranch}:${targetRef}`,
+      `+refs/heads/${metadata.headRefName}:${headRef}`,
+    ]);
+    const { stdout: fetchedTargetOutput } = await this.execute("git", ["rev-parse", targetRef]);
+    const { stdout: fetchedHeadOutput } = await this.execute("git", ["rev-parse", headRef]);
+    if (
+      fetchedTargetOutput.trim() !== request.targetSha ||
+      fetchedHeadOutput.trim() !== request.expectedHeadSha
+    ) {
+      throw new GithubVerificationError("Target or Pull Request head changed during Merger fetch");
+    }
+
+    let parents: readonly string[];
+    try {
+      const { stdout } = await this.execute("git", [
+        "rev-list",
+        "--parents",
+        "-n",
+        "1",
+        request.expectedHeadSha,
+      ]);
+      parents = stdout.trim().split(/\s+/).slice(1);
+    } catch {
+      throw new GithubVerificationError("Merger result is not a normal merge commit");
+    }
+    if (
+      parents.length !== 2 ||
+      parents[0] !== request.pullRequest.headSha ||
+      parents[1] !== request.targetSha
+    ) {
+      throw new GithubVerificationError(
+        "Merger result rewrote history or did not merge the latest target",
+      );
+    }
+    return { ...request.pullRequest, headSha: request.expectedHeadSha };
+  }
+
   async synchronizePullRequest(
     pullRequest: VerifiedPullRequest,
     allowPush = true,
@@ -279,6 +360,8 @@ export class GithubCliPort implements
       return {
         status: "conflict",
         pullRequest,
+        targetBranch: metadata.baseRefName,
+        targetSha,
         summary: `Target ${metadata.baseRefName} conflicts with ${metadata.headRefName}`,
       };
     }

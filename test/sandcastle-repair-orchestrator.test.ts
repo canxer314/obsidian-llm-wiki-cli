@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   processReadyPlan,
+  type MergerRequest,
   type RepairRequest,
 } from "../.sandcastle/repair-orchestrator.js";
 import type { VerifiedPullRequest } from "../.sandcastle/implementer.js";
@@ -67,6 +68,118 @@ describe("Sandcastle repair orchestration", () => {
     expect(runLocalQuality).toHaveBeenCalledWith(syncedPullRequest);
     expect(runReview).toHaveBeenCalledOnce();
     expect(synchronize).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not start Merger on the clean target synchronization path", async () => {
+    const mergeConflict = vi.fn();
+
+    await processReadyPlan({
+      pullRequest,
+      synchronize: vi.fn().mockResolvedValue({ status: "unchanged", pullRequest }),
+      runLocalQuality: vi.fn().mockResolvedValue(quality("success", pullRequest.headSha)),
+      runReview: vi.fn().mockResolvedValue(review("success", pullRequest.headSha)),
+      repair: vi.fn(),
+      mergeConflict,
+    });
+
+    expect(mergeConflict).not.toHaveBeenCalled();
+  });
+
+  it("repairs a real conflict with an independent Merger budget and reruns both gates", async () => {
+    const mergedPullRequest = { ...pullRequest, headSha: sha("b") };
+    const synchronize = vi.fn()
+      .mockResolvedValueOnce({
+        status: "conflict" as const,
+        pullRequest,
+        targetBranch: "master",
+        targetSha: sha("c"),
+        summary: "Target master conflicts with the Issue branch",
+      })
+      .mockResolvedValue({ status: "unchanged" as const, pullRequest: mergedPullRequest });
+    const mergeConflict = vi.fn().mockResolvedValue(mergedPullRequest);
+    const runLocalQuality = vi.fn().mockResolvedValue(
+      quality("success", mergedPullRequest.headSha),
+    );
+    const runReview = vi.fn().mockResolvedValue(
+      review("success", mergedPullRequest.headSha),
+    );
+
+    await expect(processReadyPlan({
+      pullRequest,
+      synchronize,
+      runLocalQuality,
+      runReview,
+      repair: vi.fn(),
+      mergeConflict,
+    })).resolves.toMatchObject({
+      pullRequest: mergedPullRequest,
+      repairsUsed: 0,
+      mergerRepairsUsed: 1,
+      localQuality: { status: "success", revision: mergedPullRequest.headSha },
+      review: { status: "success", revision: mergedPullRequest.headSha },
+    });
+
+    expect(mergeConflict).toHaveBeenCalledWith({
+      pullRequest,
+      attempt: 1,
+      targetBranch: "master",
+      targetSha: sha("c"),
+      summary: "Target master conflicts with the Issue branch",
+    } satisfies MergerRequest);
+    expect(runLocalQuality).toHaveBeenCalledWith(mergedPullRequest);
+    expect(runReview).toHaveBeenCalledWith(
+      mergedPullRequest,
+      quality("success", mergedPullRequest.headSha),
+    );
+  });
+
+  it("allows two Merger conflict repairs without consuming Implementer repairs", async () => {
+    const revisions = [sha("a"), sha("b"), sha("c")];
+    const targets = [sha("d"), sha("e"), sha("f")];
+    const synchronize = vi.fn()
+      .mockResolvedValueOnce({
+        status: "conflict", pullRequest, targetBranch: "master",
+        targetSha: targets[0], summary: "first conflict",
+      })
+      .mockResolvedValueOnce({
+        status: "conflict", pullRequest: { ...pullRequest, headSha: revisions[1] },
+        targetBranch: "master", targetSha: targets[1], summary: "second conflict",
+      })
+      .mockResolvedValueOnce({
+        status: "conflict", pullRequest: { ...pullRequest, headSha: revisions[2] },
+        targetBranch: "master", targetSha: targets[2], summary: "third conflict",
+      });
+    const mergeConflict = vi.fn()
+      .mockResolvedValueOnce({ ...pullRequest, headSha: revisions[1] })
+      .mockResolvedValueOnce({ ...pullRequest, headSha: revisions[2] });
+    const runLocalQuality = vi.fn()
+      .mockResolvedValueOnce(quality("success", revisions[1]!))
+      .mockResolvedValueOnce(quality("success", revisions[2]!));
+    const runReview = vi.fn()
+      .mockResolvedValueOnce(review("success", revisions[1]!))
+      .mockResolvedValueOnce(review("success", revisions[2]!));
+
+    await expect(processReadyPlan({
+      pullRequest,
+      synchronize,
+      runLocalQuality,
+      runReview,
+      repair: vi.fn(),
+      mergeConflict,
+    })).resolves.toMatchObject({
+      pullRequest: { headSha: revisions[2] },
+      repairsUsed: 0,
+      mergerRepairsUsed: 2,
+      terminalFailure: {
+        stage: "target-sync:conflict-repair-budget-exhausted",
+        revision: revisions[2],
+        summary: "third conflict",
+      },
+    });
+
+    expect(mergeConflict.mock.calls.map(([request]) => request.attempt)).toEqual([1, 2]);
+    expect(runLocalQuality.mock.calls.map(([pr]) => pr.headSha)).toEqual(revisions.slice(1));
+    expect(runReview.mock.calls.map(([pr]) => pr.headSha)).toEqual(revisions.slice(1));
   });
 
   it("returns a target conflict through terminal failure without running gates or repair", async () => {

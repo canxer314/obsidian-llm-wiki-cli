@@ -151,6 +151,87 @@ describe("Sandcastle GitHub CLI adapter", () => {
     ]);
   });
 
+  it("verifies a conflict repair is one normal merge of the latest target without rewriting history", async () => {
+    const oldHead = "a".repeat(40);
+    const targetHead = "b".repeat(40);
+    const mergedHead = "c".repeat(40);
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          baseRefName: "master",
+          headRefName: "sandcastle/issue-111",
+          headRefOid: mergedHead,
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: `${targetHead}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${targetHead}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${mergedHead}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${mergedHead} ${oldHead} ${targetHead}\n`, stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await expect(github.verifyConflictMerge({
+      issueNumber: 111,
+      pullRequest: {
+        number: 321,
+        url: "https://github.com/example/repo/pull/321",
+        headSha: oldHead,
+      },
+      expectedHeadSha: mergedHead,
+      targetBranch: "master",
+      targetSha: targetHead,
+    })).resolves.toEqual({
+      number: 321,
+      url: "https://github.com/example/repo/pull/321",
+      headSha: mergedHead,
+    });
+
+    expect(execute.mock.calls).toEqual([
+      ["gh", ["pr", "view", "321", "--json", "baseRefName,headRefName,headRefOid"]],
+      ["gh", ["api", "repos/{owner}/{repo}/git/ref/heads/master", "--jq", ".object.sha"]],
+      ["git", [
+        "fetch", "--no-tags", "origin",
+        "+refs/heads/master:refs/sandcastle/merger/321/target",
+        "+refs/heads/sandcastle/issue-111:refs/sandcastle/merger/321/head",
+      ]],
+      ["git", ["rev-parse", "refs/sandcastle/merger/321/target"]],
+      ["git", ["rev-parse", "refs/sandcastle/merger/321/head"]],
+      ["git", ["rev-list", "--parents", "-n", "1", mergedHead]],
+    ]);
+    expect(JSON.stringify(execute.mock.calls)).not.toMatch(/rebase|force-with-lease|--force/);
+  });
+
+  it("rejects rewritten Merger history before any further push", async () => {
+    const oldHead = "a".repeat(40);
+    const targetHead = "b".repeat(40);
+    const rewrittenHead = "c".repeat(40);
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          baseRefName: "master",
+          headRefName: "sandcastle/issue-111",
+          headRefOid: rewrittenHead,
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: `${targetHead}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${targetHead}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${rewrittenHead}\n`, stderr: "" })
+      .mockRejectedValueOnce(Object.assign(new Error("no second parent"), { code: 128 }));
+    const github = new GithubCliPort(execute);
+
+    await expect(github.verifyConflictMerge({
+      issueNumber: 111,
+      pullRequest: { number: 321, url: "pr-url", headSha: oldHead },
+      expectedHeadSha: rewrittenHead,
+      targetBranch: "master",
+      targetSha: targetHead,
+    })).rejects.toThrow("normal merge commit");
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["push"]));
+  });
+
   it("creates and pushes a clean merge commit from the latest target and Pull Request heads", async () => {
     const oldHead = "a".repeat(40);
     const targetHead = "b".repeat(40);
@@ -300,6 +381,8 @@ describe("Sandcastle GitHub CLI adapter", () => {
     await expect(github.synchronizePullRequest(pullRequest)).resolves.toEqual({
       status: "conflict",
       pullRequest,
+      targetBranch: "master",
+      targetSha: target,
       summary: "Target master conflicts with sandcastle/issue-109",
     });
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["commit-tree"]));
