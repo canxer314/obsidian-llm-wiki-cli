@@ -10,6 +10,7 @@ function githubPort(): SandcastleGithubPort {
   return {
     ensureLabel: vi.fn(),
     getIssue: vi.fn(),
+    claimIssue: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -104,10 +105,27 @@ describe("Sandcastle CLI", () => {
     ).rejects.toMatchObject<SandcastleCliError>({ message, exitCode: 2 });
 
     expect(github.ensureLabel).toHaveBeenCalledWith("sandcastle:failed");
+    expect(github.claimIssue).not.toHaveBeenCalled();
     expect(startPlanner).not.toHaveBeenCalled();
   });
 
-  it("idempotently prepares the failure label and starts Planner for an eligible target", async () => {
+  it("skips Planner when the target is already claimed", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    vi.mocked(github.claimIssue).mockResolvedValue(false);
+    const startPlanner = vi.fn();
+
+    await runSandcastleCli(["--issue", "100"], { github, startPlanner });
+
+    expect(github.claimIssue).toHaveBeenCalledWith(100);
+    expect(startPlanner).not.toHaveBeenCalled();
+  });
+
+  it("claims an eligible target before starting Planner", async () => {
     const github = githubPort();
     vi.mocked(github.getIssue).mockResolvedValue({
       number: 100,
@@ -133,7 +151,7 @@ describe("Sandcastle CLI", () => {
       runSandcastleCli(["--issue", "100"], { github, startPlanner }),
     ).resolves.toEqual(plan);
 
-    expect(github.ensureLabel).toHaveBeenCalledWith("sandcastle:failed");
+    expect(github.claimIssue).toHaveBeenCalledWith(100);
     expect(startPlanner).toHaveBeenCalledWith(100);
   });
 });

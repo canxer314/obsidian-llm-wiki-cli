@@ -16,6 +16,7 @@ export interface SandcastleIssue {
 export interface SandcastleGithubPort {
   ensureLabel(name: string): Promise<void>;
   getIssue(number: number): Promise<SandcastleIssue | null>;
+  claimIssue(number: number): Promise<boolean>;
 }
 
 export interface SandcastleCliDependencies<TPlan = unknown> {
@@ -86,6 +87,9 @@ export async function runSandcastleCli<TPlan>(
       `Issue #${issueNumber} must have the Sandcastle label`,
     );
   }
+
+  const claimed = await dependencies.github.claimIssue(issueNumber);
+  if (!claimed) return;
 
   return dependencies.startPlanner(issueNumber);
 }

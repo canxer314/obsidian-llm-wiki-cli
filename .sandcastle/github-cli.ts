@@ -28,6 +28,46 @@ export class GithubCliPort implements SandcastleGithubPort {
     this.execute = execute;
   }
 
+  async claimIssue(number: number): Promise<boolean> {
+    const branch = `sandcastle/issue-${number}`;
+    const { stdout: pullRequests } = await this.execute("gh", [
+      "pr",
+      "list",
+      "--head",
+      branch,
+      "--state",
+      "all",
+      "--json",
+      "number",
+      "--limit",
+      "1",
+    ]);
+    if ((JSON.parse(pullRequests) as readonly unknown[]).length > 0) return false;
+
+    const { stdout: defaultBranchOid } = await this.execute("gh", [
+      "api",
+      "repos/{owner}/{repo}/commits/HEAD",
+      "--jq",
+      ".sha",
+    ]);
+    try {
+      await this.execute("gh", [
+        "api",
+        "repos/{owner}/{repo}/git/refs",
+        "--method",
+        "POST",
+        "-f",
+        `ref=refs/heads/${branch}`,
+        "-f",
+        `sha=${defaultBranchOid.trim()}`,
+      ]);
+    } catch (error) {
+      if (isExistingReferenceError(error)) return false;
+      throw error;
+    }
+    return true;
+  }
+
   async ensureLabel(name: string): Promise<void> {
     await this.execute("gh", [
       "label",
@@ -63,11 +103,20 @@ export class GithubCliPort implements SandcastleGithubPort {
   }
 }
 
-function isMissingIssueError(error: unknown): boolean {
+function errorStderr(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("stderr" in error)) {
-    return false;
+    return null;
   }
-  const stderr = String(error.stderr);
+  return String(error.stderr);
+}
+
+function isExistingReferenceError(error: unknown): boolean {
+  return errorStderr(error)?.includes("Reference already exists") ?? false;
+}
+
+function isMissingIssueError(error: unknown): boolean {
+  const stderr = errorStderr(error);
+  if (stderr === null) return false;
   return (
     stderr.includes("Could not resolve to an Issue") ||
     stderr.includes("HTTP 404")
