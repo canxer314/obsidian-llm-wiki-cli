@@ -284,6 +284,9 @@ export class ManagedVaultBridgeRuntime {
         // A failed build leaves readiness unavailable; the barrier keeps waiting
         // for a later host event until the deadline rather than failing open.
       }
+      if (this.#snapshotRefresh !== refresh) {
+        throw new Error("Search Snapshot barrier ended because the runtime unloaded");
+      }
       if (matches()) return;
       const remaining = deadline - Date.now();
       if (remaining <= 0) {

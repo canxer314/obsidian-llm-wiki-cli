@@ -1145,6 +1145,7 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
 
       await runtime.unload();
       await expect(publication).rejects.toThrow(/runtime.*unload|lifecycle/u);
+      expect(vi.getTimerCount()).toBe(0);
 
       await vi.runAllTimersAsync();
       expect(listMarkdownPaths).toHaveBeenCalledTimes(2);
