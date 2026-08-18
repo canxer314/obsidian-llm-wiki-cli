@@ -221,6 +221,28 @@ describe("Search Snapshot publication", () => {
     }
   });
 
+  it("rejects a pending barrier and cancels its scheduled rebuild on disposal", async () => {
+    vi.useFakeTimers();
+    try {
+      const readBinary = vi.fn(async () => new TextEncoder().encode("content"));
+      const manager = new SearchSnapshotManager({
+        listMarkdownPaths: async () => ["source.md"],
+        readBinary,
+      });
+      const coordinator = new SearchSnapshotRefreshCoordinator(manager);
+
+      coordinator.schedule();
+      const barrier = coordinator.whenIdle();
+      coordinator.dispose();
+
+      await expect(barrier).rejects.toThrow("Search Snapshot refresh coordinator disposed");
+      await vi.runAllTimersAsync();
+      expect(readBinary).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a barrier pending when evidence changes during publication", async () => {
     vi.useFakeTimers();
     try {
