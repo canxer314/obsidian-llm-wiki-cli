@@ -19,9 +19,9 @@ export interface SandcastleGithubPort {
   claimIssue(number: number): Promise<boolean>;
 }
 
-export interface SandcastleCliDependencies<TPlan = unknown> {
+export interface SandcastleCliDependencies<TResult = unknown> {
   readonly github: SandcastleGithubPort;
-  readonly startPlanner: (issueNumber: number) => Promise<TPlan>;
+  readonly processIssue: (issueNumber: number) => Promise<TResult>;
 }
 
 interface CliOptions {
@@ -66,10 +66,10 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
   return { ...(issueNumber === undefined ? {} : { issueNumber }), watch };
 }
 
-export async function runSandcastleCli<TPlan>(
+export async function runSandcastleCli<TResult>(
   argv: readonly string[],
-  dependencies: SandcastleCliDependencies<TPlan>,
-): Promise<TPlan | undefined> {
+  dependencies: SandcastleCliDependencies<TResult>,
+): Promise<TResult | undefined> {
   const options = parseCliOptions(argv);
   await dependencies.github.ensureLabel("sandcastle:failed");
   if (options.watch) return;
@@ -91,5 +91,5 @@ export async function runSandcastleCli<TPlan>(
   const claimed = await dependencies.github.claimIssue(issueNumber);
   if (!claimed) return;
 
-  return dependencies.startPlanner(issueNumber);
+  return dependencies.processIssue(issueNumber);
 }
