@@ -648,6 +648,26 @@ export class GithubCliPort implements
     };
   }
 
+  async listCandidateIssues(): Promise<readonly SandcastleIssue[]> {
+    const { stdout } = await this.execute("gh", [
+      "issue",
+      "list",
+      "--state",
+      "open",
+      "--label",
+      "Sandcastle",
+      "--json",
+      "number,state,labels",
+      "--limit",
+      "100",
+    ]);
+    return (JSON.parse(stdout) as readonly GhIssue[]).map((issue) => ({
+      number: issue.number,
+      state: issue.state,
+      labels: issue.labels.map((label) => label.name),
+    }));
+  }
+
   async getIssue(number: number): Promise<SandcastleIssue | null> {
     try {
       const { stdout } = await this.execute("gh", [

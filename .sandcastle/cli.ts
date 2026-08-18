@@ -16,12 +16,14 @@ export interface SandcastleIssue {
 export interface SandcastleGithubPort {
   ensureLabel(name: string): Promise<void>;
   getIssue(number: number): Promise<SandcastleIssue | null>;
+  listCandidateIssues(): Promise<readonly SandcastleIssue[]>;
   claimIssue(number: number): Promise<boolean>;
 }
 
 export interface SandcastleCliDependencies<TResult = unknown> {
   readonly github: SandcastleGithubPort;
   readonly processIssue: (issueNumber: number) => Promise<TResult>;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly handleFailure?: (
     issueNumber: number,
     stage: "claim",
@@ -71,15 +73,13 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
   return { ...(issueNumber === undefined ? {} : { issueNumber }), watch };
 }
 
-export async function runSandcastleCli<TResult>(
-  argv: readonly string[],
+const WATCH_INTERVAL_MS = 300_000;
+const MAX_ACTIVE_ISSUES = 2;
+
+async function runIssue<TResult>(
+  issueNumber: number,
   dependencies: SandcastleCliDependencies<TResult>,
 ): Promise<TResult | undefined> {
-  const options = parseCliOptions(argv);
-  await dependencies.github.ensureLabel("sandcastle:failed");
-  if (options.watch) return;
-
-  const issueNumber = options.issueNumber!;
   const issue = await dependencies.github.getIssue(issueNumber);
   if (issue === null) {
     throw new SandcastleCliError(`Issue #${issueNumber} does not exist`);
@@ -103,4 +103,36 @@ export async function runSandcastleCli<TResult>(
   if (!claimed) return;
 
   return dependencies.processIssue(issueNumber);
+}
+
+export async function runSandcastleCli<TResult>(
+  argv: readonly string[],
+  dependencies: SandcastleCliDependencies<TResult>,
+): Promise<TResult | undefined> {
+  const options = parseCliOptions(argv);
+  await dependencies.github.ensureLabel("sandcastle:failed");
+  if (options.watch) {
+    const sleep = dependencies.sleep ?? ((milliseconds: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+    const active = new Map<number, Promise<unknown>>();
+    for (;;) {
+      let candidates: readonly SandcastleIssue[] = [];
+      try {
+        candidates = await dependencies.github.listCandidateIssues();
+      } catch {
+        // A later polling tick retries transient discovery failures.
+      }
+      for (const issue of candidates) {
+        if (active.size >= MAX_ACTIVE_ISSUES) break;
+        if (active.has(issue.number) || issue.labels.includes("sandcastle:failed")) continue;
+        const workflow = runIssue(issue.number, dependencies)
+          .catch(() => undefined)
+          .finally(() => active.delete(issue.number));
+        active.set(issue.number, workflow);
+      }
+      await sleep(WATCH_INTERVAL_MS);
+    }
+  }
+
+  return runIssue(options.issueNumber!, dependencies);
 }
