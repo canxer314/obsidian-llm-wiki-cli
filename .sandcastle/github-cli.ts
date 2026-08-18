@@ -194,6 +194,15 @@ export class GithubCliPort implements
       `Merge ${metadata.baseRefName} into ${metadata.headRefName}`,
     ]);
     const mergedSha = mergeOutput.trim();
+    const { stdout: currentTargetOutput } = await this.execute("gh", [
+      "api",
+      `repos/{owner}/{repo}/git/ref/heads/${metadata.baseRefName}`,
+      "--jq",
+      ".object.sha",
+    ]);
+    if (currentTargetOutput.trim() !== targetSha) {
+      throw new GithubVerificationError("Target branch changed while creating merge commit");
+    }
     await this.execute("git", [
       "push",
       "origin",

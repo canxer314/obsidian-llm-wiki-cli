@@ -83,6 +83,7 @@ describe("Sandcastle GitHub CLI adapter", () => {
       .mockRejectedValueOnce(Object.assign(new Error("not ancestor"), { code: 1 }))
       .mockResolvedValueOnce({ stdout: `${tree}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: `${mergedHead}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${targetHead}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${mergedHead}\n`, stderr: "" });
     const github = new GithubCliPort(execute);
@@ -113,6 +114,7 @@ describe("Sandcastle GitHub CLI adapter", () => {
       ["git", ["merge-base", "--is-ancestor", targetHead, oldHead]],
       ["git", ["merge-tree", "--write-tree", oldHead, targetHead]],
       ["git", ["commit-tree", tree, "-p", oldHead, "-p", targetHead, "-m", "Merge master into sandcastle/issue-109"]],
+      ["gh", ["api", "repos/{owner}/{repo}/git/ref/heads/master", "--jq", ".object.sha"]],
       ["git", ["push", "origin", `${mergedHead}:refs/heads/sandcastle/issue-109`]],
       ["gh", ["pr", "view", "321", "--json", "headRefOid", "--jq", ".headRefOid"]],
     ]);
@@ -239,6 +241,37 @@ describe("Sandcastle GitHub CLI adapter", () => {
       url: "https://github.com/example/repo/pull/321",
       headSha: head,
     })).rejects.toThrow("Target or Pull Request head changed during fetch");
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["push"]));
+  });
+
+  it("does not push when the target advances while the merge commit is created", async () => {
+    const head = "a".repeat(40);
+    const target = "b".repeat(40);
+    const advancedTarget = "c".repeat(40);
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          baseRefName: "master",
+          headRefName: "sandcastle/issue-109",
+          headRefOid: head,
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${target}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${head}\n`, stderr: "" })
+      .mockRejectedValueOnce(Object.assign(new Error("not ancestor"), { code: 1 }))
+      .mockResolvedValueOnce({ stdout: `${"d".repeat(40)}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${"e".repeat(40)}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${advancedTarget}\n`, stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await expect(github.synchronizePullRequest({
+      number: 321,
+      url: "https://github.com/example/repo/pull/321",
+      headSha: head,
+    })).rejects.toThrow("Target branch changed while creating merge commit");
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["push"]));
   });
 
