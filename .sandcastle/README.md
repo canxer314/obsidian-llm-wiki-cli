@@ -32,6 +32,22 @@ Neither the private env file nor complete Claude Code, CC-Switch, OAuth, or GitH
 CLI configuration is mounted into a container. The provider receives only the
 adapter's filtered environment map.
 
+## CLI startup validation
+
+Run a single explicitly selected Issue with:
+
+```bash
+npm run sandcastle -- --issue 100
+```
+
+The default mode never scans the backlog. The target must exist, be open, and
+have the exact `Sandcastle` label. `--watch` is an explicit alternative and
+cannot be combined with `--issue`. Startup also creates or updates the
+`sandcastle:failed` label idempotently.
+
+This entry point currently stops after startup validation. The Planner Agent
+Session is connected at the `startPlanner(issueNumber)` orchestration seam.
+
 ## Runtime verification
 
 The provider uses Docker host networking so a container can reach CC-Switch on
