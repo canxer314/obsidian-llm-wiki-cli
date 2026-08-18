@@ -629,6 +629,12 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       return;
     }
 
+    if (httpServer === undefined) {
+      response.writeHead(503, { "Cache-Control": "no-store" });
+      response.end();
+      return;
+    }
+
     const sessionHeader = request.headers["mcp-session-id"];
     const sessionId = typeof sessionHeader === "string" ? sessionHeader : undefined;
     let session = sessionId === undefined ? undefined : sessions.get(sessionId);
@@ -665,7 +671,17 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         if (transport.sessionId !== undefined) releaseSession(transport.sessionId);
       };
       await server.connect(transport);
+      if (httpServer === undefined) {
+        await server.close();
+        response.writeHead(503, { "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
       await transport.handleRequest(request, response, body);
+      if (httpServer === undefined) {
+        await server.close();
+        return;
+      }
       if (transport.sessionId !== undefined) {
         sessionState.clientId = transport.sessionId;
         sessions.set(transport.sessionId, { server, transport, ...sessionState });

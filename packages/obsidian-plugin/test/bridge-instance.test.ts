@@ -922,13 +922,23 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
         page: { maxItems: 10, continuation: null },
       },
     });
+    let pendingStatus!: (status: number | undefined) => void;
+    const pendingResponse = new Promise<number | undefined>((resolve) => {
+      pendingStatus = resolve;
+    });
     const pendingRequest = request(bridge.endpoint, {
+      method: "POST",
       headers: {
+        "Content-Type": "application/json",
         "X-Block-Shutdown": "yes",
         "X-Expected-Vault-ID": "vault-a",
       },
     });
-    pendingRequest.end();
+    pendingRequest.on("response", (response) => {
+      response.resume();
+      pendingStatus(response.statusCode);
+    });
+    pendingRequest.end("{}");
     await entered;
 
     const firstStop = bridge.stop();
@@ -957,6 +967,7 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
 
     releaseRequest();
     await Promise.all([firstStop, secondStop]);
+    expect(await pendingResponse).toBe(503);
     await expect(bridge.stop()).resolves.toBeUndefined();
     expect(released).toHaveLength(1);
     closeSession.mockRestore();
