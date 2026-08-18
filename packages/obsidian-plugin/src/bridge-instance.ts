@@ -237,6 +237,7 @@ function blocksVaultContent(
 export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInstance {
   let port = options.port;
   let httpServer: HttpServer | undefined;
+  let shutdown: Promise<void> | undefined;
   let changeSetService: ChangeSetService | undefined;
   const continuationStore = createVaultContinuationStore({
     now: options.continuationNow,
@@ -628,6 +629,12 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       return;
     }
 
+    if (httpServer === undefined) {
+      response.writeHead(503, { "Cache-Control": "no-store" });
+      response.end();
+      return;
+    }
+
     const sessionHeader = request.headers["mcp-session-id"];
     const sessionId = typeof sessionHeader === "string" ? sessionHeader : undefined;
     let session = sessionId === undefined ? undefined : sessions.get(sessionId);
@@ -664,7 +671,17 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         if (transport.sessionId !== undefined) releaseSession(transport.sessionId);
       };
       await server.connect(transport);
+      if (httpServer === undefined) {
+        await server.close();
+        response.writeHead(503, { "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
       await transport.handleRequest(request, response, body);
+      if (httpServer === undefined) {
+        await server.close();
+        return;
+      }
       if (transport.sessionId !== undefined) {
         sessionState.clientId = transport.sessionId;
         sessions.set(transport.sessionId, { server, transport, ...sessionState });
@@ -756,16 +773,42 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         });
       });
     },
-    async stop() {
+    stop() {
+      if (shutdown !== undefined) return shutdown;
       const server = httpServer;
-      if (server === undefined) return;
+      if (server === undefined) return Promise.resolve();
       httpServer = undefined;
-      const activeSessions = [...sessions.entries()];
-      for (const [sessionId] of activeSessions) releaseSession(sessionId);
-      await Promise.all(activeSessions.map(([, { server: mcp }]) => mcp.close()));
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error === undefined ? resolve() : reject(error)));
-      });
+      const currentShutdown = (async () => {
+        const activeSessions = [...sessions.entries()];
+        for (const [sessionId] of activeSessions) releaseSession(sessionId);
+        const sessionClosures = await Promise.allSettled(
+          activeSessions.map(([, { server: mcp }]) => mcp.close()),
+        );
+        let listenerError: unknown;
+        try {
+          await new Promise<void>((resolve, reject) => {
+            server.close((error) => (error === undefined ? resolve() : reject(error)));
+          });
+        } catch (error) {
+          listenerError = error;
+        }
+        const errors = sessionClosures.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        );
+        if (listenerError !== undefined) errors.push(listenerError);
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, "Bridge shutdown failed");
+      })();
+      shutdown = currentShutdown;
+      void currentShutdown.then(
+        () => {
+          if (shutdown === currentShutdown) shutdown = undefined;
+        },
+        () => {
+          if (shutdown === currentShutdown) shutdown = undefined;
+        },
+      );
+      return currentShutdown;
     },
     async pauseWrites() {
       const service = changeSetService;
