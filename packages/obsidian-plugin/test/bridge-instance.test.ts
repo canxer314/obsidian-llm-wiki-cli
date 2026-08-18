@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { request } from "node:http";
+import { setImmediate } from "node:timers/promises";
 
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createBridgeInstance,
@@ -42,6 +45,10 @@ async function connect(endpoint: URL, expectedVaultId?: string): Promise<Client>
   await client.connect(transport);
   return client;
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("Bridge Instance over loopback Streamable HTTP", () => {
   it("projects the fixed gate precedence consistently across all six tools", async () => {
@@ -853,6 +860,129 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
     expect(executedFor).toHaveLength(1);
     expect(released).toEqual(executedFor);
     await client.close();
+  });
+
+  it("makes concurrent stop callers wait for the complete shutdown", async () => {
+    let requestEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      requestEntered = resolve;
+    });
+    let releaseRequest!: () => void;
+    const blockedRequest = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    let sessionCloseEntered!: () => void;
+    const closingSession = new Promise<void>((resolve) => {
+      sessionCloseEntered = resolve;
+    });
+    let releaseSessionClose!: () => void;
+    const blockedSessionClose = new Promise<void>((resolve) => {
+      releaseSessionClose = resolve;
+    });
+    const originalClose = McpServer.prototype.close;
+    const closeSession = vi
+      .spyOn(McpServer.prototype, "close")
+      .mockImplementation(async function () {
+        sessionCloseEntered();
+        await blockedSessionClose;
+        await originalClose.call(this);
+      });
+    const released: string[] = [];
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      authenticator: {
+        authenticate: async (incoming) => {
+          if (incoming.headers["x-block-shutdown"] === "yes") {
+            requestEntered();
+            await blockedRequest;
+          }
+          return true;
+        },
+      },
+      discoverService: {
+        execute: async (_input, clientId) => ({
+          outcome: "results",
+          ordering: { by: "path", direction: "asc", tieBreaker: "path_utf8_bytes" },
+          items: [],
+          complete: true,
+          continuation: clientId,
+        }),
+        releaseClient: (clientId) => released.push(clientId),
+      },
+    });
+    await bridge.start();
+    const client = await connect(bridge.endpoint, "vault-a");
+    await client.callTool({
+      name: "vault_discover",
+      arguments: {
+        query: { path: { exact: "Alpha.md" } },
+        projection: { matches: false },
+        order: { by: "path", direction: "asc" },
+        page: { maxItems: 10, continuation: null },
+      },
+    });
+    const pendingRequest = request(bridge.endpoint, {
+      headers: {
+        "X-Block-Shutdown": "yes",
+        "X-Expected-Vault-ID": "vault-a",
+      },
+    });
+    pendingRequest.end();
+    await entered;
+
+    const firstStop = bridge.stop();
+    const secondStop = bridge.stop();
+    expect(secondStop).toBe(firstStop);
+    let firstStopped = false;
+    let secondStopped = false;
+    void firstStop.then(() => {
+      firstStopped = true;
+    });
+    void secondStop.then(() => {
+      secondStopped = true;
+    });
+    await closingSession;
+    await setImmediate();
+
+    expect(firstStopped).toBe(false);
+    expect(secondStopped).toBe(false);
+    expect(released).toHaveLength(1);
+
+    releaseSessionClose();
+    await setImmediate();
+    expect(closeSession).toHaveBeenCalledOnce();
+    expect(firstStopped).toBe(false);
+    expect(secondStopped).toBe(false);
+
+    releaseRequest();
+    await Promise.all([firstStop, secondStop]);
+    await expect(bridge.stop()).resolves.toBeUndefined();
+    expect(released).toHaveLength(1);
+    closeSession.mockRestore();
+    await client.close();
+  });
+
+  it("closes the listener when an MCP session fails to close", async () => {
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+    });
+    await bridge.start();
+    const client = await connect(bridge.endpoint, "vault-a");
+    const closeSession = vi
+      .spyOn(McpServer.prototype, "close")
+      .mockRejectedValueOnce(new Error("session close failed"));
+
+    await expect(bridge.stop()).rejects.toThrow("session close failed");
+    closeSession.mockRestore();
+    await expect(
+      fetch(bridge.endpoint, {
+        headers: { "X-Expected-Vault-ID": "vault-a" },
+      }),
+    ).rejects.toThrow();
+    await expect(bridge.stop()).resolves.toBeUndefined();
+    await client.close().catch(() => undefined);
   });
 
   it("reports Search Snapshot inconsistency through health and discovery without another gate", async () => {
