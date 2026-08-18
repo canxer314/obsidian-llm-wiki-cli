@@ -45,8 +45,13 @@ have the exact `Sandcastle` label. `--watch` is an explicit alternative and
 cannot be combined with `--issue`. Startup also creates or updates the
 `sandcastle:failed` label idempotently.
 
-This entry point currently stops after startup validation. The Planner Agent
-Session is connected at the `startPlanner(issueNumber)` orchestration seam.
+After startup validation, the runner starts a fresh Planner Agent Session in the
+sandbox. The Planner receives only the explicit Issue number, reads the latest
+title, body, labels, and comments itself through `gh`, and returns a schema-validated
+plan. The plan records `ready` or `blocked`, an implementation summary, an explicit
+blocking reason, whether automation configuration changes are allowed, and the full
+Issue context for a later Implementer session. Missing, free-text, mismatched-Issue,
+or otherwise invalid output fails closed.
 
 ## Runtime verification
 

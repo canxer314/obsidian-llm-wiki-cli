@@ -7,7 +7,7 @@ import {
   loadSandcastleConfig,
   type SandcastleConfigPaths,
   type SandcastleModels,
-} from "./private-config.js";
+} from "./private-config.ts";
 
 export const sandboxHooks = {
   sandbox: {
