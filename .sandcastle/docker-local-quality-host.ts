@@ -6,7 +6,7 @@ import {
   type LocalQualityCommandResult,
   type LocalQualityHost,
   type LocalQualityResult,
-} from "./local-quality.js";
+} from "./local-quality.ts";
 
 export interface LocalQualityProcessOptions {
   readonly cwd: string;
