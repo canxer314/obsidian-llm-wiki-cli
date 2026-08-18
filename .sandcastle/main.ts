@@ -8,6 +8,8 @@ import { GithubCliPort } from "./github-cli.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { implementIssue } from "./implementer.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
+import { reviewPullRequest } from "./review.ts";
+import { createSandcastleReviewerSession } from "./reviewer-session.ts";
 import { createSandcastlePlannerSession } from "./planner-session.ts";
 import { planIssue } from "./planner.ts";
 import { loadSandboxStartup, sandboxHooks } from "./sandbox.ts";
@@ -51,7 +53,22 @@ try {
         github,
         qualityHost,
       );
-      return { pullRequest, localQuality };
+      if (localQuality.status !== "success") {
+        return { pullRequest, localQuality };
+      }
+      const reviewerSession = createSandcastleReviewerSession({
+        sandbox: startup.sandbox,
+        hooks: sandboxHooks,
+      });
+      const review = await reviewPullRequest({
+        pullRequestNumber: pullRequest.number,
+        revision: pullRequest.headSha,
+        localQuality,
+        model: startup.models.reviewer,
+        session: reviewerSession,
+        github,
+      });
+      return { pullRequest, localQuality, review };
     },
   });
   if (result !== undefined) console.log(JSON.stringify(result));
