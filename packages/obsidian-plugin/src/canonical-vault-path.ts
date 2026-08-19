@@ -3,6 +3,7 @@ export function isCanonicalVaultPath(path: string): boolean {
     path.length > 0 &&
     !path.startsWith("/") &&
     !path.includes("\\") &&
+    !path.includes("\0") &&
     !path.includes("//") &&
     !path.split("/").some((part) => part === "." || part === "..")
   );
