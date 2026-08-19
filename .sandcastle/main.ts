@@ -6,6 +6,8 @@ import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { createDockerLocalQualityHost } from "./docker-local-quality-host.ts";
 import {
   createSandcastleEvidenceRecorder,
+  recordSandcastleGate,
+  recordSandcastleMerge,
   recordSandcastleWorkflow,
 } from "./evidence.ts";
 import { finalizeFailure } from "./failure-finalizer.ts";
@@ -120,36 +122,38 @@ try {
         },
         runLocalQuality: async (currentPullRequest) => {
           progress.enter("local-quality", currentPullRequest);
-          const localQuality = await checkPullRequestLocalQuality(
-            currentPullRequest.number,
-            github,
-            createDockerLocalQualityHost(localQualityHostOptions),
+          return recordSandcastleGate(
+            evidence,
+            execution,
+            {
+              pullRequestNumber: currentPullRequest.number,
+              context: "sandcastle/local-quality",
+            },
+            () => checkPullRequestLocalQuality(
+              currentPullRequest.number,
+              github,
+              createDockerLocalQualityHost(localQualityHostOptions),
+            ),
           );
-          evidence.gateFinished(execution, {
-            pullRequestNumber: currentPullRequest.number,
-            revision: localQuality.revision,
-            context: "sandcastle/local-quality",
-            outcome: localQuality.status,
-          });
-          return localQuality;
         },
         runReview: async (currentPullRequest, localQuality) => {
           progress.enter("reviewer", currentPullRequest);
-          const review = await reviewPullRequest({
-            pullRequestNumber: currentPullRequest.number,
-            revision: currentPullRequest.headSha,
-            localQuality,
-            model: startup.models.reviewer,
-            session: reviewerSession,
-            github,
-          });
-          evidence.gateFinished(execution, {
-            pullRequestNumber: currentPullRequest.number,
-            revision: review.revision,
-            context: "sandcastle/review",
-            outcome: review.status,
-          });
-          return review;
+          return recordSandcastleGate(
+            evidence,
+            execution,
+            {
+              pullRequestNumber: currentPullRequest.number,
+              context: "sandcastle/review",
+            },
+            () => reviewPullRequest({
+              pullRequestNumber: currentPullRequest.number,
+              revision: currentPullRequest.headSha,
+              localQuality,
+              model: startup.models.reviewer,
+              session: reviewerSession,
+              github,
+            }),
+          );
         },
         repair: ({ pullRequest: currentPullRequest, attempt, feedback }) => {
           progress.enter("repair", currentPullRequest);
@@ -188,17 +192,22 @@ try {
         };
       }
       progress.enter("merge", orchestration.pullRequest);
-      evidence.mergeRequested(execution, {
-        pullRequestNumber: orchestration.pullRequest.number,
-        expectedHeadSha: orchestration.pullRequest.headSha,
-      });
-      const merged = await mergeVerifiedPullRequest({
-        issueNumber,
-        pullRequest: orchestration.pullRequest,
-        localQuality: orchestration.localQuality,
-        review: orchestration.review,
-        github,
-      });
+      const verifiedReview = orchestration.review;
+      const merged = await recordSandcastleMerge(
+        evidence,
+        execution,
+        {
+          pullRequestNumber: orchestration.pullRequest.number,
+          expectedHeadSha: orchestration.pullRequest.headSha,
+        },
+        () => mergeVerifiedPullRequest({
+          issueNumber,
+          pullRequest: orchestration.pullRequest,
+          localQuality: orchestration.localQuality,
+          review: verifiedReview,
+          github,
+        }),
+      );
       return {
         result: merged,
         pullRequest: orchestration.pullRequest,

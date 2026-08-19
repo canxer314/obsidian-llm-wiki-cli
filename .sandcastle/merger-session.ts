@@ -50,7 +50,9 @@ export function createSandcastleMergerSession(options: {
     async run(request) {
       const sessionName = `merger-issue-${request.branch.split("-").at(-1)}-attempt-${request.request.attempt}`;
       if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.sessionStarted(options.execution, {
+        options.evidence.record({
+          kind: "session-started",
+          ...options.execution,
           role: "merger",
           attempt: request.request.attempt,
           sessionName,

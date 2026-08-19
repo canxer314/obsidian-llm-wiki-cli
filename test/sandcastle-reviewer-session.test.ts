@@ -19,7 +19,7 @@ describe("Sandcastle Reviewer session adapter", () => {
     const createAgent = vi.fn().mockReturnValue({ name: "fake-reviewer" });
     const sandbox = { kind: "fake-sandbox" };
     const hooks = { sandbox: { onSandboxReady: [] } };
-    const evidence = { sessionStarted: vi.fn() };
+    const evidence = { record: vi.fn() };
     const execution = { runId: "run-1", batchId: 1, issueNumber: 103 };
     const session = createSandcastleReviewerSession({
       sandbox: sandbox as never,
@@ -47,7 +47,7 @@ describe("Sandcastle Reviewer session adapter", () => {
         baseBranch: revision,
       },
       maxIterations: 1,
-      name: "reviewer-pr-321-0123456789ab",
+      name: "reviewer-pr-321-0123456789ab-attempt-1",
     }));
     const request = runAgent.mock.calls[0]![0];
     expect(request.prompt).toContain(`Pull Request #321 at exact revision ${revision}`);
@@ -55,7 +55,9 @@ describe("Sandcastle Reviewer session adapter", () => {
     expect(request.prompt).toContain("Approved or Changes requested");
     expect(request.prompt).toContain("<review>");
     expect(request.output).toMatchObject({ _tag: "object", tag: "review" });
-    expect(evidence.sessionStarted).toHaveBeenCalledWith(execution, {
+    expect(evidence.record).toHaveBeenCalledWith({
+      kind: "session-started",
+      ...execution,
       role: "reviewer",
       attempt: 1,
       sessionName: request.name,

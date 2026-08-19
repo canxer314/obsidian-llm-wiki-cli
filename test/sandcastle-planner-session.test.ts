@@ -25,7 +25,7 @@ describe("Sandcastle Planner session adapter", () => {
     const createAgent = vi.fn().mockReturnValue({ name: "fake-agent" });
     const sandbox = { kind: "fake-sandbox" };
     const hooks = { sandbox: { onSandboxReady: [] } };
-    const evidence = { sessionStarted: vi.fn() };
+    const evidence = { record: vi.fn() };
     const execution = { runId: "run-1", batchId: 1, issueNumber: 101 };
     const session = createSandcastlePlannerSession({
       sandbox: sandbox as never,
@@ -58,7 +58,9 @@ describe("Sandcastle Planner session adapter", () => {
     expect(request.prompt).toContain("body, labels, and all comments");
     expect(request.prompt).toContain("<plan>");
     expect(request.prompt).not.toContain(output.issue.body);
-    expect(evidence.sessionStarted).toHaveBeenCalledWith(execution, {
+    expect(evidence.record).toHaveBeenCalledWith({
+      kind: "session-started",
+      ...execution,
       role: "planner",
       attempt: 1,
       sessionName: request.name,

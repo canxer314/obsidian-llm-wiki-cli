@@ -73,9 +73,11 @@ export function createSandcastleReviewerSession(options: {
       attempt += 1;
       const suffix = request.revision.slice(0, 12);
       const sessionId = createSessionId();
-      const sessionName = `reviewer-pr-${request.pullRequestNumber}-${suffix}`;
+      const sessionName = `reviewer-pr-${request.pullRequestNumber}-${suffix}-attempt-${attempt}`;
       if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.sessionStarted(options.execution, {
+        options.evidence.record({
+          kind: "session-started",
+          ...options.execution,
           role: "reviewer",
           attempt,
           sessionName,

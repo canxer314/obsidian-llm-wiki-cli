@@ -36,45 +36,113 @@ export type SandcastleEvidenceEvent =
     readonly failureStage?: string;
   });
 
-type EventFields<TKind extends SandcastleEvidenceEvent["kind"]> = Omit<
-  Extract<SandcastleEvidenceEvent, { readonly kind: TKind }>,
-  keyof SandcastleExecutionContext | "kind"
->;
-
 export interface SandcastleEvidenceRecorder {
-  sessionStarted(
-    context: SandcastleExecutionContext,
-    fields: EventFields<"session-started">,
-  ): void;
-  gateFinished(
-    context: SandcastleExecutionContext,
-    fields: EventFields<"gate-finished">,
-  ): void;
-  mergeRequested(
-    context: SandcastleExecutionContext,
-    fields: EventFields<"merge-requested">,
-  ): void;
-  workflowFinished(
-    context: SandcastleExecutionContext,
-    fields: EventFields<"workflow-finished">,
-  ): void;
+  record(event: SandcastleEvidenceEvent): void;
+}
+
+const SHA_PATTERN = /^[0-9a-f]{40}$/u;
+const SAFE_TEXT_PATTERN = /^[a-zA-Z0-9._:-]+$/u;
+
+function requireIdentifier(name: string, value: string): void {
+  if (value.length === 0 || value.length > 128 || !SAFE_TEXT_PATTERN.test(value)) {
+    throw new Error(`Sandcastle evidence ${name} is invalid`);
+  }
+}
+
+function requireNumber(name: string, value: number, minimum: number): void {
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`Sandcastle evidence ${name} is invalid`);
+  }
+}
+
+function validateEvent(event: SandcastleEvidenceEvent): void {
+  requireIdentifier("runId", event.runId);
+  requireNumber("batchId", event.batchId, 0);
+  requireNumber("issueNumber", event.issueNumber, 1);
+  if ("pullRequestNumber" in event && event.pullRequestNumber !== undefined) {
+    requireNumber("pullRequestNumber", event.pullRequestNumber, 1);
+  }
+  if ("attempt" in event) requireNumber("attempt", event.attempt, 0);
+  if ("sessionName" in event) requireIdentifier("sessionName", event.sessionName);
+  if ("failureStage" in event && event.failureStage !== undefined) {
+    requireIdentifier("failureStage", event.failureStage);
+  }
+  for (const revision of [
+    "revision" in event ? event.revision : undefined,
+    "expectedHeadSha" in event ? event.expectedHeadSha : undefined,
+  ]) {
+    if (revision !== undefined && !SHA_PATTERN.test(revision)) {
+      throw new Error("Sandcastle evidence revision is invalid");
+    }
+  }
+}
+
+export function createSandcastleEvidenceRecorder(
+  write: (event: SandcastleEvidenceEvent) => void,
+): SandcastleEvidenceRecorder {
+  return {
+    record(event) {
+      validateEvent(event);
+      write(event);
+    },
+  };
+}
+
+export async function recordSandcastleGate<TResult extends {
+  readonly status: EvidenceOutcome;
+  readonly revision: string;
+}>(
+  recorder: SandcastleEvidenceRecorder,
+  execution: SandcastleExecutionContext,
+  fields: {
+    readonly pullRequestNumber: number;
+    readonly context: GateContext;
+  },
+  run: () => Promise<TResult>,
+): Promise<TResult> {
+  const result = await run();
+  recorder.record({
+    kind: "gate-finished",
+    ...execution,
+    ...fields,
+    revision: result.revision,
+    outcome: result.status,
+  });
+  return result;
+}
+
+export async function recordSandcastleMerge<TResult>(
+  recorder: SandcastleEvidenceRecorder,
+  execution: SandcastleExecutionContext,
+  fields: {
+    readonly pullRequestNumber: number;
+    readonly expectedHeadSha: string;
+  },
+  run: () => Promise<TResult>,
+): Promise<TResult> {
+  recorder.record({ kind: "merge-requested", ...execution, ...fields });
+  return run();
 }
 
 export async function recordSandcastleWorkflow<TResult>(
   recorder: SandcastleEvidenceRecorder,
-  context: SandcastleExecutionContext,
+  execution: SandcastleExecutionContext,
   run: () => Promise<TResult>,
   mergedRevision: (result: TResult) => string,
 ): Promise<TResult> {
   try {
     const result = await run();
-    recorder.workflowFinished(context, {
+    recorder.record({
+      kind: "workflow-finished",
+      ...execution,
       outcome: "merged",
       revision: mergedRevision(result),
     });
     return result;
   } catch (error) {
-    recorder.workflowFinished(context, {
+    recorder.record({
+      kind: "workflow-finished",
+      ...execution,
       outcome: "failed",
       ...(typeof error === "object" && error !== null && "stage" in error &&
           typeof error.stage === "string"
@@ -83,31 +151,4 @@ export async function recordSandcastleWorkflow<TResult>(
     });
     throw error;
   }
-}
-
-export function createSandcastleEvidenceRecorder(
-  write: (event: SandcastleEvidenceEvent) => void,
-): SandcastleEvidenceRecorder {
-  return {
-    sessionStarted: (context, fields) => write({
-      kind: "session-started",
-      ...context,
-      ...fields,
-    }),
-    gateFinished: (context, fields) => write({
-      kind: "gate-finished",
-      ...context,
-      ...fields,
-    }),
-    mergeRequested: (context, fields) => write({
-      kind: "merge-requested",
-      ...context,
-      ...fields,
-    }),
-    workflowFinished: (context, fields) => write({
-      kind: "workflow-finished",
-      ...context,
-      ...fields,
-    }),
-  };
 }

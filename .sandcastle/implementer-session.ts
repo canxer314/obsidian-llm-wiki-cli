@@ -90,7 +90,9 @@ export function createSandcastleImplementerSession(options: {
         ? `implementer-issue-${request.plan.issue.number}`
         : `implementer-repair-issue-${request.plan.issue.number}-attempt-${request.repair.attempt}`;
       if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.sessionStarted(options.execution, {
+        options.evidence.record({
+          kind: "session-started",
+          ...options.execution,
           role: "implementer",
           attempt: request.repair?.attempt ?? 0,
           sessionName,

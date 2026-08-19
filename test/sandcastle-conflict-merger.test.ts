@@ -21,7 +21,7 @@ describe("Sandcastle conflict Merger", () => {
       branch: "sandcastle/issue-111",
       commits: [{ sha: "c".repeat(40) }],
     });
-    const evidence = { sessionStarted: vi.fn() };
+    const evidence = { record: vi.fn() };
     const execution = { runId: "run-1", batchId: 1, issueNumber: 111 };
     const session = createSandcastleMergerSession({
       sandbox: { kind: "fake-sandbox" } as never,
@@ -53,7 +53,9 @@ describe("Sandcastle conflict Merger", () => {
     expect(agentRequest.prompt).toContain(`git merge ${request.targetSha}`);
     expect(agentRequest.prompt).toContain("Do not rebase or force-push");
     expect(agentRequest.prompt).not.toContain("gh pr create");
-    expect(evidence.sessionStarted).toHaveBeenCalledWith(execution, {
+    expect(evidence.record).toHaveBeenCalledWith({
+      kind: "session-started",
+      ...execution,
       role: "merger",
       attempt: 1,
       sessionName: agentRequest.name,

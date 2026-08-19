@@ -34,7 +34,9 @@ export function createSandcastlePlannerSession(options: {
     async run(request) {
       const sessionName = `planner-issue-${request.issueNumber}`;
       if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.sessionStarted(options.execution, {
+        options.evidence.record({
+          kind: "session-started",
+          ...options.execution,
           role: "planner",
           attempt: 1,
           sessionName,

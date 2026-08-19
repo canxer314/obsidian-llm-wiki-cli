@@ -2,134 +2,175 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createSandcastleEvidenceRecorder,
+  recordSandcastleGate,
+  recordSandcastleMerge,
   recordSandcastleWorkflow,
   type SandcastleExecutionContext,
 } from "../.sandcastle/evidence.js";
+import { processReadyPlan } from "../.sandcastle/repair-orchestrator.js";
 
 const context: SandcastleExecutionContext = {
   runId: "run-acceptance-1",
   batchId: 3,
   issueNumber: 142,
 };
+const sha = (character: string) => character.repeat(40);
 
 describe("Sandcastle structured evidence", () => {
-  it("records only bounded workflow correlation fields", () => {
+  it("records only validated workflow correlation fields", () => {
     const write = vi.fn();
     const evidence = createSandcastleEvidenceRecorder(write);
 
-    evidence.sessionStarted(context, {
+    evidence.record({
+      kind: "session-started",
+      ...context,
       role: "implementer",
       attempt: 1,
       sessionName: "implementer-repair-issue-142-attempt-1",
       pullRequestNumber: 321,
-      revision: "a".repeat(40),
+      revision: sha("a"),
     });
-    evidence.gateFinished(context, {
+    evidence.record({
+      kind: "gate-finished",
+      ...context,
       pullRequestNumber: 321,
-      revision: "b".repeat(40),
+      revision: sha("b"),
       context: "sandcastle/review",
       outcome: "success",
     });
-    evidence.mergeRequested(context, {
+    evidence.record({
+      kind: "merge-requested",
+      ...context,
       pullRequestNumber: 321,
-      expectedHeadSha: "b".repeat(40),
+      expectedHeadSha: sha("b"),
     });
-    evidence.workflowFinished(context, {
+    evidence.record({
+      kind: "workflow-finished",
+      ...context,
       outcome: "merged",
-      revision: "b".repeat(40),
+      revision: sha("b"),
     });
 
     expect(write.mock.calls.map(([event]) => event)).toEqual([
-      {
-        kind: "session-started",
-        ...context,
-        role: "implementer",
-        attempt: 1,
-        sessionName: "implementer-repair-issue-142-attempt-1",
-        pullRequestNumber: 321,
-        revision: "a".repeat(40),
-      },
-      {
-        kind: "gate-finished",
-        ...context,
-        pullRequestNumber: 321,
-        revision: "b".repeat(40),
-        context: "sandcastle/review",
-        outcome: "success",
-      },
-      {
-        kind: "merge-requested",
-        ...context,
-        pullRequestNumber: 321,
-        expectedHeadSha: "b".repeat(40),
-      },
-      {
-        kind: "workflow-finished",
-        ...context,
-        outcome: "merged",
-        revision: "b".repeat(40),
-      },
+      expect.objectContaining({ kind: "session-started", issueNumber: 142 }),
+      expect.objectContaining({ kind: "gate-finished", revision: sha("b") }),
+      expect.objectContaining({ kind: "merge-requested", expectedHeadSha: sha("b") }),
+      expect.objectContaining({ kind: "workflow-finished", outcome: "merged" }),
     ]);
   });
 
-  it("records an exact merged revision or an isolated failure stage", async () => {
-    const events: unknown[] = [];
-    const evidence = createSandcastleEvidenceRecorder((event) => events.push(event));
+  it.each([
+    { name: "long run ID", event: { ...context, runId: "x".repeat(129) } },
+    { name: "free-text stage", event: { ...context, failureStage: "token=secret value" } },
+    { name: "abbreviated SHA", event: { ...context, revision: "abc123" } },
+  ])("rejects $name before writing JSONL", ({ event }) => {
+    const write = vi.fn();
+    const evidence = createSandcastleEvidenceRecorder(write);
 
-    await expect(recordSandcastleWorkflow(
-      evidence,
-      context,
-      async () => ({ mergedRevision: "e".repeat(40) }),
-      (result) => result.mergedRevision,
-    )).resolves.toEqual({ mergedRevision: "e".repeat(40) });
-
-    const failure = Object.assign(new Error("review failed"), { stage: "reviewer" });
-    await expect(recordSandcastleWorkflow(
-      evidence,
-      { ...context, issueNumber: 143 },
-      async () => Promise.reject(failure),
-      () => "unreachable",
-    )).rejects.toBe(failure);
-
-    expect(events).toEqual([
-      {
-        kind: "workflow-finished",
-        ...context,
-        outcome: "merged",
-        revision: "e".repeat(40),
-      },
-      {
-        kind: "workflow-finished",
-        ...context,
-        issueNumber: 143,
-        outcome: "failed",
-        failureStage: "reviewer",
-      },
-    ]);
+    expect(() => evidence.record({
+      kind: "workflow-finished",
+      outcome: "failed",
+      ...event,
+    })).toThrow("Sandcastle evidence");
+    expect(write).not.toHaveBeenCalled();
   });
 
-  it("keeps two Issues and their repair attempts independently attributable", () => {
+  it("records complete isolated traces for two orchestrated Issues", async () => {
     const events: unknown[] = [];
     const evidence = createSandcastleEvidenceRecorder((event) => events.push(event));
 
-    evidence.sessionStarted({ ...context, issueNumber: 201 }, {
-      role: "implementer",
-      attempt: 2,
-      sessionName: "implementer-repair-issue-201-attempt-2",
-      pullRequestNumber: 401,
-      revision: "c".repeat(40),
-    });
-    evidence.sessionStarted({ ...context, issueNumber: 202 }, {
-      role: "merger",
-      attempt: 1,
-      sessionName: "merger-issue-202-attempt-1",
-      pullRequestNumber: 402,
-      revision: "d".repeat(40),
-    });
+    async function runIssue(issueNumber: number, pullRequestNumber: number, fails: boolean) {
+      const execution = { ...context, issueNumber };
+      const initialRevision = sha(issueNumber === 201 ? "a" : "c");
+      const repairedRevision = sha(issueNumber === 201 ? "b" : "d");
+      const initialPullRequest = {
+        number: pullRequestNumber,
+        url: `https://github.com/example/repo/pull/${pullRequestNumber}`,
+        headSha: initialRevision,
+      };
+      let qualityAttempt = 0;
 
-    expect(events).toEqual([
-      expect.objectContaining({ issueNumber: 201, role: "implementer", attempt: 2 }),
-      expect.objectContaining({ issueNumber: 202, role: "merger", attempt: 1 }),
+      return recordSandcastleWorkflow(
+        evidence,
+        execution,
+        async () => {
+          const orchestration = await processReadyPlan({
+            pullRequest: initialPullRequest,
+            runLocalQuality: (pullRequest) => recordSandcastleGate(
+              evidence,
+              execution,
+              {
+                pullRequestNumber,
+                context: "sandcastle/local-quality",
+              },
+              async () => {
+                qualityAttempt += 1;
+                return qualityAttempt === 1 && !fails
+                  ? { status: "failure" as const, stage: "test" as const, revision: pullRequest.headSha }
+                  : { status: fails ? "error" as const : "success" as const, stage: "test" as const, revision: pullRequest.headSha };
+              },
+            ),
+            runReview: (pullRequest) => recordSandcastleGate(
+              evidence,
+              execution,
+              { pullRequestNumber, context: "sandcastle/review" },
+              async () => ({
+                status: "success" as const,
+                revision: pullRequest.headSha,
+                verdict: "Approved" as const,
+                summary: "Approved",
+                findings: [],
+              }),
+            ),
+            repair: async ({ attempt }) => {
+              evidence.record({
+                kind: "session-started",
+                ...execution,
+                role: "implementer",
+                attempt,
+                sessionName: `implementer-repair-issue-${issueNumber}-attempt-${attempt}`,
+                pullRequestNumber,
+                revision: initialRevision,
+              });
+              return { ...initialPullRequest, headSha: repairedRevision };
+            },
+          });
+          if (orchestration.terminalFailure !== undefined) {
+            throw Object.assign(new Error("workflow failed"), {
+              stage: orchestration.terminalFailure.stage,
+            });
+          }
+          return recordSandcastleMerge(
+            evidence,
+            execution,
+            { pullRequestNumber, expectedHeadSha: orchestration.pullRequest.headSha },
+            async () => ({ mergedRevision: orchestration.pullRequest.headSha }),
+          );
+        },
+        (result) => result.mergedRevision,
+      );
+    }
+
+    const [successful, failed] = await Promise.allSettled([
+      runIssue(201, 401, false),
+      runIssue(202, 402, true),
     ]);
+
+    expect(successful).toEqual({ status: "fulfilled", value: { mergedRevision: sha("b") } });
+    expect(failed.status).toBe("rejected");
+    expect(events.filter((event) => (event as { issueNumber: number }).issueNumber === 201))
+      .toEqual([
+        expect.objectContaining({ kind: "gate-finished", revision: sha("a"), context: "sandcastle/local-quality", outcome: "failure" }),
+        expect.objectContaining({ kind: "session-started", attempt: 1 }),
+        expect.objectContaining({ kind: "gate-finished", revision: sha("b"), context: "sandcastle/local-quality", outcome: "success" }),
+        expect.objectContaining({ kind: "gate-finished", revision: sha("b"), context: "sandcastle/review", outcome: "success" }),
+        expect.objectContaining({ kind: "merge-requested", expectedHeadSha: sha("b") }),
+        expect.objectContaining({ kind: "workflow-finished", outcome: "merged", revision: sha("b") }),
+      ]);
+    expect(events.filter((event) => (event as { issueNumber: number }).issueNumber === 202))
+      .toEqual([
+        expect.objectContaining({ kind: "gate-finished", revision: sha("c"), context: "sandcastle/local-quality", outcome: "error" }),
+        expect.objectContaining({ kind: "workflow-finished", outcome: "failed", failureStage: "local-quality:test" }),
+      ]);
   });
 });
