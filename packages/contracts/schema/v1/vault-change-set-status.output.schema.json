@@ -414,7 +414,8 @@
     },
     "__schema1": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "\\S"
     },
     "__schema2": {
       "type": "string",

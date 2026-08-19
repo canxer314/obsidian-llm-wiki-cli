@@ -52,6 +52,66 @@ describe("vault_change_set_submit v1 contract", () => {
     ).toThrow();
   });
 
+  it("rejects whitespace-only operation identities without normalizing valid IDs", () => {
+    const whitespaceOperationId = " \t ";
+    const valid = validSubmit();
+
+    expect(parseChangeSetSubmitInput(valid)).toEqual(valid);
+    expect(parseChangeSetSubmitInput({
+      ...valid,
+      operations: [{ ...valid.operations[0], operationId: " edit-1 " }],
+    }).operations[0]?.operationId).toBe(" edit-1 ");
+    expect(() => parseChangeSetSubmitInput({
+      ...valid,
+      operations: [{ ...valid.operations[0], operationId: whitespaceOperationId }],
+    })).toThrow();
+    expect(() => parseChangeSetSubmitInput({
+      ...valid,
+      operations: [
+        valid.operations[0],
+        {
+          ...valid.operations[0],
+          operationId: "edit-2",
+          afterOperationId: whitespaceOperationId,
+        },
+      ],
+    })).toThrow();
+
+    for (const changeSet of [
+      {
+        changeSetId: "change-set-1",
+        state: "intent_not_applied",
+        failure: {
+          code: "path_conflict",
+          operationId: whitespaceOperationId,
+          path: "Notes/A.md",
+        },
+      },
+      {
+        changeSetId: "change-set-1",
+        state: "intent_applied",
+        preview: {
+          requestedEffects: [{
+            operationId: whitespaceOperationId,
+            kind: "edit_body",
+            projectedOutcome: "changed",
+          }],
+          derivedEffects: [],
+          paths: [],
+        },
+        requestedEffects: [],
+        derivedEffects: [],
+        paths: [],
+      },
+    ]) {
+      expect(() => parseChangeSetSubmitResult({
+        outcome: "registered",
+        changeSet,
+        vault: { writeGate: "open", writeState: "writable" },
+      })).toThrow();
+    }
+  });
+
   it("keeps Markdown and attachment trash evidence distinct", () => {
     const attachmentTrash = {
       submissionKey: "trash-attachment-key",

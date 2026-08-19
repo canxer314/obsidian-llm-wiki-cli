@@ -372,7 +372,8 @@
     },
     "__schema3": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "\\S"
     },
     "__schema4": {
       "$ref": "#/$defs/__schema3"
