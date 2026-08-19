@@ -614,7 +614,10 @@ const canonicalVaultPathSchema = z.string().min(1).regex(
   "path must be canonical and Vault-relative",
 );
 const attachmentSha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
-const operationIdSchema = z.string().min(1);
+const operationIdSchema = z
+  .string()
+  .min(1)
+  .regex(/\S/u, "operation ID must contain a non-whitespace character");
 const operationKinds = [
   "create_directory",
   "create_note",
