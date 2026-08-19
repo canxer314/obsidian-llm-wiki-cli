@@ -6,6 +6,10 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import type {
+  SandcastleEvidenceRecorder,
+  SandcastleExecutionContext,
+} from "./evidence.js";
 import type { PlannerAgentSession } from "./planner.js";
 
 const plannerPrompt = (issueNumber: number) => `
@@ -21,18 +25,28 @@ export function createSandcastlePlannerSession(options: {
   readonly hooks: SandboxHooks;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
+  readonly evidence?: SandcastleEvidenceRecorder;
+  readonly execution?: SandcastleExecutionContext;
 }): PlannerAgentSession {
   const runAgent = options.runAgent ?? run;
   const createAgent = options.createAgent ?? claudeCode;
   return {
     async run(request) {
+      const sessionName = `planner-issue-${request.issueNumber}`;
+      if (options.evidence !== undefined && options.execution !== undefined) {
+        options.evidence.sessionStarted(options.execution, {
+          role: "planner",
+          attempt: 1,
+          sessionName,
+        });
+      }
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: options.hooks,
         branchStrategy: { type: "head" },
         maxIterations: 1,
-        name: `planner-issue-${request.issueNumber}`,
+        name: sessionName,
         prompt: plannerPrompt(request.issueNumber),
         output: Output.object({
           tag: request.output.tag,

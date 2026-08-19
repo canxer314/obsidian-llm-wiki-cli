@@ -46,10 +46,25 @@ cannot be combined with `--issue`. Startup also creates or updates the
 `sandcastle:failed` label idempotently.
 
 Watch mode polls every five minutes and starts at most two Issues at once. It
-writes JSON lifecycle records to stderr under the `sandcastleWatch` key. The
-records contain only the batch number, Issue numbers, active count on Issue
-transitions, and success/failure outcome; capture them with the GitHub
-SHA/status timeline when producing concurrency acceptance evidence.
+writes JSONL records to stderr under the `sandcastleEvidence` key. Every record
+in one process carries the same random `runId`; watch records add the claiming
+`batchId`, and workflow records retain that run/batch/Issue context through
+session, gate, merge, and terminal events. Capture a run with:
+
+```bash
+npm run sandcastle -- --watch 2>sandcastle-evidence.jsonl
+```
+
+The evidence contains only run/batch/Issue/PR identifiers, session role/name and
+attempt, commit SHA, gate context/outcome, active count, merge expected head,
+and terminal outcome/failure stage. It never includes prompts, findings or
+command output, environment values, credentials, routing, or local paths.
+
+The JSONL records what Sandcastle attempted; GitHub remains authoritative for
+remote branches, Pull Requests, commit statuses, merges, closing relationships,
+and Issue state. Acceptance must cross-check every recorded gate revision and
+merge expected head against the GitHub API rather than treating the local log
+as a second source of those facts.
 
 After startup validation, the runner starts a fresh Planner Agent Session in the
 sandbox. The Planner receives only the explicit Issue number, reads the latest

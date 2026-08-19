@@ -21,11 +21,15 @@ describe("Sandcastle conflict Merger", () => {
       branch: "sandcastle/issue-111",
       commits: [{ sha: "c".repeat(40) }],
     });
+    const evidence = { sessionStarted: vi.fn() };
+    const execution = { runId: "run-1", batchId: 1, issueNumber: 111 };
     const session = createSandcastleMergerSession({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
       runAgent: runAgent as never,
       createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+      evidence: evidence as never,
+      execution,
     });
 
     await session.run({
@@ -49,6 +53,13 @@ describe("Sandcastle conflict Merger", () => {
     expect(agentRequest.prompt).toContain(`git merge ${request.targetSha}`);
     expect(agentRequest.prompt).toContain("Do not rebase or force-push");
     expect(agentRequest.prompt).not.toContain("gh pr create");
+    expect(evidence.sessionStarted).toHaveBeenCalledWith(execution, {
+      role: "merger",
+      attempt: 1,
+      sessionName: agentRequest.name,
+      pullRequestNumber: 321,
+      revision: request.pullRequest.headSha,
+    });
   });
 
   it("verifies the Merger pushed a new normal merge to the existing Pull Request", async () => {

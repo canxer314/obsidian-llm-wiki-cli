@@ -4,6 +4,10 @@ import { resolve } from "node:path";
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { createDockerLocalQualityHost } from "./docker-local-quality-host.ts";
+import {
+  createSandcastleEvidenceRecorder,
+  recordSandcastleWorkflow,
+} from "./evidence.ts";
 import { finalizeFailure } from "./failure-finalizer.ts";
 import {
   runFailureAwareWorkflow,
@@ -28,9 +32,11 @@ import { loadSandboxStartup, sandboxHooks } from "./sandbox.ts";
 
 try {
   const github = new GithubCliPort();
+  const writeEvent = (event: unknown) => console.error(JSON.stringify({ sandcastleEvidence: event }));
+  const evidence = createSandcastleEvidenceRecorder(writeEvent);
   const result = await runSandcastleCli(process.argv.slice(2), {
     github,
-    recordWatchEvent: (event) => console.error(JSON.stringify({ sandcastleWatch: event })),
+    recordWatchEvent: writeEvent,
     handleFailure: async (issueNumber, stage, error) => {
       const finalization = await finalizeFailure({
         issueNumber,
@@ -41,9 +47,12 @@ try {
         throw new SandcastleWorkflowError(stage, finalization.failures, { cause: error });
       }
     },
-    processIssue: async (issueNumber) => runFailureAwareWorkflow<
-      PlannerOutput | RepairOrchestratorResult | MergeVerifiedPullRequestResult
-    >({
+    processIssue: (issueNumber, execution) => recordSandcastleWorkflow(
+      evidence,
+      execution,
+      () => runFailureAwareWorkflow<
+        PlannerOutput | RepairOrchestratorResult | MergeVerifiedPullRequestResult
+      >({
       issueNumber,
       github,
       run: async (progress) => {
@@ -52,6 +61,8 @@ try {
       const plannerSession = createSandcastlePlannerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
+        evidence,
+        execution,
       });
       progress.enter("planner");
       const plan = await planIssue({
@@ -72,6 +83,8 @@ try {
       const implementerSession = createSandcastleImplementerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
+        evidence,
+        execution,
       });
       const pullRequest = await implementIssue({
         plan,
@@ -90,10 +103,14 @@ try {
       const reviewerSession = createSandcastleReviewerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
+        evidence,
+        execution,
       });
       const mergerSession = createSandcastleMergerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooks,
+        evidence,
+        execution,
       });
       const orchestration = await processReadyPlan({
         pullRequest,
@@ -101,24 +118,38 @@ try {
           progress.enter("target-sync", currentPullRequest);
           return github.synchronizePullRequest(currentPullRequest, allowPush);
         },
-        runLocalQuality: (currentPullRequest) => {
+        runLocalQuality: async (currentPullRequest) => {
           progress.enter("local-quality", currentPullRequest);
-          return checkPullRequestLocalQuality(
-          currentPullRequest.number,
-          github,
-          createDockerLocalQualityHost(localQualityHostOptions),
-        );
+          const localQuality = await checkPullRequestLocalQuality(
+            currentPullRequest.number,
+            github,
+            createDockerLocalQualityHost(localQualityHostOptions),
+          );
+          evidence.gateFinished(execution, {
+            pullRequestNumber: currentPullRequest.number,
+            revision: localQuality.revision,
+            context: "sandcastle/local-quality",
+            outcome: localQuality.status,
+          });
+          return localQuality;
         },
-        runReview: (currentPullRequest, localQuality) => {
+        runReview: async (currentPullRequest, localQuality) => {
           progress.enter("reviewer", currentPullRequest);
-          return reviewPullRequest({
-          pullRequestNumber: currentPullRequest.number,
-          revision: currentPullRequest.headSha,
-          localQuality,
-          model: startup.models.reviewer,
-          session: reviewerSession,
-          github,
-        });
+          const review = await reviewPullRequest({
+            pullRequestNumber: currentPullRequest.number,
+            revision: currentPullRequest.headSha,
+            localQuality,
+            model: startup.models.reviewer,
+            session: reviewerSession,
+            github,
+          });
+          evidence.gateFinished(execution, {
+            pullRequestNumber: currentPullRequest.number,
+            revision: review.revision,
+            context: "sandcastle/review",
+            outcome: review.status,
+          });
+          return review;
         },
         repair: ({ pullRequest: currentPullRequest, attempt, feedback }) => {
           progress.enter("repair", currentPullRequest);
@@ -157,6 +188,10 @@ try {
         };
       }
       progress.enter("merge", orchestration.pullRequest);
+      evidence.mergeRequested(execution, {
+        pullRequestNumber: orchestration.pullRequest.number,
+        expectedHeadSha: orchestration.pullRequest.headSha,
+      });
       const merged = await mergeVerifiedPullRequest({
         issueNumber,
         pullRequest: orchestration.pullRequest,
@@ -170,6 +205,13 @@ try {
       };
       },
     }),
+      (workflowResult) => {
+        if (!("mergedRevision" in workflowResult)) {
+          throw new Error("Successful Sandcastle workflow did not merge a revision");
+        }
+        return workflowResult.mergedRevision;
+      },
+    ),
   });
   if (result !== undefined) console.log(JSON.stringify(result));
 } catch (error) {

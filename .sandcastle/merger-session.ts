@@ -5,6 +5,10 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import type {
+  SandcastleEvidenceRecorder,
+  SandcastleExecutionContext,
+} from "./evidence.js";
 import type { MergerRequest } from "./repair-orchestrator.js";
 
 export interface MergerAgentSessionRequest {
@@ -37,11 +41,23 @@ export function createSandcastleMergerSession(options: {
   readonly hooks: SandboxHooks;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
+  readonly evidence?: SandcastleEvidenceRecorder;
+  readonly execution?: SandcastleExecutionContext;
 }): MergerAgentSession {
   const runAgent = options.runAgent ?? run;
   const createAgent = options.createAgent ?? claudeCode;
   return {
     async run(request) {
+      const sessionName = `merger-issue-${request.branch.split("-").at(-1)}-attempt-${request.request.attempt}`;
+      if (options.evidence !== undefined && options.execution !== undefined) {
+        options.evidence.sessionStarted(options.execution, {
+          role: "merger",
+          attempt: request.request.attempt,
+          sessionName,
+          pullRequestNumber: request.request.pullRequest.number,
+          revision: request.request.pullRequest.headSha,
+        });
+      }
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
@@ -52,7 +68,7 @@ export function createSandcastleMergerSession(options: {
           baseBranch: `origin/${request.branch}`,
         },
         maxIterations: 1,
-        name: `merger-issue-${request.branch.split("-").at(-1)}-attempt-${request.request.attempt}`,
+        name: sessionName,
         prompt: mergerPrompt(request.branch, request.request),
       });
       return { branch: result.branch, commits: result.commits };
