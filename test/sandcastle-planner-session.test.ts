@@ -57,6 +57,13 @@ describe("Sandcastle Planner session adapter", () => {
     expect(request.prompt).toContain("gh issue view 101 --comments");
     expect(request.prompt).toContain("body, labels, and all comments");
     expect(request.prompt).toContain("<plan>");
+    expect(request.prompt).toContain("exactly match this strict schema");
+    expect(request.prompt).toContain("implementationSummary (a non-empty string, never an array or object)");
+    expect(request.prompt).toContain("include no fields other than those listed");
+    expect(request.prompt).toContain("Do not add scope, metadata, explanation, helper, or any other fields");
+    expect(request.prompt).toContain(
+      "Determine whether the Issue explicitly permits changes to Sandcastle or GitHub automation configuration",
+    );
     expect(request.prompt).not.toContain(output.issue.body);
     expect(evidence.record).toHaveBeenCalledWith({
       kind: "session-started",
