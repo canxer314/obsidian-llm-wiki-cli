@@ -88,6 +88,7 @@ describe("Sandcastle private configuration adapter", () => {
         "GH_TOKEN=github-secret",
         "ANTHROPIC_AUTH_TOKEN=override-secret",
         "HTTPS_PROXY=",
+        "DISABLE_PROMPT_CACHING_OPUS=1",
         "UNRELATED_SECRET=ignored",
         "",
       ].join("\n"),
@@ -97,6 +98,7 @@ describe("Sandcastle private configuration adapter", () => {
 
     expect(config.environment.ANTHROPIC_AUTH_TOKEN).toBe("override-secret");
     expect(config.environment.HTTPS_PROXY).toBe("http://settings-proxy:7890");
+    expect(config.environment.DISABLE_PROMPT_CACHING_OPUS).toBe("1");
     expect(config.environment).not.toHaveProperty("UNRELATED_SECRET");
   });
 
