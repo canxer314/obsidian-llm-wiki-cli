@@ -23,7 +23,7 @@ Return one JSON object inside <plan> tags. It must exactly match this strict sch
 - issue: only number (positive integer), title (non-empty string), body (string), labels (array of strings), and comments (array).
 - each comment: only author (non-empty string) and body (string).
 
-Do not add scope, metadata, explanation, helper, or any other fields at the top level or inside issue or comments. Set allowsAutomationChanges to true when the Issue explicitly permits any necessary .sandcastle/ or .github/workflows/ change, including when that permission is limited to specific files. Set it to false only when no such automation change is explicitly permitted.
+Do not add scope, metadata, explanation, helper, or any other fields at the top level or inside issue or comments.
 `;
 
 export function createSandcastlePlannerSession(options: {
