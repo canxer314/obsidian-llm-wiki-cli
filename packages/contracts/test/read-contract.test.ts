@@ -27,6 +27,14 @@ describe("vault_read contract", () => {
     expect(parseReadInput(input)).toEqual(input);
   });
 
+  it("rejects NUL characters in Markdown paths", () => {
+    expect(() =>
+      parseReadInput({
+        items: [{ kind: "exact", path: "Notes/a\0.md" }],
+      }),
+    ).toThrow();
+  });
+
   it("requires a complete non-empty hierarchy and one-based section occurrence", () => {
     expect(() =>
       parseReadInput({

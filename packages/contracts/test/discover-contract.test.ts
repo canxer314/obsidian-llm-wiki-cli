@@ -32,6 +32,25 @@ describe("vault_discover contract", () => {
     expect(parseDiscoverInput(input)).toEqual(input);
   });
 
+  it("rejects NUL characters in path queries", () => {
+    expect(() =>
+      parseDiscoverInput({
+        query: { path: { exact: "Notes/a\0.md" } },
+        projection: { matches: false },
+        order: { by: "path", direction: "asc" },
+        page: { maxItems: 10, continuation: null },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseDiscoverInput({
+        query: { path: { prefix: "Notes/\0" } },
+        projection: { matches: false },
+        order: { by: "path", direction: "asc" },
+        page: { maxItems: 10, continuation: null },
+      }),
+    ).toThrow();
+  });
+
   it("rejects mixed leaf operators, invalid regex, and unknown fields", () => {
     expect(() =>
       parseDiscoverInput({

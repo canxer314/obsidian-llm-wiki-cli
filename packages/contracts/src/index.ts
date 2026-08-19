@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const contentVersionSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
 const canonicalMarkdownPathSchema = z.string().regex(
-  /^(?!\/)(?!.*\\)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/).+\.md$/u,
+  /^(?!\/)(?!.*\\)(?!.*\x00)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/).+\.md$/u,
   "path must be a canonical Vault-relative Markdown path",
 );
 
@@ -47,7 +47,7 @@ const jsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
 );
 
 const discoverPathSchema = z.string().regex(
-  /^(?!\/)(?!.*\\)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/).+$/u,
+  /^(?!\/)(?!.*\\)(?!.*\x00)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/).+$/u,
   "path must be canonical and Vault-relative",
 );
 
@@ -610,7 +610,7 @@ export function createContinueResultJsonSchema(): Record<string, unknown> {
 }
 
 const canonicalVaultPathSchema = z.string().min(1).regex(
-  /^(?!\/)(?!.*\\)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/)(?!.*\/$).+$/u,
+  /^(?!\/)(?!.*\\)(?!.*\x00)(?!.*(?:^|\/)(?:\.{1,2})(?:\/|$))(?!.*\/\/)(?!.*\/$).+$/u,
   "path must be canonical and Vault-relative",
 );
 const attachmentSha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
