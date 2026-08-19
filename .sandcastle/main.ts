@@ -30,7 +30,7 @@ import {
 import { reviewPullRequest } from "./review.ts";
 import { createSandcastleReviewerSession } from "./reviewer-session.ts";
 import { createSandcastlePlannerSession } from "./planner-session.ts";
-import { loadSandboxStartup, sandboxHooks } from "./sandbox.ts";
+import { loadSandboxStartup, sandboxHooksFor } from "./sandbox.ts";
 
 try {
   const github = new GithubCliPort();
@@ -62,7 +62,7 @@ try {
       const startup = await loadSandboxStartup();
       const plannerSession = createSandcastlePlannerSession({
         sandbox: startup.sandbox,
-        hooks: sandboxHooks,
+        hooks: sandboxHooksFor("planner"),
         evidence,
         execution,
       });
@@ -84,7 +84,7 @@ try {
       progress.enter("implementer");
       const implementerSession = createSandcastleImplementerSession({
         sandbox: startup.sandbox,
-        hooks: sandboxHooks,
+        hooks: sandboxHooksFor("implementer"),
         evidence,
         execution,
       });
@@ -104,13 +104,13 @@ try {
       };
       const reviewerSession = createSandcastleReviewerSession({
         sandbox: startup.sandbox,
-        hooks: sandboxHooks,
+        hooks: sandboxHooksFor("reviewer"),
         evidence,
         execution,
       });
       const mergerSession = createSandcastleMergerSession({
         sandbox: startup.sandbox,
-        hooks: sandboxHooks,
+        hooks: sandboxHooksFor("merger"),
         evidence,
         execution,
       });
