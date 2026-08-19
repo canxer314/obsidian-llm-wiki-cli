@@ -60,8 +60,42 @@ describe("Sandcastle CLI", () => {
     expect(processIssue).not.toHaveBeenCalled();
   });
 
-  it.each(["0", "-1", "1.5", "not-a-number"])(
-    "rejects invalid Issue number %s before startup",
+  it.each(["1", "100", "9007199254740991"])(
+    "accepts canonical positive decimal Issue number %s",
+    async (value) => {
+      const github = githubPort();
+      const issueNumber = Number(value);
+      vi.mocked(github.getIssue).mockResolvedValue({
+        number: issueNumber,
+        state: "OPEN",
+        labels: ["Sandcastle"],
+      });
+      const processIssue = vi.fn();
+
+      await runSandcastleCli(["--issue", value], { github, processIssue });
+
+      expect(github.claimIssue).toHaveBeenCalledWith(issueNumber);
+      expect(processIssue).toHaveBeenCalledWith(
+        issueNumber,
+        expect.objectContaining({ issueNumber }),
+      );
+    },
+  );
+
+  it.each([
+    "0",
+    "-1",
+    "+1",
+    "01",
+    "1.5",
+    "1e2",
+    "0x64",
+    " 100",
+    "100 ",
+    "9007199254740992",
+    "not-a-number",
+  ])(
+    "rejects non-canonical Issue number %s before startup",
     async (value) => {
       const github = githubPort();
 
