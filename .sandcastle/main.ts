@@ -30,6 +30,7 @@ try {
   const github = new GithubCliPort();
   const result = await runSandcastleCli(process.argv.slice(2), {
     github,
+    recordWatchEvent: (event) => console.error(JSON.stringify({ sandcastleWatch: event })),
     handleFailure: async (issueNumber, stage, error) => {
       const finalization = await finalizeFailure({
         issueNumber,

@@ -45,6 +45,12 @@ have the exact `Sandcastle` label. `--watch` is an explicit alternative and
 cannot be combined with `--issue`. Startup also creates or updates the
 `sandcastle:failed` label idempotently.
 
+Watch mode polls every five minutes and starts at most two Issues at once. It
+writes JSON lifecycle records to stderr under the `sandcastleWatch` key. The
+records contain only the batch number, Issue numbers, active count on Issue
+transitions, and success/failure outcome; capture them with the GitHub
+SHA/status timeline when producing concurrency acceptance evidence.
+
 After startup validation, the runner starts a fresh Planner Agent Session in the
 sandbox. The Planner receives only the explicit Issue number, reads the latest
 title, body, labels, and comments itself through `gh`, and returns a schema-validated
