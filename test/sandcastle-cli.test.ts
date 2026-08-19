@@ -60,7 +60,18 @@ describe("Sandcastle CLI", () => {
     expect(processIssue).not.toHaveBeenCalled();
   });
 
-  it.each(["0", "-1", "1.5", "not-a-number"])(
+  it.each([
+    "0",
+    "-1",
+    "+1",
+    "1.5",
+    "1e2",
+    "0x64",
+    " 100",
+    "100 ",
+    "9007199254740992",
+    "not-a-number",
+  ])(
     "rejects invalid Issue number %s before startup",
     async (value) => {
       const github = githubPort();

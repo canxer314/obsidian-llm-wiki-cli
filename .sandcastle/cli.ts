@@ -86,8 +86,11 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
       if (value === undefined) {
         throw new SandcastleCliError("--issue requires a number");
       }
+      if (!/^[1-9]\d*$/.test(value)) {
+        throw new SandcastleCliError("--issue requires a positive integer");
+      }
       issueNumber = Number(value);
-      if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+      if (!Number.isSafeInteger(issueNumber)) {
         throw new SandcastleCliError("--issue requires a positive integer");
       }
       index += 1;
