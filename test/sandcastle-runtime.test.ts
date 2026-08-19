@@ -22,10 +22,12 @@ const packageJson = JSON.parse(
 };
 
 describe("Sandcastle Docker runtime", () => {
-  it("exposes only the validated startup path", () => {
+  it("provides role-specific startup hooks", () => {
     expect(Object.keys(sandboxModule).sort()).toEqual([
       "loadSandboxStartup",
+      "plannerSandboxHooks",
       "sandboxHooks",
+      "sandboxHooksFor",
     ]);
   });
 
@@ -38,10 +40,21 @@ describe("Sandcastle Docker runtime", () => {
     expect(sandboxConfig).toMatch(/docker\(\{ network: ["']host["'], env:/);
   });
 
-  it("installs lockfile dependencies inside each sandbox", () => {
-    expect(sandboxConfig).toMatch(
-      /onSandboxReady:[\s\S]*command:\s*["']npm ci["']/,
+  it("installs lockfile dependencies for non-Planner sessions only", () => {
+    expect(sandboxModule.plannerSandboxHooks).toEqual({
+      sandbox: { onSandboxReady: [] },
+    });
+    expect(sandboxModule.sandboxHooks).toEqual({
+      sandbox: {
+        onSandboxReady: [{ command: "npm ci", timeoutMs: 300_000 }],
+      },
+    });
+    expect(sandboxModule.sandboxHooksFor("planner")).toBe(
+      sandboxModule.plannerSandboxHooks,
     );
+    for (const role of ["implementer", "reviewer", "merger"] as const) {
+      expect(sandboxModule.sandboxHooksFor(role)).toBe(sandboxModule.sandboxHooks);
+    }
     expect(sandboxConfig).not.toMatch(/command:\s*["']npm install["']/);
     expect(sandboxConfig).not.toMatch(/copyToWorktree[\s\S]*node_modules/);
   });

@@ -15,6 +15,18 @@ export const sandboxHooks = {
   },
 } as const;
 
+export const plannerSandboxHooks = {
+  sandbox: {
+    onSandboxReady: [],
+  },
+} as const;
+
+export function sandboxHooksFor(
+  role: "planner" | "implementer" | "reviewer" | "merger",
+) {
+  return role === "planner" ? plannerSandboxHooks : sandboxHooks;
+}
+
 function createSandboxProvider(environment: Readonly<Record<string, string>>) {
   return docker({ network: "host", env: { ...environment } });
 }

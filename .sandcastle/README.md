@@ -2,8 +2,8 @@
 
 `./sandbox.ts` is the shared runtime and private-config entry point for Sandcastle
 Agent Sessions. Orchestration entry points must call `loadSandboxStartup()` and
-use its `sandbox` and role models together with `sandboxHooks`; the unvalidated
-Docker provider constructor is not exported.
+use its `sandbox`, role models, and the role-specific `sandboxHooksFor()` selection
+together; the unvalidated Docker provider constructor is not exported.
 
 ## Private configuration
 
@@ -109,7 +109,9 @@ work.
 ## Runtime verification
 
 The provider uses Docker host networking so a container can reach CC-Switch on
-the WSL loopback interface. The setup hook runs `npm ci` in each new sandbox; do
+the WSL loopback interface. Implementer, Reviewer, and Merger setup runs `npm ci`
+in each new sandbox; Planner setup deliberately has no dependency-install hook
+because Planner sessions share the host checkout and only read Issue context. Do
 not add `node_modules` to `copyToWorktree`.
 
 Build and verify the image with:
