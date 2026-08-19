@@ -71,11 +71,15 @@ describe("Sandcastle Implementer session adapter", () => {
       branch: "sandcastle/issue-103",
       commits: [{ sha: "def456" }],
     });
+    const evidence = { record: vi.fn() };
+    const execution = { runId: "run-1", batchId: 1, issueNumber: 103 };
     const session = createSandcastleImplementerSession({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
       runAgent: runAgent as never,
       createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+      evidence: evidence as never,
+      execution,
     });
 
     await session.run({
@@ -102,5 +106,14 @@ describe("Sandcastle Implementer session adapter", () => {
     expect(request.prompt).toContain("git push origin sandcastle/issue-103");
     expect(request.prompt).toContain("Do not create another Pull Request");
     expect(request.prompt).not.toContain("gh pr create");
+    expect(evidence.record).toHaveBeenCalledWith({
+      kind: "session-started",
+      ...execution,
+      role: "implementer",
+      attempt: 2,
+      sessionName: request.name,
+      pullRequestNumber: 321,
+      revision: "a".repeat(40),
+    });
   });
 });

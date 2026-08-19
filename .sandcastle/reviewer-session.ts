@@ -9,6 +9,11 @@ import {
 } from "@ai-hero/sandcastle";
 import { z } from "zod";
 
+import type {
+  SandcastleEvidenceRecorder,
+  SandcastleExecutionContext,
+} from "./evidence.js";
+
 export interface ReviewerFinding {
   readonly summary: string;
   readonly details: string;
@@ -56,14 +61,30 @@ export function createSandcastleReviewerSession(options: {
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
   readonly createSessionId?: () => string;
+  readonly evidence?: SandcastleEvidenceRecorder;
+  readonly execution?: SandcastleExecutionContext;
 }): ReviewerAgentSession {
   const runAgent = options.runAgent ?? run;
   const createAgent = options.createAgent ?? claudeCode;
   const createSessionId = options.createSessionId ?? randomUUID;
+  let attempt = 0;
   return {
     async run(request) {
+      attempt += 1;
       const suffix = request.revision.slice(0, 12);
       const sessionId = createSessionId();
+      const sessionName = `reviewer-pr-${request.pullRequestNumber}-${suffix}-attempt-${attempt}`;
+      if (options.evidence !== undefined && options.execution !== undefined) {
+        options.evidence.record({
+          kind: "session-started",
+          ...options.execution,
+          role: "reviewer",
+          attempt,
+          sessionName,
+          pullRequestNumber: request.pullRequestNumber,
+          revision: request.revision,
+        });
+      }
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
@@ -74,7 +95,7 @@ export function createSandcastleReviewerSession(options: {
           baseBranch: request.revision,
         },
         maxIterations: 1,
-        name: `reviewer-pr-${request.pullRequestNumber}-${suffix}`,
+        name: sessionName,
         prompt: reviewerPrompt(request.pullRequestNumber, request.revision),
         output: Output.object({
           tag: "review",

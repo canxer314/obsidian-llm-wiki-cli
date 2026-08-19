@@ -5,6 +5,10 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import type {
+  SandcastleEvidenceRecorder,
+  SandcastleExecutionContext,
+} from "./evidence.js";
 import type { PlannerOutput } from "./planner.js";
 import type { RepairFeedback } from "./repair-orchestrator.js";
 
@@ -75,11 +79,29 @@ export function createSandcastleImplementerSession(options: {
   readonly hooks: SandboxHooks;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
+  readonly evidence?: SandcastleEvidenceRecorder;
+  readonly execution?: SandcastleExecutionContext;
 }): ImplementerAgentSession {
   const runAgent = options.runAgent ?? run;
   const createAgent = options.createAgent ?? claudeCode;
   return {
     async run(request) {
+      const sessionName = request.repair === undefined
+        ? `implementer-issue-${request.plan.issue.number}`
+        : `implementer-repair-issue-${request.plan.issue.number}-attempt-${request.repair.attempt}`;
+      if (options.evidence !== undefined && options.execution !== undefined) {
+        options.evidence.record({
+          kind: "session-started",
+          ...options.execution,
+          role: "implementer",
+          attempt: request.repair?.attempt ?? 0,
+          sessionName,
+          ...(request.repair === undefined ? {} : {
+            pullRequestNumber: request.repair.pullRequestNumber,
+            revision: request.repair.revision,
+          }),
+        });
+      }
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
@@ -90,9 +112,7 @@ export function createSandcastleImplementerSession(options: {
           baseBranch: `origin/${request.branch}`,
         },
         maxIterations: 1,
-        name: request.repair === undefined
-          ? `implementer-issue-${request.plan.issue.number}`
-          : `implementer-repair-issue-${request.plan.issue.number}-attempt-${request.repair.attempt}`,
+        name: sessionName,
         prompt: request.repair === undefined
           ? initialImplementerPrompt(request.branch, request.plan)
           : repairImplementerPrompt(request.branch, request.plan, request.repair),

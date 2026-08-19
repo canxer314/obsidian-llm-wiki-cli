@@ -160,11 +160,13 @@ describe("Sandcastle CLI", () => {
       return issue117.promise.then(() => Promise.reject(new Error("review failed")));
     });
     const events: unknown[] = [];
+    const runId = "acceptance-run";
     const stop = new Error("stop fake clock");
     const firstWait = deferred();
     const watching = runSandcastleCli(["--watch"], {
       github,
       processIssue,
+      createRunId: () => runId,
       recordWatchEvent: (event) => events.push(event),
       sleep: vi.fn()
         .mockReturnValueOnce(firstWait.promise)
@@ -176,6 +178,7 @@ describe("Sandcastle CLI", () => {
     issue117.resolve();
     await vi.waitFor(() => expect(events).toContainEqual({
       kind: "issue-finished",
+      runId,
       batchId: 1,
       issueNumber: 117,
       outcome: "failure",
@@ -184,6 +187,7 @@ describe("Sandcastle CLI", () => {
     issue116.resolve();
     await vi.waitFor(() => expect(events).toContainEqual({
       kind: "issue-finished",
+      runId,
       batchId: 1,
       issueNumber: 116,
       outcome: "success",
@@ -193,9 +197,16 @@ describe("Sandcastle CLI", () => {
     await expect(stopped).resolves.toBe(stop);
 
     expect(events.slice(0, 3)).toEqual([
-      { kind: "batch-started", batchId: 1, issueNumbers: [116, 117] },
-      { kind: "issue-started", batchId: 1, issueNumber: 116, activeCount: 1 },
-      { kind: "issue-started", batchId: 1, issueNumber: 117, activeCount: 2 },
+      { kind: "batch-started", runId, batchId: 1, issueNumbers: [116, 117] },
+      { kind: "issue-started", runId, batchId: 1, issueNumber: 116, activeCount: 1 },
+      { kind: "issue-started", runId, batchId: 1, issueNumber: 117, activeCount: 2 },
+    ]);
+    expect(processIssue.mock.calls.map(([issueNumber, execution]) => ({
+      issueNumber,
+      execution,
+    }))).toEqual([
+      { issueNumber: 116, execution: { runId, batchId: 1, issueNumber: 116 } },
+      { issueNumber: 117, execution: { runId, batchId: 1, issueNumber: 117 } },
     ]);
     expect(events).not.toContainEqual(expect.objectContaining({ activeCount: 3 }));
   });
@@ -235,33 +246,33 @@ describe("Sandcastle CLI", () => {
     });
     const stopped = watching.catch((error: unknown) => error);
 
-    await vi.waitFor(() => expect(events).toContainEqual({
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
       kind: "issue-started",
       batchId: 1,
       issueNumber: 117,
       activeCount: 2,
-    }));
+    })));
     workflows.get(117)!.resolve();
     await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
       kind: "issue-finished",
       issueNumber: 117,
     })));
     firstWait.resolve();
-    await vi.waitFor(() => expect(events).toContainEqual({
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
       kind: "issue-started",
       batchId: 2,
       issueNumber: 118,
       activeCount: 2,
-    }));
+    })));
 
     workflows.get(116)!.resolve();
-    await vi.waitFor(() => expect(events).toContainEqual({
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
       kind: "issue-finished",
       batchId: 1,
       issueNumber: 116,
       outcome: "success",
       activeCount: 1,
-    }));
+    })));
     workflows.get(118)!.resolve();
     secondWait.resolve();
     await expect(stopped).resolves.toBe(stop);
@@ -305,7 +316,10 @@ describe("Sandcastle CLI", () => {
     await vi.waitFor(() => expect(processIssue).toHaveBeenCalledTimes(2));
     await Promise.resolve();
     firstWait.resolve();
-    await vi.waitFor(() => expect(processIssue).toHaveBeenCalledWith(103));
+    await vi.waitFor(() => expect(processIssue).toHaveBeenCalledWith(
+      103,
+      expect.objectContaining({ issueNumber: 103 }),
+    ));
     workflows.get(102)!.resolve();
     workflows.get(103)!.resolve();
     await expect(stopped).resolves.toBe(stop);
@@ -469,6 +483,9 @@ describe("Sandcastle CLI", () => {
     ).resolves.toEqual(plan);
 
     expect(github.claimIssue).toHaveBeenCalledWith(100);
-    expect(processIssue).toHaveBeenCalledWith(100);
+    expect(processIssue).toHaveBeenCalledWith(
+      100,
+      expect.objectContaining({ batchId: 0, issueNumber: 100 }),
+    );
   });
 });

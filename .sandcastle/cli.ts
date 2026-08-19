@@ -1,3 +1,10 @@
+import { randomUUID } from "node:crypto";
+
+import {
+  validateSandcastleRunId,
+  type SandcastleExecutionContext,
+} from "./evidence.ts";
+
 export class SandcastleCliError extends Error {
   readonly exitCode = 2;
 
@@ -23,17 +30,20 @@ export interface SandcastleGithubPort {
 export type SandcastleWatchEvent =
   | {
     readonly kind: "batch-started";
+    readonly runId: string;
     readonly batchId: number;
     readonly issueNumbers: readonly number[];
   }
   | {
     readonly kind: "issue-started";
+    readonly runId: string;
     readonly batchId: number;
     readonly issueNumber: number;
     readonly activeCount: number;
   }
   | {
     readonly kind: "issue-finished";
+    readonly runId: string;
     readonly batchId: number;
     readonly issueNumber: number;
     readonly outcome: "success" | "failure";
@@ -42,7 +52,11 @@ export type SandcastleWatchEvent =
 
 export interface SandcastleCliDependencies<TResult = unknown> {
   readonly github: SandcastleGithubPort;
-  readonly processIssue: (issueNumber: number) => Promise<TResult>;
+  readonly processIssue: (
+    issueNumber: number,
+    context: SandcastleExecutionContext,
+  ) => Promise<TResult>;
+  readonly createRunId?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly recordWatchEvent?: (event: SandcastleWatchEvent) => void;
   readonly handleFailure?: (
@@ -125,11 +139,11 @@ async function claimEligibleIssue<TResult>(
 }
 
 async function runIssue<TResult>(
-  issueNumber: number,
+  context: SandcastleExecutionContext,
   dependencies: SandcastleCliDependencies<TResult>,
 ): Promise<TResult | undefined> {
-  if (!await claimEligibleIssue(issueNumber, dependencies)) return;
-  return dependencies.processIssue(issueNumber);
+  if (!await claimEligibleIssue(context.issueNumber, dependencies)) return;
+  return dependencies.processIssue(context.issueNumber, context);
 }
 
 export async function runSandcastleCli<TResult>(
@@ -137,6 +151,8 @@ export async function runSandcastleCli<TResult>(
   dependencies: SandcastleCliDependencies<TResult>,
 ): Promise<TResult | undefined> {
   const options = parseCliOptions(argv);
+  const runId = dependencies.createRunId?.() ?? randomUUID();
+  validateSandcastleRunId(runId);
   await dependencies.github.ensureLabel("sandcastle:failed");
   if (options.watch) {
     const sleep = dependencies.sleep ?? ((milliseconds: number) =>
@@ -165,6 +181,7 @@ export async function runSandcastleCli<TResult>(
         batchId += 1;
         dependencies.recordWatchEvent?.({
           kind: "batch-started",
+          runId,
           batchId,
           issueNumbers: claimed.map((issue) => issue.number),
         });
@@ -173,12 +190,18 @@ export async function runSandcastleCli<TResult>(
       for (const issue of claimed) {
         dependencies.recordWatchEvent?.({
           kind: "issue-started",
+          runId,
           batchId: workflowBatchId,
           issueNumber: issue.number,
           activeCount: active.size + 1,
         });
         let outcome: "success" | "failure" = "success";
-        const workflow = dependencies.processIssue(issue.number)
+        const context = {
+          runId,
+          batchId: workflowBatchId,
+          issueNumber: issue.number,
+        };
+        const workflow = dependencies.processIssue(issue.number, context)
           .catch(() => {
             outcome = "failure";
           })
@@ -186,6 +209,7 @@ export async function runSandcastleCli<TResult>(
             active.delete(issue.number);
             dependencies.recordWatchEvent?.({
               kind: "issue-finished",
+              runId,
               batchId: workflowBatchId,
               issueNumber: issue.number,
               outcome,
@@ -198,5 +222,5 @@ export async function runSandcastleCli<TResult>(
     }
   }
 
-  return runIssue(options.issueNumber!, dependencies);
+  return runIssue({ runId, batchId: 0, issueNumber: options.issueNumber! }, dependencies);
 }
