@@ -75,6 +75,51 @@ describe("Sandcastle structured evidence", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it("drops unknown runtime fields before writing JSONL", () => {
+    const write = vi.fn();
+    const evidence = createSandcastleEvidenceRecorder(write);
+
+    evidence.record({
+      kind: "workflow-finished",
+      ...context,
+      outcome: "failed",
+      prompt: "must not be written",
+      token: "secret",
+    } as never);
+
+    expect(write).toHaveBeenCalledWith({
+      kind: "workflow-finished",
+      ...context,
+      outcome: "failed",
+    });
+  });
+
+  it("records a gate error against the known head before rethrowing", async () => {
+    const events: unknown[] = [];
+    const evidence = createSandcastleEvidenceRecorder((event) => events.push(event));
+    const failure = new Error("status API unavailable");
+
+    await expect(recordSandcastleGate(
+      evidence,
+      context,
+      {
+        pullRequestNumber: 321,
+        revision: sha("f"),
+        context: "sandcastle/review",
+      },
+      async () => Promise.reject(failure),
+    )).rejects.toBe(failure);
+
+    expect(events).toEqual([{
+      kind: "gate-finished",
+      ...context,
+      pullRequestNumber: 321,
+      revision: sha("f"),
+      context: "sandcastle/review",
+      outcome: "error",
+    }]);
+  });
+
   it("records complete isolated traces for two orchestrated Issues", async () => {
     const events: unknown[] = [];
     const evidence = createSandcastleEvidenceRecorder((event) => events.push(event));
@@ -101,6 +146,7 @@ describe("Sandcastle structured evidence", () => {
               execution,
               {
                 pullRequestNumber,
+                revision: pullRequest.headSha,
                 context: "sandcastle/local-quality",
               },
               async () => {
@@ -113,7 +159,7 @@ describe("Sandcastle structured evidence", () => {
             runReview: (pullRequest) => recordSandcastleGate(
               evidence,
               execution,
-              { pullRequestNumber, context: "sandcastle/review" },
+              { pullRequestNumber, revision: pullRequest.headSha, context: "sandcastle/review" },
               async () => ({
                 status: "success" as const,
                 revision: pullRequest.headSha,

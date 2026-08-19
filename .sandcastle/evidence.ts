@@ -49,14 +49,68 @@ function requireIdentifier(name: string, value: string): void {
   }
 }
 
+export function validateSandcastleRunId(runId: string): void {
+  requireIdentifier("runId", runId);
+}
+
 function requireNumber(name: string, value: number, minimum: number): void {
   if (!Number.isSafeInteger(value) || value < minimum) {
     throw new Error(`Sandcastle evidence ${name} is invalid`);
   }
 }
 
+function normalizedEvent(event: SandcastleEvidenceEvent): SandcastleEvidenceEvent {
+  const execution = {
+    runId: event.runId,
+    batchId: event.batchId,
+    issueNumber: event.issueNumber,
+  };
+  switch (event.kind) {
+    case "session-started":
+      return {
+        kind: event.kind,
+        ...execution,
+        role: event.role,
+        attempt: event.attempt,
+        sessionName: event.sessionName,
+        ...(event.pullRequestNumber === undefined
+          ? {}
+          : { pullRequestNumber: event.pullRequestNumber }),
+        ...(event.revision === undefined ? {} : { revision: event.revision }),
+      };
+    case "gate-finished":
+      return {
+        kind: event.kind,
+        ...execution,
+        pullRequestNumber: event.pullRequestNumber,
+        revision: event.revision,
+        context: event.context,
+        outcome: event.outcome,
+      };
+    case "merge-requested":
+      return {
+        kind: event.kind,
+        ...execution,
+        pullRequestNumber: event.pullRequestNumber,
+        expectedHeadSha: event.expectedHeadSha,
+      };
+    case "workflow-finished":
+      return {
+        kind: event.kind,
+        ...execution,
+        outcome: event.outcome,
+        ...(event.revision === undefined ? {} : { revision: event.revision }),
+        ...(event.failureStage === undefined ? {} : { failureStage: event.failureStage }),
+      };
+  }
+}
+
+const SESSION_ROLES = new Set<unknown>(["planner", "implementer", "reviewer", "merger"]);
+const GATE_CONTEXTS = new Set<unknown>(["sandcastle/local-quality", "sandcastle/review"]);
+const EVIDENCE_OUTCOMES = new Set<unknown>(["success", "failure", "error"]);
+
 function validateEvent(event: SandcastleEvidenceEvent): void {
-  requireIdentifier("runId", event.runId);
+  validateSandcastleRunId(event.runId);
   requireNumber("batchId", event.batchId, 0);
   requireNumber("issueNumber", event.issueNumber, 1);
   if ("pullRequestNumber" in event && event.pullRequestNumber !== undefined) {
@@ -66,6 +120,18 @@ function validateEvent(event: SandcastleEvidenceEvent): void {
   if ("sessionName" in event) requireIdentifier("sessionName", event.sessionName);
   if ("failureStage" in event && event.failureStage !== undefined) {
     requireIdentifier("failureStage", event.failureStage);
+  }
+  if (event.kind === "session-started" && !SESSION_ROLES.has(event.role)) {
+    throw new Error("Sandcastle evidence role is invalid");
+  }
+  if (event.kind === "gate-finished" && (
+    !GATE_CONTEXTS.has(event.context) || !EVIDENCE_OUTCOMES.has(event.outcome)
+  )) {
+    throw new Error("Sandcastle evidence gate result is invalid");
+  }
+  if (event.kind === "workflow-finished" &&
+      event.outcome !== "merged" && event.outcome !== "failed") {
+    throw new Error("Sandcastle evidence workflow outcome is invalid");
   }
   for (const revision of [
     "revision" in event ? event.revision : undefined,
@@ -82,8 +148,9 @@ export function createSandcastleEvidenceRecorder(
 ): SandcastleEvidenceRecorder {
   return {
     record(event) {
-      validateEvent(event);
-      write(event);
+      const normalized = normalizedEvent(event);
+      validateEvent(normalized);
+      write(normalized);
     },
   };
 }
@@ -96,19 +163,30 @@ export async function recordSandcastleGate<TResult extends {
   execution: SandcastleExecutionContext,
   fields: {
     readonly pullRequestNumber: number;
+    readonly revision: string;
     readonly context: GateContext;
   },
   run: () => Promise<TResult>,
 ): Promise<TResult> {
-  const result = await run();
-  recorder.record({
-    kind: "gate-finished",
-    ...execution,
-    ...fields,
-    revision: result.revision,
-    outcome: result.status,
-  });
-  return result;
+  try {
+    const result = await run();
+    recorder.record({
+      kind: "gate-finished",
+      ...execution,
+      ...fields,
+      revision: result.revision,
+      outcome: result.status,
+    });
+    return result;
+  } catch (error) {
+    recorder.record({
+      kind: "gate-finished",
+      ...execution,
+      ...fields,
+      outcome: "error",
+    });
+    throw error;
+  }
 }
 
 export async function recordSandcastleMerge<TResult>(

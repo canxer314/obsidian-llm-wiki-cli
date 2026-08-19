@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import type { SandcastleExecutionContext } from "./evidence.js";
+import {
+  validateSandcastleRunId,
+  type SandcastleExecutionContext,
+} from "./evidence.ts";
 
 export class SandcastleCliError extends Error {
   readonly exitCode = 2;
@@ -149,6 +152,7 @@ export async function runSandcastleCli<TResult>(
 ): Promise<TResult | undefined> {
   const options = parseCliOptions(argv);
   const runId = dependencies.createRunId?.() ?? randomUUID();
+  validateSandcastleRunId(runId);
   await dependencies.github.ensureLabel("sandcastle:failed");
   if (options.watch) {
     const sleep = dependencies.sleep ?? ((milliseconds: number) =>

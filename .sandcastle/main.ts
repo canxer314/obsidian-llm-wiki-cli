@@ -127,6 +127,7 @@ try {
             execution,
             {
               pullRequestNumber: currentPullRequest.number,
+              revision: currentPullRequest.headSha,
               context: "sandcastle/local-quality",
             },
             () => checkPullRequestLocalQuality(
@@ -143,6 +144,7 @@ try {
             execution,
             {
               pullRequestNumber: currentPullRequest.number,
+              revision: currentPullRequest.headSha,
               context: "sandcastle/review",
             },
             () => reviewPullRequest({
