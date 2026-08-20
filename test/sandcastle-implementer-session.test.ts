@@ -72,7 +72,8 @@ describe("Sandcastle Implementer session adapter", () => {
       commits: [{ sha: "def456" }],
     });
     const evidence = { record: vi.fn() };
-    const execution = { runId: "run-1", batchId: 1, issueNumber: 103 };
+    const signal = new AbortController().signal;
+    const execution = { runId: "run-1", batchId: 1, issueNumber: 103, signal };
     const repairHooks = { sandbox: { onSandboxReady: [{ command: "repair" }] } };
     const session = createSandcastleImplementerSession({
       sandbox: { kind: "fake-sandbox" } as never,
@@ -101,6 +102,7 @@ describe("Sandcastle Implementer session adapter", () => {
     });
 
     const request = runAgent.mock.calls[0]![0];
+    expect(request.signal).toBe(signal);
     expect(request.name).toBe("implementer-repair-issue-103-attempt-2");
     expect(request.hooks).toBe(repairHooks);
     expect(request.prompt).toContain("repair attempt 2 of 2");
@@ -110,7 +112,8 @@ describe("Sandcastle Implementer session adapter", () => {
     expect(request.prompt).toContain("Do not create another Pull Request");
     expect(request.prompt).not.toContain("gh pr create");
     expect(evidence.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      kind: "session-started", ...execution, role: "implementer", stage: "repair",
+      kind: "session-started", runId: execution.runId, batchId: execution.batchId,
+      issueNumber: execution.issueNumber, role: "implementer", stage: "repair",
       attempt: 2, sessionName: request.name, pullRequestNumber: 321,
       revision: "a".repeat(40), timestamp: expect.any(String),
     }));

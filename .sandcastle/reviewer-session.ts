@@ -96,6 +96,7 @@ export function createSandcastleReviewerSession(options: {
         },
         maxIterations: 1,
         name: sessionName,
+        ...(options.execution === undefined ? {} : { signal: options.execution.signal }),
         ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: reviewerPrompt(request.pullRequestNumber, request.revision),
         output: Output.object({

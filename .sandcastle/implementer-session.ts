@@ -117,6 +117,7 @@ export function createSandcastleImplementerSession(options: {
         },
         maxIterations: 1,
         name: sessionName,
+        ...(options.execution === undefined ? {} : { signal: options.execution.signal }),
         ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: request.repair === undefined
           ? initialImplementerPrompt(request.branch, request.plan)
