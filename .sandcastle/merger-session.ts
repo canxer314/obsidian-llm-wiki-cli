@@ -71,6 +71,7 @@ export function createSandcastleMergerSession(options: {
         },
         maxIterations: 1,
         name: sessionName,
+        ...(options.execution === undefined ? {} : { signal: options.execution.signal }),
         ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: mergerPrompt(request.branch, request.request),
         });

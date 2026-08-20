@@ -10,6 +10,9 @@ export const SANDCASTLE_WORKFLOW_STAGES = [
   "repair",
   "merger",
   "merge",
+  "draining",
+  "cancelling",
+  "forced-exit",
   "terminal",
 ] as const;
 

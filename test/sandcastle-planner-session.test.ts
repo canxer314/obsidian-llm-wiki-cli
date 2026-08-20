@@ -26,7 +26,8 @@ describe("Sandcastle Planner session adapter", () => {
     const sandbox = { kind: "fake-sandbox" };
     const hooks = { sandbox: { onSandboxReady: [] } };
     const evidence = { record: vi.fn() };
-    const execution = { runId: "run-1", batchId: 1, issueNumber: 101 };
+    const signal = new AbortController().signal;
+    const execution = { runId: "run-1", batchId: 1, issueNumber: 101, signal };
     const session = createSandcastlePlannerSession({
       sandbox: sandbox as never,
       hooks,
@@ -49,6 +50,7 @@ describe("Sandcastle Planner session adapter", () => {
       branchStrategy: { type: "head" },
       maxIterations: 1,
       name: "planner-issue-101",
+      signal,
       output: expect.objectContaining({ tag: "plan" }),
     }));
     const request = runAgent.mock.calls[0]![0];
@@ -66,7 +68,8 @@ describe("Sandcastle Planner session adapter", () => {
     );
     expect(request.prompt).not.toContain(output.issue.body);
     expect(evidence.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      kind: "session-started", ...execution, role: "planner", stage: "planner",
+      kind: "session-started", runId: execution.runId, batchId: execution.batchId,
+      issueNumber: execution.issueNumber, role: "planner", stage: "planner",
       attempt: 1, sessionName: request.name, timestamp: expect.any(String),
     }));
     expect(evidence.record).toHaveBeenNthCalledWith(2, expect.objectContaining({

@@ -22,7 +22,8 @@ describe("Sandcastle conflict Merger", () => {
       commits: [{ sha: "c".repeat(40) }],
     });
     const evidence = { record: vi.fn() };
-    const execution = { runId: "run-1", batchId: 1, issueNumber: 111 };
+    const signal = new AbortController().signal;
+    const execution = { runId: "run-1", batchId: 1, issueNumber: 111, signal };
     const session = createSandcastleMergerSession({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
@@ -46,6 +47,7 @@ describe("Sandcastle conflict Merger", () => {
       baseBranch: "origin/sandcastle/issue-111",
     });
     expect(agentRequest.maxIterations).toBe(1);
+    expect(agentRequest.signal).toBe(signal);
     expect(agentRequest.prompt).toContain(request.pullRequest.headSha);
     expect(agentRequest.prompt).toContain(request.targetSha);
     expect(agentRequest.prompt).toContain(`git fetch origin ${request.targetBranch}`);
@@ -54,7 +56,8 @@ describe("Sandcastle conflict Merger", () => {
     expect(agentRequest.prompt).toContain("Do not rebase or force-push");
     expect(agentRequest.prompt).not.toContain("gh pr create");
     expect(evidence.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      kind: "session-started", ...execution, role: "merger", stage: "merger",
+      kind: "session-started", runId: execution.runId, batchId: execution.batchId,
+      issueNumber: execution.issueNumber, role: "merger", stage: "merger",
       attempt: 1, sessionName: agentRequest.name, pullRequestNumber: 321,
       revision: request.pullRequest.headSha, timestamp: expect.any(String),
     }));

@@ -71,6 +71,7 @@ try {
       });
     },
     recordWatchEvent: writeEvent,
+    recordInterruption: writeEvent,
     handleFailure: async (issueNumber, stage, error) => {
       const finalization = await finalizeFailure({
         issueNumber,

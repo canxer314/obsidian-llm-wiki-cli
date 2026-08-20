@@ -58,6 +58,30 @@ describe("Sandcastle failure-aware workflow", () => {
     },
   );
 
+  it("finalizes cancellation with a fixed interrupted reason", async () => {
+    const github = githubPort();
+    const cancellation = new Error("private agent payload /secret/path");
+    cancellation.name = "AbortError";
+
+    await expect(runFailureAwareWorkflow({
+      issueNumber: 108,
+      github,
+      run: async (progress) => {
+        progress.enter("implementer");
+        throw cancellation;
+      },
+    })).rejects.toMatchObject<SandcastleWorkflowError>({ stage: "interrupted" });
+
+    expect(github.addIssueComment).toHaveBeenCalledWith(
+      108,
+      expect.stringContaining("Failure stage: `interrupted`"),
+    );
+    const comment = vi.mocked(github.addIssueComment).mock.calls[0]![1];
+    expect(comment).toContain("Sandcastle workflow interrupted");
+    expect(comment).not.toContain("private agent payload");
+    expect(comment).not.toContain("/secret/path");
+  });
+
   it("finalizes an exception after implementation on the verified Draft Pull Request", async () => {
     const github = githubPort();
 

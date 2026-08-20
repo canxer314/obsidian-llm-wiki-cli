@@ -1,9 +1,13 @@
 import type { SandcastleLiveStatusPort } from "./live-status.ts";
 
-export interface SandcastleExecutionContext {
+export interface SandcastleExecutionIdentity {
   readonly runId: string;
   readonly batchId: number;
   readonly issueNumber: number;
+}
+
+export interface SandcastleExecutionContext extends SandcastleExecutionIdentity {
+  readonly signal: AbortSignal;
   readonly liveStatus?: SandcastleLiveStatusPort;
 }
 
@@ -14,7 +18,7 @@ type GateContext = "sandcastle/local-quality" | "sandcastle/review";
 type EvidenceOutcome = "success" | "failure" | "error";
 
 export type SandcastleEvidenceEvent =
-  | (SandcastleExecutionContext & {
+  | (SandcastleExecutionIdentity & {
     readonly kind: "session-started";
     readonly role: SessionRole;
     readonly stage: SessionStage;
@@ -24,7 +28,7 @@ export type SandcastleEvidenceEvent =
     readonly pullRequestNumber?: number;
     readonly revision?: string;
   })
-  | (SandcastleExecutionContext & {
+  | (SandcastleExecutionIdentity & {
     readonly kind: "session-finished";
     readonly role: SessionRole;
     readonly stage: SessionStage;
@@ -36,19 +40,19 @@ export type SandcastleEvidenceEvent =
     readonly pullRequestNumber?: number;
     readonly revision?: string;
   })
-  | (SandcastleExecutionContext & {
+  | (SandcastleExecutionIdentity & {
     readonly kind: "gate-finished";
     readonly pullRequestNumber: number;
     readonly revision: string;
     readonly context: GateContext;
     readonly outcome: EvidenceOutcome;
   })
-  | (SandcastleExecutionContext & {
+  | (SandcastleExecutionIdentity & {
     readonly kind: "merge-requested";
     readonly pullRequestNumber: number;
     readonly expectedHeadSha: string;
   })
-  | (SandcastleExecutionContext & {
+  | (SandcastleExecutionIdentity & {
     readonly kind: "workflow-finished";
     readonly outcome: "merged" | "failed";
     readonly revision?: string;
@@ -207,6 +211,14 @@ export function createSandcastleEvidenceRecorder(
   };
 }
 
+function executionIdentity(execution: SandcastleExecutionContext): SandcastleExecutionIdentity {
+  return {
+    runId: execution.runId,
+    batchId: execution.batchId,
+    issueNumber: execution.issueNumber,
+  };
+}
+
 export async function recordSandcastleSession<TResult>(
   recorder: SandcastleEvidenceRecorder,
   execution: SandcastleExecutionContext,
@@ -228,9 +240,10 @@ export async function recordSandcastleSession<TResult>(
   const monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
   const utcNow = dependencies.utcNow ?? (() => new Date());
   const startedAt = monotonicNow();
+  const identity = executionIdentity(execution);
   recorder.record({
     kind: "session-started",
-    ...execution,
+    ...identity,
     ...fields,
     timestamp: utcNow().toISOString(),
   });
@@ -238,7 +251,7 @@ export async function recordSandcastleSession<TResult>(
     const result = await run();
     recorder.record({
       kind: "session-finished",
-      ...execution,
+      ...identity,
       ...fields,
       timestamp: utcNow().toISOString(),
       durationMs: Math.max(0, Math.floor(monotonicNow() - startedAt)),
@@ -248,7 +261,7 @@ export async function recordSandcastleSession<TResult>(
   } catch (error) {
     recorder.record({
       kind: "session-finished",
-      ...execution,
+      ...identity,
       ...fields,
       timestamp: utcNow().toISOString(),
       durationMs: Math.max(0, Math.floor(monotonicNow() - startedAt)),
@@ -271,11 +284,12 @@ export async function recordSandcastleGate<TResult extends {
   },
   run: () => Promise<TResult>,
 ): Promise<TResult> {
+  const identity = executionIdentity(execution);
   try {
     const result = await run();
     recorder.record({
       kind: "gate-finished",
-      ...execution,
+      ...identity,
       ...fields,
       revision: result.revision,
       outcome: result.status,
@@ -284,7 +298,7 @@ export async function recordSandcastleGate<TResult extends {
   } catch (error) {
     recorder.record({
       kind: "gate-finished",
-      ...execution,
+      ...identity,
       ...fields,
       outcome: "error",
     });
@@ -301,7 +315,7 @@ export async function recordSandcastleMerge<TResult>(
   },
   run: () => Promise<TResult>,
 ): Promise<TResult> {
-  recorder.record({ kind: "merge-requested", ...execution, ...fields });
+  recorder.record({ kind: "merge-requested", ...executionIdentity(execution), ...fields });
   return run();
 }
 
@@ -311,11 +325,12 @@ export async function recordSandcastleWorkflow<TResult>(
   run: () => Promise<TResult>,
   mergedRevision: (result: TResult) => string,
 ): Promise<TResult> {
+  const identity = executionIdentity(execution);
   try {
     const result = await run();
     recorder.record({
       kind: "workflow-finished",
-      ...execution,
+      ...identity,
       outcome: "merged",
       revision: mergedRevision(result),
     });
@@ -323,7 +338,7 @@ export async function recordSandcastleWorkflow<TResult>(
   } catch (error) {
     recorder.record({
       kind: "workflow-finished",
-      ...execution,
+      ...identity,
       outcome: "failed",
       ...(typeof error === "object" && error !== null && "stage" in error &&
           typeof error.stage === "string"

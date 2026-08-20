@@ -49,6 +49,7 @@ export function createSandcastlePlannerSession(options: {
         branchStrategy: { type: "head" },
         maxIterations: 1,
         name: sessionName,
+        ...(options.execution === undefined ? {} : { signal: options.execution.signal }),
         ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: plannerPrompt(request.issueNumber),
         output: Output.object({
