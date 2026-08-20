@@ -123,6 +123,9 @@ export interface BridgeInstance {
   stop(): Promise<void>;
   pauseWrites(): Promise<void>;
   runMaintenance(operation: BridgeMaintenanceOperation): Promise<void>;
+  acceptTrustedRecoveryBaseline(
+    recheckTrustedBaseline: () => void | Promise<void>,
+  ): Promise<void>;
   resumeWrites(): Promise<void>;
   registrationCommand(serverName?: string): string;
 }
@@ -898,6 +901,23 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
           },
         },
       );
+    },
+    async acceptTrustedRecoveryBaseline(recheckTrustedBaseline) {
+      const service = changeSetService;
+      if (service === undefined) throw new Error("Change Set service is unavailable");
+      await service.acceptTrustedRecoveryBaseline(recheckTrustedBaseline);
+      options.health.recovery = { state: "none" };
+      options.health.write = { gate: "open", state: "paused", pauseSource: "manual" };
+      options.health.effectiveGate = { code: "writes_paused" };
+      options.health.overall = "degraded";
+      options.health.reasonCodes = [
+        ...new Set([
+          ...options.health.reasonCodes.filter((code) => code !== "recovery_blocked"),
+          "writes_paused",
+        ]),
+      ];
+      options.health.lifecycle.recovery = "succeeded";
+      options.health.operatorAction = "resume_writes";
     },
     async resumeWrites() {
       const service = changeSetService;

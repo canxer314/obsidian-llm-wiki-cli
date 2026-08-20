@@ -28,6 +28,7 @@ function fakeBridge(port: number): BridgeInstance {
       await operation.migrateState();
       await operation.recheckHealth();
     }),
+    acceptTrustedRecoveryBaseline: vi.fn(async (recheck) => recheck()),
     resumeWrites: vi.fn(async () => undefined),
     registrationCommand: vi.fn(
       () =>
@@ -37,6 +38,37 @@ function fakeBridge(port: number): BridgeInstance {
 }
 
 describe("Managed Vault Bridge plugin lifecycle", () => {
+  it("keeps local recovery authority isolated between Managed Vaults", async () => {
+    const alphaBridge = fakeBridge(27123);
+    const betaBridge = fakeBridge(27124);
+    const alpha = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      createBridge: () => alphaBridge,
+      createVaultId: () => "vault-alpha",
+      selectInitialPort: () => 27123,
+    });
+    const beta = new ManagedVaultBridgeRuntime({
+      vault: { name: "Beta", path: "D:/Vaults/Beta" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      createBridge: () => betaBridge,
+      createVaultId: () => "vault-beta",
+      selectInitialPort: () => 27124,
+    });
+    await alpha.load();
+    await beta.load();
+
+    await alpha.acceptTrustedRecoveryBaseline();
+
+    expect(alphaBridge.acceptTrustedRecoveryBaseline).toHaveBeenCalledOnce();
+    expect(betaBridge.acceptTrustedRecoveryBaseline).not.toHaveBeenCalled();
+    expect(alpha.persistedSettings).toMatchObject({ vaultId: "vault-alpha", port: 27123 });
+    expect(beta.persistedSettings).toMatchObject({ vaultId: "vault-beta", port: 27124 });
+
+    await alpha.unload();
+    await beta.unload();
+  });
+
   it("persists first-run identity and port, then reuses both on reload", async () => {
     let stored: PersistedBridgeSettings | undefined;
     const bridges: BridgeInstance[] = [];

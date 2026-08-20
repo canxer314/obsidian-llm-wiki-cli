@@ -579,6 +579,12 @@ export class ManagedVaultBridgeRuntime {
     });
   }
 
+  async acceptTrustedRecoveryBaseline(): Promise<void> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    await bridge.acceptTrustedRecoveryBaseline(() => this.refreshSearchSnapshot());
+  }
+
   async resumeWrites(): Promise<void> {
     const bridge = this.#bridge;
     if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");

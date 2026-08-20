@@ -38,6 +38,7 @@ export interface RecoveryJournalWrite {
 export interface RecoveryJournal {
   recover(): Promise<RecoveryJournalRecord | undefined>;
   write(record: RecoveryJournalWrite): Promise<RecoveryJournalRecord>;
+  clear(): Promise<void>;
 }
 
 export interface OpenRecoveryJournalOptions {
@@ -269,6 +270,22 @@ class FileRecoveryJournal implements RecoveryJournal {
 
   write(record: RecoveryJournalWrite): Promise<RecoveryJournalRecord> {
     const operation = this.#tail.then(() => this.#write(record));
+    this.#tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  clear(): Promise<void> {
+    const operation = this.#tail.then(async () => {
+      await Promise.all(
+        this.#layout.offsets.map((offset) =>
+          writeExactly(this.#handle, Buffer.alloc(this.#layout.capacity), offset),
+        ),
+      );
+      await this.#handle.sync();
+    });
     this.#tail = operation.then(
       () => undefined,
       () => undefined,

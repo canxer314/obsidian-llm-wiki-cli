@@ -75,6 +75,11 @@ class DirectoryAdapter implements ChangeSetExecutionAdapter {
     this.frame = structuredClone(frame);
   }
 
+  async clearRecoveryFrame(): Promise<void> {
+    this.events.push("journal:clear");
+    this.frame = null;
+  }
+
   async pathKind(path: string): Promise<"directory" | "file" | null> {
     this.events.push(`inspect:${path}`);
     return this.directories.has(path)
@@ -991,6 +996,214 @@ describe("durable Markdown Change Set execution", () => {
     ).resolves.toMatchObject({
       lookup: "found",
       changeSet: { state: "result_unproven" },
+    });
+
+    let rechecks = 0;
+    await recovered.acceptTrustedRecoveryBaseline(async () => {
+      rechecks += 1;
+      await adapter.publishSearchSnapshot();
+    });
+
+    expect(rechecks).toBe(1);
+    expect(adapter.frame).toBeNull();
+    expect(store.state).toMatchObject({
+      writeMode: "manual_paused",
+      recovery: { state: "none" },
+      entries: [{ changeSet: { state: "result_unproven" } }],
+    });
+    await expect(recovered.resume()).resolves.toBeUndefined();
+    expect(store.state?.writeMode).toBeUndefined();
+  });
+
+  it("keeps mismatched, failed, and ambiguous proof states recovery-blocked", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Blocked.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/Blocked.md", "blocked-before");
+    const beforeVersion = `sha256:${createHash("sha256").update("before").digest("hex")}` as const;
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      vaultId: "vault-alpha",
+      createChangeSetId: () => "change-set-blocked",
+      crashInjector: (point) => {
+        if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "blocked-key",
+          operations: [{
+            operationId: "edit-blocked",
+            kind: "edit_body",
+            path: "Notes/Blocked.md",
+            targetVersion: beforeVersion,
+            edit: { kind: "replace_whole", replacement: "after" },
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    adapter.files.set("Notes/Blocked.md", Buffer.from("third-party"));
+    adapter.fileIdentities.set("Notes/Blocked.md", "third-party");
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      vaultId: "vault-alpha",
+      runtimeState: new RecordingRuntimeState(),
+    });
+    const matching = structuredClone(adapter.frame!);
+    for (const frame of [
+      { ...matching, changeSetId: "unrelated-change-set" },
+      { ...matching, vaultId: "vault-beta" },
+      { ...matching, phase: "PREPARED" as const },
+    ]) {
+      adapter.frame = frame;
+      await expect(service.acceptTrustedRecoveryBaseline(async () => undefined)).rejects.toThrow();
+      expect(adapter.frame).toEqual(frame);
+      expect(store.state?.recovery).toEqual({
+        state: "blocked",
+        changeSetId: "change-set-blocked",
+      });
+    }
+    adapter.frame = matching;
+    const secondUnproven = structuredClone(store.state!.entries[0]!);
+    secondUnproven.submissionKey = "another-unproven-key";
+    secondUnproven.fingerprint = `sha256:${"a".repeat(64)}`;
+    secondUnproven.changeSetId = "another-unproven";
+    secondUnproven.enqueueSeq = 2;
+    secondUnproven.execution = {
+      phase: "terminal",
+      input: {
+        submissionKey: "another-unproven-key",
+        operations: [{
+          operationId: "mkdir-another",
+          kind: "create_directory",
+          path: "Another",
+          ifExists: "reject",
+        }],
+      },
+    };
+    secondUnproven.changeSet = { changeSetId: "another-unproven", state: "result_unproven" };
+    store.state!.entries.push(secondUnproven);
+    const ambiguous = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      vaultId: "vault-alpha",
+      runtimeState: new RecordingRuntimeState(),
+    });
+    await expect(ambiguous.acceptTrustedRecoveryBaseline(async () => undefined)).rejects.toThrow(
+      /proof state/u,
+    );
+    expect(adapter.frame).toEqual(matching);
+  });
+
+  it("resumes eligible Journal clearing after its accepted baseline survives interruption", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Retry.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/Retry.md", "retry-before");
+    const beforeVersion = `sha256:${createHash("sha256").update("before").digest("hex")}` as const;
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-retry-baseline",
+      crashInjector: (point) => {
+        if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "retry-baseline-key",
+          operations: [{
+            operationId: "edit-retry-baseline",
+            kind: "edit_body",
+            path: "Notes/Retry.md",
+            targetVersion: beforeVersion,
+            edit: { kind: "replace_whole", replacement: "after" },
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    adapter.files.set("Notes/Retry.md", Buffer.from("third-party"));
+    adapter.fileIdentities.set("Notes/Retry.md", "third-party");
+    const service = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState: new RecordingRuntimeState(),
+    });
+    const clear = adapter.clearRecoveryFrame.bind(adapter);
+    let attempts = 0;
+    adapter.clearRecoveryFrame = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("clear interrupted");
+      await clear();
+    };
+
+    await expect(service.acceptTrustedRecoveryBaseline(async () => undefined)).rejects.toThrow(
+      /clearing failed/u,
+    );
+    expect(store.state).toMatchObject({
+      writeMode: "manual_paused",
+      recovery: { state: "baseline_accepted", changeSetId: "change-set-retry-baseline" },
+      entries: [{ changeSet: { state: "result_unproven" } }],
+    });
+    expect(adapter.frame?.phase).toBe("FAILED");
+    await expect(service.resume()).rejects.toThrow(/Recovery/u);
+
+    const restarted = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState: new RecordingRuntimeState(),
+    });
+    expect(store.state?.recovery).toEqual({
+      state: "baseline_accepted",
+      changeSetId: "change-set-retry-baseline",
+    });
+    await restarted.acceptTrustedRecoveryBaseline(async () => {
+      throw new Error("accepted recovery must not recheck");
+    });
+    expect(attempts).toBe(2);
+    expect(adapter.frame).toBeNull();
+    expect(store.state).toMatchObject({
+      writeMode: "manual_paused",
+      recovery: { state: "none" },
+      entries: [{ changeSet: { state: "result_unproven" } }],
     });
   });
 
