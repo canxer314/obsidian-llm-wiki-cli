@@ -1,3 +1,5 @@
+import { devNull } from "node:os";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { agentActivityLogging } from "../.sandcastle/agent-session-observability.js";
@@ -15,6 +17,8 @@ describe("Sandcastle Agent stream wiring", () => {
       const logging = agentActivityLogging(`session-${index}`, port);
       expect(logging?.type).toBe("file");
       if (logging?.type !== "file") throw new Error("expected file logging");
+      expect(logging.path).toBe(devNull);
+      expect(logging.verbose).not.toBe(true);
       logging.onAgentStreamEvent?.({
         type: "raw", line: payload, iteration: 1, timestamp: new Date(0),
       });

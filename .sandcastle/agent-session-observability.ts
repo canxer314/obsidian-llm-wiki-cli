@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { devNull } from "node:os";
 
 import type { AgentStreamEvent, LoggingOption } from "@ai-hero/sandcastle";
 
@@ -11,7 +11,7 @@ export function agentActivityLogging(
   if (liveStatus === undefined) return undefined;
   return {
     type: "file",
-    path: join(process.cwd(), ".sandcastle", "logs", `${sessionName}.log`),
+    path: devNull,
     onAgentStreamEvent: (event: AgentStreamEvent) => liveStatus.observeAgentEvent(event),
   };
 }
