@@ -216,8 +216,14 @@ describe("Sandcastle CLI", () => {
       issueNumber,
       execution,
     }))).toEqual([
-      { issueNumber: 116, execution: { runId, batchId: 1, issueNumber: 116 } },
-      { issueNumber: 117, execution: { runId, batchId: 1, issueNumber: 117 } },
+      {
+        issueNumber: 116,
+        execution: expect.objectContaining({ runId, batchId: 1, issueNumber: 116 }),
+      },
+      {
+        issueNumber: 117,
+        execution: expect.objectContaining({ runId, batchId: 1, issueNumber: 117 }),
+      },
     ]);
     expect(events).not.toContainEqual(expect.objectContaining({ activeCount: 3 }));
   });
@@ -465,6 +471,408 @@ describe("Sandcastle CLI", () => {
     })).rejects.toBe(failure);
 
     expect(handleFailure).toHaveBeenCalledWith(100, "claim", failure);
+  });
+
+  it("emits one-shot transitions, heartbeats, and terminal status as JSONL", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const workflow = deferred();
+    const lines: string[] = [];
+    const intervals: Array<() => void> = [];
+    let monotonicMs = 1_000;
+
+    const running = runSandcastleCli(["--issue", "100", "--status-format", "json"], {
+      github,
+      createRunId: () => "status-run",
+      processIssue: async (_issueNumber, execution) => {
+        execution.liveStatus?.transition("planner");
+        await workflow.promise;
+        return "merged";
+      },
+      liveStatus: {
+        sink: (line) => lines.push(line),
+        monotonicNow: () => monotonicMs,
+        utcNow: () => new Date("2026-08-20T12:00:00.000Z"),
+        setInterval: (callback, milliseconds) => {
+          expect(milliseconds).toBe(30_000);
+          intervals.push(callback);
+          return callback;
+        },
+        clearInterval: vi.fn(),
+      },
+    });
+
+    await vi.waitFor(() => expect(intervals).toHaveLength(1));
+    monotonicMs = 31_000;
+    intervals[0]!();
+    workflow.resolve();
+    await expect(running).resolves.toBe("merged");
+
+    expect(lines.map((line) => JSON.parse(line).sandcastleStatus)).toEqual([
+      {
+        version: 1,
+        kind: "transition",
+        runId: "status-run",
+        batchId: 0,
+        issueNumber: 100,
+        timestamp: "2026-08-20T12:00:00.000Z",
+        elapsedMs: 0,
+        sequence: 1,
+        workflowStage: "startup",
+        role: null,
+        health: "active",
+        lastObservedActivity: null,
+      },
+      expect.objectContaining({
+        kind: "transition",
+        sequence: 2,
+        workflowStage: "planner",
+        role: "planner",
+        health: "active",
+      }),
+      expect.objectContaining({
+        kind: "heartbeat",
+        elapsedMs: 30_000,
+        sequence: 3,
+        workflowStage: "planner",
+        role: "planner",
+      }),
+      expect.objectContaining({
+        kind: "transition",
+        sequence: 4,
+        workflowStage: "terminal",
+        role: null,
+        health: "completed",
+      }),
+    ]);
+  });
+
+  it("emits one idle status per empty watch polling tick", async () => {
+    const github = githubPort();
+    const lines: string[] = [];
+    const firstWait = deferred();
+    const stop = new Error("stop fake clock");
+    let monotonicMs = 500;
+    const watching = runSandcastleCli(["--watch", "--status-format", "json"], {
+      github,
+      processIssue: vi.fn(),
+      createRunId: () => "idle-run",
+      sleep: vi.fn()
+        .mockReturnValueOnce(firstWait.promise)
+        .mockRejectedValueOnce(stop),
+      liveStatus: {
+        sink: (line) => lines.push(line),
+        monotonicNow: () => monotonicMs,
+        utcNow: () => new Date("2026-08-20T12:00:00.000Z"),
+      },
+    });
+    const stopped = watching.catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(lines).toHaveLength(1));
+    monotonicMs = 300_500;
+    firstWait.resolve();
+    await expect(stopped).resolves.toBe(stop);
+
+    expect(lines.map((line) => JSON.parse(line).sandcastleStatus)).toEqual([
+      expect.objectContaining({
+        kind: "idle",
+        issueNumber: null,
+        elapsedMs: 0,
+        sequence: 1,
+      }),
+      expect.objectContaining({
+        kind: "idle",
+        issueNumber: null,
+        elapsedMs: 300_000,
+        sequence: 2,
+      }),
+    ]);
+  });
+
+  it("orders concurrent Issue status globally without mixing their stages", async () => {
+    const github = githubPort();
+    vi.mocked(github.listCandidateIssues).mockResolvedValueOnce([
+      { number: 116, state: "OPEN", labels: ["Sandcastle"] },
+      { number: 117, state: "OPEN", labels: ["Sandcastle"] },
+    ]);
+    vi.mocked(github.getIssue).mockImplementation(async (number) => ({
+      number,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    }));
+    const workflows = new Map([[116, deferred()], [117, deferred()]]);
+    const lines: string[] = [];
+    const intervals: Array<() => void> = [];
+    const wait = deferred();
+    const stop = new Error("stop fake clock");
+    const watching = runSandcastleCli(["--watch", "--status-format", "json"], {
+      github,
+      createRunId: () => "concurrent-run",
+      processIssue: async (number, execution) => {
+        execution.liveStatus?.transition(number === 116 ? "implementer" : "reviewer");
+        await workflows.get(number)!.promise;
+      },
+      sleep: vi.fn().mockReturnValueOnce(wait.promise).mockRejectedValueOnce(stop),
+      liveStatus: {
+        sink: (line) => lines.push(line),
+        monotonicNow: () => 1_000,
+        utcNow: () => new Date("2026-08-20T12:00:00.000Z"),
+        setInterval: (callback) => {
+          intervals.push(callback);
+          return callback;
+        },
+        clearInterval: vi.fn(),
+      },
+    });
+    const stopped = watching.catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(lines).toHaveLength(4));
+    intervals[0]!();
+    workflows.get(116)!.resolve();
+    workflows.get(117)!.resolve();
+    await vi.waitFor(() => expect(lines).toHaveLength(8));
+    wait.resolve();
+    await expect(stopped).resolves.toBe(stop);
+
+    const events = lines.map((line) => JSON.parse(line).sandcastleStatus);
+    expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(events.at(-1)).toEqual(expect.objectContaining({
+      kind: "idle",
+      issueNumber: null,
+      sequence: 9,
+    }));
+    expect(events.filter((event) => event.issueNumber === 116).map((event) => event.workflowStage))
+      .toEqual(["startup", "implementer", "implementer", "terminal"]);
+    expect(events.filter((event) => event.issueNumber === 117).map((event) => event.workflowStage))
+      .toEqual(["startup", "reviewer", "reviewer", "terminal"]);
+  });
+
+  it("uses append-only human status on a TTY", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const lines: string[] = [];
+
+    await runSandcastleCli(["--issue", "100"], {
+      github,
+      createRunId: () => "human-run",
+      processIssue: async (_number, execution) => {
+        execution.liveStatus?.transition("merge");
+      },
+      liveStatus: {
+        sink: (line) => lines.push(line),
+        isTty: () => true,
+        monotonicNow: () => 0,
+        utcNow: () => new Date("2026-08-20T12:00:00.000Z"),
+        setInterval: (callback) => callback,
+        clearInterval: vi.fn(),
+      },
+    });
+
+    expect(lines).toEqual([
+      "[sandcastle 1 2026-08-20T12:00:00.000Z +0ms] run=human-run issue=#100 transition stage=startup health=active",
+      "[sandcastle 2 2026-08-20T12:00:00.000Z +0ms] run=human-run issue=#100 transition stage=merge health=active",
+      "[sandcastle 3 2026-08-20T12:00:00.000Z +0ms] run=human-run issue=#100 transition stage=terminal health=completed",
+    ]);
+  });
+
+  it("can disable live status without changing the business result", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const sink = vi.fn();
+    const setInterval = vi.fn();
+
+    await expect(runSandcastleCli(["--issue", "100", "--no-live-status"], {
+      github,
+      processIssue: vi.fn().mockResolvedValue("merged"),
+      liveStatus: { sink, setInterval },
+    })).resolves.toBe("merged");
+
+    expect(sink).not.toHaveBeenCalled();
+    expect(setInterval).not.toHaveBeenCalled();
+  });
+
+  it("does not inspect the terminal or clock when live status is disabled", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+
+    await expect(runSandcastleCli(["--issue", "100", "--no-live-status"], {
+      github,
+      processIssue: vi.fn().mockResolvedValue("merged"),
+      liveStatus: {
+        isTty: () => {
+          throw new Error("TTY unavailable");
+        },
+        monotonicNow: () => {
+          throw new Error("clock unavailable");
+        },
+      },
+    })).resolves.toBe("merged");
+  });
+
+  it("fails open after one status sink failure and warns at most once", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const sink = vi.fn(() => {
+      throw new Error("stderr closed");
+    });
+    const warningSink = vi.fn();
+    const processIssue = vi.fn(async (_number, execution) => {
+      execution.liveStatus?.transition("planner");
+      return "merged";
+    });
+
+    await expect(runSandcastleCli(["--issue", "100"], {
+      github,
+      processIssue,
+      liveStatus: { sink, warningSink },
+    })).resolves.toBe("merged");
+
+    expect(processIssue).toHaveBeenCalledOnce();
+    expect(sink).toHaveBeenCalledOnce();
+    expect(warningSink).toHaveBeenCalledOnce();
+    expect(warningSink).toHaveBeenCalledWith(
+      "Sandcastle live status disabled after output failure",
+    );
+  });
+
+  it("fails open when heartbeat timer setup fails", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const warningSink = vi.fn();
+
+    await expect(runSandcastleCli(["--issue", "100"], {
+      github,
+      processIssue: vi.fn().mockResolvedValue("merged"),
+      liveStatus: {
+        sink: vi.fn(),
+        warningSink,
+        setInterval: () => {
+          throw new Error("timer unavailable");
+        },
+      },
+    })).resolves.toBe("merged");
+
+    expect(warningSink).toHaveBeenCalledOnce();
+  });
+
+  it("fails open when status shutdown fails after a sink failure", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    let writes = 0;
+
+    await expect(runSandcastleCli(["--issue", "100"], {
+      github,
+      processIssue: async (_number, execution) => {
+        execution.liveStatus?.transition("planner");
+        return "merged";
+      },
+      liveStatus: {
+        sink: () => {
+          writes += 1;
+          if (writes === 2) throw new Error("stderr closed");
+        },
+        warningSink: vi.fn(),
+        setInterval: (callback) => callback,
+        clearInterval: () => {
+          throw new Error("timer shutdown failed");
+        },
+      },
+    })).resolves.toBe("merged");
+  });
+
+  it("fails open when an enabled status clock fails", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const warningSink = vi.fn();
+
+    await expect(runSandcastleCli(["--issue", "100"], {
+      github,
+      processIssue: vi.fn().mockResolvedValue("merged"),
+      liveStatus: {
+        monotonicNow: () => {
+          throw new Error("clock unavailable");
+        },
+        warningSink,
+      },
+    })).resolves.toBe("merged");
+
+    expect(warningSink).toHaveBeenCalledOnce();
+  });
+
+  it("clears the heartbeat when watch polling exits unexpectedly", async () => {
+    const github = githubPort();
+    vi.mocked(github.listCandidateIssues).mockResolvedValueOnce([
+      { number: 100, state: "OPEN", labels: ["Sandcastle"] },
+    ]);
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    const workflow = deferred();
+    const interval = Symbol("heartbeat");
+    const clearInterval = vi.fn();
+    const stop = new Error("polling stopped");
+
+    await expect(runSandcastleCli(["--watch"], {
+      github,
+      processIssue: vi.fn().mockReturnValue(workflow.promise),
+      sleep: vi.fn().mockRejectedValue(stop),
+      liveStatus: {
+        sink: vi.fn(),
+        setInterval: () => interval,
+        clearInterval,
+      },
+    })).rejects.toBe(stop);
+
+    expect(clearInterval).toHaveBeenCalledWith(interval);
+    workflow.resolve();
+  });
+
+  it("rejects an unsupported explicit status format", async () => {
+    const github = githubPort();
+
+    await expect(runSandcastleCli(["--issue", "100", "--status-format", "xml"], {
+      github,
+      processIssue: vi.fn(),
+    })).rejects.toMatchObject<SandcastleCliError>({
+      message: "--status-format requires human or json",
+      exitCode: 2,
+    });
+
+    expect(github.ensureLabel).not.toHaveBeenCalled();
   });
 
   it("claims an eligible target before starting Planner", async () => {
