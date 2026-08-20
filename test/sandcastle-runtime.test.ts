@@ -7,6 +7,11 @@ import * as sandboxModule from "../.sandcastle/sandbox.js";
 
 const root = resolve(import.meta.dirname, "..");
 const dockerfile = readFileSync(resolve(root, ".sandcastle/Dockerfile"), "utf8");
+const dockerIgnore = readFileSync(resolve(root, ".dockerignore"), "utf8");
+const sandboxDockerIgnore = readFileSync(
+  resolve(root, ".sandcastle/.dockerignore"),
+  "utf8",
+);
 const sandboxConfig = readFileSync(
   resolve(root, ".sandcastle/sandbox.ts"),
   "utf8",
@@ -26,6 +31,7 @@ describe("Sandcastle Docker runtime", () => {
     expect(Object.keys(sandboxModule).sort()).toEqual([
       "loadSandboxStartup",
       "plannerSandboxHooks",
+      "repairSandboxHooks",
       "sandboxHooks",
       "sandboxHooksFor",
     ]);
@@ -37,26 +43,52 @@ describe("Sandcastle Docker runtime", () => {
   });
 
   it("uses host networking", () => {
-    expect(sandboxConfig).toMatch(/docker\(\{ network: ["']host["'], env:/);
+    expect(sandboxConfig).toMatch(/network:\s*["']host["']/);
+    expect(sandboxConfig).toMatch(/env:\s*\{ \.\.\.environment \}/);
   });
 
-  it("installs lockfile dependencies for non-Planner sessions only", () => {
+  it("uses an image-seeded offline install for implementers only", () => {
     expect(sandboxModule.plannerSandboxHooks).toEqual({
       sandbox: { onSandboxReady: [] },
     });
-    expect(sandboxModule.sandboxHooks).toEqual({
-      sandbox: {
-        onSandboxReady: [{ command: "npm ci", timeoutMs: 300_000 }],
-      },
+    expect(sandboxModule.sandboxHooks.sandbox.onSandboxReady).toHaveLength(1);
+    expect(sandboxModule.sandboxHooks.sandbox.onSandboxReady[0]).toEqual({
+      command: expect.stringContaining("npm ci --offline"),
+      timeoutMs: 270_000,
     });
+    expect(sandboxModule.sandboxHooksFor("implementer")).toBe(
+      sandboxModule.sandboxHooks,
+    );
+    for (const role of ["reviewer", "merger"] as const) {
+      expect(sandboxModule.sandboxHooksFor(role)).toBe(
+        sandboxModule.repairSandboxHooks,
+      );
+    }
     expect(sandboxModule.sandboxHooksFor("planner")).toBe(
       sandboxModule.plannerSandboxHooks,
     );
-    for (const role of ["implementer", "reviewer", "merger"] as const) {
-      expect(sandboxModule.sandboxHooksFor(role)).toBe(sandboxModule.sandboxHooks);
-    }
+    expect(dockerfile).toMatch(/COPY[^\n]*package\.json package-lock\.json/);
+    expect(dockerfile).toMatch(/npm ci --ignore-scripts/);
+    expect(dockerfile).toMatch(/sandcastle-image\.sha256/);
+    expect(dockerfile).toMatch(/sandcastle-runtime\.versions/);
+    expect(sandboxConfig).toMatch(/sha256sum --check --status/);
+    expect(sandboxConfig).toMatch(/cmp --silent/);
+    expect(sandboxConfig).toMatch(/timeout --signal=TERM --kill-after=10s 240s/);
+    expect(sandboxModule.repairSandboxHooks.sandbox.onSandboxReady[0]?.command)
+      .toContain("npm ci --prefer-offline");
+    expect(sandboxModule.repairSandboxHooks.sandbox.onSandboxReady[0]?.command)
+      .toContain("--fetch-timeout=30000");
     expect(sandboxConfig).not.toMatch(/command:\s*["']npm install["']/);
     expect(sandboxConfig).not.toMatch(/copyToWorktree[\s\S]*node_modules/);
+  });
+
+  it("excludes private configuration from Docker build contexts", () => {
+    expect(dockerIgnore).toContain(".sandcastle/*");
+    expect(dockerIgnore).toContain("!.sandcastle/Dockerfile");
+    expect(dockerIgnore).not.toContain("!.sandcastle/.env");
+    expect(sandboxDockerIgnore).toContain(".sandcastle/*");
+    expect(sandboxDockerIgnore).toContain("!.sandcastle/Dockerfile");
+    expect(sandboxDockerIgnore).not.toContain("!.sandcastle/.env");
   });
 
   it("does not mount host credential or client configuration directories", () => {
@@ -70,10 +102,13 @@ describe("Sandcastle Docker runtime", () => {
     expect(smokeTest).toMatch(/docker run[\s\S]*--network host/);
     expect(smokeTest).toMatch(/docker inspect[\s\S]*NetworkMode/);
     expect(smokeTest).toMatch(/docker inspect[\s\S]*\.Mounts/);
-    expect(smokeTest).toMatch(/docker exec [^\n]* npm ci/);
+    expect(smokeTest).toMatch(/docker exec [^\n]* npm ci --offline/);
     expect(smokeTest).toMatch(/docker exec [^\n]* npm run build/);
     expect(smokeTest).toMatch(/docker exec [^\n]* npm run typecheck/);
     expect(smokeTest).toMatch(/docker exec [^\n]* npm test/);
-    expect(smokeTest).not.toMatch(/node_modules/);
+    expect(smokeTest).toMatch(/rsync -a --delete/);
+    expect(smokeTest).toMatch(/--exclude='node_modules'/);
+    expect(smokeTest).toMatch(/--exclude='\.sandcastle\/\.env'/);
+    expect(smokeTest).not.toMatch(/--volume[^\n]*node_modules/);
   });
 });

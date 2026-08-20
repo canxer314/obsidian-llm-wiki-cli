@@ -5,6 +5,10 @@ import { resolve } from "node:path";
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { createDockerLocalQualityHost } from "./docker-local-quality-host.ts";
 import {
+  buildSandcastleImage,
+  dockerResourceSuffix,
+} from "./docker-image.ts";
+import {
   createSandcastleEvidenceRecorder,
   recordSandcastleGate,
   recordSandcastleMerge,
@@ -30,10 +34,15 @@ import {
 import { reviewPullRequest } from "./review.ts";
 import { createSandcastleReviewerSession } from "./reviewer-session.ts";
 import { createSandcastlePlannerSession } from "./planner-session.ts";
-import { loadSandboxStartup, sandboxHooksFor } from "./sandbox.ts";
+import {
+  loadSandboxStartup,
+  repairSandboxHooks,
+  sandboxHooksFor,
+} from "./sandbox.ts";
 
 try {
   const github = new GithubCliPort();
+  let runtimeImageBuild: Promise<string> | undefined;
   const writeEvent = (event: unknown) => console.error(JSON.stringify({ sandcastleEvidence: event }));
   const evidence = createSandcastleEvidenceRecorder(writeEvent);
   const result = await runSandcastleCli(process.argv.slice(2), {
@@ -60,6 +69,13 @@ try {
       run: async (progress) => {
       progress.enter("startup");
       const startup = await loadSandboxStartup();
+      runtimeImageBuild ??= buildSandcastleImage({
+        repositoryPath: resolve(import.meta.dirname, ".."),
+        uid: process.getuid?.() ?? 1000,
+        gid: process.getgid?.() ?? 1000,
+        environment: startup.proxyEnvironment,
+      });
+      await runtimeImageBuild;
       const plannerSession = createSandcastlePlannerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooksFor("planner"),
@@ -85,6 +101,7 @@ try {
       const implementerSession = createSandcastleImplementerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooksFor("implementer"),
+        repairHooks: repairSandboxHooks,
         evidence,
         execution,
       });
@@ -98,9 +115,12 @@ try {
       const localQualityHostOptions = {
         repositoryPath: resolve(import.meta.dirname, ".."),
         worktreeRoot: resolve(import.meta.dirname, "worktrees"),
-        runId: `sandcastle-quality-${issueNumber}`,
+        runId: `sandcastle-quality-${issueNumber}-${dockerResourceSuffix(
+          `${execution.runId}:${execution.batchId}`,
+        )}`,
         uid: process.getuid?.() ?? 1000,
         gid: process.getgid?.() ?? 1000,
+        environment: startup.proxyEnvironment,
       };
       const reviewerSession = createSandcastleReviewerSession({
         sandbox: startup.sandbox,

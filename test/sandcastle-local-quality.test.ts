@@ -7,6 +7,20 @@ import {
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
+const timeoutCommand = [
+  "timeout",
+  "--signal=TERM",
+  "--kill-after=10s",
+  "240s",
+] as const;
+
+const installCommand = [
+  ...timeoutCommand,
+  "npm",
+  "ci",
+  "--offline",
+] as const;
+
 function host(overrides: Partial<LocalQualityHost> = {}): LocalQualityHost {
   return {
     setup: vi.fn(async () => undefined),
@@ -26,10 +40,10 @@ describe("Sandcastle local quality", () => {
     expect(qualityHost.setup).toHaveBeenCalledWith(revision);
     expect(qualityHost.run).toHaveBeenCalledTimes(4);
     expect(vi.mocked(qualityHost.run).mock.calls).toEqual([
-      [["npm", "ci"]],
-      [["npm", "run", "build"]],
-      [["npm", "run", "typecheck"]],
-      [["npm", "test"]],
+      [[...installCommand]],
+      [[...timeoutCommand, "npm", "run", "build"]],
+      [[...timeoutCommand, "npm", "run", "typecheck"]],
+      [[...timeoutCommand, "npm", "test"]],
     ]);
     expect(qualityHost.dispose).toHaveBeenCalledOnce();
   });
@@ -116,7 +130,11 @@ describe("Sandcastle local quality", () => {
     });
     expect(qualityHost.setup).toHaveBeenCalledTimes(2);
     expect(qualityHost.dispose).toHaveBeenCalledTimes(2);
-    expect(run.mock.calls.filter(([command]) => command.join(" ") === "npm ci")).toHaveLength(2);
+    expect(
+      run.mock.calls.filter(
+        ([command]) => command.join(" ") === installCommand.join(" "),
+      ),
+    ).toHaveLength(2);
   });
 
   it.each([

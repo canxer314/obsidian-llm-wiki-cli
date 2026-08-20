@@ -32,9 +32,73 @@ describe("Docker local quality host", () => {
 
     expect(process.run.mock.calls).toEqual([
       ["git", ["worktree", "add", "--detach", "/repo/.sandcastle/worktrees/quality-104", revision], { cwd: "/repo" }],
-      ["docker", ["build", "--build-arg", "AGENT_UID=1000", "--build-arg", "AGENT_GID=1000", "--file", "/repo/.sandcastle/Dockerfile", "--tag", "sandcastle:local-quality", "/repo"], { cwd: "/repo" }],
-      ["docker", ["run", "--detach", "--name", "quality-104", "--network", "host", "--user", "1000:1000", "--volume", "/repo/.sandcastle/worktrees/quality-104:/home/agent/workspace", "--workdir", "/home/agent/workspace", "sandcastle:local-quality"], { cwd: "/repo" }],
+      ["docker", ["build", "--build-arg", "AGENT_UID=1000", "--build-arg", "AGENT_GID=1000", "--file", "/repo/.sandcastle/worktrees/quality-104/.sandcastle/Dockerfile", "--tag", "sandcastle:local-quality-quality-104", "/repo/.sandcastle/worktrees/quality-104"], { cwd: "/repo", environment: {} }],
+      ["docker", ["run", "--detach", "--name", "quality-104", "--network", "host", "--user", "1000:1000", "--volume", "/repo/.sandcastle/worktrees/quality-104:/home/agent/workspace", "--workdir", "/home/agent/workspace", "sandcastle:local-quality-quality-104"], { cwd: "/repo", environment: {} }],
     ]);
+  });
+
+  it("passes only proxy variables to the build and container", async () => {
+    const process = processPort();
+    const host = createDockerLocalQualityHost({
+      repositoryPath: "/repo",
+      worktreeRoot: "/worktrees",
+      runId: "quality-104",
+      uid: 1000,
+      gid: 1000,
+      environment: {
+        HTTPS_PROXY: "http://proxy.invalid:7890",
+        no_proxy: "localhost",
+        GH_TOKEN: "must-not-pass",
+      },
+      process,
+    });
+
+    await host.setup(revision);
+
+    expect(process.run.mock.calls[1]?.[1]).toContain("HTTPS_PROXY");
+    expect(process.run.mock.calls[1]?.[1]).toContain("no_proxy");
+    expect(process.run.mock.calls[1]?.[1].join(" ")).not.toContain("proxy.invalid");
+    expect(process.run.mock.calls[1]?.[2]).toEqual({
+      cwd: "/repo",
+      environment: {
+        HTTPS_PROXY: "http://proxy.invalid:7890",
+        no_proxy: "localhost",
+      },
+    });
+    expect(process.run.mock.calls[2]?.[1]).toContain("HTTPS_PROXY");
+    expect(process.run.mock.calls[2]?.[1]).toContain("no_proxy");
+    expect(process.run.mock.calls[2]?.[1].join(" ")).not.toContain("proxy.invalid");
+    expect(process.run.mock.calls[2]?.[1].join(" ")).not.toContain("must-not-pass");
+    expect(process.run.mock.calls[2]?.[2]).toEqual({
+      cwd: "/repo",
+      environment: {
+        HTTPS_PROXY: "http://proxy.invalid:7890",
+        no_proxy: "localhost",
+      },
+    });
+  });
+
+  it("redacts proxy values from container command failures", async () => {
+    const process = processPort();
+    const host = createDockerLocalQualityHost({
+      repositoryPath: "/repo",
+      worktreeRoot: "/worktrees",
+      runId: "quality-104",
+      uid: 1000,
+      gid: 1000,
+      environment: { HTTPS_PROXY: "http://proxy.invalid:7890" },
+      process,
+    });
+    await host.setup(revision);
+    process.run.mockImplementationOnce(async (_command, _args, options) => ({
+      exitCode: 0,
+      output: `failed via ${options.environment?.HTTPS_PROXY}\n__SANDCASTLE_LOCAL_QUALITY_EXIT__=1\n`,
+    }));
+
+    const result = await host.run(["npm", "ci"]);
+
+    expect(result.output).toBe("failed via [REDACTED]");
+    expect(result.output).not.toContain("proxy.invalid");
   });
 
   it("separates container command failures from Docker failures", async () => {
@@ -127,10 +191,11 @@ describe("Docker local quality host", () => {
         "npm",
         "test",
       ],
-      { cwd: "/repo" },
+      { cwd: "/repo", environment: {} },
     );
-    expect(process.run.mock.calls.slice(-2)).toEqual([
+    expect(process.run.mock.calls.slice(-3)).toEqual([
       ["docker", ["rm", "--force", "quality-104"], { cwd: "/repo", allowFailure: true }],
+      ["docker", ["image", "rm", "--force", "sandcastle:local-quality-quality-104"], { cwd: "/repo", allowFailure: true }],
       ["git", ["worktree", "remove", "--force", "/worktrees/quality-104"], { cwd: "/repo", allowFailure: true }],
     ]);
   });

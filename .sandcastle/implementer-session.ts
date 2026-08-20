@@ -77,6 +77,7 @@ ${plan.allowsAutomationChanges
 export function createSandcastleImplementerSession(options: {
   readonly sandbox: SandboxProvider;
   readonly hooks: SandboxHooks;
+  readonly repairHooks?: SandboxHooks;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
   readonly evidence?: SandcastleEvidenceRecorder;
@@ -105,7 +106,9 @@ export function createSandcastleImplementerSession(options: {
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
-        hooks: options.hooks,
+        hooks: request.repair === undefined
+          ? options.hooks
+          : options.repairHooks ?? options.hooks,
         branchStrategy: {
           type: "branch",
           branch: request.branch,

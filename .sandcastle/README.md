@@ -109,10 +109,16 @@ work.
 ## Runtime verification
 
 The provider uses Docker host networking so a container can reach CC-Switch on
-the WSL loopback interface. Implementer, Reviewer, and Merger setup runs `npm ci`
-in each new sandbox; Planner setup deliberately has no dependency-install hook
-because Planner sessions share the host checkout and only read Issue context. Do
-not add `node_modules` to `copyToWorktree`.
+the WSL loopback interface. Sandcastle rebuilds one fixed runtime image from the
+repository context before starting a workflow. The image seeds an npm cache tied
+to the Dockerfile, lockfile, workspace manifests, Node, and npm versions without
+retaining `node_modules`. Initial Implementer setup verifies that identity and
+runs `npm ci --offline`; repair, Reviewer, and Merger sessions prefer the seeded
+cache and use bounded registry retries only when the Pull Request added a new
+dependency. Planner setup deliberately has no dependency-install hook because
+Planner sessions share the host checkout and only read Issue context. Do not add
+`node_modules` to `copyToWorktree`. Proxy variables are explicitly whitelisted;
+credential files are excluded from every Docker build context.
 
 Build and verify the image with:
 
