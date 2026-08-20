@@ -1674,7 +1674,8 @@ export class ChangeSetService {
       createChangeSetId: options.createChangeSetId ?? randomUUID,
     };
     this.#state = state;
-    this.#recoveryBlocked = state.recovery?.state === "blocked";
+    this.#recoveryBlocked =
+      state.recovery?.state !== "none" && state.recovery !== undefined;
     this.#dequeuePaused = state.writeMode !== undefined || this.#recoveryBlocked;
     this.#admissionGate = this.#recoveryBlocked
       ? { code: "recovery_blocked" }
@@ -1686,9 +1687,8 @@ export class ChangeSetService {
     const service = new ChangeSetService(options, state);
     let recoveryBlocked = service.#recoveryBlocked;
     try {
-      if (state.recovery?.state !== "baseline_accepted") {
-        await service.#recover();
-      }
+      await service.#recover();
+      recoveryBlocked = service.#recoveryBlocked;
     } catch (error) {
       if (error instanceof InjectedChangeSetCrash) throw error;
       recoveryBlocked = true;
@@ -2030,6 +2030,23 @@ export class ChangeSetService {
     }
   }
 
+  #recoveryFrameMatchesEntry(
+    frame: RecoveryJournalFrame,
+    entry: ChangeSetRegistryEntry,
+  ): boolean {
+    return (
+      frame.enqueueSeq === entry.enqueueSeq &&
+      entry.execution !== undefined &&
+      frame.input.submissionKey === entry.submissionKey &&
+      fingerprintChangeSetRequest(frame.input) === entry.fingerprint &&
+      recoveryPlanMatchesFrame(frame) &&
+      (entry.changeSet.state !== "in_progress" ||
+        entry.changeSet.preview === undefined ||
+        JSON.stringify(canonicalize(frame.preview)) ===
+          JSON.stringify(canonicalize(entry.changeSet.preview)))
+    );
+  }
+
   async #recover(): Promise<void> {
     const execution = this.#options.execution;
     if (execution === undefined) return;
@@ -2045,21 +2062,16 @@ export class ChangeSetService {
       if (expired && frame.phase !== "PREPARED") return;
       throw new Error("Recovery Journal does not match the Change Set registry");
     }
-    if (
-      frame.enqueueSeq !== entry.enqueueSeq ||
-      entry.execution === undefined ||
-      frame.input.submissionKey !== entry.submissionKey ||
-      fingerprintChangeSetRequest(frame.input) !== entry.fingerprint ||
-      !recoveryPlanMatchesFrame(frame) ||
-      entry.changeSet.state === "in_progress" &&
-        entry.changeSet.preview !== undefined &&
-        JSON.stringify(canonicalize(frame.preview)) !==
-          JSON.stringify(canonicalize(entry.changeSet.preview))
-    ) {
+    if (!this.#recoveryFrameMatchesEntry(frame, entry)) {
       await this.#markUnproven(entry);
       return;
     }
     if (frame.vaultId !== (this.#options.vaultId ?? "vault")) {
+      await this.#markUnproven(entry);
+      return;
+    }
+    if (this.#state.recovery?.state === "baseline_accepted") {
+      if (frame.phase === "FAILED") return;
       await this.#markUnproven(entry);
       return;
     }
@@ -2221,6 +2233,22 @@ export class ChangeSetService {
           if (execution.clearRecoveryFrame === undefined) {
             throw new Error("Recovery Journal clearing is unavailable");
           }
+          const frame = await execution.loadRecoveryFrame();
+          const entry = this.#state.entries.find(
+            (candidate) => candidate.changeSetId === recovery.changeSetId,
+          );
+          if (
+            frame === null ||
+            frame.phase !== "FAILED" ||
+            entry === undefined ||
+            entry.changeSet.state !== "result_unproven" ||
+            entry.execution?.phase !== "terminal" ||
+            !this.#recoveryFrameMatchesEntry(frame, entry) ||
+            frame.vaultId !== (this.#options.vaultId ?? "vault") ||
+            frame.changeSetId !== recovery.changeSetId
+          ) {
+            throw new Error("Recovery Journal does not match the accepted baseline");
+          }
           await execution.clearRecoveryFrame();
           await this.#serialize(async () => {
             const nextState = structuredClone(this.#state);
@@ -2228,7 +2256,7 @@ export class ChangeSetService {
             await this.#save(nextState);
             this.#recoveryBlocked = false;
             this.#dequeuePaused = true;
-            this.#admissionGate = { code: "writes_paused" };
+            this.#admissionGate = gateForWriteMode(this.#state.writeMode);
           });
           return;
         }
@@ -2251,6 +2279,7 @@ export class ChangeSetService {
           throw new Error("Recovery Journal is not eligible for baseline acceptance");
         }
         if (
+          !this.#recoveryFrameMatchesEntry(frame, unresolved[0]!) ||
           frame.vaultId !== (this.#options.vaultId ?? "vault") ||
           frame.changeSetId !== recovery.changeSetId
         ) {
@@ -2267,7 +2296,7 @@ export class ChangeSetService {
             state: "baseline_accepted",
             changeSetId: recovery.changeSetId,
           };
-          nextState.writeMode = "manual_paused";
+          if (nextState.writeMode === undefined) nextState.writeMode = "manual_paused";
           await this.#save(nextState);
         });
         try {

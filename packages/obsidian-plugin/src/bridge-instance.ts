@@ -906,18 +906,27 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
       const service = changeSetService;
       if (service === undefined) throw new Error("Change Set service is unavailable");
       await service.acceptTrustedRecoveryBaseline(recheckTrustedBaseline);
+      const maintenanceFailed =
+        options.health.lifecycle.upgrade === "failed" ||
+        options.health.lifecycle.migration === "failed";
       options.health.recovery = { state: "none" };
-      options.health.write = { gate: "open", state: "paused", pauseSource: "manual" };
-      options.health.effectiveGate = { code: "writes_paused" };
-      options.health.overall = "degraded";
+      options.health.write = {
+        gate: maintenanceFailed ? "blocked" : "open",
+        state: "paused",
+        pauseSource: maintenanceFailed ? "maintenance" : "manual",
+      };
+      options.health.effectiveGate = {
+        code: maintenanceFailed ? "upgrade_in_progress" : "writes_paused",
+      };
+      options.health.overall = maintenanceFailed ? "blocked" : "degraded";
       options.health.reasonCodes = [
         ...new Set([
           ...options.health.reasonCodes.filter((code) => code !== "recovery_blocked"),
-          "writes_paused",
+          maintenanceFailed ? "upgrade_failed" : "writes_paused",
         ]),
       ];
       options.health.lifecycle.recovery = "succeeded";
-      options.health.operatorAction = "resume_writes";
+      options.health.operatorAction = maintenanceFailed ? "finish_upgrade" : "resume_writes";
     },
     async resumeWrites() {
       const service = changeSetService;
