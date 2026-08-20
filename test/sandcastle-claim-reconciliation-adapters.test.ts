@@ -145,8 +145,8 @@ describe("Git claim read adapter", () => {
 describe("Docker claim read adapter", () => {
   it.each([
     ["", undefined, "absent"],
-    [JSON.stringify("abcdef123456"), JSON.stringify({ Id: "abcdef123456", State: { Running: false } }), "present"],
-    [JSON.stringify("abcdef123456"), JSON.stringify({ Id: "abcdef123456", State: { Running: true } }), "active"],
+    [JSON.stringify("abcdef123456"), JSON.stringify(false), "present"],
+    [JSON.stringify("abcdef123456"), JSON.stringify(true), "active"],
   ] as const)("reports %s containers through fixed labels", async (listing, inspect, expected) => {
     const run = command(listing, ...(inspect === undefined ? [] : [inspect]));
     const adapter = new DockerClaimReadAdapter(run);
@@ -159,6 +159,27 @@ describe("Docker claim read adapter", () => {
     expect(args).toContain("label=com.sandcastle.branch=sandcastle/issue-208");
     expect(args).not.toContain("rm");
     expect(args).not.toContain("stop");
+  });
+
+  it("fails closed when Sandcastle containers lack exact claim identity", async () => {
+    const run = command("", JSON.stringify("abcdef123456"));
+    const adapter = new DockerClaimReadAdapter(run);
+
+    await expect(adapter.getContainer(input)).rejects.toThrow(
+      "Could not read docker claim facts",
+    );
+
+    expect(vi.mocked(run).mock.calls[1]?.[1]).toContain("name=^sandcastle-");
+  });
+
+  it("requests only container activity instead of full inspect data", async () => {
+    const run = command(JSON.stringify("abcdef123456"), JSON.stringify(true));
+    const adapter = new DockerClaimReadAdapter(run);
+
+    await adapter.getContainer(input);
+
+    expect(vi.mocked(run).mock.calls[1]?.[1]).toContain("{{json .State.Running}}");
+    expect(vi.mocked(run).mock.calls[1]?.[1]).not.toContain("{{json .}}");
   });
 
   it("raises a fixed error when Docker output is malformed", async () => {

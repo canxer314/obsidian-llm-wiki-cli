@@ -283,11 +283,6 @@ export class GitClaimReadAdapter implements ClaimReconciliationGitPort {
   }
 }
 
-interface DockerInspectJson {
-  readonly Id: unknown;
-  readonly State: { readonly Running: unknown };
-}
-
 export class DockerClaimReadAdapter implements ClaimReconciliationDockerPort {
   constructor(private readonly run: ReadCommand = executeReadCommand) {}
 
@@ -314,34 +309,33 @@ export class DockerClaimReadAdapter implements ClaimReconciliationDockerPort {
       }
       if (ids.length > 1) throw new ClaimReadError("docker");
       if (ids.length === 0) {
-        const { stdout: partialOutput } = await this.run("docker", [
+        const { stdout: unownedOutput } = await this.run("docker", [
           "container",
           "ls",
           "--all",
           "--filter",
-          `label=com.sandcastle.issue=${input.issueNumber}`,
+          "name=^sandcastle-",
           "--format",
           "{{json .ID}}",
         ]);
-        if (partialOutput.trim() !== "") throw new ClaimReadError("docker");
+        if (unownedOutput.trim() !== "") throw new ClaimReadError("docker");
         return "absent" as const;
       }
       const { stdout: inspectOutput } = await this.run("docker", [
         "container",
         "inspect",
         "--format",
-        "{{json .}}",
+        "{{json .State.Running}}",
         ...ids,
       ]);
-      const containers = inspectOutput.trim().split("\n").map((line) =>
-        parseJson<DockerInspectJson>(line, "docker")
+      const runningStates = inspectOutput.trim().split("\n").map((line) =>
+        parseJson<unknown>(line, "docker")
       );
-      if (containers.length !== ids.length || containers.some((container) =>
-        typeof container.Id !== "string" || typeof container.State?.Running !== "boolean"
-      )) {
+      if (runningStates.length !== ids.length ||
+        !runningStates.every((running): running is boolean => typeof running === "boolean")) {
         throw new ClaimReadError("docker");
       }
-      return containers.some((container) => container.State.Running) ? "active" as const : "present" as const;
+      return runningStates.some(Boolean) ? "active" as const : "present" as const;
     });
   }
 }

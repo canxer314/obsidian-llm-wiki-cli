@@ -145,8 +145,15 @@ function hasUnknown(snapshot: Omit<ClaimReconciliationSnapshot, "classification"
 }
 
 function isInconsistent(snapshot: Omit<ClaimReconciliationSnapshot, "inconsistent" | "classification" | "recommendedAction">): boolean {
-  const { claimBranch, branchRelation, uniqueCommits, pullRequests, worktree, container } = snapshot;
+  const { issue, claimBranch, branchRelation, uniqueCommits, pullRequests, worktree, container } = snapshot;
+  if (issue.existence === "absent" &&
+    (issue.state !== "unknown" || issue.eligibility === "eligible")) return true;
+  if (issue.existence === "present" && issue.state === "closed" &&
+    issue.eligibility === "eligible") return true;
   if (pullRequests.state === "multiple") return true;
+  if (pullRequests.items.some((pullRequest) =>
+    pullRequest.state === "merged" && !pullRequest.closesIssue
+  )) return true;
   if (claimBranch.state === "absent") {
     if (worktree !== "absent") return true;
     if (pullRequests.state === "open") return true;
@@ -167,7 +174,9 @@ function isInconsistent(snapshot: Omit<ClaimReconciliationSnapshot, "inconsisten
 function classify(
   snapshot: Omit<ClaimReconciliationSnapshot, "classification" | "recommendedAction">,
 ): Pick<ClaimReconciliationSnapshot, "classification" | "recommendedAction"> {
-  if (snapshot.pullRequests.items.some((pullRequest) => pullRequest.state === "merged")) {
+  if (snapshot.pullRequests.items.some((pullRequest) =>
+    pullRequest.state === "merged" && pullRequest.closesIssue
+  )) {
     return { classification: "delivery-complete", recommendedAction: "no-action" };
   }
   if (snapshot.inconsistent) {
@@ -175,6 +184,10 @@ function classify(
   }
   if (
     snapshot.issue.existence !== "unknown" &&
+    (snapshot.issue.existence === "absent" || (
+      snapshot.issue.state !== "unknown" &&
+      snapshot.issue.eligibility !== "unknown"
+    )) &&
     snapshot.claimBranch.state === "absent" &&
     snapshot.pullRequests.state === "none" &&
     snapshot.worktree === "absent" &&

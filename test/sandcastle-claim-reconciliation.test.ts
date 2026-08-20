@@ -125,6 +125,21 @@ describe("claim reconciliation", () => {
     expect(result.classification).toBe("delivery-complete");
   });
 
+  it("does not treat a merged PR without a closing relationship as delivery", async () => {
+    const result = await reconcileClaim(input, ports({
+      pullRequests: [{
+        number: 312,
+        state: "merged",
+        headSha: SHA.merged,
+        closesIssue: false,
+      }],
+    }));
+
+    expect(result.inconsistent).toBe(true);
+    expect(result.classification).toBe("inconsistent");
+    expect(result.recommendedAction).toBe("manual-review");
+  });
+
   it.each([
     ["equal", 0, "empty-candidate"],
     ["ahead", 1, "active-or-preserved-work"],
@@ -193,6 +208,60 @@ describe("claim reconciliation", () => {
 
     expect(result.classification).toBe("unknown");
     expect(result.recommendedAction).toBe("manual-review");
+  });
+
+  it("fails closed for partially unknown Issue facts when resources are absent", async () => {
+    const result = await reconcileClaim(input, ports({
+      issue: { existence: "present", state: "unknown", eligible: "unknown" },
+      branch: { state: "absent" },
+      worktree: "absent",
+    }));
+
+    expect(result.classification).toBe("unknown");
+    expect(result.recommendedAction).toBe("manual-review");
+  });
+
+  it("classifies an absent Issue and absent resources as no claim", async () => {
+    const result = await reconcileClaim(input, ports({
+      issue: { existence: "absent", state: "unknown", eligible: false },
+      branch: { state: "absent" },
+      worktree: "absent",
+    }));
+
+    expect(result.classification).toBe("no-claim");
+  });
+
+  it("marks contradictory Issue facts as inconsistent", async () => {
+    const result = await reconcileClaim(input, ports({
+      issue: { existence: "absent", state: "open", eligible: true },
+      branch: { state: "absent" },
+      worktree: "absent",
+    }));
+
+    expect(result.inconsistent).toBe(true);
+    expect(result.classification).toBe("inconsistent");
+    expect(result.recommendedAction).toBe("manual-review");
+  });
+
+  it("uses read-only ports whose public interfaces cannot express mutations", async () => {
+    const fakePorts = ports();
+
+    await reconcileClaim(input, fakePorts);
+
+    expect(Object.keys(fakePorts.github).sort()).toEqual([
+      "getBranch",
+      "getIssue",
+      "listPullRequests",
+    ]);
+    expect(Object.keys(fakePorts.git).sort()).toEqual([
+      "compareCommits",
+      "countUniqueCommits",
+      "getWorktree",
+    ]);
+    expect(Object.keys(fakePorts.docker)).toEqual(["getContainer"]);
+    expect(JSON.stringify(Object.keys(fakePorts))).not.toMatch(
+      /write|delete|remove|claim|finalize|fetch|checkout|reset|prune|stop|build/u,
+    );
   });
 
   it("rejects non-deterministic or private claim identities before reading ports", async () => {
