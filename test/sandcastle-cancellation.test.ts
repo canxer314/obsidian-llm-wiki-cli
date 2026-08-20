@@ -189,6 +189,29 @@ describe("Sandcastle controlled cancellation", () => {
     expect(github.claimIssue).not.toHaveBeenCalled();
   });
 
+  it("preserves but does not start a claim cancelled before active registration", async () => {
+    const signals = fakeSignals();
+    const claim = deferred();
+    const github = githubPort([207]);
+    vi.mocked(github.claimIssue).mockImplementation(async () => {
+      await claim.promise;
+      return true;
+    });
+    const processIssue = vi.fn().mockResolvedValue(undefined);
+    const running = runSandcastleCli(["--watch"], {
+      github,
+      signalSource: signals,
+      processIssue,
+    });
+
+    await vi.waitFor(() => expect(github.claimIssue).toHaveBeenCalledOnce());
+    signals.emit("SIGINT");
+    signals.emit("SIGTERM");
+    claim.resolve();
+    await expect(running).resolves.toBeUndefined();
+    expect(processIssue).not.toHaveBeenCalled();
+  });
+
   it("starts a successfully claimed Issue conservatively when drain races with the claim", async () => {
     const signals = fakeSignals();
     const claim = deferred();

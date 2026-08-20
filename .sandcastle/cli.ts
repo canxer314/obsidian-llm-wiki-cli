@@ -376,17 +376,18 @@ export async function runSandcastleCli<TResult>(
           }
           if (draining) break;
         }
-        if (claimed.length > 0) {
+        const launchable = controller.signal.aborted ? [] : claimed;
+        if (launchable.length > 0) {
           batchId += 1;
           dependencies.recordWatchEvent?.({
             kind: "batch-started",
             runId,
             batchId,
-            issueNumbers: claimed.map((issue) => issue.number),
+            issueNumbers: launchable.map((issue) => issue.number),
           });
         }
         const workflowBatchId = batchId;
-        for (const issue of claimed) {
+        for (const issue of launchable) {
           dependencies.recordWatchEvent?.({
             kind: "issue-started",
             runId,

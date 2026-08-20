@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const fixture = resolve(import.meta.dirname, "fixtures/sandcastle-signal-child.ts");
 
-async function runWithSignal(signal: "SIGINT" | "SIGTERM") {
+async function runWithSignal(signal: "SIGINT" | "SIGTERM", force = false) {
   const child = spawn(process.execPath, ["--experimental-strip-types", fixture, signal], {
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -19,6 +19,7 @@ async function runWithSignal(signal: "SIGINT" | "SIGTERM") {
     if (!sent && stdout.includes(`ready:${signal}`)) {
       sent = true;
       child.kill(signal);
+      if (force) setTimeout(() => child.kill(signal), 5);
     }
   });
   child.stderr.on("data", (chunk: string) => { stderr += chunk; });
@@ -40,4 +41,14 @@ describe("Sandcastle process signal wiring", () => {
       expect(`${result.stdout}${result.stderr}`).not.toContain("Sandcastle forced exit requested");
     },
   );
+
+  it("forces a non-zero exit after a repeated real signal", async () => {
+    const result = await runWithSignal("SIGTERM", true);
+
+    expect(result).toMatchObject({ code: 1, signal: null });
+    expect(result.stdout).toContain("ready:SIGTERM");
+    expect(result.stderr).toBe(
+      "Sandcastle forced exit requested; finalization may be incomplete\n",
+    );
+  });
 });
