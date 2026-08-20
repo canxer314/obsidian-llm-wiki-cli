@@ -107,6 +107,46 @@ describe("Sandcastle GitHub CLI adapter", () => {
     ]);
   });
 
+  it("retries an EOF-style GraphQL read and preserves its exact head result", async () => {
+    const transient = Object.assign(new Error("GraphQL transport failed"), {
+      stderr: 'Post "https://api.github.com/graphql": EOF',
+    });
+    const execute = vi.fn()
+      .mockRejectedValueOnce(transient)
+      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" });
+    const wait = vi.fn(async () => undefined);
+    const github = new GithubCliPort(execute, wait);
+
+    await expect(github.getPullRequestHead(321)).resolves.toBe("abc123");
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledWith(100);
+  });
+
+  it("stops after bounded transient read retries", async () => {
+    const transient = Object.assign(new Error("unexpected EOF"), {
+      stderr: 'Post "https://api.github.com/graphql": unexpected EOF',
+    });
+    const execute = vi.fn().mockRejectedValue(transient);
+    const wait = vi.fn(async () => undefined);
+    const github = new GithubCliPort(execute, wait);
+
+    await expect(github.getPullRequestHead(321)).rejects.toBe(transient);
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(wait.mock.calls).toEqual([[100], [250]]);
+  });
+
+  it("does not retry permanent GitHub read failures", async () => {
+    const permanent = Object.assign(new Error("not found"), {
+      stderr: "gh: Not Found (HTTP 404)",
+    });
+    const execute = vi.fn().mockRejectedValue(permanent);
+    const wait = vi.fn(async () => undefined);
+    const github = new GithubCliPort(execute, wait);
+
+    await expect(github.getPullRequestHead(321)).rejects.toBe(permanent);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
   it("publishes local quality status to the requested commit SHA", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     const github = new GithubCliPort(execute);
@@ -126,7 +166,80 @@ describe("Sandcastle GitHub CLI adapter", () => {
     ]);
   });
 
-  it("publishes review status and a regular Pull Request comment", async () => {
+  it("reconciles a transiently failed status write without repeating it", async () => {
+    const transient = Object.assign(new Error("connection reset"), {
+      stderr: "Post https://api.github.com: connection reset by peer",
+    });
+    const execute = vi.fn()
+      .mockRejectedValueOnce(transient)
+      .mockResolvedValueOnce({ stdout: "1\n", stderr: "" });
+    const wait = vi.fn(async () => undefined);
+    const github = new GithubCliPort(execute, wait);
+    const status: LocalQualityCommitStatus = {
+      revision: "abc123",
+      context: "sandcastle/local-quality",
+      state: "pending",
+      description: "Local quality checks started",
+    };
+
+    await expect(github.publishCommitStatus(status)).resolves.toBeUndefined();
+    expect(execute.mock.calls).toEqual([
+      ["gh", [
+        "api", "repos/{owner}/{repo}/statuses/abc123", "--method", "POST",
+        "-f", "context=sandcastle/local-quality", "-f", "state=pending",
+        "-f", "description=Local quality checks started",
+      ]],
+      ["gh", [
+        "api", "repos/{owner}/{repo}/commits/abc123/statuses", "--jq",
+        '[.[] | select(.context == "sandcastle/local-quality" and .state == "pending" and .description == "Local quality checks started")] | length',
+      ]],
+    ]);
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it("retries an unreconciled transient status write with reconciliation between attempts", async () => {
+    const transient = Object.assign(new Error("unexpected EOF"), {
+      stderr: "Post https://api.github.com: unexpected EOF",
+    });
+    const execute = vi.fn()
+      .mockRejectedValueOnce(transient)
+      .mockResolvedValueOnce({ stdout: "0\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
+    const wait = vi.fn(async () => undefined);
+    const github = new GithubCliPort(execute, wait);
+
+    await expect(github.publishCommitStatus({
+      revision: "abc123",
+      context: "sandcastle/local-quality",
+      state: "pending",
+      description: "Local quality checks started",
+    })).resolves.toBeUndefined();
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(wait).toHaveBeenCalledWith(100);
+  });
+
+  it("stops after bounded unreconciled transient status writes", async () => {
+    const transient = Object.assign(new Error("unexpected EOF"), {
+      stderr: "Post https://api.github.com: unexpected EOF",
+    });
+    const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+      if (arguments_[1]?.includes("/commits/")) return { stdout: "0\n", stderr: "" };
+      throw transient;
+    });
+    const wait = vi.fn(async () => undefined);
+    const github = new GithubCliPort(execute, wait);
+
+    await expect(github.publishCommitStatus({
+      revision: "abc123",
+      context: "sandcastle/local-quality",
+      state: "pending",
+      description: "Local quality checks started",
+    })).rejects.toBe(transient);
+    expect(execute).toHaveBeenCalledTimes(6);
+    expect(wait.mock.calls).toEqual([[100], [250]]);
+  });
+
+  it("publishes local quality status to the requested commit SHA", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     const github = new GithubCliPort(execute);
     const status: ReviewCommitStatus = {
