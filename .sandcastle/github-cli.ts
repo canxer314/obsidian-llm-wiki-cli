@@ -154,6 +154,7 @@ export class GithubCliPort implements
       "-f",
       `description=${status.description}`,
     ];
+    const statusIdsBeforeWrite = await this.commitStatusIds(status);
     let writeError: unknown;
     for (let attempt = 0; attempt < MAX_GITHUB_ATTEMPTS; attempt += 1) {
       try {
@@ -162,7 +163,7 @@ export class GithubCliPort implements
       } catch (error) {
         writeError = error;
         if (!isTransientGithubError(error)) throw error;
-        if (await this.commitStatusExists(status)) return;
+        if (await this.commitStatusWasCreated(status, statusIdsBeforeWrite)) return;
         if (attempt === MAX_GITHUB_ATTEMPTS - 1) break;
         await this.wait(RETRY_DELAYS_MS[attempt]!);
       }
@@ -188,16 +189,25 @@ export class GithubCliPort implements
     throw lastError;
   }
 
-  private async commitStatusExists(
+  private async commitStatusIds(
     status: LocalQualityCommitStatus | ReviewCommitStatus,
-  ): Promise<boolean> {
+  ): Promise<readonly string[]> {
     const { stdout } = await this.executeGithubRead([
       "api",
-      `repos/{owner}/{repo}/commits/${status.revision}/statuses`,
+      "--paginate",
+      `repos/{owner}/{repo}/commits/${status.revision}/statuses?per_page=100`,
       "--jq",
-      `[.[] | select(.context == ${JSON.stringify(status.context)} and .state == ${JSON.stringify(status.state)} and .description == ${JSON.stringify(status.description)})] | length`,
+      `.[] | select(.context == ${JSON.stringify(status.context)} and .state == ${JSON.stringify(status.state)} and .description == ${JSON.stringify(status.description)}) | .id`,
     ]);
-    return stdout.trim() !== "0";
+    return stdout.trim() === "" ? [] : stdout.trim().split("\n");
+  }
+
+  private async commitStatusWasCreated(
+    status: LocalQualityCommitStatus | ReviewCommitStatus,
+    statusIdsBeforeWrite: readonly string[],
+  ): Promise<boolean> {
+    const statusIdsAfterWrite = await this.commitStatusIds(status);
+    return statusIdsAfterWrite.some((id) => !statusIdsBeforeWrite.includes(id));
   }
 
   async markPullRequestReady(pullRequestNumber: number): Promise<void> {
@@ -789,6 +799,7 @@ function isTransientGithubError(error: unknown): boolean {
   return (
     /(?:unexpected )?eof/.test(message) ||
     /(?:connection|network|transport).*(?:reset|refused|closed|timeout|timed out|unavailable)/.test(message) ||
+    /(?:tls handshake|i\/o) timeout|context deadline exceeded|client\.timeout exceeded/.test(message) ||
     /(?:http )?(?:429|500|502|503|504)\b/.test(message) ||
     /service unavailable|bad gateway|gateway timeout/.test(message)
   );
