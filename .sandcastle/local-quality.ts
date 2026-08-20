@@ -31,10 +31,20 @@ export type LocalQualityResult =
     readonly output?: string;
   };
 
+const COMMAND_TIMEOUT = [
+  "timeout",
+  "--signal=TERM",
+  "--kill-after=10s",
+  "240s",
+] as const;
+
 const QUALITY_COMMANDS = [
-  { stage: "build", command: ["npm", "run", "build"] },
-  { stage: "typecheck", command: ["npm", "run", "typecheck"] },
-  { stage: "test", command: ["npm", "test"] },
+  { stage: "build", command: [...COMMAND_TIMEOUT, "npm", "run", "build"] },
+  {
+    stage: "typecheck",
+    command: [...COMMAND_TIMEOUT, "npm", "run", "typecheck"],
+  },
+  { stage: "test", command: [...COMMAND_TIMEOUT, "npm", "test"] },
 ] as const;
 
 function terminalResult(
@@ -60,10 +70,7 @@ async function setupAttempt(
   try {
     await host.setup(revision);
     const install = await host.run([
-      "timeout",
-      "--signal=TERM",
-      "--kill-after=10s",
-      "240s",
+      ...COMMAND_TIMEOUT,
       "npm",
       "ci",
       "--offline",

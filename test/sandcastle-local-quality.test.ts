@@ -7,11 +7,15 @@ import {
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
-const installCommand = [
+const timeoutCommand = [
   "timeout",
   "--signal=TERM",
   "--kill-after=10s",
   "240s",
+] as const;
+
+const installCommand = [
+  ...timeoutCommand,
   "npm",
   "ci",
   "--offline",
@@ -37,9 +41,9 @@ describe("Sandcastle local quality", () => {
     expect(qualityHost.run).toHaveBeenCalledTimes(4);
     expect(vi.mocked(qualityHost.run).mock.calls).toEqual([
       [[...installCommand]],
-      [["npm", "run", "build"]],
-      [["npm", "run", "typecheck"]],
-      [["npm", "test"]],
+      [[...timeoutCommand, "npm", "run", "build"]],
+      [[...timeoutCommand, "npm", "run", "typecheck"]],
+      [[...timeoutCommand, "npm", "test"]],
     ]);
     expect(qualityHost.dispose).toHaveBeenCalledOnce();
   });
