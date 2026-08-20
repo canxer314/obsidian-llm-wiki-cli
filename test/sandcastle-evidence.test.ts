@@ -4,6 +4,7 @@ import {
   createSandcastleEvidenceRecorder,
   recordSandcastleGate,
   recordSandcastleMerge,
+  recordSandcastleSession,
   recordSandcastleWorkflow,
   type SandcastleExecutionContext,
 } from "../.sandcastle/evidence.js";
@@ -92,6 +93,48 @@ describe("Sandcastle structured evidence", () => {
       ...context,
       outcome: "failed",
     });
+  });
+
+  it("records a strict session lifecycle with UTC and monotonic duration", async () => {
+    const events: unknown[] = [];
+    const evidence = createSandcastleEvidenceRecorder((event) => events.push(event));
+    let monotonicMs = 100;
+
+    await expect(recordSandcastleSession(
+      evidence,
+      context,
+      { role: "planner", stage: "planner", attempt: 1, sessionName: "planner-issue-142" },
+      async () => { monotonicMs = 850; return "blocked"; },
+      {
+        monotonicNow: () => monotonicMs,
+        utcNow: () => new Date("2026-08-20T12:00:00.000Z"),
+        outcome: (result) => result,
+      },
+    )).resolves.toBe("blocked");
+
+    expect(events).toEqual([
+      {
+        kind: "session-started", ...context, role: "planner", stage: "planner",
+        attempt: 1, sessionName: "planner-issue-142",
+        timestamp: "2026-08-20T12:00:00.000Z",
+      },
+      {
+        kind: "session-finished", ...context, role: "planner", stage: "planner",
+        attempt: 1, sessionName: "planner-issue-142",
+        timestamp: "2026-08-20T12:00:00.000Z", durationMs: 750, outcome: "blocked",
+      },
+    ]);
+  });
+
+  it("fails closed on evidence sink failure and never serializes activity payload", async () => {
+    const payload = "token=secret /home/private $(curl endpoint) 源码";
+    const evidence = createSandcastleEvidenceRecorder(() => { throw new Error("evidence sink failed"); });
+    await expect(recordSandcastleSession(
+      evidence,
+      context,
+      { role: "reviewer", stage: "reviewer", attempt: 1, sessionName: "reviewer-pr-1" },
+      async () => payload,
+    )).rejects.toThrow("evidence sink failed");
   });
 
   it("records a gate error against the known head before rethrowing", async () => {

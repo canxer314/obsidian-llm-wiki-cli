@@ -5,6 +5,8 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import { agentActivityLoggingFields } from "./agent-session-observability.ts";
+import { recordSandcastleSession } from "./evidence.ts";
 import type {
   SandcastleEvidenceRecorder,
   SandcastleExecutionContext,
@@ -90,20 +92,19 @@ export function createSandcastleImplementerSession(options: {
       const sessionName = request.repair === undefined
         ? `implementer-issue-${request.plan.issue.number}`
         : `implementer-repair-issue-${request.plan.issue.number}-attempt-${request.repair.attempt}`;
-      if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.record({
-          kind: "session-started",
-          ...options.execution,
-          role: "implementer",
-          attempt: request.repair?.attempt ?? 0,
-          sessionName,
-          ...(request.repair === undefined ? {} : {
-            pullRequestNumber: request.repair.pullRequestNumber,
-            revision: request.repair.revision,
-          }),
-        });
-      }
-      const result = await runAgent({
+      const attempt = request.repair?.attempt ?? 0;
+      const fields = {
+        role: "implementer" as const,
+        stage: request.repair === undefined ? "implementer" as const : "repair" as const,
+        attempt,
+        sessionName,
+        ...(request.repair === undefined ? {} : {
+          pullRequestNumber: request.repair.pullRequestNumber,
+          revision: request.repair.revision,
+        }),
+      };
+      const runSession = async () => {
+        const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: request.repair === undefined
@@ -116,11 +117,15 @@ export function createSandcastleImplementerSession(options: {
         },
         maxIterations: 1,
         name: sessionName,
+        ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: request.repair === undefined
           ? initialImplementerPrompt(request.branch, request.plan)
           : repairImplementerPrompt(request.branch, request.plan, request.repair),
-      });
-      return { branch: result.branch, commits: result.commits };
+        });
+        return { branch: result.branch, commits: result.commits };
+      };
+      if (options.evidence === undefined || options.execution === undefined) return runSession();
+      return recordSandcastleSession(options.evidence, options.execution, fields, runSession);
     },
   };
 }

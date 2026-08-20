@@ -526,6 +526,9 @@ describe("Sandcastle CLI", () => {
         role: null,
         health: "active",
         lastObservedActivity: null,
+        activityAgeMs: null,
+        stageElapsedMs: 0,
+        warning: null,
       },
       expect.objectContaining({
         kind: "transition",

@@ -109,14 +109,13 @@ describe("Sandcastle Implementer session adapter", () => {
     expect(request.prompt).toContain("git push origin sandcastle/issue-103");
     expect(request.prompt).toContain("Do not create another Pull Request");
     expect(request.prompt).not.toContain("gh pr create");
-    expect(evidence.record).toHaveBeenCalledWith({
-      kind: "session-started",
-      ...execution,
-      role: "implementer",
-      attempt: 2,
-      sessionName: request.name,
-      pullRequestNumber: 321,
-      revision: "a".repeat(40),
-    });
+    expect(evidence.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      kind: "session-started", ...execution, role: "implementer", stage: "repair",
+      attempt: 2, sessionName: request.name, pullRequestNumber: 321,
+      revision: "a".repeat(40), timestamp: expect.any(String),
+    }));
+    expect(evidence.record).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      kind: "session-finished", outcome: "completed", durationMs: expect.any(Number),
+    }));
   });
 });

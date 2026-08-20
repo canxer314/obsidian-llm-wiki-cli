@@ -6,6 +6,8 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import { agentActivityLoggingFields } from "./agent-session-observability.ts";
+import { recordSandcastleSession } from "./evidence.ts";
 import type {
   SandcastleEvidenceRecorder,
   SandcastleExecutionContext,
@@ -39,29 +41,31 @@ export function createSandcastlePlannerSession(options: {
   return {
     async run(request) {
       const sessionName = `planner-issue-${request.issueNumber}`;
-      if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.record({
-          kind: "session-started",
-          ...options.execution,
-          role: "planner",
-          attempt: 1,
-          sessionName,
-        });
-      }
-      const result = await runAgent({
+      const runSession = async () => {
+        const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: options.hooks,
         branchStrategy: { type: "head" },
         maxIterations: 1,
         name: sessionName,
+        ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: plannerPrompt(request.issueNumber),
         output: Output.object({
           tag: request.output.tag,
           schema: request.output.schema,
         }),
-      });
-      return result.output;
+        });
+        return result.output;
+      };
+      if (options.evidence === undefined || options.execution === undefined) return runSession();
+      return recordSandcastleSession(
+        options.evidence,
+        options.execution,
+        { role: "planner", stage: "planner", attempt: 1, sessionName },
+        runSession,
+        { outcome: (output) => output.status === "blocked" ? "blocked" : "completed" },
+      );
     },
   };
 }

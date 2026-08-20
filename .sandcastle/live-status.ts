@@ -1,3 +1,5 @@
+import { classifyAgentStreamEvent } from "./agent-activity.ts";
+
 export const SANDCASTLE_WORKFLOW_STAGES = [
   "startup",
   "planner",
@@ -13,7 +15,7 @@ export const SANDCASTLE_WORKFLOW_STAGES = [
 
 export type SandcastleWorkflowStage = typeof SANDCASTLE_WORKFLOW_STAGES[number];
 export type SandcastleRole = "planner" | "implementer" | "reviewer" | "merger";
-export type SandcastleHealth = "active" | "completed" | "failed";
+export type SandcastleHealth = "active" | "warning" | "completed" | "failed";
 export type SandcastleObservedActivity =
   | "starting"
   | "waiting"
@@ -22,10 +24,19 @@ export type SandcastleObservedActivity =
   | "executing-command"
   | "executing-other-tool"
   | "completed";
+export type SandcastleWarning =
+  | "agent-idle"
+  | "planner-over-soft-limit"
+  | "implementer-over-soft-limit"
+  | "reviewer-over-soft-limit"
+  | "repair-over-soft-limit"
+  | "merger-over-soft-limit"
+  | "workflow-over-soft-limit";
 export type SandcastleStatusFormat = "human" | "json";
 
 export interface SandcastleLiveStatusPort {
   transition(stage: SandcastleWorkflowStage): void;
+  observeAgentEvent(event: unknown): void;
 }
 
 export interface SandcastleLiveStatusEvent {
@@ -41,6 +52,9 @@ export interface SandcastleLiveStatusEvent {
   readonly role: SandcastleRole | null;
   readonly health: SandcastleHealth;
   readonly lastObservedActivity: SandcastleObservedActivity | null;
+  readonly activityAgeMs: number | null;
+  readonly stageElapsedMs: number;
+  readonly warning: SandcastleWarning | null;
 }
 
 export interface SandcastleIdleStatusEvent {
@@ -56,6 +70,9 @@ export interface SandcastleIdleStatusEvent {
   readonly role: null;
   readonly health: null;
   readonly lastObservedActivity: null;
+  readonly activityAgeMs: null;
+  readonly stageElapsedMs: 0;
+  readonly warning: null;
 }
 
 export type SandcastleStatusEvent = SandcastleLiveStatusEvent | SandcastleIdleStatusEvent;
@@ -76,13 +93,25 @@ interface ActiveStatus {
   readonly batchId: number;
   readonly issueNumber: number;
   readonly startedAt: number;
+  stageStartedAt: number;
   workflowStage: SandcastleWorkflowStage;
   role: SandcastleRole | null;
   health: SandcastleHealth;
   lastObservedActivity: SandcastleObservedActivity | null;
+  lastActivityAt: number | null;
+  readonly warnings: Set<SandcastleWarning>;
 }
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const AGENT_IDLE_MS = 5 * 60_000;
+const WORKFLOW_SOFT_LIMIT_MS = 12 * 60 * 60_000;
+const STAGE_SOFT_LIMITS: Partial<Record<SandcastleWorkflowStage, number>> = {
+  planner: 15 * 60_000,
+  implementer: 75 * 60_000,
+  reviewer: 30 * 60_000,
+  repair: 60 * 60_000,
+  merger: 45 * 60_000,
+};
 const STATUS_WARNING = "Sandcastle live status disabled after output failure";
 
 function roleFor(stage: SandcastleWorkflowStage): SandcastleRole | null {
@@ -119,7 +148,7 @@ export interface SandcastleLiveStatusRegistry {
   readonly dispose: () => void;
 }
 
-const NOOP_PORT: SandcastleLiveStatusPort = { transition() {} };
+const NOOP_PORT: SandcastleLiveStatusPort = { transition() {}, observeAgentEvent() {} };
 const NOOP_REGISTRY: SandcastleLiveStatusRegistry = {
   startIssue: () => NOOP_PORT,
   finishIssue() {},
@@ -197,21 +226,52 @@ export function createSandcastleLiveStatus(options: {
     }
   };
 
-  const emitActive = (status: ActiveStatus, kind: "transition" | "heartbeat") => {
+  const emitActive = (
+    status: ActiveStatus,
+    kind: "transition" | "heartbeat",
+    warning: SandcastleWarning | null = null,
+  ) => {
     try {
+      const now = monotonicNow();
       emit({
         kind,
         runId: options.runId,
         batchId: status.batchId,
         issueNumber: status.issueNumber,
-        elapsedMs: Math.max(0, Math.floor(monotonicNow() - status.startedAt)),
+        elapsedMs: Math.max(0, Math.floor(now - status.startedAt)),
         workflowStage: status.workflowStage,
         role: status.role,
         health: status.health,
         lastObservedActivity: status.lastObservedActivity,
+        activityAgeMs: status.lastActivityAt === null
+          ? null
+          : Math.max(0, Math.floor(now - status.lastActivityAt)),
+        stageElapsedMs: Math.max(0, Math.floor(now - status.stageStartedAt)),
+        warning,
       });
     } catch {
       disable();
+    }
+  };
+
+  const emitWarning = (status: ActiveStatus, warning: SandcastleWarning) => {
+    if (status.warnings.has(warning)) return;
+    status.warnings.add(warning);
+    status.health = "warning";
+    emitActive(status, "transition", warning);
+  };
+
+  const checkWarnings = (status: ActiveStatus) => {
+    const now = monotonicNow();
+    if (status.lastActivityAt !== null && now - status.lastActivityAt >= AGENT_IDLE_MS) {
+      emitWarning(status, "agent-idle");
+    }
+    const stageLimit = STAGE_SOFT_LIMITS[status.workflowStage];
+    if (stageLimit !== undefined && now - status.stageStartedAt >= stageLimit) {
+      emitWarning(status, `${status.workflowStage}-over-soft-limit` as SandcastleWarning);
+    }
+    if (now - status.startedAt >= WORKFLOW_SOFT_LIMIT_MS) {
+      emitWarning(status, "workflow-over-soft-limit");
     }
   };
 
@@ -220,7 +280,10 @@ export function createSandcastleLiveStatus(options: {
     try {
       heartbeat = schedule(() => {
         try {
-          for (const status of active.values()) emitActive(status, "heartbeat");
+          for (const status of active.values()) {
+            checkWarnings(status);
+            emitActive(status, "heartbeat");
+          }
         } catch {
           disable();
         }
@@ -253,10 +316,13 @@ export function createSandcastleLiveStatus(options: {
         batchId,
         issueNumber,
         startedAt: issueStartedAt,
+        stageStartedAt: issueStartedAt,
         workflowStage: "startup",
         role: null,
         health: "active",
         lastObservedActivity: null,
+        lastActivityAt: null,
+        warnings: new Set(),
       };
       active.set(issueNumber, status);
       emitActive(status, "transition");
@@ -266,6 +332,19 @@ export function createSandcastleLiveStatus(options: {
           if (!active.has(issueNumber) || status.workflowStage === stage) return;
           status.workflowStage = stage;
           status.role = roleFor(stage);
+          status.stageStartedAt = monotonicNow();
+          status.health = "active";
+          status.warnings.clear();
+          emitActive(status, "transition");
+        },
+        observeAgentEvent(event) {
+          if (!active.has(issueNumber)) return;
+          const activity = classifyAgentStreamEvent(event);
+          const now = monotonicNow();
+          status.lastActivityAt = now;
+          const nextActivity = activity ?? status.lastObservedActivity ?? "starting";
+          if (status.lastObservedActivity === nextActivity) return;
+          status.lastObservedActivity = nextActivity;
           emitActive(status, "transition");
         },
       };
@@ -300,6 +379,9 @@ export function createSandcastleLiveStatus(options: {
         role: null,
         health: null,
         lastObservedActivity: null,
+        activityAgeMs: null,
+        stageElapsedMs: 0,
+        warning: null,
       });
     },
     dispose() {
