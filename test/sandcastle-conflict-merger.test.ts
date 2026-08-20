@@ -53,15 +53,14 @@ describe("Sandcastle conflict Merger", () => {
     expect(agentRequest.prompt).toContain(`git merge ${request.targetSha}`);
     expect(agentRequest.prompt).toContain("Do not rebase or force-push");
     expect(agentRequest.prompt).not.toContain("gh pr create");
-    expect(evidence.record).toHaveBeenCalledWith({
-      kind: "session-started",
-      ...execution,
-      role: "merger",
-      attempt: 1,
-      sessionName: agentRequest.name,
-      pullRequestNumber: 321,
-      revision: request.pullRequest.headSha,
-    });
+    expect(evidence.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      kind: "session-started", ...execution, role: "merger", stage: "merger",
+      attempt: 1, sessionName: agentRequest.name, pullRequestNumber: 321,
+      revision: request.pullRequest.headSha, timestamp: expect.any(String),
+    }));
+    expect(evidence.record).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      kind: "session-finished", outcome: "completed", durationMs: expect.any(Number),
+    }));
   });
 
   it("verifies the Merger pushed a new normal merge to the existing Pull Request", async () => {

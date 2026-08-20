@@ -9,6 +9,8 @@ import {
 } from "@ai-hero/sandcastle";
 import { z } from "zod";
 
+import { agentActivityLoggingFields } from "./agent-session-observability.ts";
+import { recordSandcastleSession } from "./evidence.ts";
 import type {
   SandcastleEvidenceRecorder,
   SandcastleExecutionContext,
@@ -74,18 +76,16 @@ export function createSandcastleReviewerSession(options: {
       const suffix = request.revision.slice(0, 12);
       const sessionId = createSessionId();
       const sessionName = `reviewer-pr-${request.pullRequestNumber}-${suffix}-attempt-${attempt}`;
-      if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.record({
-          kind: "session-started",
-          ...options.execution,
-          role: "reviewer",
-          attempt,
-          sessionName,
-          pullRequestNumber: request.pullRequestNumber,
-          revision: request.revision,
-        });
-      }
-      const result = await runAgent({
+      const fields = {
+        role: "reviewer" as const,
+        stage: "reviewer" as const,
+        attempt,
+        sessionName,
+        pullRequestNumber: request.pullRequestNumber,
+        revision: request.revision,
+      };
+      const runSession = async () => {
+        const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: options.hooks,
@@ -96,16 +96,20 @@ export function createSandcastleReviewerSession(options: {
         },
         maxIterations: 1,
         name: sessionName,
+        ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: reviewerPrompt(request.pullRequestNumber, request.revision),
         output: Output.object({
           tag: "review",
           schema: reviewerOutputSchema,
         }),
-      });
-      if (result.commits.length > 0) {
-        throw new Error("Reviewer session must not create commits");
-      }
-      return result.output;
+        });
+        if (result.commits.length > 0) {
+          throw new Error("Reviewer session must not create commits");
+        }
+        return result.output;
+      };
+      if (options.evidence === undefined || options.execution === undefined) return runSession();
+      return recordSandcastleSession(options.evidence, options.execution, fields, runSession);
     },
   };
 }

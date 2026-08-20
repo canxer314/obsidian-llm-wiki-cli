@@ -5,6 +5,8 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import { agentActivityLoggingFields } from "./agent-session-observability.ts";
+import { recordSandcastleSession } from "./evidence.ts";
 import type {
   SandcastleEvidenceRecorder,
   SandcastleExecutionContext,
@@ -49,18 +51,16 @@ export function createSandcastleMergerSession(options: {
   return {
     async run(request) {
       const sessionName = `merger-issue-${request.branch.split("-").at(-1)}-attempt-${request.request.attempt}`;
-      if (options.evidence !== undefined && options.execution !== undefined) {
-        options.evidence.record({
-          kind: "session-started",
-          ...options.execution,
-          role: "merger",
-          attempt: request.request.attempt,
-          sessionName,
-          pullRequestNumber: request.request.pullRequest.number,
-          revision: request.request.pullRequest.headSha,
-        });
-      }
-      const result = await runAgent({
+      const fields = {
+        role: "merger" as const,
+        stage: "merger" as const,
+        attempt: request.request.attempt,
+        sessionName,
+        pullRequestNumber: request.request.pullRequest.number,
+        revision: request.request.pullRequest.headSha,
+      };
+      const runSession = async () => {
+        const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: options.hooks,
@@ -71,9 +71,13 @@ export function createSandcastleMergerSession(options: {
         },
         maxIterations: 1,
         name: sessionName,
+        ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: mergerPrompt(request.branch, request.request),
-      });
-      return { branch: result.branch, commits: result.commits };
+        });
+        return { branch: result.branch, commits: result.commits };
+      };
+      if (options.evidence === undefined || options.execution === undefined) return runSession();
+      return recordSandcastleSession(options.evidence, options.execution, fields, runSession);
     },
   };
 }

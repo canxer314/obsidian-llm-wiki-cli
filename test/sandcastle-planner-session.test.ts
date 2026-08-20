@@ -65,12 +65,12 @@ describe("Sandcastle Planner session adapter", () => {
       "Determine whether the Issue explicitly permits changes to Sandcastle or GitHub automation configuration",
     );
     expect(request.prompt).not.toContain(output.issue.body);
-    expect(evidence.record).toHaveBeenCalledWith({
-      kind: "session-started",
-      ...execution,
-      role: "planner",
-      attempt: 1,
-      sessionName: request.name,
-    });
+    expect(evidence.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      kind: "session-started", ...execution, role: "planner", stage: "planner",
+      attempt: 1, sessionName: request.name, timestamp: expect.any(String),
+    }));
+    expect(evidence.record).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      kind: "session-finished", outcome: "completed", durationMs: expect.any(Number),
+    }));
   });
 });

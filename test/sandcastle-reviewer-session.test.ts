@@ -55,15 +55,14 @@ describe("Sandcastle Reviewer session adapter", () => {
     expect(request.prompt).toContain("Approved or Changes requested");
     expect(request.prompt).toContain("<review>");
     expect(request.output).toMatchObject({ _tag: "object", tag: "review" });
-    expect(evidence.record).toHaveBeenCalledWith({
-      kind: "session-started",
-      ...execution,
-      role: "reviewer",
-      attempt: 1,
-      sessionName: request.name,
-      pullRequestNumber: 321,
-      revision,
-    });
+    expect(evidence.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      kind: "session-started", ...execution, role: "reviewer", stage: "reviewer",
+      attempt: 1, sessionName: request.name, pullRequestNumber: 321, revision,
+      timestamp: expect.any(String),
+    }));
+    expect(evidence.record).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      kind: "session-finished", outcome: "completed", durationMs: expect.any(Number),
+    }));
   });
 
   it.each([
