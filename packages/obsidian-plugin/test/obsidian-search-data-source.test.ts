@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   SearchSnapshotManager,
+  VaultDiscoverService,
   createObsidianSearchDataSource,
   renderRegisteredReference,
 } from "../src/index.js";
@@ -77,6 +78,118 @@ describe("Obsidian semantic Content Version evidence", () => {
     const note = snapshots.current()?.notes[0];
     expect(note?.contentVersion).toBe(`sha256:${byteVersion(bytes)}`);
     expect(note?.semanticContentVersion).toBe(`sha256:${byteVersion(bytes)}`);
+  });
+  it("withholds stale cache semantics while retaining current content", async () => {
+    const content = "new";
+    const original = "[[Old]]";
+    const snapshots = new SearchSnapshotManager(createObsidianSearchDataSource({
+      markdownFiles: () => [{ path: "Note.md" }],
+      readBinary: async () => new TextEncoder().encode(content),
+      fileCache: () => ({
+        frontmatter: { status: "stale" },
+        tags: [{ tag: "#stale" }],
+        headings: [{ heading: "Stale", level: 1 }],
+        links: [{ link: "Old", original, position: position(0, original.length) }],
+      }),
+      semanticContentMatches: () => false,
+      resolveLink: () => "Old.md",
+      candidatePaths: () => ["Old.md"],
+      validSubpath: () => true,
+      resolvedLinks: () => ({ "Note.md": { "Old.md": 1 } }),
+      unresolvedLinks: () => ({ "Note.md": { Missing: 1 } }),
+      parseFrontmatter: () => ({ status: "stale" }),
+      allTags: () => ["#stale"],
+    }));
+    await snapshots.rebuild();
+
+    const note = snapshots.current()?.notes[0];
+    expect(note).toMatchObject({
+      content,
+      frontmatter: null,
+      tags: [],
+      headings: [],
+      references: [],
+      resolvedLinks: {},
+      unresolvedLinks: {},
+    });
+    expect(note?.semanticContentVersion).toBeUndefined();
+
+    const discover = new VaultDiscoverService(snapshots);
+    for (const query of [
+      { frontmatter: { key: "status", equals: "stale" } },
+      { tag: { exact: "#stale" } },
+      { reference: { profile: "wikilink", target: "Old" } },
+      { graph: { relation: "links_to", path: "Old.md", maxDepth: 1 } },
+      { unresolvedLink: { target: "Missing" } },
+    ]) {
+      await expect(discover.execute({
+        query,
+        projection: { matches: false, outline: false, frontmatter: false, references: false },
+        order: { by: "path", direction: "asc" },
+        page: { maxItems: 100, continuation: null },
+      })).resolves.toMatchObject({ items: [], complete: true });
+    }
+  });
+
+  it("keeps cache semantics when the configured matcher accepts current bytes", async () => {
+    const content = "current";
+    const snapshots = new SearchSnapshotManager(createObsidianSearchDataSource({
+      markdownFiles: () => [{ path: "Note.md" }],
+      readBinary: async () => new TextEncoder().encode(content),
+      fileCache: () => ({
+        frontmatter: { status: "current" },
+        tags: [{ tag: "#current" }],
+        headings: [{ heading: "Current", level: 1 }],
+      }),
+      semanticContentMatches: () => true,
+      resolveLink: () => null,
+      candidatePaths: () => [],
+      validSubpath: () => false,
+      resolvedLinks: () => ({ "Note.md": { "Target.md": 1 } }),
+      unresolvedLinks: () => ({ "Note.md": { Missing: 1 } }),
+      parseFrontmatter: () => ({ status: "current" }),
+      allTags: () => ["#current"],
+    }));
+    await snapshots.rebuild();
+
+    expect(snapshots.current()?.notes[0]).toMatchObject({
+      content,
+      contentVersion: `sha256:${byteVersion(utf8(content))}`,
+      semanticContentVersion: `sha256:${byteVersion(utf8(content))}`,
+      frontmatter: { status: "current" },
+      tags: ["#current"],
+      headings: [{ heading: "Current", level: 1 }],
+      resolvedLinks: { "Target.md": 1 },
+      unresolvedLinks: { Missing: 1 },
+    });
+  });
+
+  it("keeps cache semantics when no matcher is configured", async () => {
+    const snapshots = new SearchSnapshotManager(createObsidianSearchDataSource({
+      markdownFiles: () => [{ path: "Note.md" }],
+      readBinary: async () => new TextEncoder().encode("current"),
+      fileCache: () => ({
+        frontmatter: { status: "cached" },
+        tags: [{ tag: "#cached" }],
+        headings: [{ heading: "Cached", level: 1 }],
+      }),
+      resolveLink: () => null,
+      candidatePaths: () => [],
+      validSubpath: () => false,
+      resolvedLinks: () => ({ "Note.md": { "Target.md": 1 } }),
+      unresolvedLinks: () => ({ "Note.md": { Missing: 1 } }),
+      parseFrontmatter: () => ({ status: "cached" }),
+      allTags: () => ["#cached"],
+    }));
+    await snapshots.rebuild();
+
+    expect(snapshots.current()?.notes[0]).toMatchObject({
+      frontmatter: { status: "cached" },
+      tags: ["#cached"],
+      headings: [{ heading: "Cached", level: 1 }],
+      resolvedLinks: { "Target.md": 1 },
+      unresolvedLinks: { Missing: 1 },
+    });
   });
 });
 

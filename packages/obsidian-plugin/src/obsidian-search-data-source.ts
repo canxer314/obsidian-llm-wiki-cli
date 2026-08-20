@@ -298,10 +298,17 @@ export function createObsidianSearchDataSource(
       if (adapter.semanticContentMatches !== undefined) {
         const bytes = await adapter.readBinary(path);
         const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-        if (adapter.semanticContentMatches(path, raw)) {
-          contentVersion =
-            `sha256:${createHash("sha256").update(raw).digest("hex")}`;
+        if (!adapter.semanticContentMatches(path, raw)) {
+          return {
+            frontmatter: null,
+            tags: [],
+            headings: [],
+            references: [],
+            resolvedLinks: {},
+            unresolvedLinks: {},
+          };
         }
+        contentVersion = `sha256:${createHash("sha256").update(raw).digest("hex")}`;
       }
       const references = [
         ...(cache.links ?? []),
