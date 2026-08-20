@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!package.json
+!package-lock.json
+!.sandcastle/
+.sandcastle/*
+!.sandcastle/Dockerfile
+!packages/
+packages/*
+!packages/*/
+packages/*/*
+!packages/*/package.json

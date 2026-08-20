@@ -11,6 +11,7 @@ import {
 export interface LocalQualityProcessOptions {
   readonly cwd: string;
   readonly allowFailure?: boolean;
+  readonly environment?: Readonly<Record<string, string>>;
 }
 
 export interface LocalQualityProcess {
@@ -27,8 +28,39 @@ export interface DockerLocalQualityHostOptions {
   readonly runId: string;
   readonly uid: number;
   readonly gid: number;
+  readonly environment?: Readonly<Record<string, string>>;
   readonly process?: LocalQualityProcess;
   readonly image?: string;
+}
+
+const PROXY_ENVIRONMENT_NAMES = new Set([
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+]);
+
+function proxyEnvironment(
+  environment: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  if (environment === undefined) return {};
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name, value]) => PROXY_ENVIRONMENT_NAMES.has(name) && value.length > 0,
+    ),
+  );
+}
+
+function redactEnvironmentValues(
+  output: string,
+  environment: Readonly<Record<string, string>> | undefined,
+): string {
+  return Object.values(environment ?? {}).reduce(
+    (redacted, value) => value.length === 0 ? redacted : redacted.replaceAll(value, "[REDACTED]"),
+    output,
+  );
 }
 
 class ProcessError extends Error {
@@ -43,6 +75,9 @@ export const nodeProcess: LocalQualityProcess = {
     new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options.cwd,
+        env: options.environment === undefined
+          ? undefined
+          : { ...process.env, ...options.environment },
         stdio: ["ignore", "pipe", "pipe"],
       });
       let output = "";
@@ -54,9 +89,12 @@ export const nodeProcess: LocalQualityProcess = {
       });
       child.on("error", reject);
       child.on("close", (exitCode) => {
-        const result = { exitCode: exitCode ?? 1, output };
+        const result = {
+          exitCode: exitCode ?? 1,
+          output: redactEnvironmentValues(output, options.environment),
+        };
         if (result.exitCode !== 0 && options.allowFailure !== true) {
-          reject(new ProcessError([command, ...args].join(" "), output.trim()));
+          reject(new ProcessError([command, ...args].join(" "), result.output.trim()));
           return;
         }
         resolve(result);
@@ -91,10 +129,20 @@ export function createDockerLocalQualityHost(
   options: DockerLocalQualityHostOptions,
 ): LocalQualityHost {
   const process = options.process ?? nodeProcess;
-  const image = options.image ?? "sandcastle:local-quality";
+  const image = options.image ?? `sandcastle:local-quality-${options.runId}`;
   const worktreePath = join(options.worktreeRoot, options.runId);
   const commandOptions = { cwd: options.repositoryPath } as const;
+  const environment = proxyEnvironment(options.environment);
+  const environmentArgs = Object.keys(environment).flatMap((name) => [
+    "--env",
+    name,
+  ]);
+  const buildEnvironmentArgs = Object.keys(environment).flatMap((name) => [
+    "--build-arg",
+    name,
+  ]);
   let worktreeCreated = false;
+  let imageCreated = false;
   let containerCreated = false;
 
   return {
@@ -113,14 +161,16 @@ export function createDockerLocalQualityHost(
           `AGENT_UID=${options.uid}`,
           "--build-arg",
           `AGENT_GID=${options.gid}`,
+          ...buildEnvironmentArgs,
           "--file",
-          join(options.repositoryPath, ".sandcastle/Dockerfile"),
+          join(worktreePath, ".sandcastle/Dockerfile"),
           "--tag",
           image,
-          options.repositoryPath,
+          worktreePath,
         ],
-        commandOptions,
+        { ...commandOptions, environment },
       );
+      imageCreated = true;
       await process.run(
         "docker",
         [
@@ -136,9 +186,10 @@ export function createDockerLocalQualityHost(
           `${worktreePath}:/home/agent/workspace`,
           "--workdir",
           "/home/agent/workspace",
+          ...environmentArgs,
           image,
         ],
-        commandOptions,
+        { ...commandOptions, environment },
       );
       containerCreated = true;
     },
@@ -147,9 +198,11 @@ export function createDockerLocalQualityHost(
       const result = await process.run(
         "docker",
         ["exec", options.runId, ...CONTAINER_COMMAND, ...command],
-        commandOptions,
+        { ...commandOptions, environment },
       );
-      return containerCommandResult(result.output ?? "");
+      return containerCommandResult(
+        redactEnvironmentValues(result.output ?? "", environment),
+      );
     },
     dispose: async () => {
       const failures: string[] = [];
@@ -161,6 +214,15 @@ export function createDockerLocalQualityHost(
         );
         if (result.exitCode !== 0) failures.push(result.output ?? "Could not remove container");
         containerCreated = false;
+      }
+      if (imageCreated) {
+        const result = await process.run(
+          "docker",
+          ["image", "rm", "--force", image],
+          { ...commandOptions, allowFailure: true },
+        );
+        if (result.exitCode !== 0) failures.push(result.output ?? "Could not remove image");
+        imageCreated = false;
       }
       if (worktreeCreated) {
         const result = await process.run(

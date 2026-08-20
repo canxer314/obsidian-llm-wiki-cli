@@ -73,9 +73,11 @@ describe("Sandcastle Implementer session adapter", () => {
     });
     const evidence = { record: vi.fn() };
     const execution = { runId: "run-1", batchId: 1, issueNumber: 103 };
+    const repairHooks = { sandbox: { onSandboxReady: [{ command: "repair" }] } };
     const session = createSandcastleImplementerSession({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
+      repairHooks,
       runAgent: runAgent as never,
       createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
       evidence: evidence as never,
@@ -100,6 +102,7 @@ describe("Sandcastle Implementer session adapter", () => {
 
     const request = runAgent.mock.calls[0]![0];
     expect(request.name).toBe("implementer-repair-issue-103-attempt-2");
+    expect(request.hooks).toBe(repairHooks);
     expect(request.prompt).toContain("repair attempt 2 of 2");
     expect(request.prompt).toContain("a".repeat(40));
     expect(request.prompt).toContain("Handle the edge case.");

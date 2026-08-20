@@ -30,6 +30,25 @@ ENV NPM_CONFIG_PREFIX="/home/agent/.local"
 ENV PATH="/home/agent/.local/bin:$PATH"
 RUN npm install --global @anthropic-ai/claude-code@2.1.234
 
+WORKDIR /home/agent/cache-seed
+RUN mkdir -p packages/contracts packages/obsidian-plugin
+COPY --chown=${AGENT_UID}:${AGENT_GID} package.json package-lock.json ./
+COPY --chown=${AGENT_UID}:${AGENT_GID} .sandcastle/Dockerfile .sandcastle/Dockerfile
+COPY --chown=${AGENT_UID}:${AGENT_GID} packages/contracts/package.json packages/contracts/package.json
+COPY --chown=${AGENT_UID}:${AGENT_GID} packages/obsidian-plugin/package.json packages/obsidian-plugin/package.json
+RUN npm ci --ignore-scripts \
+  && rm -rf node_modules packages/*/node_modules \
+  && npm cache verify \
+  && sha256sum \
+    package.json \
+    package-lock.json \
+    .sandcastle/Dockerfile \
+    packages/contracts/package.json \
+    packages/obsidian-plugin/package.json \
+    > /home/agent/.npm/sandcastle-image.sha256 \
+  && printf '%s\n' "$(node --version)" "$(npm --version)" \
+    > /home/agent/.npm/sandcastle-runtime.versions
+
 WORKDIR /home/agent
 
 # In worktree sandbox mode, Sandcastle bind-mounts the git worktree at /home/agent/workspace

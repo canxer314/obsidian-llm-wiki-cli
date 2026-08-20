@@ -64,6 +64,9 @@ describe("Sandcastle private configuration adapter", () => {
       HTTPS_PROXY: "http://127.0.0.1:7890",
       GH_TOKEN: "github-secret",
     });
+    expect(config.proxyEnvironment).toEqual({
+      HTTPS_PROXY: "http://127.0.0.1:7890",
+    });
     expect(config.environment).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
     expect(config.environment).not.toHaveProperty(
       "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
@@ -87,7 +90,7 @@ describe("Sandcastle private configuration adapter", () => {
       [
         "GH_TOKEN=github-secret",
         "ANTHROPIC_AUTH_TOKEN=override-secret",
-        "HTTPS_PROXY=",
+        "HTTPS_PROXY=http://private-proxy:7890",
         "UNRELATED_SECRET=ignored",
         "",
       ].join("\n"),
@@ -96,7 +99,10 @@ describe("Sandcastle private configuration adapter", () => {
     const config = await loadSandcastleConfig({ settingsPath, envPath });
 
     expect(config.environment.ANTHROPIC_AUTH_TOKEN).toBe("override-secret");
-    expect(config.environment.HTTPS_PROXY).toBe("http://settings-proxy:7890");
+    expect(config.environment.HTTPS_PROXY).toBe("http://private-proxy:7890");
+    expect(config.proxyEnvironment).toEqual({
+      HTTPS_PROXY: "http://private-proxy:7890",
+    });
     expect(config.environment).not.toHaveProperty("UNRELATED_SECRET");
   });
 

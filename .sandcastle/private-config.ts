@@ -1,6 +1,15 @@
 import { lstat, readFile } from "node:fs/promises";
 import { parseEnv } from "node:util";
 
+const PROXY_ENVIRONMENT_NAMES = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+] as const;
+
 const CLAUDE_ENVIRONMENT_WHITELIST = new Set([
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_AUTH_TOKEN",
@@ -8,12 +17,7 @@ const CLAUDE_ENVIRONMENT_WHITELIST = new Set([
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-  "HTTP_PROXY",
-  "HTTPS_PROXY",
-  "NO_PROXY",
-  "http_proxy",
-  "https_proxy",
-  "no_proxy",
+  ...PROXY_ENVIRONMENT_NAMES,
 ]);
 
 const PRIVATE_ENVIRONMENT_WHITELIST = new Set([
@@ -34,6 +38,7 @@ export interface SandcastleModels {
 
 export interface SandcastlePrivateConfig {
   readonly environment: Readonly<Record<string, string>>;
+  readonly proxyEnvironment: Readonly<Record<string, string>>;
   readonly models: SandcastleModels;
 }
 
@@ -156,6 +161,11 @@ export async function loadSandcastleConfig(
   const environment = Object.fromEntries(
     Object.entries(merged).filter(([name]) => !name.startsWith("SANDCASTLE_")),
   );
+  const proxyEnvironment = Object.fromEntries(
+    PROXY_ENVIRONMENT_NAMES.flatMap((name) =>
+      environment[name] === undefined ? [] : [[name, environment[name]]]
+    ),
+  );
 
   const roleOverrideCount = [
     "SANDCASTLE_PLANNER_MODEL",
@@ -165,5 +175,5 @@ export async function loadSandcastleConfig(
   paths.log?.(
     `Loaded Sandcastle private configuration (${Object.keys(environment).length} environment variables; ${roleOverrideCount} role model overrides)`,
   );
-  return { environment, models };
+  return { environment, proxyEnvironment, models };
 }

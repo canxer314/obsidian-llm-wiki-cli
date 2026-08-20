@@ -59,7 +59,15 @@ async function setupAttempt(
 ): Promise<LocalQualityResult | undefined> {
   try {
     await host.setup(revision);
-    const install = await host.run(["npm", "ci"]);
+    const install = await host.run([
+      "timeout",
+      "--signal=TERM",
+      "--kill-after=10s",
+      "240s",
+      "npm",
+      "ci",
+      "--offline",
+    ]);
     return install.exitCode === 0
       ? undefined
       : terminalResult("error", "setup", install.output);
