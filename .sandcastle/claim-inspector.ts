@@ -69,6 +69,7 @@ export interface ClaimInspectionOptions {
 }
 
 function renderPullRequestItems(snapshot: ClaimReconciliationSnapshot): string {
+  if (snapshot.pullRequests.state === "unknown") return "unknown";
   if (snapshot.pullRequests.items.length === 0) return "none";
   return snapshot.pullRequests.items.map((pullRequest) =>
     `#${pullRequest.number}:${pullRequest.state}:${pullRequest.headSha}:closes-issue=${pullRequest.closesIssue}`

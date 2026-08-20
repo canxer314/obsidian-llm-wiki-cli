@@ -63,6 +63,18 @@ describe("Sandcastle claim inspector", () => {
     expect(rendered).not.toMatch(/(?:\/home\/|cleanup|delete|docker rm|git branch)/u);
   });
 
+  it("renders unknown PR items as unknown rather than empty", () => {
+    const unknownPullRequests: ClaimReconciliationSnapshot = {
+      ...snapshot(),
+      pullRequests: { state: "unknown", count: "unknown", items: [] },
+      classification: "unknown",
+      recommendedAction: "manual-review",
+    };
+
+    expect(renderClaimInspectionHuman(unknownPullRequests))
+      .toContain("pull-requests.items=unknown");
+  });
+
   it("renders a versioned JSON projection of the canonical snapshot", () => {
     expect(JSON.parse(renderClaimInspectionJson(snapshot()))).toEqual({
       sandcastleClaimInspection: { version: 1, ...snapshot() },
