@@ -40,7 +40,12 @@ export class SandcastleWorkflowError extends Error {
   }
 }
 
+function isCancellation(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 function errorSummary(error: unknown): string {
+  if (isCancellation(error)) return "Sandcastle workflow interrupted";
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -73,15 +78,16 @@ export async function runFailureAwareWorkflow<TResult>(
     );
   } catch (error) {
     if (error instanceof SandcastleWorkflowError) throw error;
+    const failureStage = isCancellation(error) ? "interrupted" : stage;
     const finalization = await finalizeFailure({
       issueNumber: options.issueNumber,
       ...(pullRequest === undefined ? {} : {
         pullRequestNumber: pullRequest.number,
         revision: pullRequest.headSha,
       }),
-      stage,
+      stage: failureStage,
       summary: errorSummary(error),
     }, options.github);
-    throw new SandcastleWorkflowError(stage, finalization.failures, { cause: error });
+    throw new SandcastleWorkflowError(failureStage, finalization.failures, { cause: error });
   }
 }

@@ -251,26 +251,6 @@ async function claimEligibleIssue<TResult>(
   return claimed;
 }
 
-async function runIssue<TResult>(
-  context: SandcastleExecutionContext,
-  dependencies: SandcastleCliDependencies<TResult>,
-  status: ReturnType<typeof createSandcastleLiveStatus>,
-): Promise<TResult | undefined> {
-  if (!await claimEligibleIssue(context.issueNumber, dependencies)) return;
-  const liveStatus = status.startIssue(context.batchId, context.issueNumber);
-  try {
-    const result = await dependencies.processIssue(context.issueNumber, {
-      ...context,
-      liveStatus,
-    });
-    status.finishIssue(context.issueNumber, "completed");
-    return result;
-  } catch (error) {
-    status.finishIssue(context.issueNumber, "failed");
-    throw error;
-  }
-}
-
 export async function runSandcastleCli<TResult>(
   argv: readonly string[],
   dependencies: SandcastleCliDependencies<TResult>,
@@ -417,7 +397,9 @@ export async function runSandcastleCli<TResult>(
           let outcome: "success" | "failure" = "success";
           const liveStatus = status.startIssue(workflowBatchId, issue.number);
           activeStatuses.add(liveStatus);
-          if (draining) liveStatus.transition("draining");
+          if (signalCount >= 3) liveStatus.transition("forced-exit");
+          else if (signalCount >= 2) liveStatus.transition("cancelling");
+          else if (draining) liveStatus.transition("draining");
           const workflow = Promise.resolve(dependencies.processIssue(issue.number, {
             runId,
             batchId: workflowBatchId,
@@ -455,6 +437,7 @@ export async function runSandcastleCli<TResult>(
       issueNumber: options.issueNumber!,
       signal: controller.signal,
     };
+    if (controller.signal.aborted) throw controller.signal.reason;
     if (!await claimEligibleIssue(context.issueNumber, dependencies)) return;
     const liveStatus = status.startIssue(context.batchId, context.issueNumber);
     activeStatuses.add(liveStatus);

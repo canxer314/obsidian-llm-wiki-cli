@@ -70,6 +70,26 @@ describe("Sandcastle controlled cancellation", () => {
     expect(signals.size()).toBe(0);
   });
 
+  it("does not claim a single Issue when cancellation arrives during startup", async () => {
+    const signals = fakeSignals();
+    const startup = deferred();
+    const github = githubPort();
+    vi.mocked(github.ensureLabel).mockImplementation(() => startup.promise);
+    const processIssue = vi.fn().mockResolvedValue(undefined);
+    const running = runSandcastleCli(["--issue", "207"], {
+      github,
+      signalSource: signals,
+      processIssue,
+    });
+
+    await vi.waitFor(() => expect(github.ensureLabel).toHaveBeenCalledOnce());
+    signals.emit("SIGINT");
+    startup.resolve();
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+    expect(github.claimIssue).not.toHaveBeenCalled();
+    expect(processIssue).not.toHaveBeenCalled();
+  });
+
   it("drains watch work on the first signal and cancels all active work on the second", async () => {
     const signals = fakeSignals();
     const workflows = new Map([[206, deferred()], [207, deferred()]]);
@@ -96,6 +116,56 @@ describe("Sandcastle controlled cancellation", () => {
     workflows.get(207)!.resolve();
     await expect(running).resolves.toBeUndefined();
     expect(signals.size()).toBe(0);
+  });
+
+  it("forces watch exit on the third signal and records fixed interruption evidence", async () => {
+    const signals = fakeSignals();
+    const workflow = deferred();
+    const warnings: string[] = [];
+    const forceExit = vi.fn();
+    const evidence: unknown[] = [];
+    let monotonicMs = 1_000;
+    const running = runSandcastleCli(["--watch", "--no-live-status"], {
+      github: githubPort([207]),
+      signalSource: signals,
+      warningSink: (warning) => warnings.push(warning),
+      forceExit,
+      monotonicNow: () => monotonicMs,
+      utcNow: () => new Date("2026-08-20T12:00:00.000Z"),
+      recordInterruption: (event) => evidence.push(event),
+      processIssue: async (_number, execution) => {
+        await workflow.promise;
+        if (execution.signal.aborted) throw execution.signal.reason;
+      },
+    });
+
+    await vi.waitFor(() => expect(vi.mocked(forceExit)).not.toHaveBeenCalled());
+    await vi.waitFor(() => expect(evidence).toHaveLength(0));
+    signals.emit("SIGINT");
+    monotonicMs = 1_250;
+    signals.emit("SIGTERM");
+    monotonicMs = 1_500;
+    signals.emit("SIGINT");
+
+    expect(forceExit).toHaveBeenCalledWith(1);
+    expect(warnings).toEqual(["Sandcastle forced exit requested; finalization may be incomplete"]);
+    expect(evidence).toEqual([
+      expect.objectContaining({ lifecycle: "draining", outcome: "requested", elapsedMs: 0 }),
+      expect.objectContaining({ lifecycle: "cancelling", outcome: "requested", elapsedMs: 250 }),
+      {
+        kind: "interruption-lifecycle",
+        runId: expect.any(String),
+        lifecycle: "forced-exit",
+        timestamp: "2026-08-20T12:00:00.000Z",
+        elapsedMs: 500,
+        outcome: "incomplete",
+      },
+    ]);
+    expect(JSON.stringify(evidence)).not.toContain("SIGINT");
+    expect(JSON.stringify(evidence)).not.toContain("SIGTERM");
+
+    workflow.resolve();
+    await expect(running).resolves.toBeUndefined();
   });
 
   it("does not claim after watch enters drain while discovery is pending", async () => {
