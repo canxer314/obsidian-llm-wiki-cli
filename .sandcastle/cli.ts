@@ -62,6 +62,10 @@ export interface SandcastleCliDependencies<TResult = unknown> {
     issueNumber: number,
     context: SandcastleExecutionContext,
   ) => Promise<TResult>;
+  readonly inspectClaim?: (
+    issueNumber: number,
+    format?: SandcastleStatusFormat,
+  ) => Promise<void>;
   readonly createRunId?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly recordWatchEvent?: (event: SandcastleWatchEvent) => void;
@@ -75,6 +79,7 @@ export interface SandcastleCliDependencies<TResult = unknown> {
 
 interface CliOptions {
   readonly issueNumber?: number;
+  readonly inspectClaimNumber?: number;
   readonly watch: boolean;
   readonly statusFormat?: SandcastleStatusFormat;
   readonly liveStatusEnabled: boolean;
@@ -82,6 +87,8 @@ interface CliOptions {
 
 function parseCliOptions(argv: readonly string[]): CliOptions {
   let issueNumber: number | undefined;
+  let inspectClaimNumber: number | undefined;
+  let inspectClaimCount = 0;
   let watch = false;
   let statusFormat: SandcastleStatusFormat | undefined;
   let liveStatusEnabled = true;
@@ -105,6 +112,22 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
       index += 1;
       continue;
     }
+    if (argument === "--inspect-claim") {
+      inspectClaimCount += 1;
+      const value = argv[index + 1];
+      if (value === undefined) {
+        throw new SandcastleCliError("--inspect-claim requires a number");
+      }
+      if (!/^[1-9]\d*$/.test(value)) {
+        throw new SandcastleCliError("--inspect-claim requires a positive integer");
+      }
+      inspectClaimNumber = Number(value);
+      if (!Number.isSafeInteger(inspectClaimNumber)) {
+        throw new SandcastleCliError("--inspect-claim requires a positive integer");
+      }
+      index += 1;
+      continue;
+    }
     if (argument === "--issue") {
       const value = argv[index + 1];
       if (value === undefined) {
@@ -123,10 +146,23 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
     throw new SandcastleCliError(`Unknown argument: ${argument}`);
   }
 
-  if (issueNumber !== undefined && watch) {
+  if (inspectClaimCount > 1) {
+    throw new SandcastleCliError("--inspect-claim may only be specified once");
+  }
+  if (inspectClaimNumber !== undefined && !liveStatusEnabled) {
+    throw new SandcastleCliError("--no-live-status cannot be used with --inspect-claim");
+  }
+  if (issueNumber !== undefined && watch && inspectClaimNumber === undefined) {
     throw new SandcastleCliError("--issue and --watch cannot be used together");
   }
-  if (issueNumber === undefined && !watch) {
+  const executionModeCount = Number(issueNumber !== undefined) + Number(watch) +
+    Number(inspectClaimNumber !== undefined);
+  if (executionModeCount > 1) {
+    throw new SandcastleCliError(
+      "--inspect-claim, --issue, and --watch cannot be used together",
+    );
+  }
+  if (executionModeCount === 0) {
     throw new SandcastleCliError(
       "Missing required --issue <number>; use --watch to scan the backlog",
     );
@@ -134,6 +170,7 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
 
   return {
     ...(issueNumber === undefined ? {} : { issueNumber }),
+    ...(inspectClaimNumber === undefined ? {} : { inspectClaimNumber }),
     watch,
     ...(statusFormat === undefined ? {} : { statusFormat }),
     liveStatusEnabled,
@@ -195,6 +232,16 @@ export async function runSandcastleCli<TResult>(
   dependencies: SandcastleCliDependencies<TResult>,
 ): Promise<TResult | undefined> {
   const options = parseCliOptions(argv);
+  if (options.inspectClaimNumber !== undefined) {
+    if (dependencies.inspectClaim === undefined) {
+      throw new Error("Claim inspector is unavailable");
+    }
+    await dependencies.inspectClaim(
+      options.inspectClaimNumber,
+      options.statusFormat,
+    );
+    return;
+  }
   const runId = dependencies.createRunId?.() ?? randomUUID();
   validateSandcastleRunId(runId);
   const status = createSandcastleLiveStatus({

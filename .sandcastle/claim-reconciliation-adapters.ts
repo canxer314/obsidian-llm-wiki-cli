@@ -31,8 +31,11 @@ const executeReadCommand: ReadCommand = async (file, arguments_, options) => {
 };
 
 export class ClaimReadError extends Error {
-  constructor(readonly source: "github" | "git" | "docker") {
+  readonly source: "github" | "git" | "docker";
+
+  constructor(source: "github" | "git" | "docker") {
     super(`Could not read ${source} claim facts`);
+    this.source = source;
     this.name = "ClaimReadError";
   }
 }
@@ -103,7 +106,11 @@ function validSha(value: unknown): value is string {
 }
 
 export class GithubClaimReadAdapter implements ClaimReconciliationGithubPort {
-  constructor(private readonly run: ReadCommand = executeReadCommand) {}
+  private readonly run: ReadCommand;
+
+  constructor(run: ReadCommand = executeReadCommand) {
+    this.run = run;
+  }
 
   async getIssue(input: ClaimReconciliationInput): Promise<ClaimIssueFact> {
     try {
@@ -235,10 +242,16 @@ function worktreeRecords(output: string): readonly WorktreeRecord[] {
 }
 
 export class GitClaimReadAdapter implements ClaimReconciliationGitPort {
+  private readonly repositoryPath: string;
+  private readonly run: ReadCommand;
+
   constructor(
-    private readonly repositoryPath: string,
-    private readonly run: ReadCommand = executeReadCommand,
-  ) {}
+    repositoryPath: string,
+    run: ReadCommand = executeReadCommand,
+  ) {
+    this.repositoryPath = repositoryPath;
+    this.run = run;
+  }
 
   private async commitCounts(input: ClaimReconciliationInput & { readonly branchHeadSha: string }) {
     return retryRead("git", async () => {
@@ -284,7 +297,11 @@ export class GitClaimReadAdapter implements ClaimReconciliationGitPort {
 }
 
 export class DockerClaimReadAdapter implements ClaimReconciliationDockerPort {
-  constructor(private readonly run: ReadCommand = executeReadCommand) {}
+  private readonly run: ReadCommand;
+
+  constructor(run: ReadCommand = executeReadCommand) {
+    this.run = run;
+  }
 
   async getContainer(input: ClaimReconciliationInput) {
     return retryRead("docker", async () => {

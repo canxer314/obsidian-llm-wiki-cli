@@ -27,6 +27,50 @@ function deferred(): {
 }
 
 describe("Sandcastle CLI", () => {
+  it.each([
+    ["duplicate inspector", ["--inspect-claim", "206", "--inspect-claim", "207"]],
+    ["watch mode", ["--inspect-claim", "206", "--watch"]],
+    ["live execution option", ["--inspect-claim", "206", "--no-live-status"]],
+  ])("rejects inspect mode combined with $0", async (_name, argv) => {
+    const github = githubPort();
+    const inspectClaim = vi.fn();
+
+    await expect(runSandcastleCli(argv, {
+      github,
+      inspectClaim,
+      processIssue: vi.fn(),
+    })).rejects.toMatchObject<SandcastleCliError>({ exitCode: 2 });
+
+    expect(inspectClaim).not.toHaveBeenCalled();
+    expect(github.ensureLabel).not.toHaveBeenCalled();
+  });
+
+  it("dispatches claim inspection before every execution side effect", async () => {
+    const github = githubPort();
+    const inspectClaim = vi.fn().mockResolvedValue(undefined);
+    const processIssue = vi.fn();
+    const createRunId = vi.fn(() => "must-not-run");
+    const handleFailure = vi.fn();
+
+    await runSandcastleCli(["--inspect-claim", "206", "--status-format", "json"], {
+      github,
+      inspectClaim,
+      processIssue,
+      createRunId,
+      handleFailure,
+    });
+
+    expect(inspectClaim).toHaveBeenCalledOnce();
+    expect(inspectClaim).toHaveBeenCalledWith(206, "json");
+    expect(createRunId).not.toHaveBeenCalled();
+    expect(github.ensureLabel).not.toHaveBeenCalled();
+    expect(github.getIssue).not.toHaveBeenCalled();
+    expect(github.listCandidateIssues).not.toHaveBeenCalled();
+    expect(github.claimIssue).not.toHaveBeenCalled();
+    expect(processIssue).not.toHaveBeenCalled();
+    expect(handleFailure).not.toHaveBeenCalled();
+  });
+
   it("requires an explicit Issue in the default mode without scanning the backlog", async () => {
     const github = githubPort();
     const processIssue = vi.fn();
