@@ -1,7 +1,10 @@
+import type { SandcastleLiveStatusPort } from "./live-status.ts";
+
 export interface SandcastleExecutionContext {
   readonly runId: string;
   readonly batchId: number;
   readonly issueNumber: number;
+  readonly liveStatus?: SandcastleLiveStatusPort;
 }
 
 type SessionRole = "planner" | "implementer" | "reviewer" | "merger";

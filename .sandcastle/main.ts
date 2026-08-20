@@ -67,7 +67,14 @@ try {
       issueNumber,
       github,
       run: async (progress) => {
-      progress.enter("startup");
+      const enter = (
+        stage: Parameters<NonNullable<typeof execution.liveStatus>["transition"]>[0],
+        pullRequest?: Parameters<typeof progress.enter>[1],
+      ) => {
+        progress.enter(stage, pullRequest);
+        execution.liveStatus?.transition(stage);
+      };
+      enter("startup");
       const startup = await loadSandboxStartup();
       runtimeImageBuild ??= buildSandcastleImage({
         repositoryPath: resolve(import.meta.dirname, ".."),
@@ -82,7 +89,7 @@ try {
         evidence,
         execution,
       });
-      progress.enter("planner");
+      enter("planner");
       const plan = await planIssue({
         issueNumber,
         model: startup.models.planner,
@@ -97,7 +104,7 @@ try {
           },
         };
       }
-      progress.enter("implementer");
+      enter("implementer");
       const implementerSession = createSandcastleImplementerSession({
         sandbox: startup.sandbox,
         hooks: sandboxHooksFor("implementer"),
@@ -111,7 +118,7 @@ try {
         session: implementerSession,
         github,
       });
-      progress.enter("local-quality", pullRequest);
+      enter("local-quality", pullRequest);
       const localQualityHostOptions = {
         repositoryPath: resolve(import.meta.dirname, ".."),
         worktreeRoot: resolve(import.meta.dirname, "worktrees"),
@@ -137,11 +144,11 @@ try {
       const orchestration = await processReadyPlan({
         pullRequest,
         synchronize: (currentPullRequest, allowPush) => {
-          progress.enter("target-sync", currentPullRequest);
+          enter("target-sync", currentPullRequest);
           return github.synchronizePullRequest(currentPullRequest, allowPush);
         },
         runLocalQuality: async (currentPullRequest) => {
-          progress.enter("local-quality", currentPullRequest);
+          enter("local-quality", currentPullRequest);
           return recordSandcastleGate(
             evidence,
             execution,
@@ -158,7 +165,7 @@ try {
           );
         },
         runReview: async (currentPullRequest, localQuality) => {
-          progress.enter("reviewer", currentPullRequest);
+          enter("reviewer", currentPullRequest);
           return recordSandcastleGate(
             evidence,
             execution,
@@ -178,7 +185,7 @@ try {
           );
         },
         repair: ({ pullRequest: currentPullRequest, attempt, feedback }) => {
-          progress.enter("repair", currentPullRequest);
+          enter("repair", currentPullRequest);
           return repairIssue({
           plan,
           model: startup.models.implementer,
@@ -190,7 +197,7 @@ try {
         });
         },
         mergeConflict: (request) => {
-          progress.enter("merger", request.pullRequest);
+          enter("merger", request.pullRequest);
           return mergeConflict({
             issueNumber,
             model: startup.models.implementer,
@@ -213,7 +220,7 @@ try {
             : { terminalFailure: orchestration.terminalFailure }),
         };
       }
-      progress.enter("merge", orchestration.pullRequest);
+      enter("merge", orchestration.pullRequest);
       const verifiedReview = orchestration.review;
       const merged = await recordSandcastleMerge(
         evidence,

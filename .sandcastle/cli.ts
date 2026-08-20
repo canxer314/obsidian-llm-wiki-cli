@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  createSandcastleLiveStatus,
+  type SandcastleLiveStatusDependencies,
+  type SandcastleStatusFormat,
+} from "./live-status.ts";
+
+import {
   validateSandcastleRunId,
   type SandcastleExecutionContext,
 } from "./evidence.ts";
@@ -59,6 +65,7 @@ export interface SandcastleCliDependencies<TResult = unknown> {
   readonly createRunId?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly recordWatchEvent?: (event: SandcastleWatchEvent) => void;
+  readonly liveStatus?: SandcastleLiveStatusDependencies;
   readonly handleFailure?: (
     issueNumber: number,
     stage: "claim",
@@ -69,16 +76,33 @@ export interface SandcastleCliDependencies<TResult = unknown> {
 interface CliOptions {
   readonly issueNumber?: number;
   readonly watch: boolean;
+  readonly statusFormat?: SandcastleStatusFormat;
+  readonly liveStatusEnabled: boolean;
 }
 
 function parseCliOptions(argv: readonly string[]): CliOptions {
   let issueNumber: number | undefined;
   let watch = false;
+  let statusFormat: SandcastleStatusFormat | undefined;
+  let liveStatusEnabled = true;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--watch") {
       watch = true;
+      continue;
+    }
+    if (argument === "--no-live-status") {
+      liveStatusEnabled = false;
+      continue;
+    }
+    if (argument === "--status-format") {
+      const value = argv[index + 1];
+      if (value !== "human" && value !== "json") {
+        throw new SandcastleCliError("--status-format requires human or json");
+      }
+      statusFormat = value;
+      index += 1;
       continue;
     }
     if (argument === "--issue") {
@@ -108,7 +132,12 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
     );
   }
 
-  return { ...(issueNumber === undefined ? {} : { issueNumber }), watch };
+  return {
+    ...(issueNumber === undefined ? {} : { issueNumber }),
+    watch,
+    ...(statusFormat === undefined ? {} : { statusFormat }),
+    liveStatusEnabled,
+  };
 }
 
 const WATCH_INTERVAL_MS = 300_000;
@@ -144,9 +173,21 @@ async function claimEligibleIssue<TResult>(
 async function runIssue<TResult>(
   context: SandcastleExecutionContext,
   dependencies: SandcastleCliDependencies<TResult>,
+  status: ReturnType<typeof createSandcastleLiveStatus>,
 ): Promise<TResult | undefined> {
   if (!await claimEligibleIssue(context.issueNumber, dependencies)) return;
-  return dependencies.processIssue(context.issueNumber, context);
+  const liveStatus = status.startIssue(context.batchId, context.issueNumber);
+  try {
+    const result = await dependencies.processIssue(context.issueNumber, {
+      ...context,
+      liveStatus,
+    });
+    status.finishIssue(context.issueNumber, "completed");
+    return result;
+  } catch (error) {
+    status.finishIssue(context.issueNumber, "failed");
+    throw error;
+  }
 }
 
 export async function runSandcastleCli<TResult>(
@@ -156,9 +197,18 @@ export async function runSandcastleCli<TResult>(
   const options = parseCliOptions(argv);
   const runId = dependencies.createRunId?.() ?? randomUUID();
   validateSandcastleRunId(runId);
+  const status = createSandcastleLiveStatus({
+    runId,
+    ...(options.statusFormat === undefined ? {} : { format: options.statusFormat }),
+    enabled: options.liveStatusEnabled,
+    ...(dependencies.liveStatus === undefined
+      ? {}
+      : { dependencies: dependencies.liveStatus }),
+  });
   await dependencies.github.ensureLabel("sandcastle:failed");
   if (options.watch) {
-    const sleep = dependencies.sleep ?? ((milliseconds: number) =>
+    try {
+      const sleep = dependencies.sleep ?? ((milliseconds: number) =>
       new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
     const active = new Map<number, Promise<unknown>>();
     let batchId = 0;
@@ -204,12 +254,17 @@ export async function runSandcastleCli<TResult>(
           batchId: workflowBatchId,
           issueNumber: issue.number,
         };
-        const workflow = dependencies.processIssue(issue.number, context)
+        const liveStatus = status.startIssue(workflowBatchId, issue.number);
+        const workflow = dependencies.processIssue(issue.number, {
+          ...context,
+          liveStatus,
+        })
           .catch(() => {
             outcome = "failure";
           })
           .finally(() => {
             active.delete(issue.number);
+            status.finishIssue(issue.number, outcome === "success" ? "completed" : "failed");
             dependencies.recordWatchEvent?.({
               kind: "issue-finished",
               runId,
@@ -221,9 +276,17 @@ export async function runSandcastleCli<TResult>(
           });
         active.set(issue.number, workflow);
       }
+      if (active.size === 0) status.idle(batchId);
       await sleep(WATCH_INTERVAL_MS);
+    }
+    } finally {
+      status.dispose();
     }
   }
 
-  return runIssue({ runId, batchId: 0, issueNumber: options.issueNumber! }, dependencies);
+  return runIssue(
+    { runId, batchId: 0, issueNumber: options.issueNumber! },
+    dependencies,
+    status,
+  ).finally(() => status.dispose());
 }
