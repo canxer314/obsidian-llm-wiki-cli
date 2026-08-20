@@ -101,10 +101,13 @@ describe("Sandcastle agent activity", () => {
     status.observeAgentEvent({ type: "text", message: hostile });
     now = 12 * 60 * 60_000;
     ticks[0]!();
+    status.transition("reviewer");
+    ticks[0]!();
     registry.finishIssue(205, "completed");
     const events = lines.map((line) => JSON.parse(line).sandcastleStatus);
     expect(events.filter((event) => event.warning === "agent-idle")).toHaveLength(1);
     expect(events.filter((event) => event.warning === "workflow-over-soft-limit")).toHaveLength(1);
+    expect(events.find((event) => event.workflowStage === "reviewer")?.health).toBe("warning");
     expect(events.at(-1).health).toBe("completed");
     expect(JSON.stringify(events)).not.toContain(hostile);
   });

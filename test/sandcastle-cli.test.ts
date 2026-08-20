@@ -617,6 +617,11 @@ describe("Sandcastle CLI", () => {
       createRunId: () => "concurrent-run",
       processIssue: async (number, execution) => {
         execution.liveStatus?.transition(number === 116 ? "implementer" : "reviewer");
+        execution.liveStatus?.observeAgentEvent({
+          type: "toolCall",
+          name: number === 116 ? "Edit" : "Read",
+          formattedArgs: "token=secret /home/private $(curl endpoint) 源码",
+        });
         await workflows.get(number)!.promise;
       },
       sleep: vi.fn().mockReturnValueOnce(wait.promise).mockRejectedValueOnce(stop),
@@ -633,25 +638,30 @@ describe("Sandcastle CLI", () => {
     });
     const stopped = watching.catch((error: unknown) => error);
 
-    await vi.waitFor(() => expect(lines).toHaveLength(4));
+    await vi.waitFor(() => expect(lines).toHaveLength(6));
     intervals[0]!();
     workflows.get(116)!.resolve();
     workflows.get(117)!.resolve();
-    await vi.waitFor(() => expect(lines).toHaveLength(8));
+    await vi.waitFor(() => expect(lines).toHaveLength(10));
     wait.resolve();
     await expect(stopped).resolves.toBe(stop);
 
     const events = lines.map((line) => JSON.parse(line).sandcastleStatus);
-    expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(events.at(-1)).toEqual(expect.objectContaining({
       kind: "idle",
       issueNumber: null,
-      sequence: 9,
+      sequence: 11,
     }));
     expect(events.filter((event) => event.issueNumber === 116).map((event) => event.workflowStage))
-      .toEqual(["startup", "implementer", "implementer", "terminal"]);
+      .toEqual(["startup", "implementer", "implementer", "implementer", "terminal"]);
     expect(events.filter((event) => event.issueNumber === 117).map((event) => event.workflowStage))
-      .toEqual(["startup", "reviewer", "reviewer", "terminal"]);
+      .toEqual(["startup", "reviewer", "reviewer", "reviewer", "terminal"]);
+    expect(events.filter((event) => event.issueNumber === 116).at(-2).lastObservedActivity)
+      .toBe("editing");
+    expect(events.filter((event) => event.issueNumber === 117).at(-2).lastObservedActivity)
+      .toBe("inspecting-repository");
+    expect(JSON.stringify(events)).not.toContain("token=secret");
   });
 
   it("uses append-only human status on a TTY", async () => {

@@ -17,10 +17,10 @@ export type SandcastleEvidenceEvent =
   | (SandcastleExecutionContext & {
     readonly kind: "session-started";
     readonly role: SessionRole;
-    readonly stage?: SessionStage;
+    readonly stage: SessionStage;
     readonly attempt: number;
     readonly sessionName: string;
-    readonly timestamp?: string;
+    readonly timestamp: string;
     readonly pullRequestNumber?: number;
     readonly revision?: string;
   })
@@ -90,10 +90,10 @@ function normalizedEvent(event: SandcastleEvidenceEvent): SandcastleEvidenceEven
         kind: event.kind,
         ...execution,
         role: event.role,
-        ...(event.stage === undefined ? {} : { stage: event.stage }),
+        stage: event.stage,
         attempt: event.attempt,
         sessionName: event.sessionName,
-        ...(event.timestamp === undefined ? {} : { timestamp: event.timestamp }),
+        timestamp: event.timestamp,
         ...(event.pullRequestNumber === undefined
           ? {}
           : { pullRequestNumber: event.pullRequestNumber }),
@@ -173,8 +173,7 @@ function validateEvent(event: SandcastleEvidenceEvent): void {
       (!SESSION_STAGES.has(event.stage) || !SESSION_OUTCOMES.has(event.outcome))) {
     throw new Error("Sandcastle evidence session lifecycle is invalid");
   }
-  if (event.kind === "session-started" && event.stage !== undefined &&
-      !SESSION_STAGES.has(event.stage)) {
+  if (event.kind === "session-started" && !SESSION_STAGES.has(event.stage)) {
     throw new Error("Sandcastle evidence session stage is invalid");
   }
   if (event.kind === "gate-finished" && (

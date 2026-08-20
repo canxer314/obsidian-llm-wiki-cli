@@ -26,8 +26,10 @@ describe("Sandcastle structured evidence", () => {
       kind: "session-started",
       ...context,
       role: "implementer",
+      stage: "repair",
       attempt: 1,
       sessionName: "implementer-repair-issue-142-attempt-1",
+      timestamp: "2026-08-20T12:00:00.000Z",
       pullRequestNumber: 321,
       revision: sha("a"),
     });
@@ -216,8 +218,10 @@ describe("Sandcastle structured evidence", () => {
                 kind: "session-started",
                 ...execution,
                 role: "implementer",
+                stage: "repair",
                 attempt,
                 sessionName: `implementer-repair-issue-${issueNumber}-attempt-${attempt}`,
+                timestamp: "2026-08-20T12:00:00.000Z",
                 pullRequestNumber,
                 revision: initialRevision,
               });

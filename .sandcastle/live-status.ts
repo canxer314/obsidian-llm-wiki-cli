@@ -100,6 +100,7 @@ interface ActiveStatus {
   lastObservedActivity: SandcastleObservedActivity | null;
   lastActivityAt: number | null;
   readonly warnings: Set<SandcastleWarning>;
+  stageWarning: SandcastleWarning | null;
 }
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -268,7 +269,9 @@ export function createSandcastleLiveStatus(options: {
     }
     const stageLimit = STAGE_SOFT_LIMITS[status.workflowStage];
     if (stageLimit !== undefined && now - status.stageStartedAt >= stageLimit) {
-      emitWarning(status, `${status.workflowStage}-over-soft-limit` as SandcastleWarning);
+      const warning = `${status.workflowStage}-over-soft-limit` as SandcastleWarning;
+      status.stageWarning = warning;
+      emitWarning(status, warning);
     }
     if (now - status.startedAt >= WORKFLOW_SOFT_LIMIT_MS) {
       emitWarning(status, "workflow-over-soft-limit");
@@ -323,6 +326,7 @@ export function createSandcastleLiveStatus(options: {
         lastObservedActivity: null,
         lastActivityAt: null,
         warnings: new Set(),
+        stageWarning: null,
       };
       active.set(issueNumber, status);
       emitActive(status, "transition");
@@ -333,8 +337,9 @@ export function createSandcastleLiveStatus(options: {
           status.workflowStage = stage;
           status.role = roleFor(stage);
           status.stageStartedAt = monotonicNow();
-          status.health = "active";
-          status.warnings.clear();
+          if (status.stageWarning !== null) status.warnings.delete(status.stageWarning);
+          status.stageWarning = null;
+          status.health = status.warnings.size === 0 ? "active" : "warning";
           emitActive(status, "transition");
         },
         observeAgentEvent(event) {
