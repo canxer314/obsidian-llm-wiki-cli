@@ -37,6 +37,15 @@ const executeFile: Execute = async (file, arguments_) => {
   return { stdout: result.stdout, stderr: result.stderr };
 };
 
+type Wait = (milliseconds: number) => Promise<void>;
+
+const wait: Wait = (milliseconds) => new Promise((resolve) => {
+  setTimeout(resolve, milliseconds);
+});
+
+const MAX_GITHUB_ATTEMPTS = 3;
+const RETRY_DELAYS_MS = [100, 250] as const;
+
 interface GhIssue {
   readonly number: number;
   readonly state: string;
@@ -106,10 +115,99 @@ export class GithubCliPort implements
   LocalQualityGithubPort,
   MergeGithubPort,
   ReviewGithubPort {
-  private readonly execute: Execute;
+  private readonly run: Execute;
+  private readonly wait: Wait;
 
-  constructor(execute: Execute = executeFile) {
-    this.execute = execute;
+  constructor(execute: Execute = executeFile, waitForRetry: Wait = wait) {
+    this.run = execute;
+    this.wait = waitForRetry;
+  }
+
+  private async execute(
+    file: string,
+    arguments_: readonly string[],
+  ): Promise<{ readonly stdout: string; readonly stderr: string }> {
+    if (file === "gh" && isRetrySafeGithubRead(arguments_)) {
+      return this.executeWithRetry(arguments_);
+    }
+    return this.run(file, arguments_);
+  }
+
+  private async executeGithubRead(
+    arguments_: readonly string[],
+  ): Promise<{ readonly stdout: string; readonly stderr: string }> {
+    return this.executeWithRetry(arguments_);
+  }
+
+  private async executeGithubStatusWrite(
+    status: LocalQualityCommitStatus | ReviewCommitStatus,
+  ): Promise<void> {
+    const arguments_ = [
+      "api",
+      `repos/{owner}/{repo}/statuses/${status.revision}`,
+      "--method",
+      "POST",
+      "-f",
+      `context=${status.context}`,
+      "-f",
+      `state=${status.state}`,
+      "-f",
+      `description=${status.description}`,
+    ];
+    const statusIdsBeforeWrite = await this.commitStatusIds(status);
+    let writeError: unknown;
+    for (let attempt = 0; attempt < MAX_GITHUB_ATTEMPTS; attempt += 1) {
+      try {
+        await this.run("gh", arguments_);
+        return;
+      } catch (error) {
+        writeError = error;
+        if (!isTransientGithubError(error)) throw error;
+        if (await this.commitStatusWasCreated(status, statusIdsBeforeWrite)) return;
+        if (attempt === MAX_GITHUB_ATTEMPTS - 1) break;
+        await this.wait(RETRY_DELAYS_MS[attempt]!);
+      }
+    }
+    throw writeError;
+  }
+
+  private async executeWithRetry(
+    arguments_: readonly string[],
+  ): Promise<{ readonly stdout: string; readonly stderr: string }> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < MAX_GITHUB_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.run("gh", arguments_);
+      } catch (error) {
+        lastError = error;
+        if (!isTransientGithubError(error) || attempt === MAX_GITHUB_ATTEMPTS - 1) {
+          throw error;
+        }
+        await this.wait(RETRY_DELAYS_MS[attempt]!);
+      }
+    }
+    throw lastError;
+  }
+
+  private async commitStatusIds(
+    status: LocalQualityCommitStatus | ReviewCommitStatus,
+  ): Promise<readonly string[]> {
+    const { stdout } = await this.executeGithubRead([
+      "api",
+      "--paginate",
+      `repos/{owner}/{repo}/commits/${status.revision}/statuses?per_page=100`,
+      "--jq",
+      `.[] | select(.context == ${JSON.stringify(status.context)} and .state == ${JSON.stringify(status.state)} and .description == ${JSON.stringify(status.description)}) | .id`,
+    ]);
+    return stdout.trim() === "" ? [] : stdout.trim().split("\n");
+  }
+
+  private async commitStatusWasCreated(
+    status: LocalQualityCommitStatus | ReviewCommitStatus,
+    statusIdsBeforeWrite: readonly string[],
+  ): Promise<boolean> {
+    const statusIdsAfterWrite = await this.commitStatusIds(status);
+    return statusIdsAfterWrite.some((id) => !statusIdsBeforeWrite.includes(id));
   }
 
   async markPullRequestReady(pullRequestNumber: number): Promise<void> {
@@ -405,18 +503,7 @@ export class GithubCliPort implements
   async publishCommitStatus(
     status: LocalQualityCommitStatus | ReviewCommitStatus,
   ): Promise<void> {
-    await this.execute("gh", [
-      "api",
-      `repos/{owner}/{repo}/statuses/${status.revision}`,
-      "--method",
-      "POST",
-      "-f",
-      `context=${status.context}`,
-      "-f",
-      `state=${status.state}`,
-      "-f",
-      `description=${status.description}`,
-    ]);
+    await this.executeGithubStatusWrite(status);
   }
 
   async addPullRequestComment(
@@ -688,6 +775,34 @@ export class GithubCliPort implements
       throw error;
     }
   }
+}
+
+function isRetrySafeGithubRead(arguments_: readonly string[]): boolean {
+  if (arguments_[0] === "repo") return arguments_[1] === "view";
+  if (arguments_[0] === "pr") {
+    return arguments_[1] === "view" || arguments_[1] === "list";
+  }
+  if (arguments_[0] === "issue") {
+    return arguments_[1] === "view" || arguments_[1] === "list";
+  }
+  if (arguments_[0] !== "api") return false;
+  if (arguments_[1] === "graphql") return true;
+  const methodIndex = arguments_.indexOf("--method");
+  return methodIndex === -1 || arguments_[methodIndex + 1]?.toUpperCase() === "GET";
+}
+
+function isTransientGithubError(error: unknown): boolean {
+  const message = [
+    error instanceof Error ? error.message : "",
+    errorStderr(error) ?? "",
+  ].join("\n").toLowerCase();
+  return (
+    /(?:unexpected )?eof/.test(message) ||
+    /(?:connection|network|transport).*(?:reset|refused|closed|timeout|timed out|unavailable)/.test(message) ||
+    /(?:tls handshake|i\/o) timeout|context deadline exceeded|client\.timeout exceeded/.test(message) ||
+    /(?:http )?(?:429|500|502|503|504)\b/.test(message) ||
+    /service unavailable|bad gateway|gateway timeout/.test(message)
+  );
 }
 
 function isExitCode(error: unknown, code: number): boolean {

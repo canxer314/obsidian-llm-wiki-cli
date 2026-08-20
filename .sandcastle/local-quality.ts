@@ -105,36 +105,54 @@ export async function checkPullRequestLocalQuality(
   host: LocalQualityHost,
 ): Promise<LocalQualityResult & { readonly revision: string }> {
   const revision = await github.getPullRequestHead(pullRequestNumber);
-  await github.publishCommitStatus({
-    revision,
-    context: "sandcastle/local-quality",
-    state: "pending",
-    description: "Local quality checks started",
-  });
-
-  const result = await runLocalQuality(revision, host);
-  const currentRevision = await github.getPullRequestHead(pullRequestNumber);
-  if (currentRevision !== revision) {
-    const staleResult = terminalResult(
-      "error",
-      "setup",
-      "Pull Request head changed during local quality checks",
-    );
+  let pendingPublished = false;
+  try {
     await github.publishCommitStatus({
       revision,
       context: "sandcastle/local-quality",
-      state: "error",
-      description: "Local quality result stale after head changed",
+      state: "pending",
+      description: "Local quality checks started",
     });
-    return { ...staleResult, revision };
+    pendingPublished = true;
+
+    const result = await runLocalQuality(revision, host);
+    const currentRevision = await github.getPullRequestHead(pullRequestNumber);
+    if (currentRevision !== revision) {
+      const staleResult = terminalResult(
+        "error",
+        "setup",
+        "Pull Request head changed during local quality checks",
+      );
+      await github.publishCommitStatus({
+        revision,
+        context: "sandcastle/local-quality",
+        state: "error",
+        description: "Local quality result stale after head changed",
+      });
+      return { ...staleResult, revision };
+    }
+    await github.publishCommitStatus({
+      revision,
+      context: "sandcastle/local-quality",
+      state: result.status,
+      description: statusDescription(result),
+    });
+    return { ...result, revision };
+  } catch (error) {
+    if (pendingPublished) {
+      try {
+        await github.publishCommitStatus({
+          revision,
+          context: "sandcastle/local-quality",
+          state: "error",
+          description: "Local quality gate could not complete",
+        });
+      } catch {
+        // Preserve the original gate failure when terminal status publication also fails.
+      }
+    }
+    throw error;
   }
-  await github.publishCommitStatus({
-    revision,
-    context: "sandcastle/local-quality",
-    state: result.status,
-    description: statusDescription(result),
-  });
-  return { ...result, revision };
 }
 
 export async function runLocalQuality(

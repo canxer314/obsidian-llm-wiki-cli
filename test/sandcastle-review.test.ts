@@ -179,6 +179,43 @@ describe("Sandcastle Pull Request review", () => {
     ]);
   });
 
+  it("publishes terminal error when a pending review aborts", async () => {
+    const reviewGithub = github();
+    const session: ReviewerAgentSession = {
+      run: vi.fn(async () => ({
+        verdict: "Approved",
+        summary: "The reviewed revision is correct.",
+        findings: [],
+      })),
+    };
+    vi.mocked(reviewGithub.getPullRequestHead)
+      .mockResolvedValueOnce(revision)
+      .mockRejectedValueOnce(new Error("GitHub transport failed"));
+
+    await expect(reviewPullRequest({
+      pullRequestNumber: 321,
+      revision,
+      localQuality: { status: "success", revision },
+      model: "reviewer-model",
+      session,
+      github: reviewGithub,
+    })).rejects.toThrow("GitHub transport failed");
+
+    expect(vi.mocked(reviewGithub.publishCommitStatus).mock.calls).toEqual([
+      [{
+        revision,
+        context: "sandcastle/review",
+        state: "pending",
+        description: "Independent review started",
+      }],
+      [{
+        revision,
+        context: "sandcastle/review",
+        state: "error",
+        description: "Independent review could not complete",
+      }],
+    ]);
+  });
   it("maps session and structured-output failures to error without exposing details", async () => {
     const reviewGithub = github();
     const session: ReviewerAgentSession = {

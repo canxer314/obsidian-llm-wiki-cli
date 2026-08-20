@@ -87,6 +87,32 @@ describe("Sandcastle Pull Request local quality", () => {
     );
   });
 
+  it("publishes terminal error when a pending local quality gate aborts", async () => {
+    const qualityHost = host();
+    const qualityGithub = github();
+    vi.mocked(qualityGithub.getPullRequestHead)
+      .mockResolvedValueOnce(revision)
+      .mockRejectedValueOnce(new Error("GitHub transport failed"));
+
+    await expect(
+      checkPullRequestLocalQuality(321, qualityGithub, qualityHost),
+    ).rejects.toThrow("GitHub transport failed");
+
+    expect(vi.mocked(qualityGithub.publishCommitStatus).mock.calls).toEqual([
+      [{
+        revision,
+        context: "sandcastle/local-quality",
+        state: "pending",
+        description: "Local quality checks started",
+      }],
+      [{
+        revision,
+        context: "sandcastle/local-quality",
+        state: "error",
+        description: "Local quality gate could not complete",
+      }],
+    ]);
+  });
   it("invalidates a failed result when the Pull Request head changes during checks", async () => {
     const qualityGithub = github();
     vi.mocked(qualityGithub.getPullRequestHead)
