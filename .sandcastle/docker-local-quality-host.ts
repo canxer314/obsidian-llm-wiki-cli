@@ -119,8 +119,12 @@ function containerCommandResult(output: string): LocalQualityCommandResult {
   if (!/^\d+$/u.test(resultText)) {
     throw new Error("Docker reported an invalid container command result");
   }
+  const exitCode = Number(resultText);
+  if (!Number.isInteger(exitCode) || exitCode < 0 || exitCode > 255) {
+    throw new Error("Docker reported an invalid container command result");
+  }
   return {
-    exitCode: Number(resultText),
+    exitCode,
     output: output.slice(0, markerIndex).trimEnd(),
   };
 }

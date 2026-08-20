@@ -125,6 +125,49 @@ describe("Docker local quality host", () => {
     await expect(host.run(["npm", "test"])).rejects.toThrow("Docker daemon disconnected");
   });
 
+  it("rejects an oversized container exit marker after preserving prior command output", async () => {
+    const process = processPort();
+    const host = createDockerLocalQualityHost({
+      repositoryPath: "/repo",
+      worktreeRoot: "/worktrees",
+      runId: "quality-104",
+      uid: 1000,
+      gid: 1000,
+      process,
+    });
+    await host.setup(revision);
+    process.run.mockResolvedValueOnce({
+      exitCode: 0,
+      output: "test failed\n__SANDCASTLE_LOCAL_QUALITY_EXIT__=999999999999999999999999999999999999\n",
+    });
+
+    await expect(host.run(["npm", "test"])).rejects.toThrow(
+      "Docker reported an invalid container command result",
+    );
+  });
+
+  it("preserves valid container exit codes and command output", async () => {
+    const process = processPort();
+    const host = createDockerLocalQualityHost({
+      repositoryPath: "/repo",
+      worktreeRoot: "/worktrees",
+      runId: "quality-104",
+      uid: 1000,
+      gid: 1000,
+      process,
+    });
+    await host.setup(revision);
+    process.run.mockResolvedValueOnce({
+      exitCode: 0,
+      output: "test failed\n__SANDCASTLE_LOCAL_QUALITY_EXIT__=255\n",
+    });
+
+    await expect(host.run(["npm", "test"])).resolves.toEqual({
+      exitCode: 255,
+      output: "test failed",
+    });
+  });
+
   it("provides a production entry point for one exact revision", async () => {
     const process = processPort();
 
