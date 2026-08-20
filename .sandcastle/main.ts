@@ -3,6 +3,15 @@
 import { resolve } from "node:path";
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
+import {
+  DockerClaimReadAdapter,
+  GitClaimReadAdapter,
+  GithubClaimReadAdapter,
+} from "./claim-reconciliation-adapters.ts";
+import {
+  inspectClaim,
+  resolveClaimInspectionIdentity,
+} from "./claim-inspector.ts";
 import { createDockerLocalQualityHost } from "./docker-local-quality-host.ts";
 import {
   buildSandcastleImage,
@@ -41,12 +50,26 @@ import {
 } from "./sandbox.ts";
 
 try {
+  const repositoryPath = resolve(import.meta.dirname, "..");
   const github = new GithubCliPort();
   let runtimeImageBuild: Promise<string> | undefined;
   const writeEvent = (event: unknown) => console.error(JSON.stringify({ sandcastleEvidence: event }));
   const evidence = createSandcastleEvidenceRecorder(writeEvent);
   const result = await runSandcastleCli(process.argv.slice(2), {
     github,
+    inspectClaim: async (issueNumber, format) => {
+      const identity = await resolveClaimInspectionIdentity(repositoryPath);
+      await inspectClaim({
+        ...identity,
+        issueNumber,
+        ...(format === undefined ? {} : { format }),
+        ports: {
+          github: new GithubClaimReadAdapter(),
+          git: new GitClaimReadAdapter(repositoryPath),
+          docker: new DockerClaimReadAdapter(),
+        },
+      });
+    },
     recordWatchEvent: writeEvent,
     handleFailure: async (issueNumber, stage, error) => {
       const finalization = await finalizeFailure({
