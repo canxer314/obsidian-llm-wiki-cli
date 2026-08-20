@@ -1207,6 +1207,85 @@ describe("durable Markdown Change Set execution", () => {
     });
   });
 
+  it("completes baseline acceptance after interruption immediately following Journal clearing", async () => {
+    const store = new MemoryStore();
+    const adapter = new DirectoryAdapter();
+    adapter.directories.add("Notes");
+    adapter.files.set("Notes/Cleared.md", Buffer.from("before"));
+    adapter.fileIdentities.set("Notes/Cleared.md", "cleared-before");
+    const beforeVersion = `sha256:${createHash("sha256").update("before").digest("hex")}` as const;
+    const crashing = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      createChangeSetId: () => "change-set-cleared-baseline",
+      crashInjector: (point) => {
+        if (point === "after_file_mutation:0") throw new InjectedChangeSetCrash(point);
+      },
+    });
+    await expect(
+      crashing.submit(
+        {
+          submissionKey: "cleared-baseline-key",
+          operations: [{
+            operationId: "edit-cleared-baseline",
+            kind: "edit_body",
+            path: "Notes/Cleared.md",
+            targetVersion: beforeVersion,
+            edit: { kind: "replace_whole", replacement: "after" },
+          }],
+        },
+        requestState,
+      ),
+    ).rejects.toThrow(InjectedChangeSetCrash);
+    adapter.files.set("Notes/Cleared.md", Buffer.from("third-party"));
+    adapter.fileIdentities.set("Notes/Cleared.md", "third-party");
+
+    const accepting = await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      crashInjector: (point) => {
+        if (point === "after_baseline_journal_cleared") {
+          throw new InjectedChangeSetCrash(point);
+        }
+      },
+    });
+    await expect(accepting.acceptTrustedRecoveryBaseline(async () => undefined)).rejects.toThrow(
+      /after_baseline_journal_cleared/u,
+    );
+    expect(adapter.frame).toBeNull();
+    expect(store.state).toMatchObject({
+      writeMode: "manual_paused",
+      recovery: { state: "baseline_accepted", changeSetId: "change-set-cleared-baseline" },
+      entries: [{ changeSet: { state: "result_unproven" } }],
+    });
+
+    await ChangeSetService.open({
+      store,
+      dataSource: {
+        readBinary: (path) => adapter.readBinary(path),
+        pathKind: (path) => adapter.pathKind(path),
+        isContained: async () => true,
+      },
+      execution: adapter,
+      runtimeState: new RecordingRuntimeState(),
+    });
+    expect(store.state).toMatchObject({
+      writeMode: "manual_paused",
+      recovery: { state: "none" },
+      entries: [{ changeSet: { state: "result_unproven" } }],
+    });
+  });
+
   it("revalidates target versions, absence, and Read Dependencies under the write lease", async () => {
     const scenarios = ["target", "absence", "dependency"] as const;
     for (const scenario of scenarios) {

@@ -2051,7 +2051,19 @@ export class ChangeSetService {
     const execution = this.#options.execution;
     if (execution === undefined) return;
     const frame = await execution.loadRecoveryFrame();
-    if (frame === null) return;
+    if (frame === null) {
+      if (this.#state.recovery?.state === "baseline_accepted") {
+        await this.#serialize(async () => {
+          const nextState = structuredClone(this.#state);
+          nextState.recovery = { state: "none" };
+          await this.#save(nextState);
+          this.#recoveryBlocked = false;
+          this.#dequeuePaused = true;
+          this.#admissionGate = { code: "writes_paused" };
+        });
+      }
+      return;
+    }
     const entry = this.#state.entries.find(
       (candidate) => candidate.changeSetId === frame.changeSetId,
     );
@@ -2301,7 +2313,9 @@ export class ChangeSetService {
         });
         try {
           await execution.clearRecoveryFrame();
+          await this.#crash("after_baseline_journal_cleared");
         } catch (error) {
+          if (error instanceof InjectedChangeSetCrash) throw error;
           throw new Error("Trusted baseline was accepted but Recovery Journal clearing failed", {
             cause: error,
           });
