@@ -44,6 +44,8 @@ import { GithubCliPort } from "./github-cli.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { mergeConflict } from "./conflict-merger.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
+import { runImplementationAutomationCommand } from "./implementation-automation.ts";
+import { acquireImplementationLease } from "./implementation-lease.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
 import { mergeVerifiedPullRequest, type MergeVerifiedPullRequestResult } from "./merge.ts";
 import { createSandcastleMergerSession } from "./merger-session.ts";
@@ -71,6 +73,7 @@ try {
     const automationGithub = createAutomationGithubPort({
       environment: startup.childEnvironments.github,
     });
+    const github = new GithubCliPort();
     const reviewer = createProcessReviewRunner({});
     const result = await runAutomationCli(process.argv.slice(2), {
       runReview: (pullRequestNumber) => runReviewAutomationCommand({ pullRequestNumber }, {
@@ -97,6 +100,83 @@ try {
           },
         },
         publisher: automationGithub,
+        createJobId: () => jobId,
+      }),
+      runImplement: (issueNumber) => runImplementationAutomationCommand({ issueNumber }, {
+        github: {
+          readIssue: (currentIssueNumber) => automationGithub.readIssue(currentIssueNumber),
+          findReusableImplementation: (request) => {
+            const findReusableImplementation = automationGithub.findReusableImplementation;
+            if (findReusableImplementation === undefined) {
+              throw new Error("Implementation Pull Request lookup is unavailable");
+            }
+            return findReusableImplementation(request);
+          },
+          publishExistingImplementation: (request) => {
+            const publishExistingImplementation = automationGithub.publishExistingImplementation;
+            if (publishExistingImplementation === undefined) {
+              throw new Error("Implementation Pull Request publication is unavailable");
+            }
+            return publishExistingImplementation(request);
+          },
+          addIssueLabel: (currentIssueNumber, label) => automationGithub.addIssueLabel(currentIssueNumber, label),
+          removeIssueLabel: (currentIssueNumber, label) => automationGithub.removeIssueLabel(currentIssueNumber, label),
+          addRefusalDiagnostic: (currentIssueNumber, reason) => {
+            const addRefusalDiagnostic = automationGithub.addRefusalDiagnostic;
+            return addRefusalDiagnostic === undefined
+              ? Promise.resolve()
+              : addRefusalDiagnostic(currentIssueNumber, reason);
+          },
+          addImplementationBlockedDiagnostic: (currentIssueNumber, diagnostic) => {
+            const addImplementationBlockedDiagnostic = automationGithub.addImplementationBlockedDiagnostic;
+            return addImplementationBlockedDiagnostic === undefined
+              ? Promise.resolve()
+              : addImplementationBlockedDiagnostic(currentIssueNumber, diagnostic);
+          },
+        },
+        checkout: createTargetCheckout({
+          sourceRepositoryPath: repositoryPath,
+          checkoutRoot: resolve(import.meta.dirname, "jobs"),
+          createJobDirectory: () => resolve(import.meta.dirname, "jobs", `implementation-${jobId}`),
+          gitEnvironment: startup.childEnvironments.git,
+          dependencyEnvironment: startup.childEnvironments.dependencies,
+        }),
+        implementer: {
+          implement: async ({ issueNumber: currentIssueNumber, baseRevision, checkoutPath }) => {
+            const plannerSession = createSandcastlePlannerSession({
+              sandbox: startup.automationSandbox,
+              hooks: { sandbox: { onSandboxReady: [] } },
+              checkoutPath,
+            });
+            const plan = await planIssue({
+              issueNumber: currentIssueNumber,
+              model: startup.models.planner,
+              session: plannerSession,
+            });
+            if (plan.status === "blocked") throw new Error(plan.blockingReason);
+            const implementerSession = createSandcastleImplementerSession({
+              sandbox: startup.automationSandbox,
+              hooks: sandboxHooksFor("implementer"),
+            });
+            const pullRequest = await implementIssue({
+              plan,
+              model: startup.models.implementer,
+              session: implementerSession,
+              checkoutPath,
+              github,
+            });
+            if (pullRequest.headSha === baseRevision) {
+              throw new Error("Implementer did not advance the authorized base revision");
+            }
+            return { branch: `sandcastle/issue-${currentIssueNumber}`, pullRequestUrl: pullRequest.url };
+          },
+        },
+        lease: {
+          acquire: (currentIssueNumber) => acquireImplementationLease({
+            root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
+            issueNumber: currentIssueNumber,
+          }),
+        },
         createJobId: () => jobId,
       }),
     });

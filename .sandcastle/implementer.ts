@@ -44,6 +44,7 @@ export async function implementIssue(options: {
   readonly plan: Extract<PlannerOutput, { status: "ready" }>;
   readonly model: string;
   readonly session: ImplementerAgentSession;
+  readonly checkoutPath?: string;
   readonly github: ImplementerGithubPort;
 }): Promise<VerifiedPullRequest> {
   const branch = `sandcastle/issue-${options.plan.issue.number}`;
@@ -51,6 +52,7 @@ export async function implementIssue(options: {
     model: options.model,
     branch,
     plan: options.plan,
+    ...(options.checkoutPath === undefined ? {} : { checkoutPath: options.checkoutPath }),
   });
   const expectedHeadSha = expectedHead(branch, result);
   return options.github.verifyImplementation({

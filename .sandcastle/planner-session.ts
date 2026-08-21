@@ -31,6 +31,7 @@ Do not add scope, metadata, explanation, helper, or any other fields at the top 
 export function createSandcastlePlannerSession(options: {
   readonly sandbox: SandboxProvider;
   readonly hooks: SandboxHooks;
+  readonly checkoutPath?: string;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
   readonly evidence?: SandcastleEvidenceRecorder;
@@ -45,6 +46,7 @@ export function createSandcastlePlannerSession(options: {
         const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
+        ...(options.checkoutPath === undefined ? {} : { cwd: options.checkoutPath }),
         hooks: options.hooks,
         branchStrategy: { type: "head" },
         maxIterations: 1,

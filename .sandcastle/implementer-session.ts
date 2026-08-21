@@ -25,6 +25,7 @@ export interface ImplementerAgentSessionRequest {
   readonly model: string;
   readonly branch: string;
   readonly plan: Extract<PlannerOutput, { status: "ready" }>;
+  readonly checkoutPath?: string;
   readonly repair?: ImplementerRepairContext;
 }
 
@@ -45,9 +46,9 @@ Implement GitHub Issue #${plan.issue.number} using this complete Planner handoff
 
 ${JSON.stringify(plan)}
 
-Work only on branch ${branch}. Implement the Issue, run the relevant tests, commit all intended changes, run gh auth setup-git, and run git push origin ${branch}. Do not rebase or force-push.
+Work only on branch ${branch}. Implement the Issue, choose and run the appropriate repository checks, commit all intended changes, run gh auth setup-git, and run git push origin ${branch}. Do not rebase or force-push.
 
-Create a Draft Pull Request with gh pr create --draft. Its base must be the repository default branch, its head must be ${branch}, and its body must contain exactly the closing relationship Closes #${plan.issue.number}.
+Before publishing, inspect whether this branch already has a Draft Pull Request. Reuse and update one existing upstream-equivalent Draft Pull Request; otherwise create exactly one Draft Pull Request with gh pr create --draft. Its base must be the repository default branch, its head must be ${branch}, and its body must contain exactly the closing relationship Closes #${plan.issue.number}.
 
 ${plan.allowsAutomationChanges
     ? "This Issue explicitly allows changes to Sandcastle or GitHub workflow automation."
@@ -107,13 +108,13 @@ export function createSandcastleImplementerSession(options: {
         const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
+        ...(request.checkoutPath === undefined ? {} : { cwd: request.checkoutPath }),
         hooks: request.repair === undefined
           ? options.hooks
           : options.repairHooks ?? options.hooks,
         branchStrategy: {
           type: "branch",
           branch: request.branch,
-          baseBranch: `origin/${request.branch}`,
         },
         maxIterations: 1,
         name: sessionName,

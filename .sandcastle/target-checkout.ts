@@ -70,7 +70,7 @@ export function createTargetCheckout(options: {
         completed = true;
         return result;
       } finally {
-        if (completed && options.createJobDirectory === undefined) {
+        if (completed) {
           await rm(checkoutPath, { force: true, recursive: true });
         }
       }
