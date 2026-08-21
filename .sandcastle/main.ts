@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import {
+  ClaimResourceReleaseAdapter,
   DockerClaimReadAdapter,
   GitClaimReadAdapter,
   GithubClaimReadAdapter,
@@ -24,6 +25,7 @@ import {
   recordSandcastleWorkflow,
 } from "./evidence.ts";
 import { finalizeFailure } from "./failure-finalizer.ts";
+import { finalizeInterruptedClaim } from "./interrupted-claim-finalizer.ts";
 import {
   runFailureAwareWorkflow,
   SandcastleWorkflowError,
@@ -72,6 +74,28 @@ try {
     },
     recordWatchEvent: writeEvent,
     recordInterruption: writeEvent,
+    finalizeInterruption: async (receipt) => {
+      const identity = await resolveClaimInspectionIdentity(repositoryPath);
+      const release = new ClaimResourceReleaseAdapter(repositoryPath);
+      const result = await finalizeInterruptedClaim({
+        repository: identity.repository,
+        receipt,
+      }, {
+        reconciliation: {
+          github: new GithubClaimReadAdapter(),
+          git: new GitClaimReadAdapter(repositoryPath),
+          docker: new DockerClaimReadAdapter(),
+        },
+        release: {
+          compareAndDeleteLocalBranch: (input) => release.compareAndDeleteLocalBranch(input),
+          compareAndDeleteBranch: (input) => github.compareAndDeleteBranch(input),
+        },
+        failure: github,
+      });
+      if (result.failures.length > 0) {
+        throw new SandcastleWorkflowError("interrupted", result.failures);
+      }
+    },
     handleFailure: async (issueNumber, stage, error) => {
       const finalization = await finalizeFailure({
         issueNumber,

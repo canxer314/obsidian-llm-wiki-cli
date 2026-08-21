@@ -9,7 +9,12 @@ try {
       ensureLabel: async () => undefined,
       getIssue: async () => issue,
       listCandidateIssues: async () => [],
-      claimIssue: async () => true,
+      claimIssue: async (number, runId) => ({
+        issueNumber: number,
+        runId,
+        branch: `sandcastle/issue-${number}`,
+        baseSha: "a".repeat(40),
+      }),
     },
     warningSink: (line) => console.error(line),
     processIssue: async (_number, execution) => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ClaimReadError,
+  ClaimResourceReleaseAdapter,
   DockerClaimReadAdapter,
   GitClaimReadAdapter,
   GithubClaimReadAdapter,
@@ -139,6 +140,19 @@ describe("Git claim read adapter", () => {
     expect(result).toBe(expected);
     expect(JSON.stringify(result)).not.toMatch(/agent|secret/u);
     expect(vi.mocked(run).mock.calls.flatMap((call) => call[1])).not.toContain("remove");
+  });
+});
+
+describe("claim resource release adapter", () => {
+  it("binds local branch deletion to the receipt base SHA", async () => {
+    const run = command("");
+    const adapter = new ClaimResourceReleaseAdapter("/repository", run);
+
+    await adapter.compareAndDeleteLocalBranch({ ...input, expectedHeadSha: BASE });
+
+    expect(run).toHaveBeenCalledWith("git", [
+      "update-ref", "-d", "refs/heads/sandcastle/issue-208", BASE,
+    ], { cwd: "/repository" });
   });
 });
 

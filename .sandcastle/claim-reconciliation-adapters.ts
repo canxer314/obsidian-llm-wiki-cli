@@ -296,6 +296,32 @@ export class GitClaimReadAdapter implements ClaimReconciliationGitPort {
   }
 }
 
+export class ClaimResourceReleaseAdapter {
+  private readonly repositoryPath: string;
+  private readonly run: ReadCommand;
+
+  constructor(repositoryPath: string, run: ReadCommand = executeReadCommand) {
+    this.repositoryPath = repositoryPath;
+    this.run = run;
+  }
+
+  async compareAndDeleteLocalBranch(input: ClaimReconciliationInput & {
+    readonly expectedHeadSha: string;
+  }): Promise<void> {
+    for (const ref of [
+      `refs/heads/${input.branch}`,
+      `refs/remotes/origin/${input.branch}`,
+    ]) {
+      await this.run("git", [
+        "update-ref",
+        "-d",
+        ref,
+        input.expectedHeadSha,
+      ], { cwd: this.repositoryPath });
+    }
+  }
+}
+
 export class DockerClaimReadAdapter implements ClaimReconciliationDockerPort {
   private readonly run: ReadCommand;
 

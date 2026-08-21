@@ -1,3 +1,4 @@
+import { SandcastleCancellationError } from "./cli.ts";
 import type { VerifiedPullRequest } from "./implementer.ts";
 import {
   finalizeFailure,
@@ -40,12 +41,11 @@ export class SandcastleWorkflowError extends Error {
   }
 }
 
-function isCancellation(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+function isControlledCancellation(error: unknown): boolean {
+  return error instanceof SandcastleCancellationError;
 }
 
 function errorSummary(error: unknown): string {
-  if (isCancellation(error)) return "Sandcastle workflow interrupted";
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -77,17 +77,16 @@ export async function runFailureAwareWorkflow<TResult>(
       finalization.failures,
     );
   } catch (error) {
-    if (error instanceof SandcastleWorkflowError) throw error;
-    const failureStage = isCancellation(error) ? "interrupted" : stage;
+    if (error instanceof SandcastleWorkflowError || isControlledCancellation(error)) throw error;
     const finalization = await finalizeFailure({
       issueNumber: options.issueNumber,
       ...(pullRequest === undefined ? {} : {
         pullRequestNumber: pullRequest.number,
         revision: pullRequest.headSha,
       }),
-      stage: failureStage,
+      stage,
       summary: errorSummary(error),
     }, options.github);
-    throw new SandcastleWorkflowError(failureStage, finalization.failures, { cause: error });
+    throw new SandcastleWorkflowError(stage, finalization.failures, { cause: error });
   }
 }

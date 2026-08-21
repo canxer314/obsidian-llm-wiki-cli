@@ -304,6 +304,18 @@ export class GithubCliPort implements
     }
   }
 
+  async compareAndDeleteBranch(input: {
+    readonly branch: string;
+    readonly expectedHeadSha: string;
+  }): Promise<void> {
+    await this.execute("git", [
+      "push",
+      "origin",
+      `--force-with-lease=refs/heads/${input.branch}:${input.expectedHeadSha}`,
+      `:refs/heads/${input.branch}`,
+    ]);
+  }
+
   async getPullRequestHead(pullRequestNumber: number): Promise<string> {
     const { stdout } = await this.execute("gh", [
       "pr",
@@ -549,7 +561,7 @@ export class GithubCliPort implements
     ]);
   }
 
-  async claimIssue(number: number): Promise<boolean> {
+  async claimIssue(number: number, runId: string): Promise<import("./cli.ts").SandcastleClaimReceipt | null> {
     const branch = `sandcastle/issue-${number}`;
     const { stdout: pullRequests } = await this.execute("gh", [
       "pr",
@@ -563,7 +575,20 @@ export class GithubCliPort implements
       "--limit",
       "1",
     ]);
-    if ((JSON.parse(pullRequests) as readonly unknown[]).length > 0) return false;
+    if ((JSON.parse(pullRequests) as readonly unknown[]).length > 0) return null;
+
+    const localRefs = [
+      `refs/heads/${branch}`,
+      `refs/remotes/origin/${branch}`,
+    ];
+    for (const ref of localRefs) {
+      try {
+        await this.execute("git", ["show-ref", "--verify", "--quiet", ref]);
+        return null;
+      } catch (error) {
+        if (!isExitCode(error, 1)) throw error;
+      }
+    }
 
     const { stdout: defaultBranchOid } = await this.execute("gh", [
       "api",
@@ -571,6 +596,10 @@ export class GithubCliPort implements
       "--jq",
       ".sha",
     ]);
+    const baseSha = defaultBranchOid.trim();
+    if (!/^[0-9a-f]{40}$/u.test(baseSha)) {
+      throw new GithubVerificationError("GitHub returned an invalid default branch SHA");
+    }
     try {
       await this.execute("gh", [
         "api",
@@ -580,20 +609,51 @@ export class GithubCliPort implements
         "-f",
         `ref=refs/heads/${branch}`,
         "-f",
-        `sha=${defaultBranchOid.trim()}`,
+        `sha=${baseSha}`,
       ]);
+    } catch (error) {
+      if (isExistingReferenceError(error)) return null;
+      throw error;
+    }
+
+    const zeroSha = "0".repeat(40);
+    const createdLocalRefs: string[] = [];
+    try {
       await this.execute("git", [
         "fetch",
         "--no-tags",
         "origin",
-        `refs/heads/${branch}:refs/remotes/origin/${branch}`,
+        `refs/heads/${branch}`,
       ]);
-      await this.execute("git", ["branch", "--force", branch, `origin/${branch}`]);
+      const { stdout: fetchedHead } = await this.execute("git", ["rev-parse", "FETCH_HEAD"]);
+      if (fetchedHead.trim() !== baseSha) {
+        throw new GithubVerificationError("Claim branch changed during fetch");
+      }
+      for (const ref of localRefs) {
+        await this.execute("git", ["update-ref", ref, baseSha, zeroSha]);
+        createdLocalRefs.push(ref);
+      }
     } catch (error) {
-      if (isExistingReferenceError(error)) return false;
+      for (const ref of createdLocalRefs.reverse()) {
+        try {
+          await this.execute("git", ["update-ref", "-d", ref, baseSha]);
+        } catch {
+          // The claim remains unreceipted and failure finalization reports the incomplete setup.
+        }
+      }
+      try {
+        await this.compareAndDeleteBranch({ branch, expectedHeadSha: baseSha });
+      } catch {
+        // The claim remains unreceipted and failure finalization reports the incomplete setup.
+      }
       throw error;
     }
-    return true;
+    return {
+      issueNumber: number,
+      runId,
+      branch,
+      baseSha,
+    };
   }
 
   async ensureLabel(name: string): Promise<void> {

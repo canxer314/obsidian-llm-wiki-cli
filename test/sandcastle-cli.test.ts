@@ -11,7 +11,12 @@ function githubPort(): SandcastleGithubPort {
     ensureLabel: vi.fn(),
     getIssue: vi.fn(),
     listCandidateIssues: vi.fn().mockResolvedValue([]),
-    claimIssue: vi.fn().mockResolvedValue(true),
+    claimIssue: vi.fn(async (number, runId) => ({
+      issueNumber: number,
+      runId,
+      branch: `sandcastle/issue-${number}`,
+      baseSha: "a".repeat(40),
+    })),
   };
 }
 
@@ -435,7 +440,7 @@ describe("Sandcastle CLI", () => {
       state: "OPEN",
       labels: ["Sandcastle"],
     });
-    vi.mocked(github.claimIssue).mockResolvedValue(false);
+    vi.mocked(github.claimIssue).mockResolvedValue(null);
     const events: unknown[] = [];
     const stop = new Error("stop fake clock");
 
@@ -447,7 +452,7 @@ describe("Sandcastle CLI", () => {
     })).rejects.toBe(stop);
 
     expect(github.getIssue).toHaveBeenCalledTimes(1);
-    expect(github.claimIssue).toHaveBeenCalledWith(102);
+    expect(github.claimIssue).toHaveBeenCalledWith(102, expect.any(String));
     expect(events).toEqual([]);
   });
 
@@ -488,12 +493,12 @@ describe("Sandcastle CLI", () => {
       state: "OPEN",
       labels: ["Sandcastle"],
     });
-    vi.mocked(github.claimIssue).mockResolvedValue(false);
+    vi.mocked(github.claimIssue).mockResolvedValue(null);
     const processIssue = vi.fn();
 
     await runSandcastleCli(["--issue", "100"], { github, processIssue });
 
-    expect(github.claimIssue).toHaveBeenCalledWith(100);
+    expect(github.claimIssue).toHaveBeenCalledWith(100, expect.any(String));
     expect(processIssue).not.toHaveBeenCalled();
   });
 
@@ -932,6 +937,29 @@ describe("Sandcastle CLI", () => {
     expect(github.ensureLabel).not.toHaveBeenCalled();
   });
 
+  it("rejects a claim receipt that is not bound to the requested Issue and run", async () => {
+    const github = githubPort();
+    vi.mocked(github.getIssue).mockResolvedValue({
+      number: 100,
+      state: "OPEN",
+      labels: ["Sandcastle"],
+    });
+    vi.mocked(github.claimIssue).mockResolvedValue({
+      issueNumber: 101,
+      runId: "other-run",
+      branch: "sandcastle/issue-101",
+      baseSha: "a".repeat(40),
+    });
+    const processIssue = vi.fn();
+
+    await expect(runSandcastleCli(["--issue", "100"], {
+      github,
+      createRunId: () => "current-run",
+      processIssue,
+    })).rejects.toThrow("claim receipt identity");
+    expect(processIssue).not.toHaveBeenCalled();
+  });
+
   it("claims an eligible target before starting Planner", async () => {
     const github = githubPort();
     vi.mocked(github.getIssue).mockResolvedValue({
@@ -958,7 +986,7 @@ describe("Sandcastle CLI", () => {
       runSandcastleCli(["--issue", "100"], { github, processIssue }),
     ).resolves.toEqual(plan);
 
-    expect(github.claimIssue).toHaveBeenCalledWith(100);
+    expect(github.claimIssue).toHaveBeenCalledWith(100, expect.any(String));
     expect(processIssue).toHaveBeenCalledWith(
       100,
       expect.objectContaining({ batchId: 0, issueNumber: 100 }),
