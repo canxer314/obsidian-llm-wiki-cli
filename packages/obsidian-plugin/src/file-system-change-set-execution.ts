@@ -35,6 +35,7 @@ import {
   RecoveryJournalIncompatibleError,
   openRecoveryJournal,
   type RecoveryJournal,
+  type RecoveryJournalDiagnosticFacts,
   type RecoveryJournalJson,
 } from "./recovery-journal.js";
 
@@ -445,6 +446,10 @@ export interface FileSystemChangeSetExecutionOptions {
   slotCapacity?: number;
 }
 
+export interface FileSystemChangeSetExecutionAdapter extends ChangeSetExecutionAdapter {
+  diagnosticJournalFacts(): Promise<RecoveryJournalDiagnosticFacts>;
+}
+
 function isPrivateId(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -635,7 +640,7 @@ function parseFrame(value: unknown): RecoveryJournalFrame {
 
 export async function createFileSystemChangeSetExecutionAdapter(
   options: FileSystemChangeSetExecutionOptions,
-): Promise<ChangeSetExecutionAdapter> {
+): Promise<FileSystemChangeSetExecutionAdapter> {
   await mkdir(dirname(options.journalPath), { recursive: true });
   const handle = await open(options.journalPath, "r+").catch(
     (error: NodeJS.ErrnoException) => {
@@ -662,6 +667,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
     }
   }
   return {
+    diagnosticJournalFacts: () => journal.diagnosticFacts(),
     loadRecoveryFrame: async () => {
       const record = await journal.recover();
       if (record === undefined) return null;

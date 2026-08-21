@@ -15,6 +15,11 @@ import type {
   BridgeInstance,
   BridgeMaintenanceOperation,
 } from "./bridge-instance.js";
+import {
+  createStandardDiagnosticBundle,
+  type StandardDiagnosticBundle,
+} from "./diagnostic-bundle.js";
+import type { RecoveryJournalDiagnosticFacts } from "./recovery-journal.js";
 import { withMoveReferenceProjection } from "./move-reference-projection.js";
 import {
   SearchSnapshotManager,
