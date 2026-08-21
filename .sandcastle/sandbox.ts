@@ -12,6 +12,7 @@ import {
   type SandcastleConfigPaths,
   type SandcastleModels,
 } from "./private-config.ts";
+import { createChildEnvironments } from "./automation-environment.ts";
 
 const OFFLINE_INSTALL = [
   "printf '%s\\n' \"$(node --version)\" \"$(npm --version)\" | cmp --silent - /home/agent/.npm/sandcastle-runtime.versions",
@@ -64,13 +65,15 @@ export async function loadSandboxStartup(
   paths: Partial<SandcastleConfigPaths> = {},
 ): Promise<{
   readonly sandbox: ReturnType<typeof createSandboxProvider>;
+  readonly automationSandbox: ReturnType<typeof createSandboxProvider>;
   readonly environment: Readonly<Record<string, string>>;
   readonly proxyEnvironment: Readonly<Record<string, string>>;
+  readonly childEnvironments: ReturnType<typeof createChildEnvironments>;
   readonly models: SandcastleModels;
 }> {
   const config = await loadSandcastleConfig({
     settingsPath: paths.settingsPath ?? resolve(homedir(), ".claude/settings.json"),
-    envPath: paths.envPath ?? resolve(import.meta.dirname, ".env"),
+    envPath: paths.envPath ?? resolve(homedir(), ".config", "sandcastle", "env"),
     ...(paths.log === undefined ? {} : { log: paths.log }),
   });
   const repositoryPath = resolve(import.meta.dirname, "..");
@@ -81,8 +84,13 @@ export async function loadSandboxStartup(
   });
   return {
     sandbox: createSandboxProvider(config.environment, imageName),
+    automationSandbox: createSandboxProvider(
+      createChildEnvironments(config.environment).claude,
+      imageName,
+    ),
     environment: config.environment,
     proxyEnvironment: config.proxyEnvironment,
+    childEnvironments: createChildEnvironments(config.environment),
     models: config.models,
   };
 }

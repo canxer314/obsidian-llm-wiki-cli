@@ -1,0 +1,169 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+import type {
+  PublishedReview,
+  ReviewAutomationPorts,
+  ReviewFinding,
+} from "./review-automation.ts";
+
+const executeFile = promisify(execFile);
+
+type Execute = (
+  file: string,
+  arguments_: readonly string[],
+  environment?: Readonly<Record<string, string>>,
+) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+
+function reviewEvent(review: PublishedReview): "APPROVE" | "REQUEST_CHANGES" {
+  return review.verdict === "Approved" ? "APPROVE" : "REQUEST_CHANGES";
+}
+
+function findingBody(finding: ReviewFinding): string {
+  return `**${finding.summary}**: ${finding.details}`;
+}
+
+function reviewBody(review: PublishedReview): string {
+  if (review.findings.length === 0) return review.summary;
+  return `${review.summary}\n\n${review.findings.map((finding) => `- ${findingBody(finding)}`).join("\n")}`;
+}
+
+interface InlineComment {
+  readonly path: string;
+  readonly line: number;
+  readonly side: "LEFT" | "RIGHT";
+  readonly body: string;
+}
+
+interface PullRequestFile {
+  readonly filename: string;
+  readonly patch?: string;
+}
+
+function diffLocations(files: readonly PullRequestFile[]): ReadonlyMap<string, { readonly LEFT: ReadonlySet<number>; readonly RIGHT: ReadonlySet<number> }> {
+  const locations = new Map<string, { LEFT: Set<number>; RIGHT: Set<number> }>();
+  for (const file of files) {
+    const location = { LEFT: new Set<number>(), RIGHT: new Set<number>() };
+    let left = 0;
+    let right = 0;
+    for (const line of file.patch?.split("\n") ?? []) {
+      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
+      if (hunk !== null) {
+        left = Number(hunk[1]);
+        right = Number(hunk[2]);
+      } else if (line.startsWith("-")) {
+        location.LEFT.add(left);
+        left += 1;
+      } else if (line.startsWith("+")) {
+        location.RIGHT.add(right);
+        right += 1;
+      } else if (line.startsWith(" ")) {
+        location.LEFT.add(left);
+        location.RIGHT.add(right);
+        left += 1;
+        right += 1;
+      }
+    }
+    locations.set(file.filename, location);
+  }
+  return locations;
+}
+
+function inlineComments(
+  review: PublishedReview,
+  locations: ReadonlyMap<string, { readonly LEFT: ReadonlySet<number>; readonly RIGHT: ReadonlySet<number> }>,
+): readonly InlineComment[] {
+  return review.findings.flatMap((finding) => {
+    if (finding.location === undefined) return [];
+    const { path, line, side } = finding.location;
+    if (
+      path.length === 0 ||
+      path.startsWith("/") ||
+      path.split("/").includes("..") ||
+      !Number.isSafeInteger(line) ||
+      line < 1 ||
+      (side !== "LEFT" && side !== "RIGHT")
+    ) {
+      throw new Error("Review inline comment location is invalid");
+    }
+    return locations.get(path)?.[side].has(line) === true
+      ? [{ path, line, side, body: findingBody(finding) }]
+      : [];
+  });
+}
+
+export function createAutomationGithubPort(options: {
+  readonly execute?: Execute;
+  readonly environment?: Readonly<Record<string, string>>;
+}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] {
+  const execute = options.execute ?? (async (file, arguments_, environment) => {
+    const result = await executeFile(file, [...arguments_], { env: environment });
+    return { stdout: result.stdout, stderr: result.stderr };
+  });
+  return {
+    async readPullRequest(pullRequestNumber) {
+      const { stdout } = await execute("gh", [
+        "pr", "view", String(pullRequestNumber), "--json",
+        "number,state,isDraft,baseRepository,headRepository,headRefOid,labels",
+      ], options.environment);
+      const pullRequest = JSON.parse(stdout) as {
+        readonly number: number;
+        readonly state: string;
+        readonly isDraft: boolean;
+        readonly baseRepository: { readonly nameWithOwner: string } | null;
+        readonly headRepository: { readonly nameWithOwner: string } | null;
+        readonly headRefOid: string;
+        readonly labels: readonly { readonly name: string }[];
+      };
+      if (pullRequest.baseRepository === null || pullRequest.headRepository === null) {
+        throw new Error(`Pull Request #${pullRequestNumber} repository identity is unavailable`);
+      }
+      return {
+        number: pullRequest.number,
+        state: pullRequest.state,
+        isDraft: pullRequest.isDraft,
+        baseRepository: pullRequest.baseRepository.nameWithOwner,
+        headRepository: pullRequest.headRepository.nameWithOwner,
+        headSha: pullRequest.headRefOid,
+        labels: pullRequest.labels.map(({ name }) => name),
+      };
+    },
+    async addPullRequestLabel(pullRequestNumber, label) {
+      await execute("gh", ["pr", "edit", String(pullRequestNumber), "--add-label", label], options.environment);
+    },
+    async removePullRequestLabel(pullRequestNumber, label) {
+      await execute("gh", ["pr", "edit", String(pullRequestNumber), "--remove-label", label], options.environment);
+    },
+    async addBlockedDiagnostic(pullRequestNumber, diagnostic) {
+      await execute("gh", [
+        "pr", "comment", String(pullRequestNumber), "--body",
+        `Automation review is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:review, then retry.`,
+      ], options.environment);
+    },
+    async publish(request) {
+      const { stdout: headOutput } = await execute("gh", [
+        "pr", "view", String(request.pullRequestNumber), "--json", "headRefOid", "--jq", ".headRefOid",
+      ], options.environment);
+      if (headOutput.trim() !== request.revision) {
+        throw new Error("Pull Request head changed before review publication");
+      }
+      const { stdout } = await execute("gh", [
+        "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/files`, "--method", "GET", "--paginate",
+      ], options.environment);
+      const files = JSON.parse(stdout) as readonly PullRequestFile[];
+      const comments = inlineComments(request.review, diffLocations(files));
+      await execute("gh", [
+        "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/reviews`, "--method", "POST",
+        "-f", `commit_id=${request.revision}`,
+        "-f", `event=${reviewEvent(request.review)}`,
+        "-f", `body=${reviewBody(request.review)}`,
+        ...comments.flatMap((comment, index) => [
+          "-f", `comments[${index}][path]=${comment.path}`,
+          "-f", `comments[${index}][line]=${comment.line}`,
+          "-f", `comments[${index}][side]=${comment.side}`,
+          "-f", `comments[${index}][body]=${comment.body}`,
+        ]),
+      ], options.environment);
+    },
+  };
+}
