@@ -10,6 +10,8 @@ import { dispatchAutomationCommands } from "./automation-dispatch.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { createTargetCheckout } from "./target-checkout.ts";
+import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
+import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
 import { runReviewAutomationCommand } from "./review-automation.ts";
 import { createProcessReviewRunner } from "./review-process-runner.ts";
 import {
@@ -101,6 +103,7 @@ try {
     };
     const github = new GithubCliPort();
     const reviewer = createProcessReviewRunner({});
+    const updater = createProcessBranchUpdater({});
     const result = await runAutomationCli(process.argv.slice(2), {
       runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runReviewAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,
@@ -138,7 +141,25 @@ try {
         await dispatchGithub.ensureLabels();
         return { status: "labels-ready" } as const;
       },
-      runFeedback: (pullRequestNumber) => runFeedbackImplementationAutomationCommand({ pullRequestNumber }, {
+      runUpdate: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runBranchUpdateAutomationCommand({ pullRequestNumber }, {
+        github: automationGithub,
+        checkout: createTargetCheckout({
+          sourceRepositoryPath: repositoryPath,
+          checkoutRoot: resolve(import.meta.dirname, "jobs"),
+          createJobDirectory: () => resolve(import.meta.dirname, "jobs", `branch-update-${jobId}`),
+          gitEnvironment: startup.childEnvironments.git,
+          dependencyEnvironment: startup.childEnvironments.dependencies,
+        }),
+        updater,
+        lease: {
+          acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+            root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+            pullRequestNumber: currentPullRequestNumber,
+          }),
+        },
+        createJobId: () => jobId,
+      })),
+      runFeedback: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementationAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,
         checkout: createTargetCheckout({
           sourceRepositoryPath: repositoryPath,
@@ -167,13 +188,49 @@ try {
           }),
         },
         createJobId: () => jobId,
-      }),
+      })),
       dispatch: (concurrency) => dispatchAutomationCommands({
         concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
       }, {
         scheduler,
         github: dispatchGithub,
         run: async (command) => {
+          if (command.operation === "update-branch") {
+            await runBranchUpdateAutomationCommand({ pullRequestNumber: command.number }, {
+              github: automationGithub,
+              checkout: createTargetCheckout({
+                sourceRepositoryPath: repositoryPath,
+                checkoutRoot: resolve(import.meta.dirname, "jobs"),
+                createJobDirectory: () => resolve(import.meta.dirname, "jobs", `branch-update-${jobId}`),
+                gitEnvironment: startup.childEnvironments.git,
+                dependencyEnvironment: startup.childEnvironments.dependencies,
+              }),
+              updater,
+              createJobId: () => jobId,
+            });
+            return;
+          }
+          if (command.operation === "implement") {
+            await runFeedbackImplementationAutomationCommand({ pullRequestNumber: command.number }, {
+              github: automationGithub,
+              checkout: createTargetCheckout({
+                sourceRepositoryPath: repositoryPath,
+                checkoutRoot: resolve(import.meta.dirname, "jobs"),
+                createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
+                gitEnvironment: startup.childEnvironments.git,
+                dependencyEnvironment: startup.childEnvironments.dependencies,
+              }),
+              publisher: createFeedbackPublisher({ sourceRepositoryPath: repositoryPath, gitEnvironment: startup.childEnvironments.git }),
+              implementer: {
+                implement: async (request) => createFeedbackImplementerSession({
+                  sandbox: startup.automationSandbox,
+                  hooks: sandboxHooksFor("implementer"),
+                }).run({ model: startup.models.implementer, ...request }),
+              },
+              createJobId: () => jobId,
+            });
+            return;
+          }
           await runReviewAutomationCommand({ pullRequestNumber: command.number }, {
             github: automationGithub,
             checkout: createTargetCheckout({

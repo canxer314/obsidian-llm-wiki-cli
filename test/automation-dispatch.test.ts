@@ -8,7 +8,7 @@ const sha = "a".repeat(40);
 
 function command(overrides: Partial<{
   number: number;
-  operation: "review";
+  operation: "review" | "implement" | "update-branch";
   identity: string;
   labels: readonly string[];
 }> = {}) {
@@ -72,8 +72,12 @@ describe("Automation Command dispatch", () => {
     expect(result).toEqual({ status: "dispatched", selected: commands });
   });
 
-  it("pins Pull Request review to its accepted priority and breaks ties by ascending number", () => {
+  it("pins Pull Request update, feedback, and review to their accepted priorities and breaks ties by ascending number", () => {
+    expect(commandPriority(command({ operation: "update-branch" }))).toBe(1);
+    expect(commandPriority(command({ operation: "implement" }))).toBe(2);
     expect(commandPriority(command({ number: 9 }))).toBe(3);
+    expect(compareCommands(command({ operation: "update-branch", number: 9 }), command({ number: 4 }))).toBeLessThan(0);
+    expect(compareCommands(command({ operation: "implement", number: 9 }), command({ number: 4 }))).toBeLessThan(0);
     expect(compareCommands(command({ number: 9 }), command({ number: 4 }))).toBeGreaterThan(0);
     expect(compareCommands(command({ number: 4 }), command({ number: 9 }))).toBeLessThan(0);
   });
