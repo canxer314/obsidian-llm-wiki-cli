@@ -19,6 +19,14 @@ describe("automation GitHub port", () => {
         }),
         stderr: "",
       })
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{
+          filename: ".sandcastle/review-automation.ts",
+          patch: "@@ -92,6 +92,10 @@\n export async function runReviewAutomationCommand(\n+  const review = await reviewer.review();",
+        }]),
+        stderr: "",
+      })
       .mockResolvedValue({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
@@ -37,7 +45,11 @@ describe("automation GitHub port", () => {
       review: {
         verdict: "Changes requested",
         summary: "One problem.",
-        findings: [{ summary: "Incorrect boundary", details: "The condition excludes the final record." }],
+        findings: [{
+          summary: "Incorrect boundary",
+          details: "The condition excludes the final record.",
+          location: { path: ".sandcastle/review-automation.ts", line: 93, side: "RIGHT" },
+        }],
       },
     });
 
@@ -45,10 +57,80 @@ describe("automation GitHub port", () => {
       "pr", "view", "220", "--json",
       "number,state,isDraft,baseRepository,headRepository,headRefOid,labels",
     ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "pr", "view", "220", "--json", "headRefOid", "--jq", ".headRefOid",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(3, "gh", [
+      "api", "repos/{owner}/{repo}/pulls/220/files", "--method", "GET", "--paginate",
+    ], undefined);
     expect(execute).toHaveBeenLastCalledWith("gh", [
       "api", "repos/{owner}/{repo}/pulls/220/reviews", "--method", "POST",
       "-f", `commit_id=${revision}`, "-f", "event=REQUEST_CHANGES",
       "-f", "body=One problem.\n\n- **Incorrect boundary**: The condition excludes the final record.",
+      "-f", "comments[0][path]=.sandcastle/review-automation.ts",
+      "-f", "comments[0][line]=93",
+      "-f", "comments[0][side]=RIGHT",
+      "-f", "comments[0][body]=**Incorrect boundary**: The condition excludes the final record.",
     ], undefined);
+  });
+
+  it("rejects publication if the acquired Pull Request head changed", async () => {
+    const github = createAutomationGithubPort({
+      execute: vi.fn().mockResolvedValue({ stdout: `${"a".repeat(40)}\n`, stderr: "" }),
+    });
+
+    await expect(github.publish({
+      pullRequestNumber: 220,
+      revision,
+      review: { verdict: "Approved", summary: "Looks good.", findings: [] },
+    })).rejects.toThrow("Pull Request head changed before review publication");
+  });
+
+  it("keeps a non-diff location in the review body without creating an inline comment", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await github.publish({
+      pullRequestNumber: 220,
+      revision,
+      review: {
+        verdict: "Changes requested",
+        summary: "One problem.",
+        findings: [{
+          summary: "Incorrect boundary",
+          details: "The condition excludes the final record.",
+          location: { path: ".sandcastle/review-automation.ts", line: 96, side: "RIGHT" },
+        }],
+      },
+    });
+
+    expect(execute).toHaveBeenLastCalledWith("gh", expect.not.arrayContaining([
+      "-f", "comments[0][path]=.sandcastle/review-automation.ts",
+    ]), undefined);
+  });
+
+  it("rejects an inline location that GitHub cannot safely identify", async () => {
+    const github = createAutomationGithubPort({
+      execute: vi.fn()
+        .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "[]", stderr: "" }),
+    });
+
+    await expect(github.publish({
+      pullRequestNumber: 220,
+      revision,
+      review: {
+        verdict: "Changes requested",
+        summary: "One problem.",
+        findings: [{
+          summary: "Incorrect boundary",
+          details: "The condition excludes the final record.",
+          location: { path: "../outside.ts", line: 96, side: "RIGHT" },
+        }],
+      },
+    })).rejects.toThrow("Review inline comment location is invalid");
   });
 });

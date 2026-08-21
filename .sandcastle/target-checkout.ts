@@ -49,7 +49,9 @@ export function createTargetCheckout(options: {
         : options.createJobDirectory();
       let completed = false;
       try {
-        await git(["clone", "--no-checkout", options.sourceRepositoryPath, checkoutPath]);
+        await git([
+          "clone", "--no-checkout", "--no-local", options.sourceRepositoryPath, checkoutPath,
+        ]);
         await git(["-C", checkoutPath, "fetch", "--no-tags", "origin", request.revision]);
         const fetched = (await git(["-C", checkoutPath, "rev-parse", "FETCH_HEAD"])).stdout.trim();
         if (fetched !== request.revision) {
@@ -63,7 +65,7 @@ export function createTargetCheckout(options: {
           throw new Error("Target revision tracks a Sandcastle private environment file");
         }
         await git(["-C", checkoutPath, "checkout", "--detach", request.revision]);
-        await npm(["--prefix", checkoutPath, "ci"]);
+        await npm(["--prefix", checkoutPath, "ci", "--ignore-scripts"]);
         const result = await action(checkoutPath);
         completed = true;
         return result;

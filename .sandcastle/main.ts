@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
@@ -8,6 +9,10 @@ import { createAutomationGithubPort } from "./automation-github.ts";
 import { createTargetCheckout } from "./target-checkout.ts";
 import { runReviewAutomationCommand } from "./review-automation.ts";
 import { createSameSessionReviewExtractor } from "./review-extraction.ts";
+import {
+  createReviewArtifactDirectory,
+  removeExpiredReviewArtifacts,
+} from "./review-artifacts.ts";
 import {
   ClaimResourceReleaseAdapter,
   DockerClaimReadAdapter,
@@ -59,7 +64,10 @@ import {
 try {
   const repositoryPath = resolve(import.meta.dirname, "..");
   if (process.argv[2] === "run") {
+    const artifactRoot = resolve(import.meta.dirname, "jobs", "review-artifacts");
+    await removeExpiredReviewArtifacts({ root: artifactRoot });
     const startup = await loadSandboxStartup();
+    const jobId = randomUUID();
     const automationGithub = createAutomationGithubPort({
       environment: startup.childEnvironments.github,
     });
@@ -78,15 +86,22 @@ try {
           dependencyEnvironment: startup.childEnvironments.dependencies,
         }),
         reviewer: {
-          review: ({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath }) =>
-            reviewer.review({
+          review: async ({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath }) => {
+            const artifactDirectory = await createReviewArtifactDirectory({
+              root: artifactRoot,
+              jobId,
+            });
+            return reviewer.review({
               pullRequestNumber: currentPullRequestNumber,
               revision,
               checkoutPath,
               model: startup.models.reviewer,
-            }),
+              artifactDirectory,
+            });
+          },
         },
         publisher: automationGithub,
+        createJobId: () => jobId,
       }),
     });
     console.log(JSON.stringify(result));

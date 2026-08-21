@@ -8,10 +8,20 @@ export interface ReviewAutomationPullRequest {
   readonly labels: readonly string[];
 }
 
+export interface ReviewFinding {
+  readonly summary: string;
+  readonly details: string;
+  readonly location?: {
+    readonly path: string;
+    readonly line: number;
+    readonly side: "LEFT" | "RIGHT";
+  };
+}
+
 export interface PublishedReview {
   readonly verdict: "Approved" | "Changes requested";
   readonly summary: string;
-  readonly findings: readonly unknown[];
+  readonly findings: readonly ReviewFinding[];
 }
 
 export interface ReviewAutomationPorts {

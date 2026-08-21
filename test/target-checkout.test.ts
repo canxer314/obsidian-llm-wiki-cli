@@ -24,7 +24,7 @@ describe("Target Checkout", () => {
       .resolves.toBe("/jobs/review-220-job-a");
 
     expect(execute).toHaveBeenNthCalledWith(1, "git", [
-      "clone", "--no-checkout", "/trusted/source", "/jobs/review-220-job-a",
+      "clone", "--no-checkout", "--no-local", "/trusted/source", "/jobs/review-220-job-a",
     ]);
     expect(execute).toHaveBeenNthCalledWith(2, "git", [
       "-C", "/jobs/review-220-job-a", "fetch", "--no-tags", "origin", revision,
@@ -40,7 +40,7 @@ describe("Target Checkout", () => {
       "-C", "/jobs/review-220-job-a", "checkout", "--detach", revision,
     ]);
     expect(execute).toHaveBeenNthCalledWith(6, "npm", [
-      "--prefix", "/jobs/review-220-job-a", "ci",
+      "--prefix", "/jobs/review-220-job-a", "ci", "--ignore-scripts",
     ]);
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree"]));
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["--shared"]));
