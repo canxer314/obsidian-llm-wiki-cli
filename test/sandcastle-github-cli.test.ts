@@ -87,6 +87,27 @@ describe("Sandcastle GitHub CLI adapter", () => {
     await expect(github.deleteBranch("sandcastle/issue-110")).resolves.toBeUndefined();
   });
 
+  it("atomically deletes a claim branch only at the receipt-bound expected SHA", async () => {
+    const expectedHeadSha = "a".repeat(40);
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await github.compareAndDeleteBranch({
+      repository: "example/repository",
+      issueNumber: 110,
+      branch: "sandcastle/issue-110",
+      comparisonBaseSha: expectedHeadSha,
+      expectedHeadSha,
+    });
+
+    expect(execute).toHaveBeenCalledWith("git", [
+      "push",
+      "origin",
+      `--force-with-lease=refs/heads/sandcastle/issue-110:${expectedHeadSha}`,
+      ":refs/heads/sandcastle/issue-110",
+    ]);
+  });
+
   it("reports a non-merged exact-head response without deleting anything", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "false\n", stderr: "" });
     const github = new GithubCliPort(execute);
@@ -655,16 +676,26 @@ describe("Sandcastle GitHub CLI adapter", () => {
   });
 
   it("atomically creates the deterministic remote branch from the default branch", async () => {
+    const baseSha = "a".repeat(40);
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${baseSha}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" });
     const github = new GithubCliPort(execute);
 
-    await expect(github.claimIssue(102)).resolves.toBe(true);
+    const claimReceipt = await github.claimIssue(102, "run-claim-102");
+    expect(claimReceipt).toEqual({
+      issueNumber: 102,
+      runId: "run-claim-102",
+      branch: "sandcastle/issue-102",
+      baseSha,
+    });
+    expect(JSON.stringify(claimReceipt)).not.toMatch(
+      /credential|host|pid|path|prompt|transcript|payload/iu,
+    );
 
     expect(execute.mock.calls).toEqual([
       [
@@ -696,7 +727,7 @@ describe("Sandcastle GitHub CLI adapter", () => {
           "-f",
           "ref=refs/heads/sandcastle/issue-102",
           "-f",
-          "sha=abc123",
+          `sha=${baseSha}`,
         ],
       ],
       [
@@ -715,18 +746,30 @@ describe("Sandcastle GitHub CLI adapter", () => {
     ]);
   });
 
+  it("refuses to create a claim from an invalid base SHA", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await expect(github.claimIssue(102, "run-claim-102")).rejects.toThrow(
+      "default branch SHA",
+    );
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it("fails the claim when an existing local branch cannot be aligned to the claimed remote ref", async () => {
     const checkedOut = new Error("fatal: cannot force update the branch checked out at another worktree");
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${"a".repeat(40)}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockRejectedValueOnce(checkedOut);
     const github = new GithubCliPort(execute);
 
-    await expect(github.claimIssue(102)).rejects.toBe(checkedOut);
+    await expect(github.claimIssue(102, "run-claim-102")).rejects.toBe(checkedOut);
   });
 
   it("skips a target with an associated Pull Request", async () => {
@@ -736,7 +779,7 @@ describe("Sandcastle GitHub CLI adapter", () => {
     });
     const github = new GithubCliPort(execute);
 
-    await expect(github.claimIssue(102)).resolves.toBe(false);
+    await expect(github.claimIssue(102, "run-claim-102")).resolves.toBeNull();
 
     expect(execute).toHaveBeenCalledOnce();
   });
@@ -748,11 +791,11 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${"a".repeat(40)}\n`, stderr: "" })
       .mockRejectedValueOnce(conflict);
     const github = new GithubCliPort(execute);
 
-    await expect(github.claimIssue(102)).resolves.toBe(false);
+    await expect(github.claimIssue(102, "run-claim-102")).resolves.toBeNull();
   });
 
   it("allows only one concurrent runner to claim the same target", async () => {
@@ -760,7 +803,7 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
       if (arguments_[0] === "pr") return { stdout: "[]\n", stderr: "" };
       if (arguments_[0] === "api" && arguments_[1]?.endsWith("/commits/HEAD")) {
-        return { stdout: "abc123\n", stderr: "" };
+        return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
       }
       if (_file === "git") return { stdout: "", stderr: "" };
       await Promise.resolve();
@@ -776,8 +819,19 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const second = new GithubCliPort(execute);
 
     await expect(
-      Promise.all([first.claimIssue(102), second.claimIssue(102)]),
-    ).resolves.toEqual([true, false]);
+      Promise.all([
+        first.claimIssue(102, "run-first"),
+        second.claimIssue(102, "run-second"),
+      ]),
+    ).resolves.toEqual([
+      {
+        issueNumber: 102,
+        runId: "run-first",
+        branch: "sandcastle/issue-102",
+        baseSha: "a".repeat(40),
+      },
+      null,
+    ]);
   });
 
   it("does not hide unrelated remote branch creation failures", async () => {
@@ -787,11 +841,11 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${"a".repeat(40)}\n`, stderr: "" })
       .mockRejectedValueOnce(failure);
     const github = new GithubCliPort(execute);
 
-    await expect(github.claimIssue(102)).rejects.toBe(failure);
+    await expect(github.claimIssue(102, "run-claim-102")).rejects.toBe(failure);
   });
 
   it("publishes Issue diagnostics and edits failure labels", async () => {

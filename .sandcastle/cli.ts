@@ -27,11 +27,18 @@ export interface SandcastleIssue {
   readonly labels: readonly string[];
 }
 
+export interface SandcastleClaimReceipt {
+  readonly issueNumber: number;
+  readonly runId: string;
+  readonly branch: string;
+  readonly baseSha: string;
+}
+
 export interface SandcastleGithubPort {
   ensureLabel(name: string): Promise<void>;
   getIssue(number: number): Promise<SandcastleIssue | null>;
   listCandidateIssues(): Promise<readonly SandcastleIssue[]>;
-  claimIssue(number: number): Promise<boolean>;
+  claimIssue(number: number, runId: string): Promise<SandcastleClaimReceipt | null>;
 }
 
 export type SandcastleWatchEvent =
@@ -94,6 +101,7 @@ export interface SandcastleCliDependencies<TResult = unknown> {
   readonly monotonicNow?: () => number;
   readonly utcNow?: () => Date;
   readonly recordInterruption?: (event: SandcastleInterruptionEvent) => void;
+  readonly finalizeInterruption?: (receipt: SandcastleClaimReceipt) => Promise<void>;
   readonly handleFailure?: (
     issueNumber: number,
     stage: "claim",
@@ -226,8 +234,9 @@ const PROCESS_SIGNAL_SOURCE: SandcastleSignalSource = {
 
 async function claimEligibleIssue<TResult>(
   issueNumber: number,
+  runId: string,
   dependencies: SandcastleCliDependencies<TResult>,
-): Promise<boolean> {
+): Promise<SandcastleClaimReceipt | null> {
   const issue = await dependencies.github.getIssue(issueNumber);
   if (issue === null) {
     throw new SandcastleCliError(`Issue #${issueNumber} does not exist`);
@@ -241,14 +250,22 @@ async function claimEligibleIssue<TResult>(
     );
   }
 
-  let claimed: boolean;
+  let receipt: SandcastleClaimReceipt | null;
   try {
-    claimed = await dependencies.github.claimIssue(issueNumber);
+    receipt = await dependencies.github.claimIssue(issueNumber, runId);
   } catch (error) {
     await dependencies.handleFailure?.(issueNumber, "claim", error);
     throw error;
   }
-  return claimed;
+  if (receipt !== null && (
+    receipt.issueNumber !== issueNumber ||
+    receipt.runId !== runId ||
+    receipt.branch !== `sandcastle/issue-${issueNumber}` ||
+    !/^[0-9a-f]{40}$/u.test(receipt.baseSha)
+  )) {
+    throw new Error("Invalid claim receipt identity");
+  }
+  return receipt;
 }
 
 export async function runSandcastleCli<TResult>(
@@ -353,8 +370,12 @@ export async function runSandcastleCli<TResult>(
       let batchId = 0;
       for (;;) {
         if (draining) {
-          await Promise.allSettled(active.values());
+          const results = await Promise.allSettled(active.values());
           recordInterruption(signalCount >= 2 ? "cancelling" : "draining", "completed");
+          const rejected = results.find(
+            (result): result is PromiseRejectedResult => result.status === "rejected",
+          );
+          if (rejected !== undefined) throw rejected.reason;
           return;
         }
         let candidates: readonly SandcastleIssue[] = [];
@@ -367,16 +388,25 @@ export async function runSandcastleCli<TResult>(
         const available = candidates.filter((issue) =>
           !active.has(issue.number) && !issue.labels.includes("sandcastle:failed")
         ).slice(0, MAX_ACTIVE_ISSUES - active.size);
-        const claimed: SandcastleIssue[] = [];
+        const claimed = new Map<number, SandcastleClaimReceipt>();
         for (const issue of available) {
           try {
-            if (await claimEligibleIssue(issue.number, dependencies)) claimed.push(issue);
+            const receipt = await claimEligibleIssue(issue.number, runId, dependencies);
+            if (receipt !== null) claimed.set(issue.number, receipt);
           } catch {
             // Claim failures are finalized independently and do not stop the batch.
           }
           if (draining) break;
         }
-        const launchable = controller.signal.aborted ? [] : claimed;
+        const launchable = controller.signal.aborted ? [] : available.filter(
+          (issue) => claimed.has(issue.number),
+        );
+        if (controller.signal.aborted) {
+          await Promise.all([...claimed.values()].map((receipt) =>
+            dependencies.finalizeInterruption?.(receipt)
+          ));
+          claimed.clear();
+        }
         if (launchable.length > 0) {
           batchId += 1;
           dependencies.recordWatchEvent?.({
@@ -401,6 +431,7 @@ export async function runSandcastleCli<TResult>(
           if (signalCount >= 3) liveStatus.transition("forced-exit");
           else if (signalCount >= 2) liveStatus.transition("cancelling");
           else if (draining) liveStatus.transition("draining");
+          const receipt = claimed.get(issue.number)!;
           const workflow = Promise.resolve(dependencies.processIssue(issue.number, {
             runId,
             batchId: workflowBatchId,
@@ -411,7 +442,7 @@ export async function runSandcastleCli<TResult>(
             .catch(() => {
               outcome = "failure";
             })
-            .finally(() => {
+            .finally(async () => {
               active.delete(issue.number);
               activeStatuses.delete(liveStatus);
               status.finishIssue(issue.number, outcome === "success" ? "completed" : "failed");
@@ -423,6 +454,9 @@ export async function runSandcastleCli<TResult>(
                 outcome,
                 activeCount: active.size,
               });
+              if (controller.signal.aborted) {
+                await dependencies.finalizeInterruption?.(receipt);
+              }
             });
           active.set(issue.number, workflow);
         }
@@ -439,7 +473,8 @@ export async function runSandcastleCli<TResult>(
       signal: controller.signal,
     };
     if (controller.signal.aborted) throw controller.signal.reason;
-    if (!await claimEligibleIssue(context.issueNumber, dependencies)) return;
+    const receipt = await claimEligibleIssue(context.issueNumber, runId, dependencies);
+    if (receipt === null) return;
     const liveStatus = status.startIssue(context.batchId, context.issueNumber);
     activeStatuses.add(liveStatus);
     try {
@@ -451,7 +486,10 @@ export async function runSandcastleCli<TResult>(
       throw error;
     } finally {
       activeStatuses.delete(liveStatus);
-      if (signalCount > 0) recordInterruption("cancelling", "completed");
+      if (signalCount > 0) {
+        await dependencies.finalizeInterruption?.(receipt);
+        recordInterruption("cancelling", "completed");
+      }
     }
   } finally {
     signalSource.remove(onSignal);

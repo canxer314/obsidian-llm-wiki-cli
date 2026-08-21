@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ClaimReadError,
+  ClaimResourceReleaseAdapter,
   DockerClaimReadAdapter,
   GitClaimReadAdapter,
   GithubClaimReadAdapter,
@@ -122,6 +123,7 @@ describe("Git claim read adapter", () => {
     }
   });
 
+describe("Docker claim read adapter", () => {
   it.each([
     ["", undefined, "absent"],
     ["worktree /agent/worktree\nbranch refs/heads/sandcastle/issue-208\n", "", "clean"],
@@ -142,7 +144,59 @@ describe("Git claim read adapter", () => {
   });
 });
 
-describe("Docker claim read adapter", () => {
+describe("claim resource release adapter", () => {
+  it("removes only an exact stopped container and clean claim worktree without force", async () => {
+    const run = command(
+      JSON.stringify("abcdef123456"),
+      JSON.stringify(false),
+      "",
+      "worktree /agent/worktree\nbranch refs/heads/sandcastle/issue-208\n",
+      "",
+      "",
+      "",
+    );
+    const adapter = new ClaimResourceReleaseAdapter("/repository", run);
+
+    await adapter.removeStoppedContainer(input);
+    await adapter.removeCleanWorktree(input);
+    await adapter.compareAndDeleteLocalBranch({ ...input, expectedHeadSha: BASE });
+
+    expect(vi.mocked(run).mock.calls).toEqual([
+      ["docker", [
+        "container", "ls", "--all",
+        "--filter", "label=com.sandcastle.repository=example/repository",
+        "--filter", "label=com.sandcastle.issue=208",
+        "--filter", "label=com.sandcastle.branch=sandcastle/issue-208",
+        "--format", "{{json .ID}}",
+      ]],
+      ["docker", ["container", "inspect", "--format", "{{json .State.Running}}", "abcdef123456"]],
+      ["docker", ["container", "rm", "abcdef123456"]],
+      ["git", ["worktree", "list", "--porcelain"], { cwd: "/repository" }],
+      ["git", ["status", "--porcelain", "--untracked-files=normal"], { cwd: "/agent/worktree" }],
+      ["git", ["worktree", "remove", "/agent/worktree"], { cwd: "/repository" }],
+      ["git", [
+        "update-ref", "-d", "refs/heads/sandcastle/issue-208", BASE,
+      ], { cwd: "/repository" }],
+    ]);
+  });
+
+  it("refuses destructive calls when the worktree becomes dirty or container becomes active", async () => {
+    const activeRun = command(JSON.stringify("abcdef123456"), JSON.stringify(true));
+    const activeAdapter = new ClaimResourceReleaseAdapter("/repository", activeRun);
+    await expect(activeAdapter.removeStoppedContainer(input)).rejects.toThrow();
+    expect(vi.mocked(activeRun).mock.calls).toHaveLength(2);
+
+    const dirtyRun = command(
+      "worktree /agent/worktree\nbranch refs/heads/sandcastle/issue-208\n",
+      " M changed.ts\n",
+    );
+    const dirtyAdapter = new ClaimResourceReleaseAdapter("/repository", dirtyRun);
+    await expect(dirtyAdapter.removeCleanWorktree(input)).rejects.toThrow();
+    expect(vi.mocked(dirtyRun).mock.calls).toHaveLength(2);
+  });
+});
+
+
   it.each([
     ["", undefined, "absent"],
     [JSON.stringify("abcdef123456"), JSON.stringify(false), "present"],

@@ -13,7 +13,12 @@ function githubPort(issueNumbers: readonly number[] = [207]): SandcastleGithubPo
     getIssue: vi.fn(async (number) => ({ number, state: "OPEN", labels: ["Sandcastle"] })),
     listCandidateIssues: vi.fn(async () =>
       issueNumbers.map((number) => ({ number, state: "OPEN", labels: ["Sandcastle"] }))),
-    claimIssue: vi.fn(async () => true),
+    claimIssue: vi.fn(async (number, runId) => ({
+      issueNumber: number,
+      runId,
+      branch: `sandcastle/issue-${number}`,
+      baseSha: "a".repeat(40),
+    })),
   };
 }
 
@@ -34,6 +39,96 @@ function fakeSignals(): SandcastleSignalSource & { emit(signal: SandcastleSignal
 }
 
 describe("Sandcastle controlled cancellation", () => {
+  it("finalizes only the current run receipt after controlled single-Issue teardown", async () => {
+    const signals = fakeSignals();
+    const teardown = deferred();
+    const finalizeInterruption = vi.fn(async () => undefined);
+    const running = runSandcastleCli(["--issue", "209"], {
+      github: githubPort([209]),
+      createRunId: () => "run-current-process",
+      signalSource: signals,
+      finalizeInterruption,
+      processIssue: async (_number, execution) => {
+        await teardown.promise;
+        throw execution.signal.reason;
+      },
+    });
+
+    await vi.waitFor(() => expect(vi.mocked(finalizeInterruption)).not.toHaveBeenCalled());
+    signals.emit("SIGTERM");
+    expect(finalizeInterruption).not.toHaveBeenCalled();
+    teardown.resolve();
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+    expect(finalizeInterruption).toHaveBeenCalledWith({
+      issueNumber: 209,
+      runId: "run-current-process",
+      branch: "sandcastle/issue-209",
+      baseSha: "a".repeat(40),
+    });
+  });
+
+  it("does not finalize a receipt after normal completion or non-signal failure", async () => {
+    const finalizeInterruption = vi.fn(async () => undefined);
+    await runSandcastleCli(["--issue", "209"], {
+      github: githubPort([209]),
+      finalizeInterruption,
+      processIssue: vi.fn().mockResolvedValue(undefined),
+    });
+    expect(finalizeInterruption).not.toHaveBeenCalled();
+
+    await expect(runSandcastleCli(["--issue", "210"], {
+      github: githubPort([210]),
+      finalizeInterruption,
+      processIssue: vi.fn().mockRejectedValue(new Error("ordinary failure")),
+    })).rejects.toThrow("ordinary failure");
+    expect(finalizeInterruption).not.toHaveBeenCalled();
+  });
+
+  it("isolates receipts when two watch Issues are cancelled", async () => {
+    const signals = fakeSignals();
+    const workflows = new Map([[208, deferred()], [209, deferred()]]);
+    const sleep = deferred();
+    const finalized: number[] = [];
+    const started = new Set<number>();
+    const running = runSandcastleCli(["--watch"], {
+      github: githubPort([208, 209]),
+      createRunId: () => "run-watch",
+      signalSource: signals,
+      sleep: () => sleep.promise,
+      finalizeInterruption: async (claimReceipt) => { finalized.push(claimReceipt.issueNumber); },
+      processIssue: async (number, execution) => {
+        started.add(number);
+        await workflows.get(number)!.promise;
+        throw execution.signal.reason;
+      },
+    });
+
+    await vi.waitFor(() => expect(started.size).toBe(2));
+    signals.emit("SIGINT");
+    signals.emit("SIGTERM");
+    workflows.get(208)!.resolve();
+    workflows.get(209)!.resolve();
+    await expect(running).resolves.toBeUndefined();
+    expect(finalized.sort()).toEqual([208, 209]);
+  });
+
+  it("does not infer ownership when no receipt was created", async () => {
+    const signals = fakeSignals();
+    const github = githubPort([209]);
+    vi.mocked(github.claimIssue).mockResolvedValue(null);
+    const finalizeInterruption = vi.fn(async () => undefined);
+    const running = runSandcastleCli(["--issue", "209"], {
+      github,
+      signalSource: signals,
+      finalizeInterruption,
+      processIssue: vi.fn(),
+    });
+
+    await expect(running).resolves.toBeUndefined();
+    signals.emit("SIGTERM");
+    expect(finalizeInterruption).not.toHaveBeenCalled();
+  });
+
   it("aborts a single Issue once, waits for teardown, then allows forced exit", async () => {
     const signals = fakeSignals();
     const teardown = deferred();
@@ -189,19 +284,26 @@ describe("Sandcastle controlled cancellation", () => {
     expect(github.claimIssue).not.toHaveBeenCalled();
   });
 
-  it("preserves but does not start a claim cancelled before active registration", async () => {
+  it("finalizes a receipt cancelled before active workflow registration", async () => {
     const signals = fakeSignals();
     const claim = deferred();
     const github = githubPort([207]);
-    vi.mocked(github.claimIssue).mockImplementation(async () => {
+    vi.mocked(github.claimIssue).mockImplementation(async (_number, runId) => {
       await claim.promise;
-      return true;
+      return {
+        issueNumber: 207,
+        runId,
+        branch: "sandcastle/issue-207",
+        baseSha: "a".repeat(40),
+      };
     });
     const processIssue = vi.fn().mockResolvedValue(undefined);
+    const finalizeInterruption = vi.fn(async () => undefined);
     const running = runSandcastleCli(["--watch"], {
       github,
       signalSource: signals,
       processIssue,
+      finalizeInterruption,
     });
 
     await vi.waitFor(() => expect(github.claimIssue).toHaveBeenCalledOnce());
@@ -210,15 +312,24 @@ describe("Sandcastle controlled cancellation", () => {
     claim.resolve();
     await expect(running).resolves.toBeUndefined();
     expect(processIssue).not.toHaveBeenCalled();
+    expect(finalizeInterruption).toHaveBeenCalledWith(expect.objectContaining({
+      issueNumber: 207,
+      branch: "sandcastle/issue-207",
+    }));
   });
 
   it("starts a successfully claimed Issue conservatively when drain races with the claim", async () => {
     const signals = fakeSignals();
     const claim = deferred();
     const github = githubPort([207]);
-    vi.mocked(github.claimIssue).mockImplementation(async () => {
+    vi.mocked(github.claimIssue).mockImplementation(async (number, runId) => {
       await claim.promise;
-      return true;
+      return {
+        issueNumber: number,
+        runId,
+        branch: `sandcastle/issue-${number}`,
+        baseSha: "a".repeat(40),
+      };
     });
     const processIssue = vi.fn().mockResolvedValue(undefined);
     const running = runSandcastleCli(["--watch"], {

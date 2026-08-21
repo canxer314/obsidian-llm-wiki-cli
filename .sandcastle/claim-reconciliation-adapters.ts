@@ -296,6 +296,89 @@ export class GitClaimReadAdapter implements ClaimReconciliationGitPort {
   }
 }
 
+export class ClaimResourceReleaseError extends Error {
+  constructor() {
+    super("Claim resource changed before release");
+    this.name = "ClaimResourceReleaseError";
+  }
+}
+
+export class ClaimResourceReleaseAdapter {
+  private readonly repositoryPath: string;
+  private readonly run: ReadCommand;
+
+  constructor(repositoryPath: string, run: ReadCommand = executeReadCommand) {
+    this.repositoryPath = repositoryPath;
+    this.run = run;
+  }
+
+  private containerFilters(input: ClaimReconciliationInput): readonly string[] {
+    return [
+      `label=com.sandcastle.repository=${input.repository}`,
+      `label=com.sandcastle.issue=${input.issueNumber}`,
+      `label=com.sandcastle.branch=${input.branch}`,
+    ];
+  }
+
+  async removeStoppedContainer(input: ClaimReconciliationInput): Promise<void> {
+    const { stdout } = await this.run("docker", [
+      "container",
+      "ls",
+      "--all",
+      ...this.containerFilters(input).flatMap((filter) => ["--filter", filter]),
+      "--format",
+      "{{json .ID}}",
+    ]);
+    const ids = stdout.trim() === "" ? [] : stdout.trim().split("\n").map((line) =>
+      parseJson<unknown>(line, "docker")
+    );
+    if (ids.length !== 1 || typeof ids[0] !== "string" || !/^[0-9a-f]{12,64}$/u.test(ids[0])) {
+      throw new ClaimResourceReleaseError();
+    }
+    const id = ids[0];
+    const { stdout: runningOutput } = await this.run("docker", [
+      "container",
+      "inspect",
+      "--format",
+      "{{json .State.Running}}",
+      id,
+    ]);
+    if (parseJson<unknown>(runningOutput.trim(), "docker") !== false) {
+      throw new ClaimResourceReleaseError();
+    }
+    await this.run("docker", ["container", "rm", id]);
+  }
+
+  async compareAndDeleteLocalBranch(input: ClaimReconciliationInput & {
+    readonly expectedHeadSha: string;
+  }): Promise<void> {
+    await this.run("git", [
+      "update-ref",
+      "-d",
+      `refs/heads/${input.branch}`,
+      input.expectedHeadSha,
+    ], { cwd: this.repositoryPath });
+  }
+
+  async removeCleanWorktree(input: ClaimReconciliationInput): Promise<void> {
+    const { stdout } = await this.run("git", ["worktree", "list", "--porcelain"], {
+      cwd: this.repositoryPath,
+    });
+    const matches = worktreeRecords(stdout).filter(
+      (record) => record.branch === `refs/heads/${input.branch}`,
+    );
+    if (matches.length !== 1 || matches[0]!.path === undefined) {
+      throw new ClaimResourceReleaseError();
+    }
+    const path = matches[0]!.path;
+    const status = await this.run("git", ["status", "--porcelain", "--untracked-files=normal"], {
+      cwd: path,
+    });
+    if (status.stdout !== "") throw new ClaimResourceReleaseError();
+    await this.run("git", ["worktree", "remove", path], { cwd: this.repositoryPath });
+  }
+}
+
 export class DockerClaimReadAdapter implements ClaimReconciliationDockerPort {
   private readonly run: ReadCommand;
 
