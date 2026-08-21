@@ -8,9 +8,10 @@ export interface AutomationDispatchPorts {
   readonly scheduler: {
     acquire(): Promise<{ release(): Promise<void> } | undefined>;
     prepare(): Promise<void>;
+    track(identity: string, action: () => Promise<void>): Promise<void>;
   };
   readonly github: {
-    ensureLabels(): Promise<void>;
+    verifyLabels(): Promise<void>;
     listCommands(): Promise<readonly AutomationCommand[]>;
   };
   readonly run: (command: AutomationCommand) => Promise<void>;
@@ -24,7 +25,7 @@ export async function dispatchAutomationCommands(
   if (lock === undefined) return { status: "locked" };
   try {
     await ports.scheduler.prepare();
-    await ports.github.ensureLabels();
+    await ports.github.verifyLabels();
     const limit = request.concurrency ?? 2;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) {
       throw new Error("Dispatch concurrency must be between 1 and 8");
@@ -36,7 +37,7 @@ export async function dispatchAutomationCommands(
       .filter((command) => !identities.has(command.identity) && (identities.add(command.identity), true))
       .slice(0, limit));
     const frontier = await selected;
-    await Promise.all(frontier.map((command) => ports.run(command)));
+    await Promise.all(frontier.map((command) => ports.scheduler.track(command.identity, () => ports.run(command))));
     return { status: "dispatched", selected: frontier };
   } finally {
     await lock.release();

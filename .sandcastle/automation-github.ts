@@ -105,6 +105,7 @@ export function createAutomationDispatchGithubPort(options: {
   readonly environment?: Readonly<Record<string, string>>;
 }): {
   listCommands(): Promise<readonly import("./automation-command.ts").AutomationCommand[]>;
+  verifyLabels(): Promise<void>;
   ensureLabels(): Promise<void>;
 } {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
@@ -112,6 +113,13 @@ export function createAutomationDispatchGithubPort(options: {
     return { stdout: result.stdout, stderr: result.stderr };
   });
   return {
+    async verifyLabels() {
+      const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
+      const existing = new Set((JSON.parse(stdout) as readonly { readonly name: string }[]).map(({ name }) => name));
+      for (const name of ["agent:review", "agent:in-progress", "agent:blocked"]) {
+        if (!existing.has(name)) throw new Error(`Missing required Automation Command label: ${name}`);
+      }
+    },
     async ensureLabels() {
       const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
       const existing = new Set((JSON.parse(stdout) as readonly { readonly name: string }[]).map(({ name }) => name));

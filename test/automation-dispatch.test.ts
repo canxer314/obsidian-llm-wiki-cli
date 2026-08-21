@@ -34,8 +34,8 @@ describe("Automation Command dispatch", () => {
     });
 
     const round = dispatchAutomationCommands({ concurrency: 2 }, {
-      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {} },
-      github: { ensureLabels: async () => {}, listCommands: async () => [first, second, conflicting] },
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      github: { verifyLabels: async () => {}, listCommands: async () => [first, second, conflicting] },
       run,
     });
 
@@ -48,8 +48,8 @@ describe("Automation Command dispatch", () => {
   it("does no discovery while the host scheduler lock is unavailable", async () => {
     const listCommands = vi.fn();
     await expect(dispatchAutomationCommands({}, {
-      scheduler: { acquire: async () => undefined, prepare: async () => {} },
-      github: { ensureLabels: async () => {}, listCommands },
+      scheduler: { acquire: async () => undefined, prepare: async () => {}, track: async (_identity, action) => action() },
+      github: { verifyLabels: async () => {}, listCommands },
       run: vi.fn(),
     })).resolves.toEqual({ status: "locked" });
     expect(listCommands).not.toHaveBeenCalled();
@@ -60,8 +60,8 @@ describe("Automation Command dispatch", () => {
     const blocked = command({ number: 11, labels: ["agent:review", "agent:blocked"] });
     const run = vi.fn();
     await dispatchAutomationCommands({}, {
-      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {} },
-      github: { ensureLabels: async () => {}, listCommands: async () => [inconsistent, blocked] },
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      github: { verifyLabels: async () => {}, listCommands: async () => [inconsistent, blocked] },
       run,
     });
     expect(run).not.toHaveBeenCalled();

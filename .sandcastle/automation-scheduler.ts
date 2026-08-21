@@ -26,6 +26,8 @@ export function createAutomationScheduler(options: {
     const result = await executeFile(file, [...arguments_], { cwd: options.repositoryPath });
     return { stdout: result.stdout };
   });
+  const activeJobs = new Map<string, string>();
+  let nextJob = 0;
   return {
     acquire: options.acquireLock ?? (() => acquireFileLock(resolve(options.repositoryPath ?? process.cwd(), ".sandcastle", "dispatcher.lock"))),
     async prepare() {
@@ -40,6 +42,15 @@ export function createAutomationScheduler(options: {
       if (ahead !== 0) throw new Error("Dispatcher repository is ahead of origin/master");
       await execute("git", ["merge", "--ff-only", "origin/master"]);
     },
-    activeJobs: async () => [],
+    async track(identity: string, action: () => Promise<void>) {
+      const jobId = `local-dispatch-${++nextJob}`;
+      activeJobs.set(identity, jobId);
+      try {
+        await action();
+      } finally {
+        activeJobs.delete(identity);
+      }
+    },
+    activeJobs: async () => [...activeJobs].map(([identity, jobId]) => ({ identity, jobId })),
   };
 }
