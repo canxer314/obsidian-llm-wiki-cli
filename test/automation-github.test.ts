@@ -14,6 +14,7 @@ describe("automation GitHub port", () => {
           isDraft: true,
           baseRepository: { nameWithOwner: "canxer314/obsidian-llm-wiki-cli" },
           headRepository: { nameWithOwner: "canxer314/obsidian-llm-wiki-cli" },
+          headRefName: "feedback-branch",
           headRefOid: revision,
           labels: [{ name: "agent:review" }],
         }),
@@ -36,6 +37,7 @@ describe("automation GitHub port", () => {
       isDraft: true,
       baseRepository: "canxer314/obsidian-llm-wiki-cli",
       headRepository: "canxer314/obsidian-llm-wiki-cli",
+      headRefName: "feedback-branch",
       headSha: revision,
       labels: ["agent:review"],
     });
@@ -55,7 +57,7 @@ describe("automation GitHub port", () => {
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
       "pr", "view", "220", "--json",
-      "number,state,isDraft,baseRepository,headRepository,headRefOid,labels",
+      "number,state,isDraft,baseRepository,headRepository,headRefName,headRefOid,labels",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "pr", "view", "220", "--json", "headRefOid", "--jq", ".headRefOid",

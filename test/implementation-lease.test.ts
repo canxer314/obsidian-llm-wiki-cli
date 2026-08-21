@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
-import { acquireImplementationLease } from "../.sandcastle/implementation-lease.js";
+import { acquireImplementationLease, acquirePullRequestLease } from "../.sandcastle/implementation-lease.js";
 
 describe("implementation lease", () => {
   it("atomically grants one lease per Issue and releases it for retry", async () => {
@@ -39,7 +39,24 @@ describe("implementation lease", () => {
     }
   });
 
-  it("rejects an invalid Issue number before changing the filesystem", async () => {
+  it("grants one shared lease per Pull Request", async () => {
+    const root = await mkdtemp(`${tmpdir()}/implementation-lease-`);
+    try {
+      const first = await acquirePullRequestLease({ root, pullRequestNumber: 224 });
+      expect(first).toBeDefined();
+      await expect(acquirePullRequestLease({ root, pullRequestNumber: 224 })).resolves.toBeUndefined();
+      await first!.release();
+      const retry = await acquirePullRequestLease({ root, pullRequestNumber: 224 });
+      expect(retry).toBeDefined();
+      await retry!.release();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid lease numbers before changing the filesystem", async () => {
+    await expect(acquirePullRequestLease({ root: "/unused", pullRequestNumber: 0 }))
+      .rejects.toThrow("Pull Request lease number is invalid");
     await expect(acquireImplementationLease({ root: "/unused", issueNumber: 0 }))
       .rejects.toThrow("Implementation lease Issue number is invalid");
   });

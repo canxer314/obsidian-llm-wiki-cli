@@ -41,11 +41,14 @@ import {
   SandcastleWorkflowError,
 } from "./failure-workflow.ts";
 import { GithubCliPort } from "./github-cli.ts";
+import { createFeedbackImplementerSession } from "./feedback-implementer-session.ts";
+import { runFeedbackImplementationAutomationCommand } from "./feedback-implementation-automation.ts";
+import { createFeedbackPublisher } from "./feedback-publisher.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { mergeConflict } from "./conflict-merger.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
-import { acquireImplementationLease } from "./implementation-lease.ts";
+import { acquireImplementationLease, acquirePullRequestLease } from "./implementation-lease.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
 import { mergeVerifiedPullRequest, type MergeVerifiedPullRequestResult } from "./merge.ts";
 import { createSandcastleMergerSession } from "./merger-session.ts";
@@ -100,6 +103,42 @@ try {
           },
         },
         publisher: automationGithub,
+        lease: {
+          acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+            root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+            pullRequestNumber: currentPullRequestNumber,
+          }),
+        },
+        createJobId: () => jobId,
+      }),
+      runFeedback: (pullRequestNumber) => runFeedbackImplementationAutomationCommand({ pullRequestNumber }, {
+        github: automationGithub,
+        checkout: createTargetCheckout({
+          sourceRepositoryPath: repositoryPath,
+          checkoutRoot: resolve(import.meta.dirname, "jobs"),
+          createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
+          gitEnvironment: startup.childEnvironments.git,
+          dependencyEnvironment: startup.childEnvironments.dependencies,
+        }),
+        publisher: createFeedbackPublisher({
+          sourceRepositoryPath: repositoryPath,
+          gitEnvironment: startup.childEnvironments.git,
+        }),
+        implementer: {
+          implement: async (request) => createFeedbackImplementerSession({
+            sandbox: startup.automationSandbox,
+            hooks: sandboxHooksFor("implementer"),
+          }).run({
+            model: startup.models.implementer,
+            ...request,
+          }),
+        },
+        lease: {
+          acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+            root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+            pullRequestNumber: currentPullRequestNumber,
+          }),
+        },
         createJobId: () => jobId,
       }),
       runImplement: (issueNumber) => runImplementationAutomationCommand({ issueNumber }, {

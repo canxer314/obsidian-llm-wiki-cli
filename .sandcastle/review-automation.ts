@@ -54,6 +54,9 @@ export interface ReviewAutomationPorts {
       readonly review: PublishedReview;
     }): Promise<void>;
   };
+  readonly lease?: {
+    acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> } | undefined>;
+  };
   readonly createJobId?: () => string;
 }
 
@@ -95,39 +98,47 @@ export async function runReviewAutomationCommand(
 ): Promise<ReviewAutomationResult> {
   const pullRequest = await ports.github.readPullRequest(request.pullRequestNumber);
   requireEligiblePullRequest(pullRequest);
-
-  await ports.github.addPullRequestLabel(pullRequest.number, "agent:in-progress");
-  try {
-    await ports.github.removePullRequestLabel(pullRequest.number, "agent:review");
-    await ports.checkout.withCheckout({
-      pullRequestNumber: pullRequest.number,
-      revision: pullRequest.headSha,
-    }, async (checkoutPath) => {
-      const review = await ports.reviewer.review({
-        pullRequestNumber: pullRequest.number,
-        revision: pullRequest.headSha,
-        checkoutPath,
-      });
-      await ports.publisher.publish({
-        pullRequestNumber: pullRequest.number,
-        revision: pullRequest.headSha,
-        review,
-      });
-    });
-  } catch {
-    const jobId = ports.createJobId?.() ?? "local-review-job";
-    await Promise.allSettled([
-      ports.github.addPullRequestLabel(pullRequest.number, "agent:blocked"),
-      ports.github.addBlockedDiagnostic?.(pullRequest.number, {
-        reason: "review-execution",
-        jobId,
-      }),
-    ]);
-    return { status: "blocked", reason: "review-execution", jobId };
-  } finally {
-    await ports.github.removePullRequestLabel(pullRequest.number, "agent:in-progress")
-      .catch(() => undefined);
+  const lease = ports.lease === undefined ? undefined : await ports.lease.acquire(pullRequest.number);
+  if (ports.lease !== undefined && lease === undefined) {
+    throw new Error(`Pull Request #${pullRequest.number} is already in progress`);
   }
 
-  return { status: "reviewed", revision: pullRequest.headSha };
+  try {
+    await ports.github.addPullRequestLabel(pullRequest.number, "agent:in-progress");
+    try {
+      await ports.github.removePullRequestLabel(pullRequest.number, "agent:review");
+      await ports.checkout.withCheckout({
+        pullRequestNumber: pullRequest.number,
+        revision: pullRequest.headSha,
+      }, async (checkoutPath) => {
+        const review = await ports.reviewer.review({
+          pullRequestNumber: pullRequest.number,
+          revision: pullRequest.headSha,
+          checkoutPath,
+        });
+        await ports.publisher.publish({
+          pullRequestNumber: pullRequest.number,
+          revision: pullRequest.headSha,
+          review,
+        });
+      });
+    } catch {
+      const jobId = ports.createJobId?.() ?? "local-review-job";
+      await Promise.allSettled([
+        ports.github.addPullRequestLabel(pullRequest.number, "agent:blocked"),
+        ports.github.addBlockedDiagnostic?.(pullRequest.number, {
+          reason: "review-execution",
+          jobId,
+        }),
+      ]);
+      return { status: "blocked", reason: "review-execution", jobId };
+    } finally {
+      await ports.github.removePullRequestLabel(pullRequest.number, "agent:in-progress")
+        .catch(() => undefined);
+    }
+
+    return { status: "reviewed", revision: pullRequest.headSha };
+  } finally {
+    await lease?.release();
+  }
 }
