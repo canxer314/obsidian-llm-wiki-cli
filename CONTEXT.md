@@ -51,3 +51,29 @@ _Avoid_: Recycle bin, system trash, deletion
 **Semantic Evidence**:
 The Obsidian-layer confirmation that a Change Set's mutations became visible to the rest of the Vault — required Vault events for ordinary operations, plus targeted metadata-cache and reference probes for Managed Trash and restore, which emit no generic events. Success is reported only after Semantic Evidence converges within its deadline; otherwise the Change Set rolls back or fails closed.
 _Avoid_: Indexing, search results, cache warm-up
+
+## Repository Automation Language
+
+**Automation Command**:
+A request for one repository automation operation on an Automation Work Item. The command may be requested by the Primary Operator or by a defined automation transition, remains independently visible and retryable, and does not rely on a previous Agent Session remaining alive.
+_Avoid_: In-memory pipeline stage, automatic repair
+
+**Automation Work Item**:
+The durable repository record that carries one unit of automation work, its proposed changes, and its discussion across independent Agent Sessions.
+_Avoid_: Claim receipt, local job record
+
+**Blocked Automation**:
+An Automation Command that stopped without a publishable result and requires the Primary Operator to inspect the failure before explicitly retrying it. It is not a terminal state of the Automation Work Item.
+_Avoid_: Failed issue, repair-budget exhaustion
+
+**Legacy Run State**:
+Local, partially completed execution state created by the retired repository automation system. It is not an Automation Work Item and is not adopted, resumed, or treated as migration input by the replacement system.
+_Avoid_: Issue #127, recoverable job, migration checkpoint
+
+**Dispatcher**:
+The trusted scheduler that discovers Automation Commands, starts isolated jobs, enforces concurrency and time limits, and reports outcomes. It does not decide the business behavior of an Automation Command.
+_Avoid_: Workflow engine, claim service
+
+**Target Checkout**:
+A disposable repository copy at the exact revision authorized by an Automation Command. It contains the operation, rules, dependencies, source code, and Git state used by that job and shares no mutable worktree registration with the Primary Operator's development checkout.
+_Avoid_: Control snapshot, shared worktree, permanent workspace
