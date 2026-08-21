@@ -87,6 +87,29 @@ describe("Sandcastle controlled cancellation", () => {
     await expect(running).rejects.toBe(cleanupFailure);
   });
 
+  it("returns a nonzero watch failure when interruption finalization fails", async () => {
+    const signals = fakeSignals();
+    const teardown = deferred();
+    const cleanupFailure = new Error("interrupted cleanup failed");
+    let started = false;
+    const running = runSandcastleCli(["--watch"], {
+      github: githubPort([209]),
+      signalSource: signals,
+      finalizeInterruption: vi.fn().mockRejectedValue(cleanupFailure),
+      processIssue: async (_number, execution) => {
+        started = true;
+        await teardown.promise;
+        throw execution.signal.reason;
+      },
+    });
+
+    await vi.waitFor(() => expect(started).toBe(true));
+    signals.emit("SIGINT");
+    signals.emit("SIGTERM");
+    teardown.resolve();
+    await expect(running).rejects.toBe(cleanupFailure);
+  });
+
   it("does not finalize a receipt after normal completion or non-signal failure", async () => {
     const finalizeInterruption = vi.fn(async () => undefined);
     await runSandcastleCli(["--issue", "209"], {
