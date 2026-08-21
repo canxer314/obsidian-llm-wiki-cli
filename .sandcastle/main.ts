@@ -5,7 +5,10 @@ import { resolve } from "node:path";
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { runAutomationCli } from "./automation-cli.ts";
-import { createAutomationGithubPort } from "./automation-github.ts";
+import { createAutomationGithubPort, createAutomationDispatchGithubPort } from "./automation-github.ts";
+import { dispatchAutomationCommands } from "./automation-dispatch.ts";
+import { inspectAutomationCommands } from "./automation-inspector.ts";
+import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { createTargetCheckout } from "./target-checkout.ts";
 import { runReviewAutomationCommand } from "./review-automation.ts";
 import { createProcessReviewRunner } from "./review-process-runner.ts";
@@ -70,14 +73,18 @@ import {
 
 try {
   const repositoryPath = resolve(import.meta.dirname, "..");
-  if (process.argv[2] === "run") {
+  if (["run", "dispatch", "inspect"].includes(process.argv[2] ?? "")) {
     const artifactRoot = resolve(import.meta.dirname, "jobs", "review-artifacts");
-    await removeExpiredReviewArtifacts({ root: artifactRoot });
+    if (process.argv[2] !== "inspect") await removeExpiredReviewArtifacts({ root: artifactRoot });
     const startup = await loadSandboxStartup();
     const jobId = randomUUID();
     const automationGithub = createAutomationGithubPort({
       environment: startup.childEnvironments.github,
     });
+    const dispatchGithub = createAutomationDispatchGithubPort({
+      environment: startup.childEnvironments.github,
+    });
+    const scheduler = createAutomationScheduler({ repositoryPath });
     const github = new GithubCliPort();
     const reviewer = createProcessReviewRunner({});
     const result = await runAutomationCli(process.argv.slice(2), {
@@ -143,6 +150,32 @@ try {
         },
         createJobId: () => jobId,
       }),
+      dispatch: (concurrency) => dispatchAutomationCommands({
+        concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
+      }, {
+        scheduler,
+        github: dispatchGithub,
+        run: async (command) => {
+          await runReviewAutomationCommand({ pullRequestNumber: command.number }, {
+            github: automationGithub,
+            checkout: createTargetCheckout({
+              sourceRepositoryPath: repositoryPath,
+              checkoutRoot: resolve(import.meta.dirname, "jobs"),
+              gitEnvironment: startup.childEnvironments.git,
+              dependencyEnvironment: startup.childEnvironments.dependencies,
+            }),
+            reviewer: {
+              review: async ({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath }) => {
+                const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId });
+                return reviewer.review({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath, model: startup.models.reviewer, artifactDirectory });
+              },
+            },
+            publisher: automationGithub,
+            createJobId: () => jobId,
+          });
+        },
+      }),
+      inspect: () => inspectAutomationCommands({ github: dispatchGithub, scheduler }),
       runImplement: (issueNumber) => runImplementationAutomationCommand({ issueNumber }, {
         github: {
           readIssue: (currentIssueNumber) => automationGithub.readIssue(currentIssueNumber),

@@ -100,6 +100,45 @@ function splitBody(prdNumber: number, slice: PrdSlice): string {
   return `## Parent PRD\n\n#${prdNumber}\n\n## What to build\n\n${slice.whatToBuild}\n\n## Acceptance criteria\n\n${slice.acceptanceCriteria.map((criterion) => `- [ ] ${criterion}`).join("\n")}\n`;
 }
 
+export function createAutomationDispatchGithubPort(options: {
+  readonly execute?: Execute;
+  readonly environment?: Readonly<Record<string, string>>;
+}): {
+  listCommands(): Promise<readonly import("./automation-command.ts").AutomationCommand[]>;
+  ensureLabels(): Promise<void>;
+} {
+  const execute = options.execute ?? (async (file, arguments_, environment) => {
+    const result = await executeFile(file, [...arguments_], { env: environment });
+    return { stdout: result.stdout, stderr: result.stderr };
+  });
+  return {
+    async ensureLabels() {
+      const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
+      const existing = new Set((JSON.parse(stdout) as readonly { readonly name: string }[]).map(({ name }) => name));
+      await Promise.all(["agent:review", "agent:in-progress", "agent:blocked"]
+        .filter((name) => !existing.has(name))
+        .map((name) => execute("gh", ["label", "create", name, "--color", "0E8A16"], options.environment)));
+    },
+    async listCommands() {
+      const responses = await Promise.all(["agent:review", "agent:in-progress", "agent:blocked"].map((label) => execute(
+        "gh", ["pr", "list", "--state", "open", "--label", label, "--json", "number,labels", "--limit", "100"], options.environment,
+      )));
+      const pullRequests = new Map<number, { readonly number: number; readonly labels: readonly { readonly name: string }[] }>();
+      for (const response of responses) {
+        for (const pullRequest of JSON.parse(response.stdout) as readonly { readonly number: number; readonly labels: readonly { readonly name: string }[] }[]) {
+          pullRequests.set(pullRequest.number, pullRequest);
+        }
+      }
+      return [...pullRequests.values()].map((pullRequest) => ({
+        number: pullRequest.number,
+        operation: "review" as const,
+        identity: `pull-request:${pullRequest.number}`,
+        labels: pullRequest.labels.map(({ name }) => name),
+      }));
+    },
+  };
+}
+
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;

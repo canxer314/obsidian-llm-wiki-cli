@@ -8,15 +8,25 @@ describe("review automation command", () => {
   it("acquires an eligible Draft Pull Request and publishes a review for its acquired revision", async () => {
     const events: string[] = [];
     const github = {
-      readPullRequest: vi.fn().mockResolvedValue({
-        number: 220,
-        state: "OPEN",
-        isDraft: true,
-        baseRepository: "canxer314/obsidian-llm-wiki-cli",
-        headRepository: "canxer314/obsidian-llm-wiki-cli",
-        headSha: revision,
-        labels: ["agent:review"],
-      }),
+      readPullRequest: vi.fn()
+        .mockResolvedValueOnce({
+          number: 220,
+          state: "OPEN",
+          isDraft: true,
+          baseRepository: "canxer314/obsidian-llm-wiki-cli",
+          headRepository: "canxer314/obsidian-llm-wiki-cli",
+          headSha: revision,
+          labels: ["agent:review"],
+        })
+        .mockResolvedValueOnce({
+          number: 220,
+          state: "OPEN",
+          isDraft: true,
+          baseRepository: "canxer314/obsidian-llm-wiki-cli",
+          headRepository: "canxer314/obsidian-llm-wiki-cli",
+          headSha: revision,
+          labels: ["agent:review", "agent:in-progress"],
+        }),
       addPullRequestLabel: vi.fn(async (_number: number, label: string) => {
         events.push(`add:${label}`);
       }),
@@ -161,15 +171,25 @@ describe("review automation command", () => {
     const events: string[] = [];
     const failure = new Error("Agent execution failed");
     const github = {
-      readPullRequest: vi.fn().mockResolvedValue({
-        number: 220,
-        state: "OPEN",
-        isDraft: true,
-        baseRepository: "canxer314/obsidian-llm-wiki-cli",
-        headRepository: "canxer314/obsidian-llm-wiki-cli",
-        headSha: revision,
-        labels: ["agent:review"],
-      }),
+      readPullRequest: vi.fn()
+        .mockResolvedValueOnce({
+          number: 220,
+          state: "OPEN",
+          isDraft: true,
+          baseRepository: "canxer314/obsidian-llm-wiki-cli",
+          headRepository: "canxer314/obsidian-llm-wiki-cli",
+          headSha: revision,
+          labels: ["agent:review"],
+        })
+        .mockResolvedValueOnce({
+          number: 220,
+          state: "OPEN",
+          isDraft: true,
+          baseRepository: "canxer314/obsidian-llm-wiki-cli",
+          headRepository: "canxer314/obsidian-llm-wiki-cli",
+          headSha: revision,
+          labels: ["agent:review", "agent:in-progress"],
+        }),
       addPullRequestLabel: vi.fn(async (_number: number, label: string) => {
         events.push(`add:${label}`);
       }),
