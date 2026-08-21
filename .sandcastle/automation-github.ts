@@ -3,6 +3,8 @@ import { promisify } from "node:util";
 
 import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
+import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
+import type { PrdSlice } from "./prd-split-extraction.ts";
 import type {
   PublishedReview,
   ReviewAutomationPorts,
@@ -94,10 +96,14 @@ function inlineComments(
   });
 }
 
+function splitBody(prdNumber: number, slice: PrdSlice): string {
+  return `## Parent PRD\n\n#${prdNumber}\n\n## What to build\n\n${slice.whatToBuild}\n\n## Acceptance criteria\n\n${slice.acceptanceCriteria.map((criterion) => `- [ ] ${criterion}`).join("\n")}\n`;
+}
+
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] {
+}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
@@ -125,6 +131,41 @@ export function createAutomationGithubPort(options: {
         state: issue.state,
         labels: issue.labels.map(({ name }) => name),
         baseRevision: baseRevisionOutput.trim(),
+      };
+    },
+    async readPrd(issueNumber) {
+      const [{ stdout: issueOutput }, { stdout: baseRevisionOutput }, { stdout: subIssuesOutput }, { stdout: parentOutput }] = await Promise.all([
+        execute("gh", [
+          "api", `repos/{owner}/{repo}/issues/${issueNumber}`,
+          "--jq", "{number, title, state, labels, pull_request}",
+        ], options.environment),
+        execute("gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"], options.environment),
+        execute("gh", ["api", `repos/{owner}/{repo}/issues/${issueNumber}/sub_issues`, "--jq", "length"], options.environment),
+        execute("gh", [
+          "api", "graphql", "-f",
+          "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number}}}}",
+          "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`, "--jq", ".data.repository.issue.parent.number // empty",
+        ], options.environment),
+      ]);
+      const issue = JSON.parse(issueOutput) as {
+        readonly number: number;
+        readonly title: string;
+        readonly state: string;
+        readonly labels: readonly { readonly name: string }[];
+        readonly pull_request?: unknown;
+      };
+      if (issue.pull_request !== undefined && issue.pull_request !== null) {
+        throw new Error(`Automation work item #${issueNumber} is a Pull Request`);
+      }
+      const parentNumber = parentOutput.trim();
+      return {
+        number: issue.number,
+        title: issue.title,
+        state: issue.state,
+        labels: issue.labels.map(({ name }) => name),
+        baseRevision: baseRevisionOutput.trim(),
+        subIssueCount: Number(subIssuesOutput.trim()),
+        ...(parentNumber.length === 0 ? {} : { parentNumber: Number(parentNumber) }),
       };
     },
     async findReusableImplementation(request) {
@@ -189,6 +230,41 @@ export function createAutomationGithubPort(options: {
         "issue", "comment", String(issueNumber), "--body",
         `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/implementation-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
+    },
+    async addSplitBlockedDiagnostic(issueNumber, diagnostic) {
+      await execute("gh", [
+        "issue", "comment", String(issueNumber), "--body",
+        `Automation PRD splitting is blocked (job ${diagnostic.jobId}). Remove agent:blocked, restore agent:to-issues, then retry.`,
+      ], options.environment);
+    },
+    async publishPrdSplit(request) {
+      const created: number[] = [];
+      let previousIssueId: string | undefined;
+      for (const slice of request.slices) {
+        const { stdout: createOutput } = await execute("gh", [
+          "issue", "create", "--title", slice.title, "--body", splitBody(request.prdNumber, slice),
+        ], options.environment);
+        const match = /\/issues\/(\d+)\s*$/u.exec(createOutput);
+        if (match === null) throw new Error("Could not parse created child Issue number");
+        const childIssueNumber = Number(match[1]);
+        created.push(childIssueNumber);
+        const { stdout: childIssueIdOutput } = await execute("gh", [
+          "api", `repos/{owner}/{repo}/issues/${childIssueNumber}`, "--jq", ".id",
+        ], options.environment);
+        const childIssueId = childIssueIdOutput.trim();
+        await execute("gh", [
+          "api", "-X", "POST", `repos/{owner}/{repo}/issues/${request.prdNumber}/sub_issues`,
+          "-F", `sub_issue_id=${childIssueId}`,
+        ], options.environment);
+        if (previousIssueId !== undefined) {
+          await execute("gh", [
+            "api", "-X", "POST", `repos/{owner}/{repo}/issues/${childIssueNumber}/dependencies/blocked_by`,
+            "-F", `issue_id=${previousIssueId}`,
+          ], options.environment);
+        }
+        previousIssueId = childIssueId;
+      }
+      return created;
     },
     async readPullRequest(pullRequestNumber) {
       const { stdout } = await execute("gh", [

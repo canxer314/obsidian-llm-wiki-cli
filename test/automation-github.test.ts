@@ -5,6 +5,35 @@ import { createAutomationGithubPort } from "../.sandcastle/automation-github.js"
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
 describe("automation GitHub port", () => {
+  it("publishes ordered self-contained child Issues with parent and dependency relationships", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "https://example.test/issues/301\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "3010\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "https://example.test/issues/302\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "3020\n", stderr: "" })
+      .mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.publishPrdSplit({
+      prdNumber: 223,
+      slices: [
+        { title: "Prepare vertical path", whatToBuild: "Build the initial path.", acceptanceCriteria: ["Initial path works"] },
+        { title: "Extend vertical path", whatToBuild: "Extend the path.", acceptanceCriteria: ["Extension works"] },
+      ],
+    })).resolves.toEqual([301, 302]);
+
+    expect(execute).toHaveBeenNthCalledWith(3, "gh", [
+      "api", "-X", "POST", "repos/{owner}/{repo}/issues/223/sub_issues", "-F", "sub_issue_id=3010",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(6, "gh", [
+      "api", "-X", "POST", "repos/{owner}/{repo}/issues/223/sub_issues", "-F", "sub_issue_id=3020",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(7, "gh", [
+      "api", "-X", "POST", "repos/{owner}/{repo}/issues/302/dependencies/blocked_by", "-F", "issue_id=3010",
+    ], undefined);
+  });
+
   it("re-reads PR labels and publishes a review pinned to its acquired commit", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({
