@@ -85,12 +85,16 @@ try {
       environment: startup.childEnvironments.github,
     });
     const scheduler = createAutomationScheduler({ repositoryPath });
-    const withScheduler = async <T>(action: () => Promise<T>): Promise<T> => {
+    const withScheduler = async <T>(identity: string, action: () => Promise<T>): Promise<T> => {
       const lock = await scheduler.acquire();
       if (lock === undefined) throw new Error("Dispatcher is already running");
       try {
         await scheduler.prepare();
-        return await action();
+        let result!: T;
+        await scheduler.track(identity, async () => {
+          result = await action();
+        });
+        return result;
       } finally {
         await lock.release();
       }
@@ -98,7 +102,7 @@ try {
     const github = new GithubCliPort();
     const reviewer = createProcessReviewRunner({});
     const result = await runAutomationCli(process.argv.slice(2), {
-      runReview: (pullRequestNumber) => withScheduler(() => runReviewAutomationCommand({ pullRequestNumber }, {
+      runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runReviewAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,
         checkout: createTargetCheckout({
           sourceRepositoryPath: repositoryPath,

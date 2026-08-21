@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { inspectAutomationCommands } from "../.sandcastle/automation-inspector.js";
 import { dispatchAutomationCommands } from "../.sandcastle/automation-dispatch.js";
+import { commandPriority, compareCommands } from "../.sandcastle/automation-command.js";
 
 const sha = "a".repeat(40);
 
@@ -43,6 +44,67 @@ describe("Automation Command dispatch", () => {
     release();
     await expect(round).resolves.toEqual({ status: "dispatched", selected: [second, first] });
     expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds execution concurrency without truncating the selected frontier", async () => {
+    const commands = [
+      command({ number: 1, identity: "pull-request:1" }),
+      command({ number: 2, identity: "pull-request:2" }),
+      command({ number: 3, identity: "pull-request:3" }),
+    ];
+    let active = 0;
+    let maxActive = 0;
+    const run = vi.fn(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+    });
+
+    const result = await dispatchAutomationCommands({ concurrency: 2 }, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      github: { verifyLabels: async () => {}, listCommands: async () => commands },
+      run,
+    });
+
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(maxActive).toBe(2);
+    expect(result).toEqual({ status: "dispatched", selected: commands });
+  });
+
+  it("pins Pull Request review to its accepted priority and breaks ties by ascending number", () => {
+    expect(commandPriority(command({ number: 9 }))).toBe(3);
+    expect(compareCommands(command({ number: 9 }), command({ number: 4 }))).toBeGreaterThan(0);
+    expect(compareCommands(command({ number: 4 }), command({ number: 9 }))).toBeLessThan(0);
+  });
+
+  it("waits for every selected job before the round fails when one job rejects", async () => {
+    const failing = command({ number: 1, identity: "pull-request:1" });
+    const slow = command({ number: 2, identity: "pull-request:2" });
+    let releaseSlow!: () => void;
+    const slowFinished = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    let slowCompleted = false;
+    const run = vi.fn(async (selected: typeof failing) => {
+      if (selected.number === 1) throw new Error("review failed");
+      await slowFinished;
+      slowCompleted = true;
+    });
+
+    const round = dispatchAutomationCommands({ concurrency: 2 }, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      github: { verifyLabels: async () => {}, listCommands: async () => [failing, slow] },
+      run,
+    });
+    const settled = vi.fn();
+    void round.catch(() => {}).then(settled);
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).not.toHaveBeenCalled();
+
+    releaseSlow();
+    await expect(round).rejects.toThrow("review failed");
+    expect(slowCompleted).toBe(true);
   });
 
   it("does no discovery while the host scheduler lock is unavailable", async () => {

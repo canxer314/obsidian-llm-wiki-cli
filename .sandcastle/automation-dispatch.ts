@@ -31,13 +31,22 @@ export async function dispatchAutomationCommands(
       throw new Error("Dispatch concurrency must be between 1 and 8");
     }
     const identities = new Set<string>();
-    const selected = ports.github.listCommands().then((commands) => commands
+    const frontier = (await ports.github.listCommands())
       .filter((command) => commandEligibility(command) === "eligible")
       .sort(compareCommands)
-      .filter((command) => !identities.has(command.identity) && (identities.add(command.identity), true))
-      .slice(0, limit));
-    const frontier = await selected;
-    await Promise.all(frontier.map((command) => ports.scheduler.track(command.identity, () => ports.run(command))));
+      .filter((command) => !identities.has(command.identity) && (identities.add(command.identity), true));
+    let next = 0;
+    const workers = Array.from({ length: Math.min(limit, frontier.length) }, async () => {
+      for (;;) {
+        const command = frontier[next];
+        if (command === undefined) return;
+        next += 1;
+        await ports.scheduler.track(command.identity, () => ports.run(command));
+      }
+    });
+    const outcomes = await Promise.allSettled(workers);
+    const failure = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+    if (failure !== undefined) throw failure.reason;
     return { status: "dispatched", selected: frontier };
   } finally {
     await lock.release();
