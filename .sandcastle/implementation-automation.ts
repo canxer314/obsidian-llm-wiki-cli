@@ -55,6 +55,8 @@ function refusal(issue: ImplementationAutomationIssue): string | undefined {
   return undefined;
 }
 
+const activeIssueNumbers = new Set<number>();
+
 function reusableBranch(issueNumber: number): string {
   return `sandcastle/issue-${issueNumber}`;
 }
@@ -76,37 +78,47 @@ export async function runImplementationAutomationCommand(
     return { status: "refused", reason };
   }
 
-  const acquired = ports.github.claimIssue === undefined
-    ? (await ports.github.addIssueLabel(issue.number, "agent:in-progress"), "acquired")
-    : await ports.github.claimIssue(issue);
-  if (acquired === "unavailable") {
-    const unavailableReason = `Issue #${issue.number} is no longer available for implementation`;
+  if (activeIssueNumbers.has(issue.number)) {
+    const unavailableReason = `Issue #${issue.number} is already being implemented`;
     await ports.github.addRefusalDiagnostic?.(issue.number, unavailableReason);
     return { status: "refused", reason: unavailableReason };
   }
-
+  activeIssueNumbers.add(issue.number);
   try {
-    await ports.github.removeIssueLabel(issue.number, "agent:implement");
-    const result = await ports.checkout.withCheckout({
-      pullRequestNumber: issue.number,
-      revision: issue.baseRevision,
-    }, (checkoutPath) => ports.implementer.implement({
-      issueNumber: issue.number,
-      baseRevision: issue.baseRevision,
-      checkoutPath,
-    }));
-    return { status: "implemented", ...result };
-  } catch {
-    const jobId = ports.createJobId?.() ?? "local-implementation-job";
-    await Promise.allSettled([
-      ports.github.addIssueLabel(issue.number, "agent:blocked"),
-      ports.github.addImplementationBlockedDiagnostic?.(issue.number, {
-        reason: "implementation-execution",
-        jobId,
-      }),
-    ]);
-    return { status: "blocked", reason: "implementation-execution", jobId };
+    const acquired = ports.github.claimIssue === undefined
+      ? (await ports.github.addIssueLabel(issue.number, "agent:in-progress"), "acquired")
+      : await ports.github.claimIssue(issue);
+    if (acquired === "unavailable") {
+      const unavailableReason = `Issue #${issue.number} is no longer available for implementation`;
+      await ports.github.addRefusalDiagnostic?.(issue.number, unavailableReason);
+      return { status: "refused", reason: unavailableReason };
+    }
+
+    try {
+      await ports.github.removeIssueLabel(issue.number, "agent:implement");
+      const result = await ports.checkout.withCheckout({
+        pullRequestNumber: issue.number,
+        revision: issue.baseRevision,
+      }, (checkoutPath) => ports.implementer.implement({
+        issueNumber: issue.number,
+        baseRevision: issue.baseRevision,
+        checkoutPath,
+      }));
+      return { status: "implemented", ...result };
+    } catch {
+      const jobId = ports.createJobId?.() ?? "local-implementation-job";
+      await Promise.allSettled([
+        ports.github.addIssueLabel(issue.number, "agent:blocked"),
+        ports.github.addImplementationBlockedDiagnostic?.(issue.number, {
+          reason: "implementation-execution",
+          jobId,
+        }),
+      ]);
+      return { status: "blocked", reason: "implementation-execution", jobId };
+    } finally {
+      await ports.github.removeIssueLabel(issue.number, "agent:in-progress").catch(() => undefined);
+    }
   } finally {
-    await ports.github.removeIssueLabel(issue.number, "agent:in-progress").catch(() => undefined);
+    activeIssueNumbers.delete(issue.number);
   }
 }

@@ -75,6 +75,35 @@ describe("implementation automation command", () => {
     expect(github.addRefusalDiagnostic).toHaveBeenCalledWith(221, "Issue #221 is not queued for implementation");
   });
 
+  it("refuses a concurrent command for the same Issue before another Agent can run", async () => {
+    let releaseImplementation!: () => void;
+    const implementationFinished = new Promise<void>((resolve) => { releaseImplementation = resolve; });
+    const github = {
+      readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision }),
+      addIssueLabel: vi.fn().mockResolvedValue(undefined),
+      removeIssueLabel: vi.fn().mockResolvedValue(undefined),
+      addRefusalDiagnostic: vi.fn().mockResolvedValue(undefined),
+    };
+    const checkout = {
+      withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")),
+    };
+    const implementer = {
+      implement: vi.fn(async () => {
+        await implementationFinished;
+        return { branch: "sandcastle/issue-221", pullRequestUrl: "https://example.test/pr/221" };
+      }),
+    };
+
+    const first = runImplementationAutomationCommand({ issueNumber: 221 }, { github, checkout, implementer });
+    await vi.waitFor(() => expect(implementer.implement).toHaveBeenCalledOnce());
+    await expect(runImplementationAutomationCommand({ issueNumber: 221 }, { github, checkout, implementer }))
+      .resolves.toEqual({ status: "refused", reason: "Issue #221 is already being implemented" });
+    releaseImplementation();
+    await first;
+
+    expect(implementer.implement).toHaveBeenCalledOnce();
+  });
+
   it("reuses an existing upstream-equivalent Draft Pull Request after the trigger label was removed", async () => {
     const github = {
       readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: [], baseRevision: revision }),
