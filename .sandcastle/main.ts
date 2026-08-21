@@ -8,7 +8,7 @@ import { runAutomationCli } from "./automation-cli.ts";
 import { createAutomationGithubPort } from "./automation-github.ts";
 import { createTargetCheckout } from "./target-checkout.ts";
 import { runReviewAutomationCommand } from "./review-automation.ts";
-import { createSameSessionReviewExtractor } from "./review-extraction.ts";
+import { createProcessReviewRunner } from "./review-process-runner.ts";
 import {
   createReviewArtifactDirectory,
   removeExpiredReviewArtifacts,
@@ -71,11 +71,7 @@ try {
     const automationGithub = createAutomationGithubPort({
       environment: startup.childEnvironments.github,
     });
-    const reviewer = createSameSessionReviewExtractor({
-      sandbox: startup.automationSandbox,
-      hooks: { sandbox: { onSandboxReady: [] } },
-      agentEnvironment: startup.childEnvironments.claude,
-    });
+    const reviewer = createProcessReviewRunner({});
     const result = await runAutomationCli(process.argv.slice(2), {
       runReview: (pullRequestNumber) => runReviewAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,

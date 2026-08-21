@@ -1,5 +1,9 @@
 export async function runJobWithTimeout(options: {
-  readonly start: () => { readonly pid: number; readonly exited: Promise<void> };
+  readonly start: () => {
+    readonly pid: number;
+    readonly exited: Promise<void>;
+    readonly groupExited: Promise<void>;
+  };
   readonly timeoutMilliseconds: number;
   readonly graceMilliseconds: number;
   readonly kill: (pid: number, signal: NodeJS.Signals) => void;
@@ -17,10 +21,10 @@ export async function runJobWithTimeout(options: {
 
   options.kill(-child.pid, "SIGTERM");
   const forced = await Promise.race([
-    child.exited.then(() => false),
+    child.groupExited.then(() => false),
     options.wait(options.graceMilliseconds).then(() => true),
   ]);
   if (forced) options.kill(-child.pid, "SIGKILL");
-  await child.exited;
+  await child.groupExited;
   return { status: "timed-out" };
 }
