@@ -45,6 +45,8 @@ import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { mergeConflict } from "./conflict-merger.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
+import { runPrdSplitAutomationCommand } from "./prd-split-automation.ts";
+import { createSameSessionPrdSplitExtractor } from "./prd-split-extraction.ts";
 import { acquireImplementationLease } from "./implementation-lease.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
 import { mergeVerifiedPullRequest, type MergeVerifiedPullRequestResult } from "./merge.ts";
@@ -177,6 +179,24 @@ try {
             issueNumber: currentIssueNumber,
           }),
         },
+        createJobId: () => jobId,
+      }),
+      runSplit: (issueNumber) => runPrdSplitAutomationCommand({ issueNumber }, {
+        github: automationGithub,
+        checkout: createTargetCheckout({
+          sourceRepositoryPath: repositoryPath,
+          checkoutRoot: resolve(import.meta.dirname, "jobs"),
+          gitEnvironment: startup.childEnvironments.git,
+          dependencyEnvironment: startup.childEnvironments.dependencies,
+        }),
+        splitter: {
+          split: ({ prdNumber, title, checkoutPath }) => createSameSessionPrdSplitExtractor({
+            sandbox: startup.automationSandbox,
+            hooks: { sandbox: { onSandboxReady: [] } },
+            agentEnvironment: startup.childEnvironments.claude,
+          }).split({ prdNumber, title, checkoutPath, model: startup.models.planner }),
+        },
+        publisher: automationGithub,
         createJobId: () => jobId,
       }),
     });
