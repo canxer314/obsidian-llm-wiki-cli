@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
 import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
 import type { PrdSlice } from "./prd-split-extraction.ts";
@@ -102,7 +103,7 @@ function splitBody(prdNumber: number, slice: PrdSlice): string {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] {
+}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
@@ -268,7 +269,7 @@ export function createAutomationGithubPort(options: {
     async readPullRequest(pullRequestNumber) {
       const { stdout } = await execute("gh", [
         "pr", "view", String(pullRequestNumber), "--json",
-        "number,state,isDraft,baseRepository,headRepository,headRefOid,labels",
+        "number,state,isDraft,baseRepository,headRepository,headRefName,headRefOid,labels",
       ], options.environment);
       const pullRequest = JSON.parse(stdout) as {
         readonly number: number;
@@ -276,6 +277,7 @@ export function createAutomationGithubPort(options: {
         readonly isDraft: boolean;
         readonly baseRepository: { readonly nameWithOwner: string } | null;
         readonly headRepository: { readonly nameWithOwner: string } | null;
+        readonly headRefName: string;
         readonly headRefOid: string;
         readonly labels: readonly { readonly name: string }[];
       };
@@ -288,6 +290,7 @@ export function createAutomationGithubPort(options: {
         isDraft: pullRequest.isDraft,
         baseRepository: pullRequest.baseRepository.nameWithOwner,
         headRepository: pullRequest.headRepository.nameWithOwner,
+        headRefName: pullRequest.headRefName,
         headSha: pullRequest.headRefOid,
         labels: pullRequest.labels.map(({ name }) => name),
       };
@@ -297,6 +300,12 @@ export function createAutomationGithubPort(options: {
     },
     async removePullRequestLabel(pullRequestNumber, label) {
       await execute("gh", ["pr", "edit", String(pullRequestNumber), "--remove-label", label], options.environment);
+    },
+    async addFeedbackBlockedDiagnostic(pullRequestNumber, diagnostic) {
+      await execute("gh", [
+        "pr", "comment", String(pullRequestNumber), "--body",
+        `Automation feedback implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/feedback-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+      ], options.environment);
     },
     async addBlockedDiagnostic(pullRequestNumber, diagnostic) {
       await execute("gh", [
