@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { SandcastleCancellationError } from "../.sandcastle/cli.js";
 import {
   runFailureAwareWorkflow,
   SandcastleWorkflowError,
@@ -58,10 +59,9 @@ describe("Sandcastle failure-aware workflow", () => {
     },
   );
 
-  it("finalizes cancellation with a fixed interrupted reason", async () => {
+  it("defers controlled cancellation to receipt-bound CLI finalization", async () => {
     const github = githubPort();
-    const cancellation = new Error("private agent payload /secret/path");
-    cancellation.name = "AbortError";
+    const cancellation = new SandcastleCancellationError();
 
     await expect(runFailureAwareWorkflow({
       issueNumber: 108,
@@ -70,16 +70,26 @@ describe("Sandcastle failure-aware workflow", () => {
         progress.enter("implementer");
         throw cancellation;
       },
-    })).rejects.toMatchObject<SandcastleWorkflowError>({ stage: "interrupted" });
+    })).rejects.toBe(cancellation);
 
-    expect(github.addIssueComment).toHaveBeenCalledWith(
-      108,
-      expect.stringContaining("Failure stage: `interrupted`"),
-    );
-    const comment = vi.mocked(github.addIssueComment).mock.calls[0]![1];
-    expect(comment).toContain("Sandcastle workflow interrupted");
-    expect(comment).not.toContain("private agent payload");
-    expect(comment).not.toContain("/secret/path");
+    expect(github.addIssueComment).not.toHaveBeenCalled();
+    expect(github.addPullRequestComment).not.toHaveBeenCalled();
+    expect(github.addIssueLabel).not.toHaveBeenCalled();
+    expect(github.removeIssueLabel).not.toHaveBeenCalled();
+  });
+
+  it("treats an unrelated AbortError as a normal non-signal failure", async () => {
+    const github = githubPort();
+    const abortError = new Error("provider aborted");
+    abortError.name = "AbortError";
+
+    await expect(runFailureAwareWorkflow({
+      issueNumber: 108,
+      github,
+      run: async () => { throw abortError; },
+    })).rejects.toMatchObject<SandcastleWorkflowError>({ stage: "planner" });
+
+    expect(github.addIssueLabel).toHaveBeenCalledWith(108, "sandcastle:failed");
   });
 
   it("finalizes an exception after implementation on the verified Draft Pull Request", async () => {

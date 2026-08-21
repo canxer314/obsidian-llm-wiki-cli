@@ -25,15 +25,13 @@ function ports(): InterruptedClaimFinalizationPorts {
       git: {
         compareCommits: vi.fn(async () => "equal"),
         countUniqueCommits: vi.fn(async () => 0),
-        getWorktree: vi.fn(async () => "clean"),
+        getWorktree: vi.fn(async () => "absent"),
       },
       docker: {
-        getContainer: vi.fn(async () => "present"),
+        getContainer: vi.fn(async () => "absent"),
       },
     },
     release: {
-      removeStoppedContainer: vi.fn(async () => undefined),
-      removeCleanWorktree: vi.fn(async () => undefined),
       compareAndDeleteLocalBranch: vi.fn(async () => undefined),
       compareAndDeleteBranch: vi.fn(async () => undefined),
     },
@@ -61,13 +59,11 @@ describe("interrupted current-process claim finalization", () => {
       branch: "sandcastle/issue-209",
       comparisonBaseSha: baseSha,
     };
-    expect(fake.release.removeStoppedContainer).toHaveBeenCalledWith(identity);
-    expect(fake.release.removeCleanWorktree).toHaveBeenCalledWith(identity);
-    expect(fake.release.compareAndDeleteLocalBranch).toHaveBeenCalledWith({
+    expect(fake.release.compareAndDeleteBranch).toHaveBeenCalledWith({
       ...identity,
       expectedHeadSha: baseSha,
     });
-    expect(fake.release.compareAndDeleteBranch).toHaveBeenCalledWith({
+    expect(fake.release.compareAndDeleteLocalBranch).toHaveBeenCalledWith({
       ...identity,
       expectedHeadSha: baseSha,
     });
@@ -76,13 +72,31 @@ describe("interrupted current-process claim finalization", () => {
 
   it.each([
     ["branch absent", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.getBranch).mockResolvedValue({ state: "absent" })],
+    ["branch unknown", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.getBranch).mockRejectedValue(new Error("unavailable"))],
     ["branch head mismatch", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.getBranch).mockResolvedValue({ state: "present", headSha: "b".repeat(40) })],
-    ["branch ahead", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.compareCommits).mockResolvedValue("ahead")],
+    ...(["ahead", "behind", "diverged"] as const).map((relation) => [
+      `branch ${relation}`,
+      (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.compareCommits).mockResolvedValue(relation),
+    ] as const),
+    ["branch relation unknown", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.compareCommits).mockRejectedValue(new Error("unavailable"))],
     ["unique commits", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.countUniqueCommits).mockResolvedValue(1)],
+    ["unique commits unknown", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.countUniqueCommits).mockRejectedValue(new Error("unavailable"))],
+    ["clean worktree", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.getWorktree).mockResolvedValue("clean")],
     ["dirty worktree", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.getWorktree).mockResolvedValue("dirty")],
+    ["unknown worktree", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.getWorktree).mockRejectedValue(new Error("unavailable"))],
+    ["stopped container", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.docker.getContainer).mockResolvedValue("present")],
     ["active container", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.docker.getContainer).mockResolvedValue("active")],
-    ["associated Pull Request", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.listPullRequests).mockResolvedValue([{ number: 31, state: "closed", headSha: baseSha, closesIssue: true }])],
-    ["unknown Git fact", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.git.getWorktree).mockRejectedValue(new Error("unavailable"))],
+    ["unknown container", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.docker.getContainer).mockRejectedValue(new Error("unavailable"))],
+    ...(["open", "closed"] as const).map((state) => [
+      `${state} Pull Request`,
+      (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.listPullRequests).mockResolvedValue([{ number: 31, state, headSha: baseSha, closesIssue: true }]),
+    ] as const),
+    ["multiple Pull Requests", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.listPullRequests).mockResolvedValue([
+      { number: 31, state: "closed", headSha: baseSha, closesIssue: true },
+      { number: 32, state: "closed", headSha: baseSha, closesIssue: true },
+    ])],
+    ["unknown Pull Requests", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.listPullRequests).mockRejectedValue(new Error("unavailable"))],
+    ["unknown Issue", (fake: InterruptedClaimFinalizationPorts) => vi.mocked(fake.reconciliation.github.getIssue).mockRejectedValue(new Error("unavailable"))],
   ])("preserves the claim when %s is observed", async (_name, change) => {
     const fake = ports();
     change(fake);
@@ -93,8 +107,7 @@ describe("interrupted current-process claim finalization", () => {
     }, fake);
 
     expect(result.status).toBe("preserved");
-    expect(fake.release.removeStoppedContainer).not.toHaveBeenCalled();
-    expect(fake.release.removeCleanWorktree).not.toHaveBeenCalled();
+    expect(fake.release.compareAndDeleteLocalBranch).not.toHaveBeenCalled();
     expect(fake.release.compareAndDeleteBranch).not.toHaveBeenCalled();
     expect(fake.failure.addIssueLabel).toHaveBeenCalledWith(209, "sandcastle:failed");
     expect(fake.failure.removeIssueLabel).toHaveBeenCalledWith(209, "Sandcastle");
@@ -119,9 +132,11 @@ describe("interrupted current-process claim finalization", () => {
     expect(fake.failure.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("reports partial cleanup failure and leaves the branch as the recovery anchor", async () => {
+  it("preserves the remote branch when its expected head changes during compare-delete", async () => {
     const fake = ports();
-    vi.mocked(fake.release.removeCleanWorktree).mockRejectedValue(new Error("worktree changed"));
+    vi.mocked(fake.release.compareAndDeleteBranch).mockRejectedValue(
+      new Error("stale lease"),
+    );
 
     const result = await finalizeInterruptedClaim({
       repository: "example/repository",
@@ -130,9 +145,31 @@ describe("interrupted current-process claim finalization", () => {
 
     expect(result).toEqual({
       status: "cleanup-failed",
-      failures: ["worktree: cleanup-failed"],
+      failures: ["branch: cleanup-failed"],
     });
-    expect(fake.release.compareAndDeleteBranch).not.toHaveBeenCalled();
+    expect(fake.release.compareAndDeleteBranch).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedHeadSha: baseSha }),
+    );
+    expect(fake.release.compareAndDeleteLocalBranch).not.toHaveBeenCalled();
+    expect(fake.failure.addIssueLabel).toHaveBeenCalledWith(209, "sandcastle:failed");
+  });
+
+  it("reports local branch cleanup failure after the remote branch was safely released", async () => {
+    const fake = ports();
+    vi.mocked(fake.release.compareAndDeleteLocalBranch).mockRejectedValue(
+      new Error("local ref changed"),
+    );
+
+    const result = await finalizeInterruptedClaim({
+      repository: "example/repository",
+      receipt,
+    }, fake);
+
+    expect(result).toEqual({
+      status: "cleanup-failed",
+      failures: ["local-branch: cleanup-failed"],
+    });
+    expect(fake.release.compareAndDeleteBranch).toHaveBeenCalledOnce();
     expect(fake.failure.addIssueLabel).toHaveBeenCalledWith(209, "sandcastle:failed");
   });
 });

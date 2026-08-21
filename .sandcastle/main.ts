@@ -87,8 +87,6 @@ try {
           docker: new DockerClaimReadAdapter(),
         },
         release: {
-          removeStoppedContainer: (input) => release.removeStoppedContainer(input),
-          removeCleanWorktree: (input) => release.removeCleanWorktree(input),
           compareAndDeleteLocalBranch: (input) => release.compareAndDeleteLocalBranch(input),
           compareAndDeleteBranch: (input) => github.compareAndDeleteBranch(input),
         },

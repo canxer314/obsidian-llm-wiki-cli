@@ -11,8 +11,6 @@ import {
 } from "./failure-finalizer.ts";
 
 export interface InterruptedClaimReleasePort {
-  removeStoppedContainer(input: ClaimReconciliationInput): Promise<void>;
-  removeCleanWorktree(input: ClaimReconciliationInput): Promise<void>;
   compareAndDeleteLocalBranch(input: ClaimReconciliationInput & {
     readonly expectedHeadSha: string;
   }): Promise<void>;
@@ -47,8 +45,8 @@ function isReceiptBoundEmpty(
     snapshot.branchRelation === "equal" &&
     snapshot.uniqueCommits.state === "zero" &&
     snapshot.pullRequests.state === "none" &&
-    (snapshot.worktree === "absent" || snapshot.worktree === "clean") &&
-    (snapshot.container === "absent" || snapshot.container === "present");
+    snapshot.worktree === "absent" &&
+    snapshot.container === "absent";
 }
 
 async function markInterruptedFailure(
@@ -89,19 +87,13 @@ export async function finalizeInterruptedClaim(
   }
 
   const cleanupFailures: string[] = [];
-  if (snapshot.container === "present") {
-    try {
-      await ports.release.removeStoppedContainer(input);
-    } catch {
-      cleanupFailures.push("container: cleanup-failed");
-    }
-  }
-  if (cleanupFailures.length === 0 && snapshot.worktree === "clean") {
-    try {
-      await ports.release.removeCleanWorktree(input);
-    } catch {
-      cleanupFailures.push("worktree: cleanup-failed");
-    }
+  try {
+    await ports.release.compareAndDeleteBranch({
+      ...input,
+      expectedHeadSha: options.receipt.baseSha,
+    });
+  } catch {
+    cleanupFailures.push("branch: cleanup-failed");
   }
   if (cleanupFailures.length === 0) {
     try {
@@ -111,16 +103,6 @@ export async function finalizeInterruptedClaim(
       });
     } catch {
       cleanupFailures.push("local-branch: cleanup-failed");
-    }
-  }
-  if (cleanupFailures.length === 0) {
-    try {
-      await ports.release.compareAndDeleteBranch({
-        ...input,
-        expectedHeadSha: options.receipt.baseSha,
-      });
-    } catch {
-      cleanupFailures.push("branch: cleanup-failed");
     }
   }
   if (cleanupFailures.length === 0) return { status: "released", failures: [] };

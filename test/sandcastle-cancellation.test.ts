@@ -67,6 +67,26 @@ describe("Sandcastle controlled cancellation", () => {
     });
   });
 
+  it("returns a nonzero failure when interruption finalization fails", async () => {
+    const signals = fakeSignals();
+    const teardown = deferred();
+    const cleanupFailure = new Error("interrupted cleanup failed");
+    const running = runSandcastleCli(["--issue", "209"], {
+      github: githubPort([209]),
+      signalSource: signals,
+      finalizeInterruption: vi.fn().mockRejectedValue(cleanupFailure),
+      processIssue: async (_number, execution) => {
+        await teardown.promise;
+        throw execution.signal.reason;
+      },
+    });
+
+    await vi.waitFor(() => expect(signals.size()).toBe(1));
+    signals.emit("SIGTERM");
+    teardown.resolve();
+    await expect(running).rejects.toBe(cleanupFailure);
+  });
+
   it("does not finalize a receipt after normal completion or non-signal failure", async () => {
     const finalizeInterruption = vi.fn(async () => undefined);
     await runSandcastleCli(["--issue", "209"], {
@@ -315,6 +335,30 @@ describe("Sandcastle controlled cancellation", () => {
     expect(finalizeInterruption).toHaveBeenCalledWith(expect.objectContaining({
       issueNumber: 207,
       branch: "sandcastle/issue-207",
+    }));
+  });
+
+  it("finalizes instead of starting when cancellation arrives after launch selection", async () => {
+    const signals = fakeSignals();
+    const processIssue = vi.fn().mockResolvedValue(undefined);
+    const finalizeInterruption = vi.fn(async () => undefined);
+    const running = runSandcastleCli(["--watch"], {
+      github: githubPort([207]),
+      signalSource: signals,
+      processIssue,
+      finalizeInterruption,
+      recordWatchEvent: (event) => {
+        if (event.kind === "batch-started") {
+          signals.emit("SIGINT");
+          signals.emit("SIGTERM");
+        }
+      },
+    });
+
+    await expect(running).resolves.toBeUndefined();
+    expect(processIssue).not.toHaveBeenCalled();
+    expect(finalizeInterruption).toHaveBeenCalledWith(expect.objectContaining({
+      issueNumber: 207,
     }));
   });
 

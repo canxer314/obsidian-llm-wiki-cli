@@ -418,6 +418,12 @@ export async function runSandcastleCli<TResult>(
         }
         const workflowBatchId = batchId;
         for (const issue of launchable) {
+          const receipt = claimed.get(issue.number)!;
+          if (controller.signal.aborted) {
+            await dependencies.finalizeInterruption?.(receipt);
+            claimed.delete(issue.number);
+            continue;
+          }
           dependencies.recordWatchEvent?.({
             kind: "issue-started",
             runId,
@@ -431,7 +437,6 @@ export async function runSandcastleCli<TResult>(
           if (signalCount >= 3) liveStatus.transition("forced-exit");
           else if (signalCount >= 2) liveStatus.transition("cancelling");
           else if (draining) liveStatus.transition("draining");
-          const receipt = claimed.get(issue.number)!;
           const workflow = Promise.resolve(dependencies.processIssue(issue.number, {
             runId,
             batchId: workflowBatchId,
