@@ -73,6 +73,27 @@ describe("PRD split automation command", () => {
     expect(github.removeIssueLabel).toHaveBeenCalledWith(223, "agent:to-issues");
   });
 
+  it("blocks partial publication without rerunning the produce pass", async () => {
+    const splitter = { split: vi.fn().mockResolvedValue([{ title: "Slice", whatToBuild: "Build it.", acceptanceCriteria: ["It works"] }]) };
+    const github = {
+      readPrd: vi.fn().mockResolvedValue(prd()),
+      addIssueLabel: vi.fn().mockResolvedValue(undefined),
+      removeIssueLabel: vi.fn().mockResolvedValue(undefined),
+      addSplitBlockedDiagnostic: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(runPrdSplitAutomationCommand({ issueNumber: 223 }, {
+      github,
+      checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
+      splitter,
+      publisher: { publishPrdSplit: vi.fn().mockRejectedValue(new Error("Second child publication failed")) },
+      createJobId: () => "job-223",
+    })).resolves.toEqual({ status: "blocked", reason: "prd-split-execution", jobId: "job-223" });
+
+    expect(splitter.split).toHaveBeenCalledTimes(1);
+    expect(github.addIssueLabel).toHaveBeenCalledWith(223, "agent:blocked");
+  });
+
   it("blocks execution failures and always clears visible acquisition", async () => {
     const events: string[] = [];
     const github = {
