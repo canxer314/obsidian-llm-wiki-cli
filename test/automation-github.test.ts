@@ -74,6 +74,39 @@ describe("automation GitHub port", () => {
     ], undefined);
   });
 
+  it("reads an ordinary Issue whose REST pull request field is null", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({
+        number: 221,
+        state: "OPEN",
+        labels: [{ name: "agent:implement" }],
+        pull_request: null,
+      }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readIssue(221)).resolves.toEqual({
+      number: 221,
+      state: "OPEN",
+      labels: ["agent:implement"],
+      baseRevision: revision,
+    });
+  });
+
+  it("rejects a Pull Request supplied as an implementation work item", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({
+        number: 221,
+        state: "OPEN",
+        labels: [{ name: "agent:implement" }],
+        pull_request: {},
+      }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readIssue(221)).rejects.toThrow("is a Pull Request");
+  });
+
   it("recognizes exactly one equivalent Draft Pull Request for implementation re-invocation", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
@@ -84,10 +117,33 @@ describe("automation GitHub port", () => {
         baseRefName: "master",
         headRefName: "sandcastle/issue-221",
         body: "Closes #221",
-      }]), stderr: "" });
+      }]), stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{ ref: "refs/heads/sandcastle/issue-221" }]), stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
     await expect(github.findReusableImplementation?.({
+      issueNumber: 221,
+      branch: "sandcastle/issue-221",
+    })).resolves.toEqual({
+      status: "pull-request",
+      branch: "sandcastle/issue-221",
+      pullRequestUrl: "https://example.test/pr/221",
+    });
+  });
+
+  it("recovers Draft Pull Request publication from an existing deterministic branch", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{ ref: "refs/heads/sandcastle/issue-221" }]), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "https://example.test/pr/221\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.findReusableImplementation?.({
+      issueNumber: 221,
+      branch: "sandcastle/issue-221",
+    })).resolves.toEqual({ status: "branch", branch: "sandcastle/issue-221" });
+    await expect(github.publishExistingImplementation?.({
       issueNumber: 221,
       branch: "sandcastle/issue-221",
     })).resolves.toEqual({
@@ -106,7 +162,8 @@ describe("automation GitHub port", () => {
         baseRefName: "master",
         headRefName: "sandcastle/issue-221",
         body: "Closes #221",
-      }]), stderr: "" });
+      }]), stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{ ref: "refs/heads/sandcastle/issue-221" }]), stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
     await expect(github.findReusableImplementation?.({

@@ -104,14 +104,21 @@ export function createAutomationGithubPort(options: {
   return {
     async readIssue(issueNumber) {
       const [{ stdout: issueOutput }, { stdout: baseRevisionOutput }] = await Promise.all([
-        execute("gh", ["issue", "view", String(issueNumber), "--json", "number,state,labels"], options.environment),
+        execute("gh", [
+          "api", `repos/{owner}/{repo}/issues/${issueNumber}`,
+          "--jq", "{number, state, labels, pull_request}",
+        ], options.environment),
         execute("gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"], options.environment),
       ]);
       const issue = JSON.parse(issueOutput) as {
         readonly number: number;
         readonly state: string;
         readonly labels: readonly { readonly name: string }[];
+        readonly pull_request?: unknown;
       };
+      if (issue.pull_request !== undefined && issue.pull_request !== null) {
+        throw new Error(`Automation work item #${issueNumber} is a Pull Request`);
+      }
       return {
         number: issue.number,
         state: issue.state,
@@ -120,12 +127,13 @@ export function createAutomationGithubPort(options: {
       };
     },
     async findReusableImplementation(request) {
-      const [{ stdout: repositoryOutput }, { stdout: pullRequestsOutput }] = await Promise.all([
+      const [{ stdout: repositoryOutput }, { stdout: pullRequestsOutput }, { stdout: branchOutput }] = await Promise.all([
         execute("gh", ["repo", "view", "--json", "defaultBranchRef"], options.environment),
         execute("gh", [
           "pr", "list", "--head", request.branch, "--state", "all",
           "--json", "url,state,isDraft,baseRefName,headRefName,body", "--limit", "2",
         ], options.environment),
+        execute("gh", ["api", `repos/{owner}/{repo}/git/matching-refs/heads/${request.branch}`], options.environment),
       ]);
       const repository = JSON.parse(repositoryOutput) as {
         readonly defaultBranchRef: { readonly name: string };
@@ -138,7 +146,11 @@ export function createAutomationGithubPort(options: {
         readonly headRefName: string;
         readonly body: string;
       }[];
-      if (pullRequests.length === 0) return undefined;
+      const branches = JSON.parse(branchOutput) as readonly { readonly ref: string }[];
+      const branchExists = branches.some(({ ref }) => ref === `refs/heads/${request.branch}`);
+      if (pullRequests.length === 0) {
+        return branchExists ? { status: "branch" as const, branch: request.branch } : undefined;
+      }
       if (pullRequests.length !== 1) {
         throw new Error(`Expected one Pull Request for ${request.branch}; found ${pullRequests.length}`);
       }
@@ -152,7 +164,15 @@ export function createAutomationGithubPort(options: {
       ) {
         throw new Error(`Existing Pull Request for ${request.branch} is not an upstream-equivalent Draft`);
       }
-      return { branch: request.branch, pullRequestUrl: pullRequest.url };
+      return { status: "pull-request", branch: request.branch, pullRequestUrl: pullRequest.url };
+    },
+    async publishExistingImplementation(request) {
+      const { stdout } = await execute("gh", [
+        "pr", "create", "--draft", "--head", request.branch,
+        "--body", `Closes #${request.issueNumber}`,
+        "--title", `Implement #${request.issueNumber}`,
+      ], options.environment);
+      return { branch: request.branch, pullRequestUrl: stdout.trim() };
     },
     async addIssueLabel(issueNumber, label) {
       await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
@@ -166,7 +186,7 @@ export function createAutomationGithubPort(options: {
     async addImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/implementation-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async readPullRequest(pullRequestNumber) {

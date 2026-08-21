@@ -45,6 +45,7 @@ import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { mergeConflict } from "./conflict-merger.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
+import { acquireImplementationLease } from "./implementation-lease.ts";
 import { checkPullRequestLocalQuality } from "./local-quality.ts";
 import { mergeVerifiedPullRequest, type MergeVerifiedPullRequestResult } from "./merge.ts";
 import { createSandcastleMergerSession } from "./merger-session.ts";
@@ -111,6 +112,13 @@ try {
             }
             return findReusableImplementation(request);
           },
+          publishExistingImplementation: (request) => {
+            const publishExistingImplementation = automationGithub.publishExistingImplementation;
+            if (publishExistingImplementation === undefined) {
+              throw new Error("Implementation Pull Request publication is unavailable");
+            }
+            return publishExistingImplementation(request);
+          },
           addIssueLabel: (currentIssueNumber, label) => automationGithub.addIssueLabel(currentIssueNumber, label),
           removeIssueLabel: (currentIssueNumber, label) => automationGithub.removeIssueLabel(currentIssueNumber, label),
           addRefusalDiagnostic: (currentIssueNumber, reason) => {
@@ -129,6 +137,7 @@ try {
         checkout: createTargetCheckout({
           sourceRepositoryPath: repositoryPath,
           checkoutRoot: resolve(import.meta.dirname, "jobs"),
+          createJobDirectory: () => resolve(import.meta.dirname, "jobs", `implementation-${jobId}`),
           gitEnvironment: startup.childEnvironments.git,
           dependencyEnvironment: startup.childEnvironments.dependencies,
         }),
@@ -161,6 +170,12 @@ try {
             }
             return { branch: `sandcastle/issue-${currentIssueNumber}`, pullRequestUrl: pullRequest.url };
           },
+        },
+        lease: {
+          acquire: (currentIssueNumber) => acquireImplementationLease({
+            root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
+            issueNumber: currentIssueNumber,
+          }),
         },
         createJobId: () => jobId,
       }),

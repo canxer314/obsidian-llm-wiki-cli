@@ -8,13 +8,25 @@ describe("implementation automation command", () => {
   it("acquires an eligible Issue and runs the Implementer in a Target Checkout at its authorized base revision", async () => {
     const events: string[] = [];
     const github = {
-      readIssue: vi.fn().mockResolvedValue({
-        number: 221,
-        state: "OPEN",
-        labels: ["agent:implement"],
-        baseRevision: revision,
-      }),
-      addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
+      readIssue: vi.fn()
+        .mockResolvedValueOnce({
+          number: 221,
+          state: "OPEN",
+          labels: ["agent:implement"],
+          baseRevision: revision,
+        })
+        .mockResolvedValueOnce({
+          number: 221,
+          state: "OPEN",
+          labels: ["agent:implement"],
+          baseRevision: revision,
+        })
+        .mockResolvedValue({
+          number: 221,
+          state: "OPEN",
+          labels: ["agent:in-progress"],
+          baseRevision: revision,
+        }),      addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
       removeIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`remove:${label}`)),
     };
     const checkout = {
@@ -79,7 +91,10 @@ describe("implementation automation command", () => {
     let releaseImplementation!: () => void;
     const implementationFinished = new Promise<void>((resolve) => { releaseImplementation = resolve; });
     const github = {
-      readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision }),
+      readIssue: vi.fn()
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValue({ number: 221, state: "OPEN", labels: ["agent:in-progress"], baseRevision: revision }),
       addIssueLabel: vi.fn().mockResolvedValue(undefined),
       removeIssueLabel: vi.fn().mockResolvedValue(undefined),
       addRefusalDiagnostic: vi.fn().mockResolvedValue(undefined),
@@ -110,6 +125,7 @@ describe("implementation automation command", () => {
       addIssueLabel: vi.fn().mockResolvedValue(undefined),
       removeIssueLabel: vi.fn().mockResolvedValue(undefined),
       findReusableImplementation: vi.fn().mockResolvedValue({
+        status: "pull-request",
         branch: "sandcastle/issue-221",
         pullRequestUrl: "https://example.test/pr/221",
       }),
@@ -135,10 +151,45 @@ describe("implementation automation command", () => {
     expect(implementer.implement).not.toHaveBeenCalled();
   });
 
+  it("publishes an existing deterministic branch without starting another Agent", async () => {
+    const github = {
+      readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: [], baseRevision: revision }),
+      addIssueLabel: vi.fn(),
+      removeIssueLabel: vi.fn(),
+      findReusableImplementation: vi.fn().mockResolvedValue({ status: "branch", branch: "sandcastle/issue-221" }),
+      publishExistingImplementation: vi.fn().mockResolvedValue({
+        branch: "sandcastle/issue-221",
+        pullRequestUrl: "https://example.test/pr/221",
+      }),
+    };
+    const checkout = { withCheckout: vi.fn() };
+    const implementer = { implement: vi.fn() };
+
+    await expect(runImplementationAutomationCommand({ issueNumber: 221 }, {
+      github,
+      checkout,
+      implementer,
+    })).resolves.toEqual({
+      status: "implemented",
+      branch: "sandcastle/issue-221",
+      pullRequestUrl: "https://example.test/pr/221",
+    });
+
+    expect(github.publishExistingImplementation).toHaveBeenCalledWith({
+      issueNumber: 221,
+      branch: "sandcastle/issue-221",
+    });
+    expect(checkout.withCheckout).not.toHaveBeenCalled();
+    expect(implementer.implement).not.toHaveBeenCalled();
+  });
+
   it("blocks an acquired Issue when execution or publication fails and preserves the job diagnostic", async () => {
     const events: string[] = [];
     const github = {
-      readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision }),
+      readIssue: vi.fn()
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValue({ number: 221, state: "OPEN", labels: ["agent:in-progress"], baseRevision: revision }),
       addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
       removeIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`remove:${label}`)),
       addImplementationBlockedDiagnostic: vi.fn(async (_number: number, diagnostic) => events.push(`blocked:${diagnostic.jobId}`)),
@@ -151,6 +202,11 @@ describe("implementation automation command", () => {
       createJobId: () => "job-221",
     })).resolves.toEqual({ status: "blocked", reason: "implementation-execution", jobId: "job-221" });
 
+    expect(github.addImplementationBlockedDiagnostic).toHaveBeenCalledWith(221, {
+      reason: "implementation-execution",
+      jobId: "job-221",
+      summary: "push failed",
+    });
     expect(events).toEqual([
       "add:agent:in-progress",
       "remove:agent:implement",
