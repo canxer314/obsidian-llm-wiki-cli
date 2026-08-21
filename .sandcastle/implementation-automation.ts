@@ -9,6 +9,10 @@ export interface ImplementationAutomationPorts {
   readonly github: {
     readIssue(issueNumber: number): Promise<ImplementationAutomationIssue>;
     claimIssue?(issue: ImplementationAutomationIssue): Promise<"acquired" | "unavailable">;
+    findReusableImplementation?(request: {
+      readonly issueNumber: number;
+      readonly branch: string;
+    }): Promise<{ readonly branch: string; readonly pullRequestUrl: string } | undefined>;
     addIssueLabel(issueNumber: number, label: string): Promise<void>;
     removeIssueLabel(issueNumber: number, label: string): Promise<void>;
     addRefusalDiagnostic?(issueNumber: number, reason: string): Promise<void>;
@@ -51,11 +55,21 @@ function refusal(issue: ImplementationAutomationIssue): string | undefined {
   return undefined;
 }
 
+function reusableBranch(issueNumber: number): string {
+  return `sandcastle/issue-${issueNumber}`;
+}
+
 export async function runImplementationAutomationCommand(
   request: { readonly issueNumber: number },
   ports: ImplementationAutomationPorts,
 ): Promise<ImplementationAutomationResult> {
   const issue = await ports.github.readIssue(request.issueNumber);
+  const branch = reusableBranch(issue.number);
+  const existing = await ports.github.findReusableImplementation?.({
+    issueNumber: issue.number,
+    branch,
+  });
+  if (existing !== undefined) return { status: "implemented", ...existing };
   const reason = refusal(issue);
   if (reason !== undefined) {
     await ports.github.addRefusalDiagnostic?.(issue.number, reason);

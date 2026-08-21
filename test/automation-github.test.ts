@@ -74,6 +74,47 @@ describe("automation GitHub port", () => {
     ], undefined);
   });
 
+  it("recognizes exactly one equivalent Draft Pull Request for implementation re-invocation", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{
+        url: "https://example.test/pr/221",
+        state: "OPEN",
+        isDraft: true,
+        baseRefName: "master",
+        headRefName: "sandcastle/issue-221",
+        body: "Closes #221",
+      }]), stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.findReusableImplementation?.({
+      issueNumber: 221,
+      branch: "sandcastle/issue-221",
+    })).resolves.toEqual({
+      branch: "sandcastle/issue-221",
+      pullRequestUrl: "https://example.test/pr/221",
+    });
+  });
+
+  it("rejects a non-equivalent existing implementation Pull Request", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{
+        url: "https://example.test/pr/221",
+        state: "OPEN",
+        isDraft: false,
+        baseRefName: "master",
+        headRefName: "sandcastle/issue-221",
+        body: "Closes #221",
+      }]), stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.findReusableImplementation?.({
+      issueNumber: 221,
+      branch: "sandcastle/issue-221",
+    })).rejects.toThrow("not an upstream-equivalent Draft");
+  });
+
   it("rejects publication if the acquired Pull Request head changed", async () => {
     const github = createAutomationGithubPort({
       execute: vi.fn().mockResolvedValue({ stdout: `${"a".repeat(40)}\n`, stderr: "" }),

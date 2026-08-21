@@ -104,6 +104,13 @@ try {
       runImplement: (issueNumber) => runImplementationAutomationCommand({ issueNumber }, {
         github: {
           readIssue: (currentIssueNumber) => automationGithub.readIssue(currentIssueNumber),
+          findReusableImplementation: (request) => {
+            const findReusableImplementation = automationGithub.findReusableImplementation;
+            if (findReusableImplementation === undefined) {
+              throw new Error("Implementation Pull Request lookup is unavailable");
+            }
+            return findReusableImplementation(request);
+          },
           addIssueLabel: (currentIssueNumber, label) => automationGithub.addIssueLabel(currentIssueNumber, label),
           removeIssueLabel: (currentIssueNumber, label) => automationGithub.removeIssueLabel(currentIssueNumber, label),
           addRefusalDiagnostic: (currentIssueNumber, reason) => {

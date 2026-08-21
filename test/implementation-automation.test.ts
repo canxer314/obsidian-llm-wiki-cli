@@ -75,6 +75,37 @@ describe("implementation automation command", () => {
     expect(github.addRefusalDiagnostic).toHaveBeenCalledWith(221, "Issue #221 is not queued for implementation");
   });
 
+  it("reuses an existing upstream-equivalent Draft Pull Request after the trigger label was removed", async () => {
+    const github = {
+      readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: [], baseRevision: revision }),
+      addIssueLabel: vi.fn().mockResolvedValue(undefined),
+      removeIssueLabel: vi.fn().mockResolvedValue(undefined),
+      findReusableImplementation: vi.fn().mockResolvedValue({
+        branch: "sandcastle/issue-221",
+        pullRequestUrl: "https://example.test/pr/221",
+      }),
+    };
+    const checkout = { withCheckout: vi.fn() };
+    const implementer = { implement: vi.fn() };
+
+    await expect(runImplementationAutomationCommand({ issueNumber: 221 }, {
+      github,
+      checkout,
+      implementer,
+    })).resolves.toEqual({
+      status: "implemented",
+      branch: "sandcastle/issue-221",
+      pullRequestUrl: "https://example.test/pr/221",
+    });
+
+    expect(github.findReusableImplementation).toHaveBeenCalledWith({
+      issueNumber: 221,
+      branch: "sandcastle/issue-221",
+    });
+    expect(checkout.withCheckout).not.toHaveBeenCalled();
+    expect(implementer.implement).not.toHaveBeenCalled();
+  });
+
   it("blocks an acquired Issue when execution or publication fails and preserves the job diagnostic", async () => {
     const events: string[] = [];
     const github = {

@@ -119,6 +119,41 @@ export function createAutomationGithubPort(options: {
         baseRevision: baseRevisionOutput.trim(),
       };
     },
+    async findReusableImplementation(request) {
+      const [{ stdout: repositoryOutput }, { stdout: pullRequestsOutput }] = await Promise.all([
+        execute("gh", ["repo", "view", "--json", "defaultBranchRef"], options.environment),
+        execute("gh", [
+          "pr", "list", "--head", request.branch, "--state", "all",
+          "--json", "url,state,isDraft,baseRefName,headRefName,body", "--limit", "2",
+        ], options.environment),
+      ]);
+      const repository = JSON.parse(repositoryOutput) as {
+        readonly defaultBranchRef: { readonly name: string };
+      };
+      const pullRequests = JSON.parse(pullRequestsOutput) as readonly {
+        readonly url: string;
+        readonly state: string;
+        readonly isDraft: boolean;
+        readonly baseRefName: string;
+        readonly headRefName: string;
+        readonly body: string;
+      }[];
+      if (pullRequests.length === 0) return undefined;
+      if (pullRequests.length !== 1) {
+        throw new Error(`Expected one Pull Request for ${request.branch}; found ${pullRequests.length}`);
+      }
+      const pullRequest = pullRequests[0]!;
+      if (
+        pullRequest.state.toUpperCase() !== "OPEN" ||
+        !pullRequest.isDraft ||
+        pullRequest.baseRefName !== repository.defaultBranchRef.name ||
+        pullRequest.headRefName !== request.branch ||
+        !new RegExp(`(?:^|\\s)closes\\s+#${request.issueNumber}(?=\\s|$|[.,;:!?])`, "i").test(pullRequest.body)
+      ) {
+        throw new Error(`Existing Pull Request for ${request.branch} is not an upstream-equivalent Draft`);
+      }
+      return { branch: request.branch, pullRequestUrl: pullRequest.url };
+    },
     async addIssueLabel(issueNumber, label) {
       await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
     },
