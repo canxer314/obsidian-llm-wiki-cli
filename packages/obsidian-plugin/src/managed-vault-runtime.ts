@@ -434,10 +434,13 @@ export class ManagedVaultBridgeRuntime {
     };
     const persistedWriteMode = restricted ? undefined : settings.changeSets?.writeMode;
     // `baseline_accepted` is deliberately durable before clearing the Journal.
-    // Once the Journal is gone, it represents completed recovery and must
-    // project the existing manual pause rather than a stale recovery block.
+    // Keep its health projection recovery-blocked until ChangeSetService confirms
+    // that the Journal is gone during startup; otherwise a failed clear could
+    // advertise a manual pause while the service still blocks recovery.
     const recoveryPending =
-      !restricted && settings.changeSets?.recovery?.state === "blocked";
+      !restricted &&
+      settings.changeSets?.recovery !== undefined &&
+      settings.changeSets.recovery.state !== "none";
     const writeUnavailable = this.#options.changeSetDataSource === undefined;
     const persistedPaused = persistedWriteMode !== undefined;
     const persistedLifecycle = restricted ? undefined : settings.changeSets?.lifecycle;
