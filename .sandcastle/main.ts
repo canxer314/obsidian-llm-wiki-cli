@@ -73,7 +73,7 @@ import {
 
 try {
   const repositoryPath = resolve(import.meta.dirname, "..");
-  if (["run", "dispatch", "inspect"].includes(process.argv[2] ?? "")) {
+  if (["run", "dispatch", "inspect", "setup-labels"].includes(process.argv[2] ?? "")) {
     const artifactRoot = resolve(import.meta.dirname, "jobs", "review-artifacts");
     if (process.argv[2] !== "inspect") await removeExpiredReviewArtifacts({ root: artifactRoot });
     const startup = await loadSandboxStartup();
