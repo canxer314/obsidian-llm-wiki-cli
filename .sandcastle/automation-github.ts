@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
 import type {
   PublishedReview,
   ReviewAutomationPorts,
@@ -95,12 +96,44 @@ function inlineComments(
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] {
+}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
   return {
+    async readIssue(issueNumber) {
+      const [{ stdout: issueOutput }, { stdout: baseRevisionOutput }] = await Promise.all([
+        execute("gh", ["issue", "view", String(issueNumber), "--json", "number,state,labels"], options.environment),
+        execute("gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"], options.environment),
+      ]);
+      const issue = JSON.parse(issueOutput) as {
+        readonly number: number;
+        readonly state: string;
+        readonly labels: readonly { readonly name: string }[];
+      };
+      return {
+        number: issue.number,
+        state: issue.state,
+        labels: issue.labels.map(({ name }) => name),
+        baseRevision: baseRevisionOutput.trim(),
+      };
+    },
+    async addIssueLabel(issueNumber, label) {
+      await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
+    },
+    async removeIssueLabel(issueNumber, label) {
+      await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
+    },
+    async addRefusalDiagnostic(issueNumber, reason) {
+      await execute("gh", ["issue", "comment", String(issueNumber), "--body", reason], options.environment);
+    },
+    async addImplementationBlockedDiagnostic(issueNumber, diagnostic) {
+      await execute("gh", [
+        "issue", "comment", String(issueNumber), "--body",
+        `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:implement, then retry.`,
+      ], options.environment);
+    },
     async readPullRequest(pullRequestNumber) {
       const { stdout } = await execute("gh", [
         "pr", "view", String(pullRequestNumber), "--json",

@@ -50,7 +50,6 @@ describe("Sandcastle Implementer session adapter", () => {
       branchStrategy: {
         type: "branch",
         branch: "sandcastle/issue-103",
-        baseBranch: "origin/sandcastle/issue-103",
       },
       maxIterations: 1,
       name: "implementer-issue-103",
