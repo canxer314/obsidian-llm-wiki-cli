@@ -24,8 +24,16 @@ export function commandEligibility(command: AutomationCommand): AutomationComman
   return hasTrigger ? "eligible" : "ineligible";
 }
 
-export function commandPriority(_command: AutomationCommand): number {
-  return 2;
+// Accepted priority order (#219): 1 branch update, 2 Pull Request feedback
+// implementation, 3 Pull Request review, 4 PRD or Issue implementation,
+// 5 PRD split, 6 queue promotion, 7 architecture review. The trusted registry
+// currently runs only the already-supported review operation.
+const operationPriority: Readonly<Record<AutomationOperation, number>> = {
+  review: 3,
+};
+
+export function commandPriority(command: AutomationCommand): number {
+  return operationPriority[command.operation];
 }
 
 export function compareCommands(left: AutomationCommand, right: AutomationCommand): number {

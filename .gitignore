@@ -4,3 +4,5 @@ coverage/
 *.tsbuildinfo
 .claude/
 .codegraph/
+.sandcastle/dispatcher.lock
+.sandcastle/dispatcher-jobs/

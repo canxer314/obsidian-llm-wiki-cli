@@ -73,7 +73,7 @@ import {
 
 try {
   const repositoryPath = resolve(import.meta.dirname, "..");
-  if (["run", "dispatch", "inspect"].includes(process.argv[2] ?? "")) {
+  if (["run", "dispatch", "inspect", "setup-labels"].includes(process.argv[2] ?? "")) {
     const artifactRoot = resolve(import.meta.dirname, "jobs", "review-artifacts");
     if (process.argv[2] !== "inspect") await removeExpiredReviewArtifacts({ root: artifactRoot });
     const startup = await loadSandboxStartup();
@@ -85,10 +85,24 @@ try {
       environment: startup.childEnvironments.github,
     });
     const scheduler = createAutomationScheduler({ repositoryPath });
+    const withScheduler = async <T>(identity: string, action: () => Promise<T>): Promise<T> => {
+      const lock = await scheduler.acquire();
+      if (lock === undefined) throw new Error("Dispatcher is already running");
+      try {
+        await scheduler.prepare();
+        let result!: T;
+        await scheduler.track(identity, async () => {
+          result = await action();
+        });
+        return result;
+      } finally {
+        await lock.release();
+      }
+    };
     const github = new GithubCliPort();
     const reviewer = createProcessReviewRunner({});
     const result = await runAutomationCli(process.argv.slice(2), {
-      runReview: (pullRequestNumber) => runReviewAutomationCommand({ pullRequestNumber }, {
+      runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runReviewAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,
         checkout: createTargetCheckout({
           sourceRepositoryPath: repositoryPath,
@@ -119,7 +133,11 @@ try {
           }),
         },
         createJobId: () => jobId,
-      }),
+      })),
+      setupLabels: async () => {
+        await dispatchGithub.ensureLabels();
+        return { status: "labels-ready" } as const;
+      },
       runFeedback: (pullRequestNumber) => runFeedbackImplementationAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,
         checkout: createTargetCheckout({
