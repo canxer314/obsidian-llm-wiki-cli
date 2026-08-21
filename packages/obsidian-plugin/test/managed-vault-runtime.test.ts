@@ -28,6 +28,7 @@ function fakeBridge(port: number): BridgeInstance {
       await operation.migrateState();
       await operation.recheckHealth();
     }),
+    acceptTrustedRecoveryBaseline: vi.fn(async (recheck) => recheck()),
     resumeWrites: vi.fn(async () => undefined),
     registrationCommand: vi.fn(
       () =>
@@ -37,6 +38,37 @@ function fakeBridge(port: number): BridgeInstance {
 }
 
 describe("Managed Vault Bridge plugin lifecycle", () => {
+  it("keeps local recovery authority isolated between Managed Vaults", async () => {
+    const alphaBridge = fakeBridge(27123);
+    const betaBridge = fakeBridge(27124);
+    const alpha = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      createBridge: () => alphaBridge,
+      createVaultId: () => "vault-alpha",
+      selectInitialPort: () => 27123,
+    });
+    const beta = new ManagedVaultBridgeRuntime({
+      vault: { name: "Beta", path: "D:/Vaults/Beta" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      createBridge: () => betaBridge,
+      createVaultId: () => "vault-beta",
+      selectInitialPort: () => 27124,
+    });
+    await alpha.load();
+    await beta.load();
+
+    await alpha.acceptTrustedRecoveryBaseline();
+
+    expect(alphaBridge.acceptTrustedRecoveryBaseline).toHaveBeenCalledOnce();
+    expect(betaBridge.acceptTrustedRecoveryBaseline).not.toHaveBeenCalled();
+    expect(alpha.persistedSettings).toMatchObject({ vaultId: "vault-alpha", port: 27123 });
+    expect(beta.persistedSettings).toMatchObject({ vaultId: "vault-beta", port: 27124 });
+
+    await alpha.unload();
+    await beta.unload();
+  });
+
   it("persists first-run identity and port, then reuses both on reload", async () => {
     let stored: PersistedBridgeSettings | undefined;
     const bridges: BridgeInstance[] = [];
@@ -756,6 +788,99 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
           lookup: "operationally_blocked",
           gate: { code: "incompatible_protocol" },
         },
+      });
+    } finally {
+      await client.close();
+      await runtime.unload();
+    }
+  });
+
+  it("projects a cleared accepted baseline as manually paused after restart", async () => {
+    const settings: PersistedBridgeSettings = {
+      schemaVersion: 2,
+      vaultId: "vault-a",
+      port: 27123,
+      diagnosticPath: "D:/Vaults/Alpha",
+      changeSets: {
+        schemaVersion: 2,
+        nextEnqueueSeq: 2,
+        entries: [{
+          submissionKey: "accepted-baseline-key",
+          fingerprint: `sha256:${"a".repeat(64)}`,
+          changeSetId: "change-set-accepted-baseline",
+          enqueueSeq: 1,
+          acceptedAt: 0,
+          expiresAt: Number.MAX_SAFE_INTEGER,
+          execution: {
+            phase: "terminal",
+            input: {
+              submissionKey: "accepted-baseline-key",
+              operations: [{
+                operationId: "mkdir-accepted",
+                kind: "create_directory",
+                path: "Directory",
+                ifExists: "reject",
+              }],
+            },
+          },
+          changeSet: { changeSetId: "change-set-accepted-baseline", state: "result_unproven" },
+        }],
+        tombstones: [],
+        writeMode: "manual_paused",
+        recovery: { state: "baseline_accepted", changeSetId: "change-set-accepted-baseline" },
+      },
+    };
+    const execution = {
+      loadRecoveryFrame: async () => null,
+      persistRecoveryFrame: async () => undefined,
+      clearRecoveryFrame: async () => undefined,
+      pathKind: async () => null,
+      directoryIdentity: async () => null,
+      prepareDirectory: async () => "directory",
+      publishDirectory: async () => undefined,
+      discardPreparedDirectory: async () => undefined,
+      removeDirectory: async () => undefined,
+      publishSearchSnapshot: async () => undefined,
+    };
+    let bridge: BridgeInstance | undefined;
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => settings, save: async () => undefined },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      changeSetExecution: execution,
+      createBridge: (options) => {
+        bridge = createBridgeInstance({ ...options, port: 0 });
+        return bridge;
+      },
+    });
+
+    await runtime.load();
+    const client = new Client({ name: "accepted-baseline-restart", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(bridge!.endpoint, {
+        requestInit: { headers: { "X-Expected-Vault-ID": "vault-a" } },
+      }),
+    );
+
+    try {
+      const health = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(health.structuredContent).toMatchObject({
+        recovery: { state: "none" },
+        write: { gate: "open", state: "paused", pauseSource: "manual" },
+        effectiveGate: { code: "writes_paused" },
+        overall: "degraded",
+      });
+      expect(health.structuredContent).not.toMatchObject({
+        effectiveGate: { code: "recovery_blocked" },
+      });
+      expect(runtime.persistedSettings?.changeSets).toMatchObject({
+        recovery: { state: "none" },
+        writeMode: "manual_paused",
+        entries: [{ changeSet: { state: "result_unproven" } }],
       });
     } finally {
       await client.close();
