@@ -5,7 +5,7 @@ export class AutomationCliError extends Error {
   }
 }
 
-export async function runAutomationCli<TReview, TImplement, TFeedback, TSplit, TDispatch, TInspect>(
+export async function runAutomationCli<TReview, TImplement, TFeedback, TSplit, TDispatch, TInspect, TSetup>(
   argv: readonly string[],
   dependencies: {
     readonly runReview: (pullRequestNumber: number) => Promise<TReview>;
@@ -14,8 +14,13 @@ export async function runAutomationCli<TReview, TImplement, TFeedback, TSplit, T
     readonly runSplit: (issueNumber: number) => Promise<TSplit>;
     readonly dispatch?: (concurrency?: number) => Promise<TDispatch>;
     readonly inspect?: () => Promise<TInspect>;
+    readonly setupLabels?: () => Promise<TSetup>;
   },
-): Promise<TReview | TImplement | TFeedback | TSplit | TDispatch | TInspect> {
+): Promise<TReview | TImplement | TFeedback | TSplit | TDispatch | TInspect | TSetup> {
+  if (argv[0] === "setup-labels") {
+    if (argv.length !== 1 || dependencies.setupLabels === undefined) throw new AutomationCliError("Expected: setup-labels");
+    return dependencies.setupLabels();
+  }
   if (argv[0] === "inspect") {
     if (argv.length !== 1 || dependencies.inspect === undefined) throw new AutomationCliError("Expected: inspect");
     return dependencies.inspect();

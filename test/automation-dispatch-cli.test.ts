@@ -6,11 +6,15 @@ describe("automation command CLI", () => {
   it("dispatches one bounded round and reads inspection without allowing arbitrary operations", async () => {
     const dispatch = vi.fn().mockResolvedValue({ status: "dispatched" });
     const inspect = vi.fn().mockResolvedValue({ commands: [] });
+    const setupLabels = vi.fn().mockResolvedValue({ status: "labels-ready" });
     await expect(runAutomationCli(["dispatch", "--concurrency", "3"], {
-      runReview: vi.fn(), runImplement: vi.fn(), dispatch, inspect,
+      runReview: vi.fn(), runImplement: vi.fn(), runFeedback: vi.fn(), runSplit: vi.fn(), dispatch, inspect, setupLabels,
     })).resolves.toEqual({ status: "dispatched" });
+    await expect(runAutomationCli(["setup-labels"], {
+      runReview: vi.fn(), runImplement: vi.fn(), runFeedback: vi.fn(), runSplit: vi.fn(), dispatch, inspect, setupLabels,
+    })).resolves.toEqual({ status: "labels-ready" });
     await expect(runAutomationCli(["inspect"], {
-      runReview: vi.fn(), runImplement: vi.fn(), dispatch, inspect,
+      runReview: vi.fn(), runImplement: vi.fn(), runFeedback: vi.fn(), runSplit: vi.fn(), dispatch, inspect, setupLabels,
     })).resolves.toEqual({ commands: [] });
     expect(dispatch).toHaveBeenCalledWith(3);
     expect(inspect).toHaveBeenCalledOnce();

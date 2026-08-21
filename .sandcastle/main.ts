@@ -85,10 +85,20 @@ try {
       environment: startup.childEnvironments.github,
     });
     const scheduler = createAutomationScheduler({ repositoryPath });
+    const withScheduler = async <T>(action: () => Promise<T>): Promise<T> => {
+      const lock = await scheduler.acquire();
+      if (lock === undefined) throw new Error("Dispatcher is already running");
+      try {
+        await scheduler.prepare();
+        return await action();
+      } finally {
+        await lock.release();
+      }
+    };
     const github = new GithubCliPort();
     const reviewer = createProcessReviewRunner({});
     const result = await runAutomationCli(process.argv.slice(2), {
-      runReview: (pullRequestNumber) => runReviewAutomationCommand({ pullRequestNumber }, {
+      runReview: (pullRequestNumber) => withScheduler(() => runReviewAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,
         checkout: createTargetCheckout({
           sourceRepositoryPath: repositoryPath,
@@ -119,7 +129,11 @@ try {
           }),
         },
         createJobId: () => jobId,
-      }),
+      })),
+      setupLabels: async () => {
+        await dispatchGithub.ensureLabels();
+        return { status: "labels-ready" } as const;
+      },
       runFeedback: (pullRequestNumber) => runFeedbackImplementationAutomationCommand({ pullRequestNumber }, {
         github: automationGithub,
         checkout: createTargetCheckout({
