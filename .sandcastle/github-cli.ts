@@ -577,6 +577,19 @@ export class GithubCliPort implements
     ]);
     if ((JSON.parse(pullRequests) as readonly unknown[]).length > 0) return null;
 
+    const localRefs = [
+      `refs/heads/${branch}`,
+      `refs/remotes/origin/${branch}`,
+    ];
+    for (const ref of localRefs) {
+      try {
+        await this.execute("git", ["show-ref", "--verify", "--quiet", ref]);
+        return null;
+      } catch (error) {
+        if (!isExitCode(error, 1)) throw error;
+      }
+    }
+
     const { stdout: defaultBranchOid } = await this.execute("gh", [
       "api",
       "repos/{owner}/{repo}/commits/HEAD",
@@ -598,15 +611,41 @@ export class GithubCliPort implements
         "-f",
         `sha=${baseSha}`,
       ]);
+    } catch (error) {
+      if (isExistingReferenceError(error)) return null;
+      throw error;
+    }
+
+    const zeroSha = "0".repeat(40);
+    const createdLocalRefs: string[] = [];
+    try {
       await this.execute("git", [
         "fetch",
         "--no-tags",
         "origin",
-        `refs/heads/${branch}:refs/remotes/origin/${branch}`,
+        `refs/heads/${branch}`,
       ]);
-      await this.execute("git", ["branch", "--force", branch, `origin/${branch}`]);
+      const { stdout: fetchedHead } = await this.execute("git", ["rev-parse", "FETCH_HEAD"]);
+      if (fetchedHead.trim() !== baseSha) {
+        throw new GithubVerificationError("Claim branch changed during fetch");
+      }
+      for (const ref of localRefs) {
+        await this.execute("git", ["update-ref", ref, baseSha, zeroSha]);
+        createdLocalRefs.push(ref);
+      }
     } catch (error) {
-      if (isExistingReferenceError(error)) return null;
+      for (const ref of createdLocalRefs.reverse()) {
+        try {
+          await this.execute("git", ["update-ref", "-d", ref, baseSha]);
+        } catch {
+          // The claim remains unreceipted and failure finalization reports the incomplete setup.
+        }
+      }
+      try {
+        await this.compareAndDeleteBranch({ branch, expectedHeadSha: baseSha });
+      } catch {
+        // The claim remains unreceipted and failure finalization reports the incomplete setup.
+      }
       throw error;
     }
     return {

@@ -308,12 +308,17 @@ export class ClaimResourceReleaseAdapter {
   async compareAndDeleteLocalBranch(input: ClaimReconciliationInput & {
     readonly expectedHeadSha: string;
   }): Promise<void> {
-    await this.run("git", [
-      "update-ref",
-      "-d",
+    for (const ref of [
       `refs/heads/${input.branch}`,
-      input.expectedHeadSha,
-    ], { cwd: this.repositoryPath });
+      `refs/remotes/origin/${input.branch}`,
+    ]) {
+      await this.run("git", [
+        "update-ref",
+        "-d",
+        ref,
+        input.expectedHeadSha,
+      ], { cwd: this.repositoryPath });
+    }
   }
 }
 

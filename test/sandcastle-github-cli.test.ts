@@ -4,6 +4,8 @@ import { GithubCliPort, GithubVerificationError } from "../.sandcastle/github-cl
 import type { LocalQualityCommitStatus } from "../.sandcastle/local-quality.js";
 import type { ReviewCommitStatus } from "../.sandcastle/review.js";
 
+const missingLocalRef = () => Object.assign(new Error("missing local ref"), { code: 1 });
+
 const encodedFile = (filename: string, previousFilename = ""): string =>
   Buffer.from(JSON.stringify([filename, previousFilename])).toString("base64");
 
@@ -680,8 +682,12 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
+      .mockRejectedValueOnce(missingLocalRef())
+      .mockRejectedValueOnce(missingLocalRef())
       .mockResolvedValueOnce({ stdout: `${baseSha}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${baseSha}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" });
     const github = new GithubCliPort(execute);
@@ -713,10 +719,9 @@ describe("Sandcastle GitHub CLI adapter", () => {
           "1",
         ],
       ],
-      [
-        "gh",
-        ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"],
-      ],
+      ["git", ["show-ref", "--verify", "--quiet", "refs/heads/sandcastle/issue-102"]],
+      ["git", ["show-ref", "--verify", "--quiet", "refs/remotes/origin/sandcastle/issue-102"]],
+      ["gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"]],
       [
         "gh",
         [
@@ -730,46 +735,78 @@ describe("Sandcastle GitHub CLI adapter", () => {
           `sha=${baseSha}`,
         ],
       ],
-      [
-        "git",
-        [
-          "fetch",
-          "--no-tags",
-          "origin",
-          "refs/heads/sandcastle/issue-102:refs/remotes/origin/sandcastle/issue-102",
-        ],
-      ],
-      [
-        "git",
-        ["branch", "--force", "sandcastle/issue-102", "origin/sandcastle/issue-102"],
-      ],
+      ["git", ["fetch", "--no-tags", "origin", "refs/heads/sandcastle/issue-102"]],
+      ["git", ["rev-parse", "FETCH_HEAD"]],
+      ["git", [
+        "update-ref", "refs/heads/sandcastle/issue-102", baseSha, "0".repeat(40),
+      ]],
+      ["git", [
+        "update-ref", "refs/remotes/origin/sandcastle/issue-102", baseSha, "0".repeat(40),
+      ]],
     ]);
   });
 
   it("refuses to create a claim from an invalid base SHA", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
+      .mockRejectedValueOnce(missingLocalRef())
+      .mockRejectedValueOnce(missingLocalRef())
       .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" });
     const github = new GithubCliPort(execute);
 
     await expect(github.claimIssue(102, "run-claim-102")).rejects.toThrow(
       "default branch SHA",
     );
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(4);
   });
 
-  it("fails the claim when an existing local branch cannot be aligned to the claimed remote ref", async () => {
-    const checkedOut = new Error("fatal: cannot force update the branch checked out at another worktree");
-    const execute = vi
-      .fn()
+  it("preserves an existing unowned local branch without creating a remote claim", async () => {
+    const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
-      .mockResolvedValueOnce({ stdout: `${"a".repeat(40)}\n`, stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
-      .mockRejectedValueOnce(checkedOut);
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
     const github = new GithubCliPort(execute);
 
-    await expect(github.claimIssue(102, "run-claim-102")).rejects.toBe(checkedOut);
+    await expect(github.claimIssue(102, "run-claim-102")).resolves.toBeNull();
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalledWith("gh", expect.arrayContaining(["POST"]));
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["update-ref"]));
+  });
+
+  it("rolls back the remote claim when local branch creation loses a race", async () => {
+    const baseSha = "a".repeat(40);
+    const existingLocal = Object.assign(new Error("reference already exists"), { code: 128 });
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
+      .mockRejectedValueOnce(missingLocalRef())
+      .mockRejectedValueOnce(missingLocalRef())
+      .mockResolvedValueOnce({ stdout: `${baseSha}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${baseSha}\n`, stderr: "" })
+      .mockRejectedValueOnce(existingLocal)
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
+    const github = new GithubCliPort(execute);
+
+    await expect(github.claimIssue(102, "run-claim-102")).rejects.toBe(existingLocal);
+
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["--force"]));
+    expect(execute).toHaveBeenLastCalledWith("git", [
+      "push", "origin",
+      `--force-with-lease=refs/heads/sandcastle/issue-102:${baseSha}`,
+      ":refs/heads/sandcastle/issue-102",
+    ]);
+  });
+
+  it("fails closed when local claim ownership cannot be read", async () => {
+    const localReadFailure = Object.assign(new Error("could not inspect local ref"), { code: 2 });
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
+      .mockRejectedValueOnce(localReadFailure);
+    const github = new GithubCliPort(execute);
+
+    await expect(github.claimIssue(102, "run-claim-102")).rejects.toBe(localReadFailure);
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it("skips a target with an associated Pull Request", async () => {
@@ -791,6 +828,8 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
+      .mockRejectedValueOnce(missingLocalRef())
+      .mockRejectedValueOnce(missingLocalRef())
       .mockResolvedValueOnce({ stdout: `${"a".repeat(40)}\n`, stderr: "" })
       .mockRejectedValueOnce(conflict);
     const github = new GithubCliPort(execute);
@@ -803,6 +842,10 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
       if (arguments_[0] === "pr") return { stdout: "[]\n", stderr: "" };
       if (arguments_[0] === "api" && arguments_[1]?.endsWith("/commits/HEAD")) {
+        return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
+      }
+      if (_file === "git" && arguments_[0] === "show-ref") throw missingLocalRef();
+      if (_file === "git" && arguments_[0] === "rev-parse") {
         return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
       }
       if (_file === "git") return { stdout: "", stderr: "" };
@@ -841,6 +884,8 @@ describe("Sandcastle GitHub CLI adapter", () => {
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ stdout: "[]\n", stderr: "" })
+      .mockRejectedValueOnce(missingLocalRef())
+      .mockRejectedValueOnce(missingLocalRef())
       .mockResolvedValueOnce({ stdout: `${"a".repeat(40)}\n`, stderr: "" })
       .mockRejectedValueOnce(failure);
     const github = new GithubCliPort(execute);
