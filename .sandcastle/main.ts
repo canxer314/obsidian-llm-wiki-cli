@@ -3,6 +3,11 @@
 import { resolve } from "node:path";
 
 import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
+import { runAutomationCli } from "./automation-cli.ts";
+import { createAutomationGithubPort } from "./automation-github.ts";
+import { createTargetCheckout } from "./target-checkout.ts";
+import { runReviewAutomationCommand } from "./review-automation.ts";
+import { createSameSessionReviewExtractor } from "./review-extraction.ts";
 import {
   ClaimResourceReleaseAdapter,
   DockerClaimReadAdapter,
@@ -53,6 +58,39 @@ import {
 
 try {
   const repositoryPath = resolve(import.meta.dirname, "..");
+  if (process.argv[2] === "run") {
+    const startup = await loadSandboxStartup();
+    const automationGithub = createAutomationGithubPort({
+      environment: startup.childEnvironments.github,
+    });
+    const reviewer = createSameSessionReviewExtractor({
+      sandbox: startup.automationSandbox,
+      hooks: { sandbox: { onSandboxReady: [] } },
+      agentEnvironment: startup.childEnvironments.claude,
+    });
+    const result = await runAutomationCli(process.argv.slice(2), {
+      runReview: (pullRequestNumber) => runReviewAutomationCommand({ pullRequestNumber }, {
+        github: automationGithub,
+        checkout: createTargetCheckout({
+          sourceRepositoryPath: repositoryPath,
+          checkoutRoot: resolve(import.meta.dirname, "jobs"),
+          gitEnvironment: startup.childEnvironments.git,
+          dependencyEnvironment: startup.childEnvironments.dependencies,
+        }),
+        reviewer: {
+          review: ({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath }) =>
+            reviewer.review({
+              pullRequestNumber: currentPullRequestNumber,
+              revision,
+              checkoutPath,
+              model: startup.models.reviewer,
+            }),
+        },
+        publisher: automationGithub,
+      }),
+    });
+    console.log(JSON.stringify(result));
+  } else {
   const github = new GithubCliPort();
   let runtimeImageBuild: Promise<string> | undefined;
   const writeEvent = (event: unknown) => console.error(JSON.stringify({ sandcastleEvidence: event }));
@@ -300,6 +338,7 @@ try {
     ),
   });
   if (result !== undefined) console.log(JSON.stringify(result));
+  }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);
