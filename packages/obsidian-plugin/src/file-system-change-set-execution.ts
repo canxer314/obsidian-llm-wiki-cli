@@ -677,6 +677,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
         payload: structuredClone(frame) as unknown as RecoveryJournalJson,
       });
     },
+    clearRecoveryFrame: () => journal.clear(),
     pathKind: options.host.pathKind,
     directoryIdentity: options.host.directoryIdentity,
     prepareDirectory: options.host.prepareDirectory,
