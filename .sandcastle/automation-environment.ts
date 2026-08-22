@@ -17,6 +17,11 @@ const CLAUDE_NAMES = [
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ] as const;
 
+// git and npm are resolved through PATH and read configuration and caches
+// from HOME, so those two entries join the transport variables in the
+// environments that spawn them.
+const PROCESS_NAMES = ["PATH", "HOME"] as const;
+
 function pick(
   environment: Readonly<Record<string, string>>,
   names: readonly string[],
@@ -34,9 +39,10 @@ export function createChildEnvironments(environment: Readonly<Record<string, str
   readonly claude: Readonly<Record<string, string>>;
 } {
   const transport = pick(environment, TRANSPORT_NAMES);
+  const processEnvironment = { ...transport, ...pick(environment, PROCESS_NAMES) };
   return {
-    dependencies: transport,
-    git: transport,
+    dependencies: processEnvironment,
+    git: processEnvironment,
     github: { ...transport, ...pick(environment, ["GH_TOKEN"]) },
     claude: { ...transport, ...pick(environment, CLAUDE_NAMES) },
   };
