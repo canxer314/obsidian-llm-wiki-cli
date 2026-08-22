@@ -268,6 +268,36 @@ describe("PRD implementation automation command", () => {
     expect(ports.pullRequests.addPullRequestLabel).not.toHaveBeenCalled();
   });
 
+  it("blocks the PRD and retains the local job diagnostic when the child implementation job times out", async () => {
+    const ports = portsFor({
+      implementer: { implement: vi.fn().mockRejectedValue(new Error("PRD implementation execution timed out")) },
+      createJobId: () => "job-226",
+    });
+    ports.github.listChildren.mockResolvedValue([child(301), child(302)]);
+
+    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+      status: "blocked",
+      reason: "prd-implementation-execution",
+      jobId: "job-226",
+    });
+
+    expect(ports.github.addPrdImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, {
+      reason: "prd-implementation-execution",
+      jobId: "job-226",
+      summary: "PRD implementation execution timed out",
+      childNumber: 301,
+    });
+    expect(ports.events).toEqual([
+      "add:226:agent:in-progress",
+      "remove:226:agent:implement",
+      `checkout:${revision}`,
+      "add:226:agent:blocked",
+      "blocked:226:job-226",
+      "child-failure:301",
+      "remove:226:agent:in-progress",
+    ]);
+  });
+
   it("turns a continuation-publication failure into Blocked Automation without repeating the child", async () => {
     const ports = portsFor({
       createJobId: () => "job-226",
