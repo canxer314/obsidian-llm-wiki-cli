@@ -27,6 +27,7 @@ export interface ImplementerAgentSessionRequest {
   readonly plan: Extract<PlannerOutput, { status: "ready" }>;
   readonly checkoutPath?: string;
   readonly repair?: ImplementerRepairContext;
+  readonly parentPrd?: { readonly number: number };
 }
 
 export interface ImplementerAgentSessionResult {
@@ -38,9 +39,12 @@ export interface ImplementerAgentSession {
   run(request: ImplementerAgentSessionRequest): Promise<ImplementerAgentSessionResult>;
 }
 
+const draftPullRequestInstructions = (branch: string, relationship: string) => `Before publishing, inspect whether this branch already has a Draft Pull Request. Reuse and update one existing upstream-equivalent Draft Pull Request; otherwise create exactly one Draft Pull Request with gh pr create --draft. Its base must be the repository default branch, its head must be ${branch}, and its body must contain the relationship ${relationship}.`;
+
 const initialImplementerPrompt = (
   branch: string,
   plan: Extract<PlannerOutput, { status: "ready" }>,
+  parentPrd?: { readonly number: number },
 ) => `
 Implement GitHub Issue #${plan.issue.number} using this complete Planner handoff:
 
@@ -48,7 +52,9 @@ ${JSON.stringify(plan)}
 
 Work only on branch ${branch}. Implement the Issue, choose and run the appropriate repository checks, commit all intended changes, run gh auth setup-git, and run git push origin ${branch}. Do not rebase or force-push.
 
-Before publishing, inspect whether this branch already has a Draft Pull Request. Reuse and update one existing upstream-equivalent Draft Pull Request; otherwise create exactly one Draft Pull Request with gh pr create --draft. Its base must be the repository default branch, its head must be ${branch}, and its body must contain exactly the closing relationship Closes #${plan.issue.number}.
+${parentPrd === undefined
+    ? draftPullRequestInstructions(branch, `Closes #${plan.issue.number}`)
+    : `This Issue is one child of PRD #${parentPrd.number}, delivered on the shared accumulating branch ${branch}. If ${branch} already exists on origin, resume it with git fetch origin ${branch} && git checkout -B ${branch} origin/${branch} so earlier completed children are preserved. ${draftPullRequestInstructions(branch, `Part of #${parentPrd.number}`)}`}
 
 ${plan.allowsAutomationChanges
     ? "This Issue explicitly allows changes to Sandcastle or GitHub workflow automation."
@@ -121,7 +127,7 @@ export function createSandcastleImplementerSession(options: {
         ...(options.execution === undefined ? {} : { signal: options.execution.signal }),
         ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
         prompt: request.repair === undefined
-          ? initialImplementerPrompt(request.branch, request.plan)
+          ? initialImplementerPrompt(request.branch, request.plan, request.parentPrd)
           : repairImplementerPrompt(request.branch, request.plan, request.repair),
         });
         return { branch: result.branch, commits: result.commits };

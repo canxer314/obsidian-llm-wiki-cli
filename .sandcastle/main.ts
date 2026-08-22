@@ -53,6 +53,7 @@ import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { mergeConflict } from "./conflict-merger.ts";
 import { implementIssue, repairIssue } from "./implementer.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
+import { runPrdImplementationAutomationCommand } from "./prd-implementation-automation.ts";
 import { runPrdSplitAutomationCommand } from "./prd-split-automation.ts";
 import { createSameSessionPrdSplitExtractor } from "./prd-split-extraction.ts";
 import { acquireImplementationLease, acquirePullRequestLease } from "./implementation-lease.ts";
@@ -328,6 +329,59 @@ try {
         },
         createJobId: () => jobId,
       }),
+      runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => runPrdImplementationAutomationCommand({ issueNumber }, {
+        github: automationGithub,
+        pullRequests: automationGithub,
+        checkout: createTargetCheckout({
+          sourceRepositoryPath: repositoryPath,
+          checkoutRoot: resolve(import.meta.dirname, "jobs"),
+          createJobDirectory: () => resolve(import.meta.dirname, "jobs", `prd-implementation-${jobId}`),
+          gitEnvironment: startup.childEnvironments.git,
+          dependencyEnvironment: startup.childEnvironments.dependencies,
+        }),
+        implementer: {
+          implement: async ({ prdNumber, child, branch, baseRevision, checkoutPath }) => {
+            const plannerSession = createSandcastlePlannerSession({
+              sandbox: startup.automationSandbox,
+              hooks: { sandbox: { onSandboxReady: [] } },
+              checkoutPath,
+            });
+            const plan = await planIssue({
+              issueNumber: child.number,
+              model: startup.models.planner,
+              session: plannerSession,
+            });
+            if (plan.status === "blocked") throw new Error(plan.blockingReason);
+            const implementerSession = createSandcastleImplementerSession({
+              sandbox: startup.automationSandbox,
+              hooks: sandboxHooksFor("implementer"),
+            });
+            const result = await implementerSession.run({
+              model: startup.models.implementer,
+              branch,
+              plan,
+              checkoutPath,
+              parentPrd: { number: prdNumber },
+            });
+            if (result.branch !== branch) {
+              throw new Error(`Implementer used branch ${result.branch}; expected ${branch}`);
+            }
+            const headSha = result.commits.at(-1)?.sha;
+            if (headSha === undefined) throw new Error("Implementer did not create a commit");
+            if (headSha === baseRevision) {
+              throw new Error("Implementer did not advance the authorized base revision");
+            }
+            return { branch, headSha };
+          },
+        },
+        lease: {
+          acquire: (currentIssueNumber) => acquireImplementationLease({
+            root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
+            issueNumber: currentIssueNumber,
+          }),
+        },
+        createJobId: () => jobId,
+      })),
       runSplit: (issueNumber) => runPrdSplitAutomationCommand({ issueNumber }, {
         github: automationGithub,
         checkout: createTargetCheckout({
