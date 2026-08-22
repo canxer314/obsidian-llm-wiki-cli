@@ -16,12 +16,16 @@ describe("automation child environments", () => {
     });
 
     expect(environments.dependencies).toEqual({
+      HOME: "/host/home",
       HTTPS_PROXY: "http://proxy.example",
       NODE_EXTRA_CA_CERTS: "/etc/ssl/custom-ca.pem",
+      PATH: "/host/bin",
     });
     expect(environments.git).toEqual({
+      HOME: "/host/home",
       HTTPS_PROXY: "http://proxy.example",
       NODE_EXTRA_CA_CERTS: "/etc/ssl/custom-ca.pem",
+      PATH: "/host/bin",
     });
     expect(environments.github).toEqual({
       GH_TOKEN: "github-secret",
@@ -35,7 +39,9 @@ describe("automation child environments", () => {
       HTTPS_PROXY: "http://proxy.example",
       NODE_EXTRA_CA_CERTS: "/etc/ssl/custom-ca.pem",
     });
-    expect(Object.values(environments).flatMap(Object.keys)).not.toContain("PATH");
-    expect(Object.values(environments).flatMap(Object.keys)).not.toContain("HOME");
+    expect(Object.keys(environments.github)).not.toContain("PATH");
+    expect(Object.keys(environments.github)).not.toContain("HOME");
+    expect(Object.keys(environments.claude)).not.toContain("PATH");
+    expect(Object.keys(environments.claude)).not.toContain("HOME");
   });
 });
