@@ -49,8 +49,17 @@ export function createTargetCheckout(options: {
         : options.createJobDirectory();
       let completed = false;
       try {
+        // Fetch and push against the GitHub remote resolved from the trusted
+        // repository's origin, never the trusted repository itself, so Pull
+        // Request refs and objects stay out of it.
+        const remote = (await git([
+          "-C", options.sourceRepositoryPath, "remote", "get-url", "origin",
+        ])).stdout.trim();
+        if (remote.length === 0 || /:\/\/[^/]*@/u.test(remote)) {
+          throw new Error("Target Checkout remote is invalid");
+        }
         await git([
-          "clone", "--no-checkout", "--no-local", options.sourceRepositoryPath, checkoutPath,
+          "clone", "--no-checkout", "--no-local", remote, checkoutPath,
         ]);
         await git(["-C", checkoutPath, "fetch", "--no-tags", "origin", request.revision]);
         const fetched = (await git(["-C", checkoutPath, "rev-parse", "FETCH_HEAD"])).stdout.trim();

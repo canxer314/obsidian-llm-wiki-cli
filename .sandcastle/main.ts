@@ -23,22 +23,18 @@ import {
   createReviewArtifactDirectory,
   removeExpiredReviewArtifacts,
 } from "./review-artifacts.ts";
-import { GithubCliPort } from "./github-cli.ts";
-import { createFeedbackImplementerSession } from "./feedback-implementer-session.ts";
+import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
 import { runFeedbackImplementationAutomationCommand } from "./feedback-implementation-automation.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
-import { createSandcastleImplementerSession } from "./implementer-session.ts";
-import { implementIssue } from "./implementer.ts";
+import { createProcessImplementer } from "./implementation-process-runner.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
+import { createProcessPrdImplementer } from "./prd-implementation-process-runner.ts";
 import { runPrdImplementationAutomationCommand } from "./prd-implementation-automation.ts";
 import { runPrdSplitAutomationCommand } from "./prd-split-automation.ts";
-import { createSameSessionPrdSplitExtractor } from "./prd-split-extraction.ts";
+import { createProcessPrdSplitter } from "./prd-split-process-runner.ts";
 import { acquireImplementationLease, acquirePullRequestLease } from "./implementation-lease.ts";
-import { planIssue } from "./planner.ts";
-import { createSandcastlePlannerSession } from "./planner-session.ts";
 import {
   loadSandboxStartup,
-  sandboxHooksFor,
 } from "./sandbox.ts";
 
 try {
@@ -68,10 +64,19 @@ try {
       await lock.release();
     }
   };
-  const github = new GithubCliPort();
   const reviewer = createProcessReviewRunner({});
   const updater = createProcessBranchUpdater({});
   const architectureReviewer = createProcessArchitectureReviewRunner({});
+  const implementer = createProcessImplementer({
+    plannerModel: startup.models.planner,
+    implementerModel: startup.models.implementer,
+  });
+  const prdImplementer = createProcessPrdImplementer({
+    plannerModel: startup.models.planner,
+    implementerModel: startup.models.implementer,
+  });
+  const feedbackImplementer = createProcessFeedbackImplementer({ model: startup.models.implementer });
+  const prdSplitter = createProcessPrdSplitter({ model: startup.models.planner });
   const runIssueImplementation = (issueNumber: number) => runImplementationAutomationCommand({ issueNumber }, {
     github: {
       readIssue: (currentIssueNumber) => automationGithub.readIssue(currentIssueNumber),
@@ -111,36 +116,7 @@ try {
       gitEnvironment: startup.childEnvironments.git,
       dependencyEnvironment: startup.childEnvironments.dependencies,
     }),
-    implementer: {
-      implement: async ({ issueNumber: currentIssueNumber, baseRevision, checkoutPath }) => {
-        const plannerSession = createSandcastlePlannerSession({
-          sandbox: startup.automationSandbox,
-          hooks: { sandbox: { onSandboxReady: [] } },
-          checkoutPath,
-        });
-        const plan = await planIssue({
-          issueNumber: currentIssueNumber,
-          model: startup.models.planner,
-          session: plannerSession,
-        });
-        if (plan.status === "blocked") throw new Error(plan.blockingReason);
-        const implementerSession = createSandcastleImplementerSession({
-          sandbox: startup.automationSandbox,
-          hooks: sandboxHooksFor("implementer"),
-        });
-        const pullRequest = await implementIssue({
-          plan,
-          model: startup.models.implementer,
-          session: implementerSession,
-          checkoutPath,
-          github,
-        });
-        if (pullRequest.headSha === baseRevision) {
-          throw new Error("Implementer did not advance the authorized base revision");
-        }
-        return { branch: `sandcastle/issue-${currentIssueNumber}`, pullRequestUrl: pullRequest.url };
-      },
-    },
+    implementer,
     lease: {
       acquire: (currentIssueNumber) => acquireImplementationLease({
         root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
@@ -159,41 +135,7 @@ try {
       gitEnvironment: startup.childEnvironments.git,
       dependencyEnvironment: startup.childEnvironments.dependencies,
     }),
-    implementer: {
-      implement: async ({ prdNumber, child, branch, baseRevision, checkoutPath }) => {
-        const plannerSession = createSandcastlePlannerSession({
-          sandbox: startup.automationSandbox,
-          hooks: { sandbox: { onSandboxReady: [] } },
-          checkoutPath,
-        });
-        const plan = await planIssue({
-          issueNumber: child.number,
-          model: startup.models.planner,
-          session: plannerSession,
-        });
-        if (plan.status === "blocked") throw new Error(plan.blockingReason);
-        const implementerSession = createSandcastleImplementerSession({
-          sandbox: startup.automationSandbox,
-          hooks: sandboxHooksFor("implementer"),
-        });
-        const result = await implementerSession.run({
-          model: startup.models.implementer,
-          branch,
-          plan,
-          checkoutPath,
-          parentPrd: { number: prdNumber },
-        });
-        if (result.branch !== branch) {
-          throw new Error(`Implementer used branch ${result.branch}; expected ${branch}`);
-        }
-        const headSha = result.commits.at(-1)?.sha;
-        if (headSha === undefined) throw new Error("Implementer did not create a commit");
-        if (headSha === baseRevision) {
-          throw new Error("Implementer did not advance the authorized base revision");
-        }
-        return { branch, headSha };
-      },
-    },
+    implementer: prdImplementer,
     lease: {
       acquire: (currentIssueNumber) => acquireImplementationLease({
         root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
@@ -210,13 +152,7 @@ try {
       gitEnvironment: startup.childEnvironments.git,
       dependencyEnvironment: startup.childEnvironments.dependencies,
     }),
-    splitter: {
-      split: ({ prdNumber, title, checkoutPath }) => createSameSessionPrdSplitExtractor({
-        sandbox: startup.automationSandbox,
-        hooks: { sandbox: { onSandboxReady: [] } },
-        agentEnvironment: startup.childEnvironments.claude,
-      }).split({ prdNumber, title, checkoutPath, model: startup.models.planner }),
-    },
+    splitter: prdSplitter,
     publisher: automationGithub,
     createJobId: () => jobId,
   });
@@ -315,15 +251,7 @@ try {
         sourceRepositoryPath: repositoryPath,
         gitEnvironment: startup.childEnvironments.git,
       }),
-      implementer: {
-        implement: async (request) => createFeedbackImplementerSession({
-          sandbox: startup.automationSandbox,
-          hooks: sandboxHooksFor("implementer"),
-        }).run({
-          model: startup.models.implementer,
-          ...request,
-        }),
-      },
+      implementer: feedbackImplementer,
       lease: {
         acquire: (currentPullRequestNumber) => acquirePullRequestLease({
           root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
@@ -367,12 +295,7 @@ try {
               dependencyEnvironment: startup.childEnvironments.dependencies,
             }),
             publisher: createFeedbackPublisher({ sourceRepositoryPath: repositoryPath, gitEnvironment: startup.childEnvironments.git }),
-            implementer: {
-              implement: async (request) => createFeedbackImplementerSession({
-                sandbox: startup.automationSandbox,
-                hooks: sandboxHooksFor("implementer"),
-              }).run({ model: startup.models.implementer, ...request }),
-            },
+            implementer: feedbackImplementer,
             createJobId: () => jobId,
           });
           return;

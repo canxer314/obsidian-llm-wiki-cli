@@ -119,4 +119,32 @@ describe("PRD split automation command", () => {
       "remove:agent:in-progress",
     ]);
   });
+
+  it("blocks the PRD and retains the local job reference when the split job times out", async () => {
+    const events: string[] = [];
+    const github = {
+      readPrd: vi.fn().mockResolvedValue(prd()),
+      addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
+      removeIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`remove:${label}`)),
+      addSplitBlockedDiagnostic: vi.fn(async (_number: number, diagnostic) => events.push(`blocked:${diagnostic.jobId}`)),
+    };
+    const publisher = { publishPrdSplit: vi.fn() };
+
+    await expect(runPrdSplitAutomationCommand({ issueNumber: 223 }, {
+      github,
+      checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
+      splitter: { split: vi.fn().mockRejectedValue(new Error("PRD split execution timed out")) },
+      publisher,
+      createJobId: () => "job-223",
+    })).resolves.toEqual({ status: "blocked", reason: "prd-split-execution", jobId: "job-223" });
+
+    expect(publisher.publishPrdSplit).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      "add:agent:in-progress",
+      "remove:agent:to-issues",
+      "add:agent:blocked",
+      "blocked:job-223",
+      "remove:agent:in-progress",
+    ]);
+  });
 });
