@@ -1,4 +1,4 @@
-export type AutomationOperation = "review";
+export type AutomationOperation = "update-branch" | "implement" | "review";
 
 export interface AutomationCommand {
   readonly number: number;
@@ -27,8 +27,10 @@ export function commandEligibility(command: AutomationCommand): AutomationComman
 // Accepted priority order (#219): 1 branch update, 2 Pull Request feedback
 // implementation, 3 Pull Request review, 4 PRD or Issue implementation,
 // 5 PRD split, 6 queue promotion, 7 architecture review. The trusted registry
-// currently runs only the already-supported review operation.
+// currently runs the supported Pull Request operations.
 const operationPriority: Readonly<Record<AutomationOperation, number>> = {
+  "update-branch": 1,
+  implement: 2,
   review: 3,
 };
 

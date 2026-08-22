@@ -86,7 +86,7 @@ describe("automation GitHub port", () => {
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
       "pr", "view", "220", "--json",
-      "number,state,isDraft,baseRepository,headRepository,headRefName,headRefOid,labels",
+      "number,state,isDraft,baseRepository,headRepository,baseRefName,headRefName,headRefOid,labels",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "pr", "view", "220", "--json", "headRefOid", "--jq", ".headRefOid",

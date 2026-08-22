@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { BranchUpdateAutomationPorts } from "./branch-update-automation.ts";
 import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
 import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
@@ -116,19 +117,19 @@ export function createAutomationDispatchGithubPort(options: {
     async verifyLabels() {
       const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
       const existing = new Set((JSON.parse(stdout) as readonly { readonly name: string }[]).map(({ name }) => name));
-      for (const name of ["agent:review", "agent:in-progress", "agent:blocked"]) {
+      for (const name of ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"]) {
         if (!existing.has(name)) throw new Error(`Missing required Automation Command label: ${name}`);
       }
     },
     async ensureLabels() {
       const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
       const existing = new Set((JSON.parse(stdout) as readonly { readonly name: string }[]).map(({ name }) => name));
-      await Promise.all(["agent:review", "agent:in-progress", "agent:blocked"]
+      await Promise.all(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"]
         .filter((name) => !existing.has(name))
         .map((name) => execute("gh", ["label", "create", name, "--color", "0E8A16"], options.environment)));
     },
     async listCommands() {
-      const responses = await Promise.all(["agent:review", "agent:in-progress", "agent:blocked"].map((label) => execute(
+      const responses = await Promise.all(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"].map((label) => execute(
         "gh", ["pr", "list", "--state", "open", "--label", label, "--json", "number,labels", "--limit", "100"], options.environment,
       )));
       const pullRequests = new Map<number, { readonly number: number; readonly labels: readonly { readonly name: string }[] }>();
@@ -137,12 +138,17 @@ export function createAutomationDispatchGithubPort(options: {
           pullRequests.set(pullRequest.number, pullRequest);
         }
       }
-      return [...pullRequests.values()].map((pullRequest) => ({
-        number: pullRequest.number,
-        operation: "review" as const,
-        identity: `pull-request:${pullRequest.number}`,
-        labels: pullRequest.labels.map(({ name }) => name),
-      }));
+      return [...pullRequests.values()].flatMap((pullRequest) => {
+        const labels = pullRequest.labels.map(({ name }) => name);
+        return (["update-branch", "implement", "review"] as const)
+          .filter((operation) => labels.includes(`agent:${operation}`))
+          .map((operation) => ({
+            number: pullRequest.number,
+            operation,
+            identity: `pull-request:${pullRequest.number}`,
+            labels,
+          }));
+      });
     },
   };
 }
@@ -150,7 +156,7 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] {
+}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
@@ -316,7 +322,7 @@ export function createAutomationGithubPort(options: {
     async readPullRequest(pullRequestNumber) {
       const { stdout } = await execute("gh", [
         "pr", "view", String(pullRequestNumber), "--json",
-        "number,state,isDraft,baseRepository,headRepository,headRefName,headRefOid,labels",
+        "number,state,isDraft,baseRepository,headRepository,baseRefName,headRefName,headRefOid,labels",
       ], options.environment);
       const pullRequest = JSON.parse(stdout) as {
         readonly number: number;
@@ -324,6 +330,7 @@ export function createAutomationGithubPort(options: {
         readonly isDraft: boolean;
         readonly baseRepository: { readonly nameWithOwner: string } | null;
         readonly headRepository: { readonly nameWithOwner: string } | null;
+        readonly baseRefName: string;
         readonly headRefName: string;
         readonly headRefOid: string;
         readonly labels: readonly { readonly name: string }[];
@@ -337,6 +344,7 @@ export function createAutomationGithubPort(options: {
         isDraft: pullRequest.isDraft,
         baseRepository: pullRequest.baseRepository.nameWithOwner,
         headRepository: pullRequest.headRepository.nameWithOwner,
+        baseRefName: pullRequest.baseRefName,
         headRefName: pullRequest.headRefName,
         headSha: pullRequest.headRefOid,
         labels: pullRequest.labels.map(({ name }) => name),
@@ -358,6 +366,12 @@ export function createAutomationGithubPort(options: {
       await execute("gh", [
         "pr", "comment", String(pullRequestNumber), "--body",
         `Automation review is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:review, then retry.`,
+      ], options.environment);
+    },
+    async addBranchUpdateBlockedDiagnostic(pullRequestNumber, diagnostic) {
+      await execute("gh", [
+        "pr", "comment", String(pullRequestNumber), "--body",
+        `Automation branch update is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/branch-update-${diagnostic.jobId}. Remove agent:blocked, restore agent:update-branch, then retry.`,
       ], options.environment);
     },
     async publish(request) {
