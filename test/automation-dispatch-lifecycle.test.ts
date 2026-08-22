@@ -8,12 +8,14 @@ const scheduler = {
   prepare: async () => {},
   track: async (_identity: string, action: () => Promise<void>) => action(),
 };
+const promotion = { scan: async () => ({ status: "scanned" as const, promoted: [], refused: [] }) };
 
 describe("Automation Command dispatch lifecycle", () => {
   it("fails closed when required labels are unavailable", async () => {
     const listCommands = vi.fn();
     await expect(dispatchAutomationCommands({}, {
       scheduler,
+      promotion,
       github: { verifyLabels: async () => { throw new Error("Missing required Automation Command label: agent:review"); }, listCommands },
       run: vi.fn(),
     })).rejects.toThrow("Missing required Automation Command label: agent:review");
@@ -26,6 +28,7 @@ describe("Automation Command dispatch lifecycle", () => {
     const run = vi.fn(async () => { commands.push(late); });
     await dispatchAutomationCommands({}, {
       scheduler,
+      promotion,
       github: { verifyLabels: async () => {}, listCommands: async () => commands },
       run,
     });

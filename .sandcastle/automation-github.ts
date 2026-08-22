@@ -6,6 +6,7 @@ import type { FeedbackImplementationPorts } from "./feedback-implementation-auto
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
 import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
 import type { PrdSlice } from "./prd-split-extraction.ts";
+import type { QueuePromotionPorts } from "./queue-promotion-automation.ts";
 import type {
   PublishedReview,
   ReviewAutomationPorts,
@@ -101,10 +102,12 @@ function splitBody(prdNumber: number, slice: PrdSlice): string {
   return `## Parent PRD\n\n#${prdNumber}\n\n## What to build\n\n${slice.whatToBuild}\n\n## Acceptance criteria\n\n${slice.acceptanceCriteria.map((criterion) => `- [ ] ${criterion}`).join("\n")}\n`;
 }
 
+const automationLabels = ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked", "agent:queued"] as const;
+
 export function createAutomationDispatchGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): {
+}): QueuePromotionPorts["github"] & {
   listCommands(): Promise<readonly import("./automation-command.ts").AutomationCommand[]>;
   verifyLabels(): Promise<void>;
   ensureLabels(): Promise<void>;
@@ -117,16 +120,62 @@ export function createAutomationDispatchGithubPort(options: {
     async verifyLabels() {
       const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
       const existing = new Set((JSON.parse(stdout) as readonly { readonly name: string }[]).map(({ name }) => name));
-      for (const name of ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"]) {
+      for (const name of automationLabels) {
         if (!existing.has(name)) throw new Error(`Missing required Automation Command label: ${name}`);
       }
     },
     async ensureLabels() {
       const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
       const existing = new Set((JSON.parse(stdout) as readonly { readonly name: string }[]).map(({ name }) => name));
-      await Promise.all(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"]
+      await Promise.all(automationLabels
         .filter((name) => !existing.has(name))
         .map((name) => execute("gh", ["label", "create", name, "--color", "0E8A16"], options.environment)));
+    },
+    async listQueuedIssues() {
+      const { stdout } = await execute(
+        "gh", ["issue", "list", "--state", "open", "--label", "agent:queued", "--json", "number,labels", "--limit", "100"], options.environment,
+      );
+      return (JSON.parse(stdout) as readonly { readonly number: number; readonly labels: readonly { readonly name: string }[] }[])
+        .map((issue) => ({ number: issue.number, labels: issue.labels.map(({ name }) => name) }));
+    },
+    async readPromotionState(issueNumber) {
+      const { stdout } = await execute("gh", [
+        "api", "graphql", "-f",
+        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){labels(first:50){nodes{name} pageInfo{hasNextPage}} parent{number} blockedBy(first:100){nodes{number state} pageInfo{hasNextPage}}}}}",
+        "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`,
+        "--jq", ".data.repository.issue",
+      ], options.environment);
+      const issue = JSON.parse(stdout) as {
+        readonly labels: { readonly nodes: readonly { readonly name: string }[]; readonly pageInfo: { readonly hasNextPage: boolean } };
+        readonly parent: { readonly number: number } | null;
+        readonly blockedBy: { readonly nodes: readonly { readonly number: number; readonly state: string }[]; readonly pageInfo: { readonly hasNextPage: boolean } };
+      } | null;
+      if (issue === null || issue.labels.pageInfo.hasNextPage || issue.blockedBy.pageInfo.hasNextPage) {
+        throw new Error(`Issue #${issueNumber} dependency state is unreadable`);
+      }
+      return {
+        labels: issue.labels.nodes.map(({ name }) => name),
+        ...(issue.parent === null ? {} : { parentNumber: issue.parent.number }),
+        blockers: issue.blockedBy.nodes.map(({ number, state }) => ({ number, state })),
+      };
+    },
+    async addIssueLabel(issueNumber, label) {
+      await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
+    },
+    async removeIssueLabel(issueNumber, label) {
+      await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
+    },
+    async addPromotionDiagnostic(issueNumber) {
+      await execute("gh", [
+        "issue", "comment", String(issueNumber), "--body",
+        "All blockers are closed — promoting from `agent:queued` to `agent:implement`.",
+      ], options.environment);
+    },
+    async addSubIssueRefusalDiagnostic(issueNumber, parentNumber) {
+      await execute("gh", [
+        "issue", "comment", String(issueNumber), "--body",
+        `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent PRD instead. Cleared \`agent:queued\` and added \`agent:blocked\`.`,
+      ], options.environment);
     },
     async listCommands() {
       const responses = await Promise.all(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"].map((label) => execute(
