@@ -6,3 +6,4 @@ coverage/
 .codegraph/
 .sandcastle/dispatcher.lock
 .sandcastle/dispatcher-jobs/
+.sandcastle/jobs/

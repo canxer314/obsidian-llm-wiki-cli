@@ -1,4 +1,4 @@
-import { redactFailureSummary } from "./failure-finalizer.ts";
+import { redact as redactFailureSummary } from "./redaction.ts";
 
 export interface BranchUpdatePullRequest {
   readonly number: number;

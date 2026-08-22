@@ -6,12 +6,6 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
-import { agentActivityLoggingFields } from "./agent-session-observability.ts";
-import { recordSandcastleSession } from "./evidence.ts";
-import type {
-  SandcastleEvidenceRecorder,
-  SandcastleExecutionContext,
-} from "./evidence.js";
 import type { PlannerAgentSession } from "./planner.js";
 
 const plannerPrompt = (issueNumber: number) => `
@@ -34,41 +28,26 @@ export function createSandcastlePlannerSession(options: {
   readonly checkoutPath?: string;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
-  readonly evidence?: SandcastleEvidenceRecorder;
-  readonly execution?: SandcastleExecutionContext;
 }): PlannerAgentSession {
   const runAgent = options.runAgent ?? run;
   const createAgent = options.createAgent ?? claudeCode;
   return {
     async run(request) {
-      const sessionName = `planner-issue-${request.issueNumber}`;
-      const runSession = async () => {
-        const result = await runAgent({
+      const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         ...(options.checkoutPath === undefined ? {} : { cwd: options.checkoutPath }),
         hooks: options.hooks,
         branchStrategy: { type: "head" },
         maxIterations: 1,
-        name: sessionName,
-        ...(options.execution === undefined ? {} : { signal: options.execution.signal }),
-        ...agentActivityLoggingFields(sessionName, options.execution?.liveStatus),
+        name: `planner-issue-${request.issueNumber}`,
         prompt: plannerPrompt(request.issueNumber),
         output: Output.object({
           tag: request.output.tag,
           schema: request.output.schema,
         }),
-        });
-        return result.output;
-      };
-      if (options.evidence === undefined || options.execution === undefined) return runSession();
-      return recordSandcastleSession(
-        options.evidence,
-        options.execution,
-        { role: "planner", stage: "planner", attempt: 1, sessionName },
-        runSession,
-        { outcome: (output) => output.status === "blocked" ? "blocked" : "completed" },
-      );
+      });
+      return result.output;
     },
   };
 }
