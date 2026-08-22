@@ -51,3 +51,31 @@ _Avoid_: Recycle bin, system trash, deletion
 **Semantic Evidence**:
 The Obsidian-layer confirmation that a Change Set's mutations became visible to the rest of the Vault — required Vault events for ordinary operations, plus targeted metadata-cache and reference probes for Managed Trash and restore, which emit no generic events. Success is reported only after Semantic Evidence converges within its deadline; otherwise the Change Set rolls back or fails closed.
 _Avoid_: Indexing, search results, cache warm-up
+
+## Automation Language
+
+These terms govern the repository's label-driven automation (the local Dispatcher and its operations). GitHub Issues, Pull Requests, branches, labels, and comments are the only durable business state.
+
+**Automation Command**:
+One visible and independently retryable repository operation, represented by a trigger label or a defined schedule. The Dispatcher discovers, acquires, and executes Automation Commands; it never invents them implicitly.
+_Avoid_: Job spec, hidden claim, task record
+
+**Automation Work Item**:
+The durable repository record — a GitHub Issue or Pull Request — that carries an Automation Command's work, discussion, labels, and history.
+_Avoid_: Ticket database row, local work record
+
+**Blocked Automation**:
+An operation failure (execution, timeout, push, or publication) marked with `agent:blocked` that requires operator inspection and deliberate manual retry. It never terminalizes the Automation Work Item and is never retried automatically.
+_Avoid_: Terminal failure, dead letter, automatic retry
+
+**Dispatcher**:
+The thin trusted local scheduler that runs directly from the trusted local `master` checkout. It owns discovery, acquisition labels, bounded concurrency, Target Checkout creation, job time limits, and read-only inspection — never operation-specific business behavior.
+_Avoid_: Workflow engine, claim service, orchestrator
+
+**Target Checkout**:
+A disposable, independent local Git repository created for one Agent job at the exact authorized revision. It is never a registered worktree of the Primary Operator's checkout, and its cleanup cannot affect the source repository.
+_Avoid_: Shared worktree, shared clone, workspace replacement
+
+**Legacy Run State**:
+Local partial state left behind by the retired claim/watch pipeline. It is discarded at cutover, never adopted, resumed, or reconciled by the replacement system.
+_Avoid_: Checkpoint, resume point, migration input

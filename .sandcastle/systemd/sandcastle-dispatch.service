@@ -1,0 +1,40 @@
+# Sandcastle Dispatcher: one bounded Automation Command dispatch round.
+#
+# This is a version-controlled template, not an installed unit. To deploy:
+#   1. Follow docs/operations/sandcastle-local-dispatcher-runbook.md first.
+#   2. Copy this file and sandcastle-dispatch.timer to ~/.config/systemd/user/.
+#   3. Adjust WorkingDirectory, the Node 24 path, and PATH below for this host.
+#   4. systemctl --user daemon-reload
+#   5. Enable ONLY after the canaries pass: systemctl --user enable --now sandcastle-dispatch.timer
+# The service is intentionally not enable-able and never starts either write
+# path by being merged or copied.
+
+[Unit]
+Description=Sandcastle Dispatcher bounded dispatch round
+# Concurrency with the retired writer is prevented procedurally: the runbook's
+# cutover guard requires the old system to be stopped before this timer is
+# enabled. Old and new write paths must never be active at the same time.
+
+[Service]
+Type=oneshot
+# Trusted local repository checkout. The Dispatcher fails closed unless this is
+# a clean master that fast-forwards to origin/master.
+WorkingDirectory=%h/repos/obsidian-llm-wiki-cli
+# Node 24 (type stripping) running the Dispatcher straight from trusted master.
+# Point this at the host's Node 24 installation; there is no build or install step.
+ExecStart=%h/.nvm/versions/node/v24.19.0/bin/node --experimental-strip-types .sandcastle/main.ts dispatch
+# Job time limits are enforced by the Dispatcher (process-group SIGTERM/SIGKILL).
+# The unit must not cut a bounded round, so disable the oneshot start timeout.
+TimeoutStartSec=0
+# Child tools (claude, gh, git, docker, node, npm) resolve through this PATH.
+Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v24.19.0/bin:/usr/local/bin:/usr/bin:/bin
+# No credentials live in this unit. GH_TOKEN, Claude/CC-Switch routing and
+# authentication, and WSL proxy transport settings are loaded at startup from
+# ~/.claude/settings.json and the protected private environment file
+# (~/.config/sandcastle/env, mode 0600, outside the repository).
+# Job state and logs stay local: Target Checkouts and job artifacts under
+# .sandcastle/jobs/, the scheduler lock and active-job markers under
+# .sandcastle/, and dispatch-round output in the systemd journal below.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sandcastle-dispatch
