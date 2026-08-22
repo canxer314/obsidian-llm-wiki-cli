@@ -29,6 +29,7 @@ export interface ReviewAutomationPorts {
     readPullRequest(pullRequestNumber: number): Promise<ReviewAutomationPullRequest>;
     addPullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     removePullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
+    addRefusalDiagnostic?(pullRequestNumber: number, reason: string): Promise<void>;
     addBlockedDiagnostic?(
       pullRequestNumber: number,
       diagnostic: { readonly reason: "review-execution"; readonly jobId: string },
@@ -62,16 +63,18 @@ export interface ReviewAutomationPorts {
 
 export type ReviewAutomationResult =
   | { readonly status: "reviewed"; readonly revision: string }
+  | { readonly status: "refused"; readonly reason: string }
   | { readonly status: "blocked"; readonly reason: "review-execution"; readonly jobId: string };
 
-function requireEligiblePullRequest(pullRequest: ReviewAutomationPullRequest): void {
-  if (pullRequest.state !== "OPEN") throw new Error(`Pull Request #${pullRequest.number} is not open`);
-  if (!pullRequest.isDraft) throw new Error(`Pull Request #${pullRequest.number} is not a Draft`);
-  if (pullRequest.baseRepository !== pullRequest.headRepository) throw new Error(`Pull Request #${pullRequest.number} must not originate from a fork`);
-  if (!/^[0-9a-f]{40}$/u.test(pullRequest.headSha)) throw new Error(`Pull Request #${pullRequest.number} has an invalid head revision`);
-  if (!pullRequest.labels.includes("agent:review")) throw new Error(`Pull Request #${pullRequest.number} is not queued for review`);
-  if (pullRequest.labels.includes("agent:in-progress")) throw new Error(`Pull Request #${pullRequest.number} is already in progress`);
-  if (pullRequest.labels.includes("agent:blocked")) throw new Error(`Pull Request #${pullRequest.number} is blocked`);
+function refusal(pullRequest: ReviewAutomationPullRequest): string | undefined {
+  if (pullRequest.state !== "OPEN") return `Pull Request #${pullRequest.number} is not open`;
+  if (!pullRequest.isDraft) return `Pull Request #${pullRequest.number} is not a Draft`;
+  if (pullRequest.baseRepository !== pullRequest.headRepository) return `Pull Request #${pullRequest.number} must not originate from a fork`;
+  if (!/^[0-9a-f]{40}$/u.test(pullRequest.headSha)) return `Pull Request #${pullRequest.number} has an invalid head revision`;
+  if (!pullRequest.labels.includes("agent:review")) return `Pull Request #${pullRequest.number} is not queued for review`;
+  if (pullRequest.labels.includes("agent:in-progress")) return `Pull Request #${pullRequest.number} is already in progress`;
+  if (pullRequest.labels.includes("agent:blocked")) return `Pull Request #${pullRequest.number} is blocked`;
+  return undefined;
 }
 
 export async function runReviewAutomationCommand(
@@ -79,7 +82,20 @@ export async function runReviewAutomationCommand(
   ports: ReviewAutomationPorts,
 ): Promise<ReviewAutomationResult> {
   const pullRequest = await ports.github.readPullRequest(request.pullRequestNumber);
-  requireEligiblePullRequest(pullRequest);
+  const reason = refusal(pullRequest);
+  if (reason !== undefined) {
+    // An in-progress Pull Request is owned by an in-flight run whose
+    // acquisition protocol requires the trigger to still be present, so a
+    // concurrent refusal must not touch it; every other refusal is a
+    // business preflight refusal (#219 story 17): remove the trigger and
+    // explain on the Automation Work Item, without agent:blocked, so an
+    // inapplicable request (e.g. a fork Pull Request) does not re-refuse
+    // every round.
+    if (pullRequest.labels.includes("agent:in-progress")) return { status: "refused", reason };
+    await ports.github.removePullRequestLabel(pullRequest.number, "agent:review");
+    await ports.github.addRefusalDiagnostic?.(pullRequest.number, reason);
+    return { status: "refused", reason };
+  }
   const lease = ports.lease === undefined ? undefined : await ports.lease.acquire(pullRequest.number);
   if (ports.lease !== undefined && lease === undefined) throw new Error(`Pull Request #${pullRequest.number} is already in progress`);
   try {

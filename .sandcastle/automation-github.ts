@@ -180,7 +180,7 @@ export function createAutomationDispatchGithubPort(options: {
     async addSubIssueRefusalDiagnostic(issueNumber, parentNumber) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent PRD instead. Cleared \`agent:queued\` and added \`agent:blocked\`.`,
+        `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent PRD instead. Cleared \`agent:queued\`.`,
       ], options.environment);
     },
     async listCommands() {
@@ -373,7 +373,13 @@ export function createAutomationGithubPort(options: {
       await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
     },
     async addRefusalDiagnostic(issueNumber, reason) {
-      await execute("gh", ["issue", "comment", String(issueNumber), "--body", reason], options.environment);
+      // The issues comments endpoint carries both Issue and Pull Request
+      // conversation comments, so one diagnostic port serves every
+      // operation's business refusal (#219 story 17).
+      await execute("gh", [
+        "api", `repos/{owner}/{repo}/issues/${issueNumber}/comments`,
+        "-f", `body=${reason}`,
+      ], options.environment);
     },
     async addImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [

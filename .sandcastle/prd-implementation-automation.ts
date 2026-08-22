@@ -117,11 +117,12 @@ export async function runPrdImplementationAutomationCommand(
   }
   activePrdNumbers.add(prd.number);
   try {
-    // Shape errors cannot resolve themselves, so they block the Work Item
-    // (upstream-equivalent) instead of silently consuming the trigger.
+    // Shape errors are business preflight refusals (#219 story 17): remove
+    // the trigger and explain on the Automation Work Item without
+    // agent:blocked, so an inapplicable request stays distinct from an
+    // execution failure.
     const refuseShape = async (shapeReason: string): Promise<PrdImplementationAutomationResult> => {
       await ports.github.removeIssueLabel(prd.number, "agent:implement");
-      await ports.github.addIssueLabel(prd.number, "agent:blocked");
       await ports.github.addRefusalDiagnostic?.(prd.number, shapeReason);
       return { status: "refused", reason: shapeReason };
     };

@@ -45,12 +45,13 @@ export async function runQueuePromotionScan(
     if (!state.labels.includes("agent:queued")) continue;
     if (state.labels.includes("agent:in-progress")) continue;
     if (state.parentNumber !== undefined) {
-      // Upstream refusal: agent:queued is not meaningful on sub-issues. Add
-      // the blocked label before clearing the queue so an interrupted
-      // refusal is picked up again by the next scan.
-      await ports.github.addIssueLabel(issue.number, "agent:blocked");
-      await ports.github.removeIssueLabel(issue.number, "agent:queued");
+      // Upstream refusal: agent:queued is not meaningful on sub-issues.
+      // Business refusal semantics (#219 story 17): explain on the Issue and
+      // clear the queue trigger, without agent:blocked. Comment before
+      // clearing so an interrupted refusal stays visible and is picked up
+      // again by the next scan.
       await ports.github.addSubIssueRefusalDiagnostic(issue.number, state.parentNumber);
+      await ports.github.removeIssueLabel(issue.number, "agent:queued");
       refused.push(issue.number);
       continue;
     }
