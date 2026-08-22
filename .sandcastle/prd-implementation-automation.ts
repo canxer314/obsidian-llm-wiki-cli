@@ -1,4 +1,4 @@
-import { redactFailureSummary } from "./failure-finalizer.ts";
+import { redact as redactFailureSummary } from "./redaction.ts";
 import type { PrdAutomationIssue } from "./prd-split-automation.ts";
 
 export interface PrdChildIssue {

@@ -1,4 +1,4 @@
-import { redactFailureSummary } from "./failure-finalizer.ts";
+import { redact as redactFailureSummary } from "./redaction.ts";
 import type { ReviewAutomationPullRequest } from "./review-automation.js";
 
 export interface FeedbackImplementationPorts {

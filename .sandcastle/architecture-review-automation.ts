@@ -1,4 +1,4 @@
-import { redactFailureSummary } from "./failure-finalizer.ts";
+import { redact as redactFailureSummary } from "./redaction.ts";
 
 export const ARCHITECTURE_REVIEW_IDENTITY = "architecture-review";
 
