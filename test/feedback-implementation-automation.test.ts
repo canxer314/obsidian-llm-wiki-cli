@@ -80,4 +80,21 @@ describe("feedback implementation automation", () => {
     expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
     expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
   });
+
+  it("blocks the work item and retains the local job diagnostic when the feedback job times out", async () => {
+    const subject = ports();
+    subject.implementer.implement.mockRejectedValue(new Error("Feedback implementation execution timed out"));
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "blocked", reason: "feedback-execution", jobId: "feedback-job" });
+
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.addFeedbackBlockedDiagnostic).toHaveBeenCalledWith(224, {
+      reason: "feedback-execution",
+      jobId: "feedback-job",
+      summary: "Feedback implementation execution timed out",
+    });
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+  });
 });

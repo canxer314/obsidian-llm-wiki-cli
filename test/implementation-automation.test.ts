@@ -215,4 +215,37 @@ describe("implementation automation command", () => {
       "remove:agent:in-progress",
     ]);
   });
+
+  it("blocks the Issue and retains the local job diagnostic when the implementation job times out", async () => {
+    const events: string[] = [];
+    const github = {
+      readIssue: vi.fn()
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValue({ number: 221, state: "OPEN", labels: ["agent:in-progress"], baseRevision: revision }),
+      addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
+      removeIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`remove:${label}`)),
+      addImplementationBlockedDiagnostic: vi.fn(async (_number: number, diagnostic) => events.push(`blocked:${diagnostic.jobId}`)),
+    };
+
+    await expect(runImplementationAutomationCommand({ issueNumber: 221 }, {
+      github,
+      checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
+      implementer: { implement: vi.fn().mockRejectedValue(new Error("Implementation execution timed out")) },
+      createJobId: () => "job-221",
+    })).resolves.toEqual({ status: "blocked", reason: "implementation-execution", jobId: "job-221" });
+
+    expect(github.addImplementationBlockedDiagnostic).toHaveBeenCalledWith(221, {
+      reason: "implementation-execution",
+      jobId: "job-221",
+      summary: "Implementation execution timed out",
+    });
+    expect(events).toEqual([
+      "add:agent:in-progress",
+      "remove:agent:implement",
+      "add:agent:blocked",
+      "blocked:job-221",
+      "remove:agent:in-progress",
+    ]);
+  });
 });
