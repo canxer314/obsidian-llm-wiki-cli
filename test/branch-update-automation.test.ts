@@ -116,6 +116,49 @@ describe("branch update automation command", () => {
     });
   });
 
+  it("refuses an ineligible Pull Request without mutating labels or starting an update", async () => {
+    const github = {
+      readPullRequest: vi.fn().mockResolvedValue(pullRequest([])),
+      addPullRequestLabel: vi.fn(),
+      removePullRequestLabel: vi.fn(),
+    };
+    const checkout = { withCheckout: vi.fn() };
+    const updater = { update: vi.fn() };
+
+    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, { github, checkout, updater }))
+      .resolves.toEqual({ status: "refused", reason: "Pull Request #225 is not queued for branch update" });
+
+    expect(github.addPullRequestLabel).not.toHaveBeenCalled();
+    expect(github.removePullRequestLabel).not.toHaveBeenCalled();
+    expect(checkout.withCheckout).not.toHaveBeenCalled();
+    expect(updater.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks a merge conflict with local diagnostics and restores retry state", async () => {
+    const github = {
+      readPullRequest: vi.fn()
+        .mockResolvedValueOnce(pullRequest())
+        .mockResolvedValueOnce(pullRequest(["agent:in-progress"])),
+      addPullRequestLabel: vi.fn().mockResolvedValue(undefined),
+      removePullRequestLabel: vi.fn().mockResolvedValue(undefined),
+      addBranchUpdateBlockedDiagnostic: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, {
+      github,
+      checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
+      updater: { update: vi.fn().mockRejectedValue(new Error("merge conflict in src/index.ts")) },
+      createJobId: () => "job-225",
+    })).resolves.toEqual({ status: "blocked", reason: "branch-update-execution", jobId: "job-225" });
+
+    expect(github.addPullRequestLabel).toHaveBeenCalledWith(225, "agent:blocked");
+    expect(github.addBranchUpdateBlockedDiagnostic).toHaveBeenCalledWith(225, {
+      reason: "branch-update-execution",
+      jobId: "job-225",
+      summary: "merge conflict in src/index.ts",
+    });
+  });
+
   it("refuses a concurrent branch update before invoking another updater", async () => {
     let releaseUpdate!: () => void;
     const updateFinished = new Promise<void>((resolve) => { releaseUpdate = resolve; });
