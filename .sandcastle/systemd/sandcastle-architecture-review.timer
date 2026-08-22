@@ -1,0 +1,20 @@
+# Upstream-equivalent architecture review schedule: cron "0 9 * * 1-5"
+# (09:00 UTC, Monday-Friday). Copy to ~/.config/systemd/user/ together with
+# sandcastle-architecture-review.service. Shipped disabled: enable explicitly
+# with
+#   systemctl --user enable --now sandcastle-architecture-review.timer
+# only after a manual architecture-review canary passes.
+
+[Unit]
+Description=Scheduled Sandcastle architecture review (09:00 UTC, Monday-Friday)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:00:00 UTC
+AccuracySec=1s
+# Missed occurrences are never replayed; the next schedule or a manual
+# `npm run sandcastle -- architecture-review` is sufficient.
+Persistent=false
+Unit=sandcastle-architecture-review.service
+
+[Install]
+WantedBy=timers.target

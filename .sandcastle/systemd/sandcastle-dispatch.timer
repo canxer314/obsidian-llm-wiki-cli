@@ -1,0 +1,16 @@
+# One-minute schedule for bounded Sandcastle dispatch rounds.
+# Copy to ~/.config/systemd/user/ together with sandcastle-dispatch.service.
+# Shipped disabled: enable explicitly with
+#   systemctl --user enable --now sandcastle-dispatch.timer
+# only after the runbook canaries pass and the retired writer is stopped.
+
+[Unit]
+Description=Run one bounded Sandcastle dispatch round every minute
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+Unit=sandcastle-dispatch.service
+
+[Install]
+WantedBy=timers.target
