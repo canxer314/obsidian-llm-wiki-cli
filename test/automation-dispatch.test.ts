@@ -2,13 +2,25 @@ import { describe, expect, it, vi } from "vitest";
 
 import { inspectAutomationCommands } from "../.sandcastle/automation-inspector.js";
 import { dispatchAutomationCommands } from "../.sandcastle/automation-dispatch.js";
-import { commandPriority, compareCommands } from "../.sandcastle/automation-command.js";
+import { commandEligibility, commandPriority, compareCommands, type AutomationOperation } from "../.sandcastle/automation-command.js";
 
 const sha = "a".repeat(40);
 
+// Trigger labels as specified by #219: Pull Request operations use their own
+// label; Issue and PRD implementation share agent:implement; PRD split uses
+// agent:to-issues.
+const triggerLabels: Readonly<Record<AutomationOperation, string>> = {
+  "update-branch": "agent:update-branch",
+  implement: "agent:implement",
+  review: "agent:review",
+  "implement-issue": "agent:implement",
+  "implement-prd": "agent:implement",
+  "split-prd": "agent:to-issues",
+};
+
 function command(overrides: Partial<{
   number: number;
-  operation: "review" | "implement" | "update-branch";
+  operation: AutomationOperation;
   identity: string;
   labels: readonly string[];
 }> = {}) {
@@ -17,7 +29,7 @@ function command(overrides: Partial<{
     number: overrides.number ?? 10,
     operation,
     identity: overrides.identity ?? `pull-request:${overrides.number ?? 10}`,
-    labels: overrides.labels ?? [`agent:${operation}`],
+    labels: overrides.labels ?? [triggerLabels[operation]],
   } as const;
 }
 
@@ -84,6 +96,60 @@ describe("Automation Command dispatch", () => {
     expect(compareCommands(command({ operation: "implement", number: 9 }), command({ number: 4 }))).toBeLessThan(0);
     expect(compareCommands(command({ number: 9 }), command({ number: 4 }))).toBeGreaterThan(0);
     expect(compareCommands(command({ number: 4 }), command({ number: 9 }))).toBeLessThan(0);
+  });
+
+  it("pins Issue and PRD implementation ahead of PRD split and breaks ties by ascending number", () => {
+    expect(commandPriority(command({ operation: "implement-issue" }))).toBe(4);
+    expect(commandPriority(command({ operation: "implement-prd" }))).toBe(4);
+    expect(commandPriority(command({ operation: "split-prd" }))).toBe(5);
+    // Every Pull Request family stays ahead of Issue and PRD implementation.
+    expect(compareCommands(command({ operation: "update-branch", number: 9 }), command({ operation: "implement-issue", number: 4 }))).toBeLessThan(0);
+    expect(compareCommands(command({ number: 9 }), command({ operation: "implement-prd", number: 4 }))).toBeLessThan(0);
+    // PRD/Issue implementation runs before PRD split regardless of number.
+    expect(compareCommands(command({ operation: "implement-issue", number: 9 }), command({ operation: "split-prd", number: 4 }))).toBeLessThan(0);
+    expect(compareCommands(command({ operation: "split-prd", number: 4 }), command({ operation: "implement-issue", number: 9 }))).toBeGreaterThan(0);
+    // The shared implementation priority breaks ties by ascending number.
+    expect(compareCommands(command({ operation: "implement-prd", number: 3 }), command({ operation: "implement-issue", number: 7 }))).toBeLessThan(0);
+    expect(compareCommands(command({ operation: "implement-issue", number: 7 }), command({ operation: "implement-prd", number: 3 }))).toBeGreaterThan(0);
+  });
+
+  it("applies the shared Issue and PRD trigger labels to command eligibility", () => {
+    expect(commandEligibility(command({ operation: "implement-issue" }))).toBe("eligible");
+    expect(commandEligibility(command({ operation: "implement-prd" }))).toBe("eligible");
+    expect(commandEligibility(command({ operation: "split-prd" }))).toBe("eligible");
+    expect(commandEligibility(command({ operation: "implement-prd", labels: ["agent:implement", "agent:in-progress"] }))).toBe("inconsistent");
+    expect(commandEligibility(command({ operation: "implement-issue", labels: ["agent:implement", "agent:blocked"] }))).toBe("blocked");
+    expect(commandEligibility(command({ operation: "split-prd", labels: ["agent:in-progress"] }))).toBe("stale-in-progress");
+    expect(commandEligibility(command({ operation: "implement-prd", labels: [] }))).toBe("ineligible");
+  });
+
+  it("serializes PRD implementation and PRD split on their shared per-PRD identity", async () => {
+    const implementPrd = command({ number: 30, operation: "implement-prd", identity: "prd:30", labels: ["agent:implement"] });
+    const splitPrd = command({ number: 30, operation: "split-prd", identity: "prd:30", labels: ["agent:to-issues"] });
+    const run = vi.fn(async () => {});
+    const result = await dispatchAutomationCommands({}, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      promotion,
+      github: { verifyLabels: async () => {}, listCommands: async () => [splitPrd, implementPrd] },
+      run,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith(implementPrd);
+    expect(result).toEqual({ status: "dispatched", selected: [implementPrd] });
+  });
+
+  it("runs Issue implementation and PRD implementation with independent identities concurrently", async () => {
+    const implementIssue = command({ number: 31, operation: "implement-issue", identity: "issue:31", labels: ["agent:implement"] });
+    const implementPrd = command({ number: 32, operation: "implement-prd", identity: "prd:32", labels: ["agent:implement"] });
+    const run = vi.fn(async () => {});
+    const result = await dispatchAutomationCommands({ concurrency: 2 }, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      promotion,
+      github: { verifyLabels: async () => {}, listCommands: async () => [implementIssue, implementPrd] },
+      run,
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ status: "dispatched", selected: [implementIssue, implementPrd] });
   });
 
   it("waits for every selected job before the round fails when one job rejects", async () => {
@@ -179,6 +245,8 @@ describe("Automation Command inspection", () => {
           command({ number: 11, labels: ["agent:review", "agent:blocked"] }),
           command({ number: 12, labels: ["agent:in-progress"] }),
           command({ number: 13, labels: ["agent:review", "agent:in-progress"] }),
+          command({ number: 14, operation: "implement-issue", identity: "issue:14", labels: ["agent:implement", "agent:blocked"] }),
+          command({ number: 15, operation: "split-prd", identity: "prd:15", labels: ["agent:to-issues", "agent:blocked"] }),
         ],
       },
       scheduler: { activeJobs: async () => [{ identity: "pull-request:10", jobId: "local-1" }] },
@@ -189,6 +257,8 @@ describe("Automation Command inspection", () => {
       expect.objectContaining({ number: 11, eligibility: "blocked", retry: "remove agent:blocked, restore agent:review, then retry" }),
       expect.objectContaining({ number: 12, eligibility: "stale-in-progress", retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }),
       expect.objectContaining({ number: 13, eligibility: "inconsistent", retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }),
+      expect.objectContaining({ number: 14, eligibility: "blocked", retry: "remove agent:blocked, restore agent:implement, then retry" }),
+      expect.objectContaining({ number: 15, eligibility: "blocked", retry: "remove agent:blocked, restore agent:to-issues, then retry" }),
     ]);
     expect(result.activeJobs).toEqual([{ identity: "pull-request:10", jobId: "local-1" }]);
     expect(addLabel).not.toHaveBeenCalled();

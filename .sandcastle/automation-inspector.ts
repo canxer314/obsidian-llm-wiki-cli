@@ -1,5 +1,6 @@
 import {
   commandEligibility,
+  commandTriggerLabel,
   type AutomationCommand,
   type AutomationCommandEligibility,
 } from "./automation-command.ts";
@@ -27,7 +28,7 @@ export async function inspectAutomationCommands(ports: {
         identity: command.identity,
         eligibility,
         ...(eligibility === "blocked"
-          ? { retry: `remove agent:blocked, restore agent:${command.operation}, then retry` }
+          ? { retry: `remove agent:blocked, restore ${commandTriggerLabel(command)}, then retry` }
           : eligibility === "stale-in-progress" || eligibility === "inconsistent"
             ? { retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }
             : {}),
