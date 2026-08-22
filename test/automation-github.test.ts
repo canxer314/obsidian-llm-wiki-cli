@@ -413,4 +413,73 @@ describe("automation GitHub port", () => {
       },
     })).rejects.toThrow("Review inline comment location is invalid");
   });
+
+  it("counts the open architecture-review backlog with the upstream limit", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "3\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.countOpenArchitectureReviewProposals()).resolves.toBe(3);
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "issue", "list", "--state", "open", "--label", "source:architecture-review",
+      "--limit", "10", "--json", "number", "--jq", "length",
+    ], undefined);
+  });
+
+  it("lists prior architecture-review proposals across all states", async () => {
+    const proposals = [
+      { number: 101, title: "Deepen the vault index", state: "CLOSED", body: "Prior body" },
+      { number: 108, title: "Deepen the search indexer", state: "OPEN", body: "Open body" },
+    ];
+    const execute = vi.fn().mockResolvedValue({ stdout: JSON.stringify(proposals), stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.listArchitectureReviewProposals()).resolves.toEqual(proposals);
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "issue", "list", "--state", "all", "--label", "source:architecture-review",
+      "--limit", "200", "--json", "number,title,state,body",
+    ], undefined);
+  });
+
+  it("reads the trusted base revision", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: `${revision}\n`, stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readBaseRevision()).resolves.toBe(revision);
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha",
+    ], undefined);
+  });
+
+  it("publishes an accepted proposal with the upstream architecture source label", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "https://example.test/issues/240\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.publishArchitectureProposal({
+      title: "Deepen the search indexer",
+      body: "## Architecture review\n\n...",
+    })).resolves.toEqual({ issueNumber: 240, issueUrl: "https://example.test/issues/240" });
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "label", "create", "source:architecture-review", "--color", "5319E7",
+      "--description", "PRDs proposed by the automated architecture-review workflow",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "issue", "create", "--title", "Deepen the search indexer",
+      "--body", "## Architecture review\n\n...", "--label", "source:architecture-review",
+    ], undefined);
+  });
+
+  it("tolerates an already-existing architecture source label at publication", async () => {
+    const execute = vi.fn()
+      .mockRejectedValueOnce(new Error("label already exists"))
+      .mockResolvedValueOnce({ stdout: "https://example.test/issues/241\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.publishArchitectureProposal({
+      title: "Deepen the search indexer",
+      body: "body",
+    })).resolves.toEqual({ issueNumber: 241, issueUrl: "https://example.test/issues/241" });
+  });
 });

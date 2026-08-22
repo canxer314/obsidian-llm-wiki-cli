@@ -5,7 +5,7 @@ export class AutomationCliError extends Error {
   }
 }
 
-export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeedback, TSplit, TUpdate, TDispatch, TInspect, TSetup>(
+export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeedback, TSplit, TUpdate, TDispatch, TInspect, TSetup, TArchitectureReview>(
   argv: readonly string[],
   dependencies: {
     readonly runReview: (pullRequestNumber: number) => Promise<TReview>;
@@ -17,8 +17,13 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
     readonly dispatch?: (concurrency?: number) => Promise<TDispatch>;
     readonly inspect?: () => Promise<TInspect>;
     readonly setupLabels?: () => Promise<TSetup>;
+    readonly architectureReview?: () => Promise<TArchitectureReview>;
   },
-): Promise<TReview | TImplement | TImplementPrd | TFeedback | TSplit | TUpdate | TDispatch | TInspect | TSetup> {
+): Promise<TReview | TImplement | TImplementPrd | TFeedback | TSplit | TUpdate | TDispatch | TInspect | TSetup | TArchitectureReview> {
+  if (argv[0] === "architecture-review") {
+    if (argv.length !== 1 || dependencies.architectureReview === undefined) throw new AutomationCliError("Expected: architecture-review");
+    return dependencies.architectureReview();
+  }
   if (argv[0] === "setup-labels") {
     if (argv.length !== 1 || dependencies.setupLabels === undefined) throw new AutomationCliError("Expected: setup-labels");
     return dependencies.setupLabels();

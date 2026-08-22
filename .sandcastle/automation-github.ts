@@ -1,6 +1,11 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import {
+  ARCHITECTURE_REVIEW_BACKLOG_LIMIT,
+  type ArchitectureReviewAutomationPorts,
+  type ArchitectureReviewProposal,
+} from "./architecture-review-automation.ts";
 import type { BranchUpdateAutomationPorts } from "./branch-update-automation.ts";
 import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
@@ -157,19 +162,61 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] {
+}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
+  const readHeadSha = async () => {
+    const { stdout } = await execute("gh", [
+      "api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha",
+    ], options.environment);
+    return stdout.trim();
+  };
   return {
+    async countOpenArchitectureReviewProposals() {
+      // The count only needs to saturate at the refusal threshold, so the
+      // query limit is the backlog limit itself (as in the upstream guard).
+      const { stdout } = await execute("gh", [
+        "issue", "list", "--state", "open", "--label", "source:architecture-review",
+        "--limit", String(ARCHITECTURE_REVIEW_BACKLOG_LIMIT), "--json", "number", "--jq", "length",
+      ], options.environment);
+      return Number(stdout.trim());
+    },
+    async listArchitectureReviewProposals() {
+      // The upstream skill reads up to 200 prior proposals for the
+      // loose-duplicate filter.
+      const { stdout } = await execute("gh", [
+        "issue", "list", "--state", "all", "--label", "source:architecture-review",
+        "--limit", "200", "--json", "number,title,state,body",
+      ], options.environment);
+      return JSON.parse(stdout) as ArchitectureReviewProposal[];
+    },
+    async readBaseRevision() {
+      return readHeadSha();
+    },
+    async publishArchitectureProposal(request) {
+      // Idempotent provenance-label creation, as in the upstream publish step.
+      await execute("gh", [
+        "label", "create", "source:architecture-review", "--color", "5319E7",
+        "--description", "PRDs proposed by the automated architecture-review workflow",
+      ], options.environment).catch(() => undefined);
+      const { stdout } = await execute("gh", [
+        "issue", "create", "--title", request.title, "--body", request.body,
+        "--label", "source:architecture-review",
+      ], options.environment);
+      const issueUrl = stdout.trim().split("\n").at(-1) ?? "";
+      const match = /\/issues\/(\d+)\s*$/u.exec(issueUrl);
+      if (match === null) throw new Error("Could not parse created architecture-review Issue number");
+      return { issueNumber: Number(match[1]), issueUrl };
+    },
     async readIssue(issueNumber) {
-      const [{ stdout: issueOutput }, { stdout: baseRevisionOutput }] = await Promise.all([
+      const [{ stdout: issueOutput }, baseRevision] = await Promise.all([
         execute("gh", [
           "api", `repos/{owner}/{repo}/issues/${issueNumber}`,
           "--jq", "{number, state, labels, pull_request}",
         ], options.environment),
-        execute("gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"], options.environment),
+        readHeadSha(),
       ]);
       const issue = JSON.parse(issueOutput) as {
         readonly number: number;
@@ -184,16 +231,16 @@ export function createAutomationGithubPort(options: {
         number: issue.number,
         state: issue.state.toUpperCase(),
         labels: issue.labels.map(({ name }) => name),
-        baseRevision: baseRevisionOutput.trim(),
+        baseRevision,
       };
     },
     async readPrd(issueNumber) {
-      const [{ stdout: issueOutput }, { stdout: baseRevisionOutput }, { stdout: subIssuesOutput }, { stdout: parentOutput }] = await Promise.all([
+      const [{ stdout: issueOutput }, baseRevision, { stdout: subIssuesOutput }, { stdout: parentOutput }] = await Promise.all([
         execute("gh", [
           "api", `repos/{owner}/{repo}/issues/${issueNumber}`,
           "--jq", "{number, title, state, labels, pull_request}",
         ], options.environment),
-        execute("gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"], options.environment),
+        readHeadSha(),
         execute("gh", ["api", `repos/{owner}/{repo}/issues/${issueNumber}/sub_issues`, "--jq", "length"], options.environment),
         execute("gh", [
           "api", "graphql", "-f",
@@ -217,7 +264,7 @@ export function createAutomationGithubPort(options: {
         title: issue.title,
         state: issue.state.toUpperCase(),
         labels: issue.labels.map(({ name }) => name),
-        baseRevision: baseRevisionOutput.trim(),
+        baseRevision,
         subIssueCount: Number(subIssuesOutput.trim()),
         ...(parentNumber.length === 0 ? {} : { parentNumber: Number(parentNumber) }),
       };
