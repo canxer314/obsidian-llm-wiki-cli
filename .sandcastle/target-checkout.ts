@@ -8,7 +8,7 @@ const executeFile = promisify(execFile);
 
 export interface TargetCheckout {
   withCheckout<TResult>(
-    request: { readonly pullRequestNumber: number; readonly revision: string },
+    request: { readonly pullRequestNumber?: number; readonly revision: string },
     action: (checkoutPath: string) => Promise<TResult>,
   ): Promise<TResult>;
 }
@@ -44,7 +44,7 @@ export function createTargetCheckout(options: {
         ? await (async () => {
           const checkoutRoot = options.checkoutRoot ?? tmpdir();
           await mkdir(checkoutRoot, { recursive: true, mode: 0o700 });
-          return mkdtemp(join(checkoutRoot, `review-${request.pullRequestNumber}-`));
+          return mkdtemp(join(checkoutRoot, `review-${request.pullRequestNumber ?? "job"}-`));
         })()
         : options.createJobDirectory();
       let completed = false;

@@ -34,6 +34,157 @@ describe("automation GitHub port", () => {
     ], undefined);
   });
 
+  it("normalizes lowercase REST issue states for command refusal checks", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({
+        number: 221,
+        state: "open",
+        labels: [{ name: "agent:implement" }],
+        pull_request: null,
+      }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readIssue(221)).resolves.toEqual(expect.objectContaining({ state: "OPEN" }));
+  });
+
+  it("lists PRD children in order with open blockers and nested sub-issue counts", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        stdout: '{"number":301,"title":"First","state":"closed"}\n{"number":302,"title":"Second","state":"open"}\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: '{"blockedBy":0,"subIssues":0}', stderr: "" })
+      .mockResolvedValueOnce({ stdout: '{"blockedBy":1,"subIssues":2}', stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.listChildren(226)).resolves.toEqual([
+      { number: 301, title: "First", state: "CLOSED", openBlockerCount: 0, subIssueCount: 0 },
+      { number: 302, title: "Second", state: "OPEN", openBlockerCount: 1, subIssueCount: 2 },
+    ]);
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "repos/{owner}/{repo}/issues/226/sub_issues", "--paginate", "--jq", ".[] | {number, title, state}",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "api", "repos/{owner}/{repo}/issues/301", "--jq",
+      "{blockedBy: (.issue_dependencies_summary.blocked_by // 0), subIssues: (.sub_issues_summary.total // 0)}",
+    ], undefined);
+  });
+
+  it("closes an implemented child with its revision and PRD relationship", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await github.closeImplementedChild({ prdNumber: 226, childNumber: 301, revision });
+
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "issue", "close", "301", "--comment", `Implemented in ${revision}. Part of #226.`,
+    ], undefined);
+  });
+
+  it("reuses the existing upstream-equivalent Draft Pull Request for a PRD branch", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{
+        number: 401,
+        url: "https://example.test/pull/401",
+        isDraft: true,
+        baseRefName: "master",
+        headRefName: "sandcastle/prd-226",
+        headRefOid: revision,
+      }]), stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.ensurePrdDraftPullRequest({
+      prdNumber: 226,
+      branch: "sandcastle/prd-226",
+      headSha: revision,
+    })).resolves.toEqual({ number: 401, url: "https://example.test/pull/401" });
+
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an existing PRD Pull Request whose head does not match the Implementer commit", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{
+        number: 401,
+        url: "https://example.test/pull/401",
+        isDraft: true,
+        baseRefName: "master",
+        headRefName: "sandcastle/prd-226",
+        headRefOid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      }]), stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.ensurePrdDraftPullRequest({
+      prdNumber: 226,
+      branch: "sandcastle/prd-226",
+      headSha: revision,
+    })).rejects.toThrow("head does not match the Implementer commit");
+  });
+
+  it("creates the PRD Draft Pull Request with its PRD relationship and verifies the published head", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "https://example.test/pull/401\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.ensurePrdDraftPullRequest({
+      prdNumber: 226,
+      branch: "sandcastle/prd-226",
+      headSha: revision,
+    })).resolves.toEqual({ number: 401, url: "https://example.test/pull/401" });
+
+    expect(execute).toHaveBeenNthCalledWith(3, "gh", [
+      "pr", "create", "--draft", "--head", "sandcastle/prd-226",
+      "--title", "Implement #226", "--body", "Part of #226",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(4, "gh", [
+      "pr", "view", "401", "--json", "headRefOid", "--jq", ".headRefOid",
+    ], undefined);
+  });
+
+  it("rejects creating a PRD Pull Request when the branch head moved before publication", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "https://example.test/pull/401\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.ensurePrdDraftPullRequest({
+      prdNumber: 226,
+      branch: "sandcastle/prd-226",
+      headSha: revision,
+    })).rejects.toThrow("head changed before Pull Request publication");
+  });
+
+  it("publishes classified PRD implementation and child failure diagnostics", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await github.addPrdImplementationBlockedDiagnostic(226, {
+      reason: "prd-implementation-execution",
+      jobId: "job-226",
+      summary: "push failed",
+      childNumber: 301,
+    });
+    await github.addChildFailureDiagnostic(301, { prdNumber: 226, jobId: "job-226" });
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "issue", "comment", "226", "--body",
+      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226; push failed) while implementing sub-issue #301. Local diagnostics are retained at .sandcastle/jobs/prd-implementation-job-226. Remove agent:blocked, restore agent:implement, then retry.",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "issue", "comment", "301", "--body",
+      "Implementation attempt failed (job job-226). See PRD #226 for status.",
+    ], undefined);
+  });
+
   it("re-reads PR labels and publishes a review pinned to its acquired commit", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({
@@ -261,5 +412,74 @@ describe("automation GitHub port", () => {
         }],
       },
     })).rejects.toThrow("Review inline comment location is invalid");
+  });
+
+  it("counts the open architecture-review backlog with the upstream limit", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "3\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.countOpenArchitectureReviewProposals()).resolves.toBe(3);
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "issue", "list", "--state", "open", "--label", "source:architecture-review",
+      "--limit", "10", "--json", "number", "--jq", "length",
+    ], undefined);
+  });
+
+  it("lists prior architecture-review proposals across all states", async () => {
+    const proposals = [
+      { number: 101, title: "Deepen the vault index", state: "CLOSED", body: "Prior body" },
+      { number: 108, title: "Deepen the search indexer", state: "OPEN", body: "Open body" },
+    ];
+    const execute = vi.fn().mockResolvedValue({ stdout: JSON.stringify(proposals), stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.listArchitectureReviewProposals()).resolves.toEqual(proposals);
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "issue", "list", "--state", "all", "--label", "source:architecture-review",
+      "--limit", "200", "--json", "number,title,state,body",
+    ], undefined);
+  });
+
+  it("reads the trusted base revision", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: `${revision}\n`, stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readBaseRevision()).resolves.toBe(revision);
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha",
+    ], undefined);
+  });
+
+  it("publishes an accepted proposal with the upstream architecture source label", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "https://example.test/issues/240\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.publishArchitectureProposal({
+      title: "Deepen the search indexer",
+      body: "## Architecture review\n\n...",
+    })).resolves.toEqual({ issueNumber: 240, issueUrl: "https://example.test/issues/240" });
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "label", "create", "source:architecture-review", "--color", "5319E7",
+      "--description", "PRDs proposed by the automated architecture-review workflow",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "issue", "create", "--title", "Deepen the search indexer",
+      "--body", "## Architecture review\n\n...", "--label", "source:architecture-review",
+    ], undefined);
+  });
+
+  it("tolerates an already-existing architecture source label at publication", async () => {
+    const execute = vi.fn()
+      .mockRejectedValueOnce(new Error("label already exists"))
+      .mockResolvedValueOnce({ stdout: "https://example.test/issues/241\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.publishArchitectureProposal({
+      title: "Deepen the search indexer",
+      body: "body",
+    })).resolves.toEqual({ issueNumber: 241, issueUrl: "https://example.test/issues/241" });
   });
 });

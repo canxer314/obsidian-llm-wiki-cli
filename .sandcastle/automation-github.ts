@@ -1,9 +1,15 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import {
+  ARCHITECTURE_REVIEW_BACKLOG_LIMIT,
+  type ArchitectureReviewAutomationPorts,
+  type ArchitectureReviewProposal,
+} from "./architecture-review-automation.ts";
 import type { BranchUpdateAutomationPorts } from "./branch-update-automation.ts";
 import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
+import type { PrdImplementationAutomationPorts } from "./prd-implementation-automation.ts";
 import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
 import type { PrdSlice } from "./prd-split-extraction.ts";
 import type { QueuePromotionPorts } from "./queue-promotion-automation.ts";
@@ -205,19 +211,61 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] {
+}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
+  const readHeadSha = async () => {
+    const { stdout } = await execute("gh", [
+      "api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha",
+    ], options.environment);
+    return stdout.trim();
+  };
   return {
+    async countOpenArchitectureReviewProposals() {
+      // The count only needs to saturate at the refusal threshold, so the
+      // query limit is the backlog limit itself (as in the upstream guard).
+      const { stdout } = await execute("gh", [
+        "issue", "list", "--state", "open", "--label", "source:architecture-review",
+        "--limit", String(ARCHITECTURE_REVIEW_BACKLOG_LIMIT), "--json", "number", "--jq", "length",
+      ], options.environment);
+      return Number(stdout.trim());
+    },
+    async listArchitectureReviewProposals() {
+      // The upstream skill reads up to 200 prior proposals for the
+      // loose-duplicate filter.
+      const { stdout } = await execute("gh", [
+        "issue", "list", "--state", "all", "--label", "source:architecture-review",
+        "--limit", "200", "--json", "number,title,state,body",
+      ], options.environment);
+      return JSON.parse(stdout) as ArchitectureReviewProposal[];
+    },
+    async readBaseRevision() {
+      return readHeadSha();
+    },
+    async publishArchitectureProposal(request) {
+      // Idempotent provenance-label creation, as in the upstream publish step.
+      await execute("gh", [
+        "label", "create", "source:architecture-review", "--color", "5319E7",
+        "--description", "PRDs proposed by the automated architecture-review workflow",
+      ], options.environment).catch(() => undefined);
+      const { stdout } = await execute("gh", [
+        "issue", "create", "--title", request.title, "--body", request.body,
+        "--label", "source:architecture-review",
+      ], options.environment);
+      const issueUrl = stdout.trim().split("\n").at(-1) ?? "";
+      const match = /\/issues\/(\d+)\s*$/u.exec(issueUrl);
+      if (match === null) throw new Error("Could not parse created architecture-review Issue number");
+      return { issueNumber: Number(match[1]), issueUrl };
+    },
     async readIssue(issueNumber) {
-      const [{ stdout: issueOutput }, { stdout: baseRevisionOutput }] = await Promise.all([
+      const [{ stdout: issueOutput }, baseRevision] = await Promise.all([
         execute("gh", [
           "api", `repos/{owner}/{repo}/issues/${issueNumber}`,
           "--jq", "{number, state, labels, pull_request}",
         ], options.environment),
-        execute("gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"], options.environment),
+        readHeadSha(),
       ]);
       const issue = JSON.parse(issueOutput) as {
         readonly number: number;
@@ -230,18 +278,18 @@ export function createAutomationGithubPort(options: {
       }
       return {
         number: issue.number,
-        state: issue.state,
+        state: issue.state.toUpperCase(),
         labels: issue.labels.map(({ name }) => name),
-        baseRevision: baseRevisionOutput.trim(),
+        baseRevision,
       };
     },
     async readPrd(issueNumber) {
-      const [{ stdout: issueOutput }, { stdout: baseRevisionOutput }, { stdout: subIssuesOutput }, { stdout: parentOutput }] = await Promise.all([
+      const [{ stdout: issueOutput }, baseRevision, { stdout: subIssuesOutput }, { stdout: parentOutput }] = await Promise.all([
         execute("gh", [
           "api", `repos/{owner}/{repo}/issues/${issueNumber}`,
           "--jq", "{number, title, state, labels, pull_request}",
         ], options.environment),
-        execute("gh", ["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"], options.environment),
+        readHeadSha(),
         execute("gh", ["api", `repos/{owner}/{repo}/issues/${issueNumber}/sub_issues`, "--jq", "length"], options.environment),
         execute("gh", [
           "api", "graphql", "-f",
@@ -263,9 +311,9 @@ export function createAutomationGithubPort(options: {
       return {
         number: issue.number,
         title: issue.title,
-        state: issue.state,
+        state: issue.state.toUpperCase(),
         labels: issue.labels.map(({ name }) => name),
-        baseRevision: baseRevisionOutput.trim(),
+        baseRevision,
         subIssueCount: Number(subIssuesOutput.trim()),
         ...(parentNumber.length === 0 ? {} : { parentNumber: Number(parentNumber) }),
       };
@@ -338,6 +386,101 @@ export function createAutomationGithubPort(options: {
         "issue", "comment", String(issueNumber), "--body",
         `Automation PRD splitting is blocked (job ${diagnostic.jobId}). Remove agent:blocked, restore agent:to-issues, then retry.`,
       ], options.environment);
+    },
+    async listChildren(prdNumber) {
+      const { stdout } = await execute("gh", [
+        "api", `repos/{owner}/{repo}/issues/${prdNumber}/sub_issues`, "--paginate",
+        "--jq", ".[] | {number, title, state}",
+      ], options.environment);
+      const children = stdout
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as { readonly number: number; readonly title: string; readonly state: string });
+      return Promise.all(children.map(async (childIssue) => {
+        const { stdout: detailOutput } = await execute("gh", [
+          "api", `repos/{owner}/{repo}/issues/${childIssue.number}`,
+          "--jq", "{blockedBy: (.issue_dependencies_summary.blocked_by // 0), subIssues: (.sub_issues_summary.total // 0)}",
+        ], options.environment);
+        const detail = JSON.parse(detailOutput) as { readonly blockedBy: number; readonly subIssues: number };
+        return {
+          number: childIssue.number,
+          title: childIssue.title,
+          state: childIssue.state.toUpperCase(),
+          openBlockerCount: detail.blockedBy,
+          subIssueCount: detail.subIssues,
+        };
+      }));
+    },
+    async closeImplementedChild(request) {
+      await execute("gh", [
+        "issue", "close", String(request.childNumber), "--comment",
+        `Implemented in ${request.revision}. Part of #${request.prdNumber}.`,
+      ], options.environment);
+    },
+    async addPrdImplementationBlockedDiagnostic(issueNumber, diagnostic) {
+      await execute("gh", [
+        "issue", "comment", String(issueNumber), "--body",
+        `Automation PRD implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}) while implementing sub-issue #${diagnostic.childNumber}. Local diagnostics are retained at .sandcastle/jobs/prd-implementation-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+      ], options.environment);
+    },
+    async addChildFailureDiagnostic(childNumber, diagnostic) {
+      await execute("gh", [
+        "issue", "comment", String(childNumber), "--body",
+        `Implementation attempt failed (job ${diagnostic.jobId}). See PRD #${diagnostic.prdNumber} for status.`,
+      ], options.environment);
+    },
+    async ensurePrdDraftPullRequest(request) {
+      const [{ stdout: repositoryOutput }, { stdout: pullRequestsOutput }] = await Promise.all([
+        execute("gh", ["repo", "view", "--json", "defaultBranchRef"], options.environment),
+        execute("gh", [
+          "pr", "list", "--head", request.branch, "--state", "open",
+          "--json", "number,url,isDraft,baseRefName,headRefName,headRefOid", "--limit", "2",
+        ], options.environment),
+      ]);
+      const repository = JSON.parse(repositoryOutput) as {
+        readonly defaultBranchRef: { readonly name: string };
+      };
+      const pullRequests = JSON.parse(pullRequestsOutput) as readonly {
+        readonly number: number;
+        readonly url: string;
+        readonly isDraft: boolean;
+        readonly baseRefName: string;
+        readonly headRefName: string;
+        readonly headRefOid: string;
+      }[];
+      if (pullRequests.length > 1) {
+        throw new Error(`Expected at most one open Pull Request for ${request.branch}; found ${pullRequests.length}`);
+      }
+      const existing = pullRequests[0];
+      if (existing !== undefined) {
+        if (
+          !existing.isDraft ||
+          existing.baseRefName !== repository.defaultBranchRef.name ||
+          existing.headRefName !== request.branch
+        ) {
+          throw new Error(`Existing Pull Request for ${request.branch} is not an upstream-equivalent Draft`);
+        }
+        if (existing.headRefOid !== request.headSha) {
+          throw new Error(`Pull Request #${existing.number} head does not match the Implementer commit`);
+        }
+        return { number: existing.number, url: existing.url };
+      }
+      const { stdout: createOutput } = await execute("gh", [
+        "pr", "create", "--draft", "--head", request.branch,
+        "--title", `Implement #${request.prdNumber}`,
+        "--body", `Part of #${request.prdNumber}`,
+      ], options.environment);
+      const url = createOutput.trim();
+      const match = /\/pull\/(\d+)$/u.exec(url);
+      if (match === null) throw new Error("Could not parse created Pull Request number");
+      const number = Number(match[1]);
+      const { stdout: headOutput } = await execute("gh", [
+        "pr", "view", String(number), "--json", "headRefOid", "--jq", ".headRefOid",
+      ], options.environment);
+      if (headOutput.trim() !== request.headSha) {
+        throw new Error("Pull Request head changed before Pull Request publication");
+      }
+      return { number, url };
     },
     async publishPrdSplit(request) {
       const created: number[] = [];
