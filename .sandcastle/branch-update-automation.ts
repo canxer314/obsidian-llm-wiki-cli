@@ -17,6 +17,7 @@ export interface BranchUpdateAutomationPorts {
     readPullRequest(pullRequestNumber: number): Promise<BranchUpdatePullRequest>;
     addPullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     removePullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
+    addRefusalDiagnostic?(pullRequestNumber: number, reason: string): Promise<void>;
     addBranchUpdateBlockedDiagnostic?(
       pullRequestNumber: number,
       diagnostic: {
@@ -90,8 +91,16 @@ export async function runBranchUpdateAutomationCommand(
   }
   activePullRequestNumbers.add(pullRequest.number);
   try {
+    // Business preflight refusal (#219 story 17): remove the trigger and
+    // explain on the Automation Work Item, without agent:blocked, so an
+    // inapplicable request (e.g. a fork Pull Request) does not re-refuse
+    // every round.
     const reason = refusal(pullRequest);
-    if (reason !== undefined) return { status: "refused", reason };
+    if (reason !== undefined) {
+      await ports.github.removePullRequestLabel(pullRequest.number, "agent:update-branch");
+      await ports.github.addRefusalDiagnostic?.(pullRequest.number, reason);
+      return { status: "refused", reason };
+    }
 
     await ports.github.addPullRequestLabel(pullRequest.number, "agent:in-progress");
     try {

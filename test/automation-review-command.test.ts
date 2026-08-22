@@ -84,7 +84,7 @@ describe("review automation command", () => {
     expect(github.addPullRequestLabel).not.toHaveBeenCalledWith(220, "agent:blocked");
   });
 
-  it("refuses a blocked or in-progress request without mutating it", async () => {
+  it("refuses an in-progress request without touching the trigger an in-flight run still owns", async () => {
     const github = {
       readPullRequest: vi.fn().mockResolvedValue({
         number: 220,
@@ -97,6 +97,7 @@ describe("review automation command", () => {
       }),
       addPullRequestLabel: vi.fn(),
       removePullRequestLabel: vi.fn(),
+      addRefusalDiagnostic: vi.fn(),
     };
 
     await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
@@ -104,10 +105,11 @@ describe("review automation command", () => {
       checkout: { withCheckout: vi.fn() },
       reviewer: { review: vi.fn() },
       publisher: { publish: vi.fn() },
-    })).rejects.toThrow("already in progress");
+    })).resolves.toEqual({ status: "refused", reason: "Pull Request #220 is already in progress" });
 
     expect(github.addPullRequestLabel).not.toHaveBeenCalled();
     expect(github.removePullRequestLabel).not.toHaveBeenCalled();
+    expect(github.addRefusalDiagnostic).not.toHaveBeenCalled();
   });
 
   it("refuses a fork before checkout or Agent execution", async () => {
@@ -125,6 +127,7 @@ describe("review automation command", () => {
       }),
       addPullRequestLabel: vi.fn(),
       removePullRequestLabel: vi.fn(),
+      addRefusalDiagnostic: vi.fn(),
     };
 
     await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
@@ -132,8 +135,11 @@ describe("review automation command", () => {
       checkout,
       reviewer,
       publisher: { publish: vi.fn() },
-    })).rejects.toThrow("must not originate from a fork");
+    })).resolves.toEqual({ status: "refused", reason: "Pull Request #220 must not originate from a fork" });
 
+    expect(github.removePullRequestLabel).toHaveBeenCalledWith(220, "agent:review");
+    expect(github.addRefusalDiagnostic).toHaveBeenCalledWith(220, "Pull Request #220 must not originate from a fork");
+    expect(github.addPullRequestLabel).not.toHaveBeenCalled();
     expect(checkout.withCheckout).not.toHaveBeenCalled();
     expect(reviewer.review).not.toHaveBeenCalled();
   });

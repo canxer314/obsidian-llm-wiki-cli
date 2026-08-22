@@ -116,11 +116,12 @@ describe("branch update automation command", () => {
     });
   });
 
-  it("refuses an ineligible Pull Request without mutating labels or starting an update", async () => {
+  it("refuses an ineligible Pull Request by removing the trigger and explaining, without starting an update", async () => {
     const github = {
       readPullRequest: vi.fn().mockResolvedValue(pullRequest([])),
       addPullRequestLabel: vi.fn(),
       removePullRequestLabel: vi.fn(),
+      addRefusalDiagnostic: vi.fn(),
     };
     const checkout = { withCheckout: vi.fn() };
     const updater = { update: vi.fn() };
@@ -129,7 +130,8 @@ describe("branch update automation command", () => {
       .resolves.toEqual({ status: "refused", reason: "Pull Request #225 is not queued for branch update" });
 
     expect(github.addPullRequestLabel).not.toHaveBeenCalled();
-    expect(github.removePullRequestLabel).not.toHaveBeenCalled();
+    expect(github.removePullRequestLabel).toHaveBeenCalledWith(225, "agent:update-branch");
+    expect(github.addRefusalDiagnostic).toHaveBeenCalledWith(225, "Pull Request #225 is not queued for branch update");
     expect(checkout.withCheckout).not.toHaveBeenCalled();
     expect(updater.update).not.toHaveBeenCalled();
   });
