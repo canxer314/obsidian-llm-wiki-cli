@@ -3,6 +3,7 @@ import {
   compareCommands,
   type AutomationCommand,
 } from "./automation-command.ts";
+import type { QueuePromotionResult } from "./queue-promotion-automation.ts";
 
 export interface AutomationDispatchPorts {
   readonly scheduler: {
@@ -13,6 +14,9 @@ export interface AutomationDispatchPorts {
   readonly github: {
     verifyLabels(): Promise<void>;
     listCommands(): Promise<readonly AutomationCommand[]>;
+  };
+  readonly promotion: {
+    scan(): Promise<QueuePromotionResult>;
   };
   readonly run: (command: AutomationCommand) => Promise<void>;
 }
@@ -26,6 +30,7 @@ export async function dispatchAutomationCommands(
   try {
     await ports.scheduler.prepare();
     await ports.github.verifyLabels();
+    await ports.promotion.scan();
     const limit = request.concurrency ?? 2;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) {
       throw new Error("Dispatch concurrency must be between 1 and 8");

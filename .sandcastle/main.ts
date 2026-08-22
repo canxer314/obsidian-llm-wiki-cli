@@ -7,6 +7,7 @@ import { SandcastleCliError, runSandcastleCli } from "./cli.ts";
 import { runAutomationCli } from "./automation-cli.ts";
 import { createAutomationGithubPort, createAutomationDispatchGithubPort } from "./automation-github.ts";
 import { dispatchAutomationCommands } from "./automation-dispatch.ts";
+import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { createTargetCheckout } from "./target-checkout.ts";
@@ -194,6 +195,9 @@ try {
       }, {
         scheduler,
         github: dispatchGithub,
+        promotion: {
+          scan: () => runQueuePromotionScan({ github: dispatchGithub }),
+        },
         run: async (command) => {
           if (command.operation === "update-branch") {
             await runBranchUpdateAutomationCommand({ pullRequestNumber: command.number }, {

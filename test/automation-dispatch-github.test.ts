@@ -24,4 +24,108 @@ describe("Automation Command GitHub discovery", () => {
     expect(execute).toHaveBeenNthCalledWith(4, "gh", ["pr", "list", "--state", "open", "--label", "agent:in-progress", "--json", "number,labels", "--limit", "100"], undefined);
     expect(execute).toHaveBeenNthCalledWith(5, "gh", ["pr", "list", "--state", "open", "--label", "agent:blocked", "--json", "number,labels", "--limit", "100"], undefined);
   });
+
+  it("fails closed when the agent:queued label is missing and sets it up idempotently", async () => {
+    const missing = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"].map((name) => ({ name }))),
+      stderr: "",
+    });
+    await expect(createAutomationDispatchGithubPort({ execute: missing }).verifyLabels())
+      .rejects.toThrow("Missing required Automation Command label: agent:queued");
+
+    const baseLabels = ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"];
+    const setup = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify(baseLabels.map((name) => ({ name }))), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([...baseLabels, "agent:queued"].map((name) => ({ name }))), stderr: "" });
+    const port = createAutomationDispatchGithubPort({ execute: setup });
+    await port.ensureLabels();
+    expect(setup).toHaveBeenCalledWith("gh", ["label", "create", "agent:queued", "--color", "0E8A16"], undefined);
+    await port.ensureLabels();
+    expect(setup).toHaveBeenCalledTimes(3);
+  });
+
+  it("lists open queued Issues for promotion", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify([
+        { number: 5, labels: [{ name: "agent:queued" }] },
+        { number: 9, labels: [{ name: "agent:queued" }, { name: "agent:in-progress" }] },
+      ]),
+      stderr: "",
+    });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await expect(port.listQueuedIssues()).resolves.toEqual([
+      { number: 5, labels: ["agent:queued"] },
+      { number: 9, labels: ["agent:queued", "agent:in-progress"] },
+    ]);
+    expect(execute).toHaveBeenCalledWith(
+      "gh", ["issue", "list", "--state", "open", "--label", "agent:queued", "--json", "number,labels", "--limit", "100"], undefined,
+    );
+  });
+
+  it("reads current labels, parent, and native blocker state for a queued Issue", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        labels: { nodes: [{ name: "agent:queued" }], pageInfo: { hasNextPage: false } },
+        parent: { number: 12 },
+        blockedBy: { nodes: [{ number: 7, state: "CLOSED" }, { number: 8, state: "OPEN" }], pageInfo: { hasNextPage: false } },
+      }),
+      stderr: "",
+    });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await expect(port.readPromotionState(5)).resolves.toEqual({
+      labels: ["agent:queued"],
+      parentNumber: 12,
+      blockers: [{ number: 7, state: "CLOSED" }, { number: 8, state: "OPEN" }],
+    });
+    const [file, arguments_] = execute.mock.calls[0]!;
+    expect(file).toBe("gh");
+    expect(arguments_[0]).toBe("api");
+    expect(arguments_[1]).toBe("graphql");
+    expect(arguments_).toContain("-F");
+    expect(arguments_).toContain("number=5");
+  });
+
+  it("reads a queued Issue without a parent and fails closed when the Issue is unreadable", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          labels: { nodes: [{ name: "agent:queued" }], pageInfo: { hasNextPage: false } },
+          parent: null,
+          blockedBy: { nodes: [], pageInfo: { hasNextPage: false } },
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: "null", stderr: "" });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await expect(port.readPromotionState(5)).resolves.toEqual({ labels: ["agent:queued"], blockers: [] });
+    await expect(port.readPromotionState(404)).rejects.toThrow("dependency state is unreadable");
+  });
+
+  it("fails closed when blocker or label state is truncated", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          labels: { nodes: [{ name: "agent:queued" }], pageInfo: { hasNextPage: false } },
+          parent: null,
+          blockedBy: { nodes: [{ number: 7, state: "CLOSED" }], pageInfo: { hasNextPage: true } },
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          labels: { nodes: [{ name: "agent:queued" }], pageInfo: { hasNextPage: true } },
+          parent: null,
+          blockedBy: { nodes: [], pageInfo: { hasNextPage: false } },
+        }),
+        stderr: "",
+      });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await expect(port.readPromotionState(5)).rejects.toThrow("dependency state is unreadable");
+    await expect(port.readPromotionState(5)).rejects.toThrow("dependency state is unreadable");
+  });
 });
