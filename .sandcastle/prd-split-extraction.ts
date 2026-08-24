@@ -30,7 +30,6 @@ export function createSameSessionPrdSplitExtractor(options: {
   readonly hooks: SandboxHooks;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
-  readonly agentEnvironment?: Readonly<Record<string, string>>;
 }) {
   const runAgent = options.runAgent ?? run;
   const createAgent = options.createAgent ?? claudeCode;
@@ -42,9 +41,7 @@ export function createSameSessionPrdSplitExtractor(options: {
       readonly model: string;
     }): Promise<readonly PrdSlice[]> {
       const produced = await runAgent({
-        agent: createAgent(request.model, options.agentEnvironment === undefined ? undefined : {
-          env: { ...options.agentEnvironment },
-        }),
+        agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: options.hooks,
         cwd: request.checkoutPath,

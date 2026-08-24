@@ -70,6 +70,7 @@ export async function loadSandboxStartup(
   readonly imageName: string;
   readonly sandbox: ReturnType<typeof createSandboxProvider>;
   readonly automationSandbox: ReturnType<typeof createSandboxProvider>;
+  readonly githubAgentSandbox: ReturnType<typeof createSandboxProvider>;
   readonly environment: Readonly<Record<string, string>>;
   readonly proxyEnvironment: Readonly<Record<string, string>>;
   readonly childEnvironments: ReturnType<typeof createChildEnvironments>;
@@ -97,6 +98,10 @@ export async function loadSandboxStartup(
     sandbox: createSandboxProvider(config.environment, imageName),
     automationSandbox: createSandboxProvider(
       childEnvironments.claude,
+      imageName,
+    ),
+    githubAgentSandbox: createSandboxProvider(
+      childEnvironments.githubAgent,
       imageName,
     ),
     environment: config.environment,

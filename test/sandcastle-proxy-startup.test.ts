@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 describe("Sandcastle proxy startup", () => {
-  it("passes one resolved value to both sandboxes and every child environment", async () => {
+  it("passes one resolved value to every sandbox and every child environment", async () => {
     const root = await mkdtemp(join(tmpdir(), "sandcastle-proxy-startup-"));
     roots.push(root);
     const settingsPath = join(root, "settings.json");
@@ -60,7 +60,8 @@ describe("Sandcastle proxy startup", () => {
     expect(startup.childEnvironments.git.HTTPS_PROXY).toBe(resolved);
     expect(startup.childEnvironments.github.HTTPS_PROXY).toBe(resolved);
     expect(startup.childEnvironments.claude.HTTPS_PROXY).toBe(resolved);
-    expect(dockerCalls).toHaveLength(2);
+    expect(startup.childEnvironments.githubAgent.HTTPS_PROXY).toBe(resolved);
+    expect(dockerCalls).toHaveLength(3);
     expect(dockerCalls[0]).toMatchObject({
       network: "host",
       env: { HTTPS_PROXY: resolved },
@@ -69,6 +70,51 @@ describe("Sandcastle proxy startup", () => {
       network: "host",
       env: { HTTPS_PROXY: resolved },
     });
+    expect(dockerCalls[2]).toMatchObject({
+      network: "host",
+      env: { HTTPS_PROXY: resolved },
+    });
+  });
+
+  it("keeps GH_TOKEN out of the Claude-only sandbox and inside the GitHub-capable sandbox", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandcastle-proxy-startup-"));
+    roots.push(root);
+    const settingsPath = join(root, "settings.json");
+    const envPath = join(root, ".env");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "https://claude.example",
+          ANTHROPIC_AUTH_TOKEN: "claude-secret",
+          ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5",
+          HTTP_PROXY: "http://proxy.example",
+          SANDCASTLE_DEFAULT_MODEL: "claude-routed-default",
+          SANDCASTLE_REVIEWER_MODEL: "claude-routed-reviewer",
+        },
+      }),
+    );
+    await writeFile(envPath, "GH_TOKEN=github-secret\n", { mode: 0o600 });
+    await chmod(envPath, 0o600);
+
+    const startup = await loadSandboxStartup({ settingsPath, envPath });
+
+    expect(dockerCalls).toHaveLength(3);
+    const automationSandbox = dockerCalls[1]?.env ?? {};
+    const githubAgentSandbox = dockerCalls[2]?.env ?? {};
+    expect(automationSandbox.GH_TOKEN).toBeUndefined();
+    expect(githubAgentSandbox.GH_TOKEN).toBe("github-secret");
+    expect(githubAgentSandbox).toEqual({
+      ANTHROPIC_AUTH_TOKEN: "claude-secret",
+      ANTHROPIC_BASE_URL: "https://claude.example",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5",
+      GH_TOKEN: "github-secret",
+      HTTP_PROXY: "http://proxy.example",
+    });
+    expect(Object.keys(githubAgentSandbox)).not.toContain("PATH");
+    expect(Object.keys(githubAgentSandbox)).not.toContain("HOME");
+    expect(githubAgentSandbox).not.toHaveProperty("SANDCASTLE_DEFAULT_MODEL");
+    expect(githubAgentSandbox).not.toHaveProperty("SANDCASTLE_REVIEWER_MODEL");
   });
 
   it("fails before creating either sandbox when a winning proxy reference is unusable", async () => {
