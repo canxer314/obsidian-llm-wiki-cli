@@ -136,6 +136,50 @@ describe("branch update automation command", () => {
     expect(updater.update).not.toHaveBeenCalled();
   });
 
+  it("posts the upstream-style informational comment without pushing when already up to date", async () => {
+    const github = {
+      readPullRequest: vi.fn()
+        .mockResolvedValueOnce(pullRequest())
+        .mockResolvedValueOnce(pullRequest(["agent:in-progress"])),
+      addPullRequestLabel: vi.fn().mockResolvedValue(undefined),
+      removePullRequestLabel: vi.fn().mockResolvedValue(undefined),
+      addBranchUpdateComment: vi.fn().mockResolvedValue(undefined),
+    };
+    const updater = { update: vi.fn().mockResolvedValue({ status: "up-to-date" }) };
+
+    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, {
+      github,
+      checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
+      updater,
+    })).resolves.toEqual({ status: "up-to-date" });
+
+    expect(github.addBranchUpdateComment).toHaveBeenCalledWith(
+      225,
+      "`agent:update-branch`: branch is already up to date with `origin/master`. No merge needed.",
+    );
+  });
+
+  it("publishes the conflict resolver comment after a verified update", async () => {
+    const github = {
+      readPullRequest: vi.fn()
+        .mockResolvedValueOnce(pullRequest())
+        .mockResolvedValueOnce(pullRequest(["agent:in-progress"])),
+      addPullRequestLabel: vi.fn().mockResolvedValue(undefined),
+      removePullRequestLabel: vi.fn().mockResolvedValue(undefined),
+      addBranchUpdateComment: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, {
+      github,
+      checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
+      updater: { update: vi.fn().mockResolvedValue({
+        status: "updated", revision: updatedRevision, comment: "Resolved src/index.ts.",
+      }) },
+    })).resolves.toEqual({ status: "updated", revision: updatedRevision });
+
+    expect(github.addBranchUpdateComment).toHaveBeenCalledWith(225, "Resolved src/index.ts.");
+  });
+
   it("blocks a merge conflict with local diagnostics and restores retry state", async () => {
     const github = {
       readPullRequest: vi.fn()
