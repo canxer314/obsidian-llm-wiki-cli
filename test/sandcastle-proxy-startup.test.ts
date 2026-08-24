@@ -70,4 +70,47 @@ describe("Sandcastle proxy startup", () => {
       env: { HTTPS_PROXY: resolved },
     });
   });
+
+  it("fails before creating either sandbox when a winning proxy reference is unusable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandcastle-proxy-startup-"));
+    roots.push(root);
+    const settingsPath = join(root, "settings.json");
+    const envPath = join(root, ".env");
+    process.env.HTTPS_PROXY =
+      "http://fictional-host-user:fictional-host-pass@fictional-host.example/secret-host-fragment";
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "https://claude.example",
+          ANTHROPIC_AUTH_TOKEN: "claude-secret",
+          HTTPS_PROXY:
+            "http://fictional-config.example/secret-config-fragment/${HTTPS_PROXY}",
+        },
+      }),
+    );
+    await writeFile(envPath, "GH_TOKEN=github-secret\n", { mode: 0o600 });
+    await chmod(envPath, 0o600);
+
+    const error = await loadSandboxStartup({ settingsPath, envPath }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(dockerCalls).toHaveLength(0);
+    const diagnostic = String(error);
+    expect(diagnostic).toContain("HTTPS_PROXY");
+    for (const sentinel of [
+      "fictional-config.example",
+      "secret-config-fragment",
+      "fictional-host-user",
+      "fictional-host-pass",
+      "fictional-host.example",
+      "secret-host-fragment",
+      "claude-secret",
+      "github-secret",
+    ]) {
+      expect(diagnostic).not.toContain(sentinel);
+    }
+  });
 });

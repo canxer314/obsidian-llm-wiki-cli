@@ -48,6 +48,17 @@ afterEach(async () => {
   );
 });
 
+function assertNoSentinels(
+  diagnostic: string,
+  messages: readonly string[],
+  sentinels: readonly string[],
+): void {
+  for (const sentinel of sentinels) {
+    expect(diagnostic).not.toContain(sentinel);
+    expect(messages.join(" ")).not.toContain(sentinel);
+  }
+}
+
 describe("Sandcastle private configuration adapter", () => {
   it.each([
     "HTTP_PROXY",
@@ -480,6 +491,251 @@ describe("Sandcastle private configuration adapter", () => {
     ).rejects.toThrow(/0600/);
   });
 
+  it("fails a settings reference when its host variable is missing", async () => {
+    const { settingsPath, envPath } = await fixture();
+    setProcessEnvironment("HTTPS_PROXY", undefined);
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+          HTTPS_PROXY: "${HTTPS_PROXY}",
+        },
+      }),
+    );
+    await writePrivateEnv(envPath, "GH_TOKEN=github-secret\n");
+
+    const error = await loadSandcastleConfig({ settingsPath, envPath }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(SandcastleConfigError);
+    expect(String(error)).toContain("HTTPS_PROXY");
+    expect(String(error)).toContain("Claude Code user settings");
+    expect(String(error)).toMatch(/missing/i);
+    expect(String(error)).not.toContain("settings-secret");
+  });
+
+  it.each([
+    ["empty", ""],
+    ["whitespace-only", " \t  "],
+  ])("fails a winning private %s reference without falling back to settings", async (reason, hostValue) => {
+    const { settingsPath, envPath } = await fixture();
+    setProcessEnvironment("HTTP_PROXY", hostValue);
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+          HTTP_PROXY: "http://settings-fallback.example/fallback-fragment",
+        },
+      }),
+    );
+    await writePrivateEnv(
+      envPath,
+      ["GH_TOKEN=github-secret", 'HTTP_PROXY="${HTTP_PROXY}"', ""].join("\n"),
+    );
+
+    const error = await loadSandcastleConfig({ settingsPath, envPath }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(SandcastleConfigError);
+    expect(String(error)).toContain("HTTP_PROXY");
+    expect(String(error)).toContain("Sandcastle private environment");
+    expect(String(error)).toContain(reason);
+    expect(String(error)).not.toContain("settings-fallback.example");
+    expect(String(error)).not.toContain("fallback-fragment");
+  });
+
+  it.each([
+    ["cross-key", "${HTTP_PROXY}"],
+    ["arbitrary-name", "${OTHER}"],
+    ["concatenated", "http://fictional.example/${HTTPS_PROXY}"],
+    ["defaulted", "${HTTPS_PROXY:-http://fallback.example}"],
+    ["nested", "${${HTTPS_PROXY}}"],
+    ["reference-like", "prefix${not-closed"],
+  ])("rejects a %s malformed private proxy reference without echoing it", async (_kind, configured) => {
+    const { settingsPath, envPath } = await fixture();
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+        },
+      }),
+    );
+    await writePrivateEnv(
+      envPath,
+      ["GH_TOKEN=github-secret", `HTTPS_PROXY="${configured}"`, ""].join("\n"),
+    );
+
+    const error = await loadSandcastleConfig({ settingsPath, envPath }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(SandcastleConfigError);
+    expect(String(error)).toContain("HTTPS_PROXY");
+    expect(String(error)).toContain("Sandcastle private environment");
+    expect(String(error)).toMatch(/malformed/i);
+    expect(String(error)).not.toContain(configured);
+    expect(String(error)).not.toContain("fictional.example");
+    expect(String(error)).not.toContain("fallback.example");
+  });
+
+  it("rejects an unbraced cross-key settings reference with safe braced guidance", async () => {
+    const { settingsPath, envPath } = await fixture();
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+          HTTPS_PROXY: "$HTTP_PROXY",
+        },
+      }),
+    );
+    await writePrivateEnv(envPath, "GH_TOKEN=github-secret\n");
+
+    const error = await loadSandcastleConfig({ settingsPath, envPath }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(SandcastleConfigError);
+    expect(String(error)).toContain("HTTPS_PROXY");
+    expect(String(error)).toContain("Claude Code user settings");
+    expect(String(error)).toContain("${HTTPS_PROXY}");
+    expect(String(error)).not.toContain("$HTTP_PROXY");
+  });
+
+  it("never falls back to a different-cased host variable", async () => {
+    const { settingsPath, envPath } = await fixture();
+    setProcessEnvironment("HTTPS_PROXY", "http://uppercase-only.example");
+    setProcessEnvironment("https_proxy", undefined);
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+          https_proxy: "${https_proxy}",
+        },
+      }),
+    );
+    await writePrivateEnv(envPath, "GH_TOKEN=github-secret\n");
+
+    const error = await loadSandcastleConfig({ settingsPath, envPath }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(SandcastleConfigError);
+    expect(String(error)).toContain("https_proxy");
+    expect(String(error)).toMatch(/missing/i);
+    expect(String(error)).not.toContain("uppercase-only.example");
+  });
+
+  it("rejects a malformed settings reference without leaking configured or host sentinels", async () => {
+    const { settingsPath, envPath } = await fixture();
+    setProcessEnvironment(
+      "HTTPS_PROXY",
+      "http://fictional-host-user:fictional-host-pass@fictional-host.example/secret-host-fragment",
+    );
+    setProcessEnvironment(
+      "HTTP_PROXY",
+      "http://fictional-other-user@fictional-other.example/other-fragment",
+    );
+    const messages: string[] = [];
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+          HTTPS_PROXY: "http://fictional-config-user:fictional-config-pass@fictional-proxy.example/secret-config-fragment/${HTTPS_PROXY}",
+        },
+      }),
+    );
+    await writePrivateEnv(envPath, "GH_TOKEN=github-secret\n");
+
+    const error = await loadSandcastleConfig({
+      settingsPath,
+      envPath,
+      log: (message) => messages.push(message),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SandcastleConfigError);
+    const diagnostic = String(error);
+    expect(diagnostic).toContain("HTTPS_PROXY");
+    expect(diagnostic).toContain("Claude Code user settings");
+    assertNoSentinels(diagnostic, messages, [
+      "fictional-config-user",
+      "fictional-config-pass",
+      "fictional-proxy.example",
+      "secret-config-fragment",
+      "fictional-host-user",
+      "fictional-host-pass",
+      "fictional-host.example",
+      "secret-host-fragment",
+      "fictional-other-user",
+      "fictional-other.example",
+      "other-fragment",
+      "settings-secret",
+      "github-secret",
+    ]);
+  });
+
+  it("rejects a malformed private reference without leaking configured or host sentinels", async () => {
+    const { settingsPath, envPath } = await fixture();
+    setProcessEnvironment(
+      "HTTPS_PROXY",
+      "http://fictional-host-user:fictional-host-pass@fictional-host.example/secret-host-fragment",
+    );
+    const messages: string[] = [];
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+        },
+      }),
+    );
+    await writePrivateEnv(
+      envPath,
+      [
+        "GH_TOKEN=github-secret",
+        'HTTPS_PROXY="http://fictional-config-user:fictional-config-pass@fictional-proxy.example/secret-config-fragment/${HTTPS_PROXY}"',
+        "",
+      ].join("\n"),
+    );
+
+    const error = await loadSandcastleConfig({
+      settingsPath,
+      envPath,
+      log: (message) => messages.push(message),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SandcastleConfigError);
+    const diagnostic = String(error);
+    expect(diagnostic).toContain("HTTPS_PROXY");
+    expect(diagnostic).toContain("Sandcastle private environment");
+    assertNoSentinels(diagnostic, messages, [
+      "fictional-config-user",
+      "fictional-config-pass",
+      "fictional-proxy.example",
+      "secret-config-fragment",
+      "fictional-host-user",
+      "fictional-host-pass",
+      "fictional-host.example",
+      "secret-host-fragment",
+      "settings-secret",
+      "github-secret",
+    ]);
+  });
+
   it("redacts configured values from startup logs", async () => {
     const { settingsPath, envPath } = await fixture();
     await writeFile(
@@ -506,5 +762,40 @@ describe("Sandcastle private configuration adapter", () => {
     expect(messages.join(" ")).not.toContain("settings-secret");
     expect(messages.join(" ")).not.toContain("github-secret");
     expect(messages.join(" ")).not.toContain("127.0.0.1");
+  });
+
+  it("keeps success logs count-only when proxy references are resolved", async () => {
+    const { settingsPath, envPath } = await fixture();
+    const resolved =
+      "http://fictional-host-user:fictional-host-pass@fictional-host.example/secret-host-fragment";
+    setProcessEnvironment("HTTPS_PROXY", resolved);
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          ANTHROPIC_AUTH_TOKEN: "settings-secret",
+          HTTPS_PROXY: "${HTTPS_PROXY}",
+        },
+      }),
+    );
+    await writePrivateEnv(envPath, "GH_TOKEN=github-secret\n");
+    const messages: string[] = [];
+
+    const config = await loadSandcastleConfig({
+      settingsPath,
+      envPath,
+      log: (message) => messages.push(message),
+    });
+
+    expect(config.environment.HTTPS_PROXY).toBe(resolved);
+    expect(messages).toEqual([
+      "Loaded Sandcastle private configuration (4 environment variables; 0 role model overrides)",
+    ]);
+    expect(messages.join(" ")).not.toContain(resolved);
+    expect(messages.join(" ")).not.toContain("fictional-host-user");
+    expect(messages.join(" ")).not.toContain("fictional-host-pass");
+    expect(messages.join(" ")).not.toContain("secret-host-fragment");
+    expect(messages.join(" ")).not.toContain("settings-secret");
   });
 });
