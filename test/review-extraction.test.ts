@@ -3,17 +3,19 @@ import { describe, expect, it, vi } from "vitest";
 import { createSameSessionReviewExtractor } from "../.sandcastle/review-extraction.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
+const request = {
+  pullRequestNumber: 220,
+  branch: "feature/review",
+  revision,
+  checkoutPath: "/safe/disposable-checkout",
+  reviewThreads: [{ commentId: "PRRC_1", author: "maintainer", body: "Please fix this." }],
+  model: "reviewer-model",
+};
 
 describe("same-session review extraction", () => {
-  it("runs one unconstrained review pass then extracts structured output by resuming that session", async () => {
-    const extraction = vi.fn().mockResolvedValue({
-      commits: [],
-      output: { verdict: "Approved", summary: "Looks good.", findings: [] },
-    });
-    const runAgent = vi.fn().mockResolvedValue({
-      commits: [],
-      resume: extraction,
-    });
+  it("lets the reviewer commit on the existing branch then extracts structured output by resuming that session", async () => {
+    const extraction = vi.fn().mockResolvedValue({ output: { summary: "Improved the branch.", inlineComments: [], replies: [] } });
+    const runAgent = vi.fn().mockResolvedValue({ commits: [{}], resume: extraction });
     const extractor = createSameSessionReviewExtractor({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
@@ -21,24 +23,18 @@ describe("same-session review extraction", () => {
       createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
     });
 
-    await expect(extractor.review({
-      pullRequestNumber: 220,
-      revision,
-      checkoutPath: "/safe/disposable-checkout",
-      model: "reviewer-model",
-    })).resolves.toEqual({
-      verdict: "Approved",
-      summary: "Looks good.",
-      findings: [],
-    });
+    await expect(extractor.review(request)).resolves.toEqual({ summary: "Improved the branch.", inlineComments: [], replies: [] });
 
     expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({
-      cwd: "/safe/disposable-checkout",
+      cwd: request.checkoutPath,
       maxIterations: 1,
+      branchStrategy: { type: "branch", branch: request.branch },
     }));
     const produceRequest = runAgent.mock.calls[0]![0];
-    expect(produceRequest.prompt).toContain(`Pull Request #220 at exact revision ${revision}`);
-    expect(produceRequest.prompt).not.toContain("<review>");
+    expect(produceRequest.prompt).toContain(`Pull Request #220 on branch ${request.branch}`);
+    expect(produceRequest.prompt).toContain(`exact revision ${revision}`);
+    expect(produceRequest.prompt).toContain("PRRC_1");
+    expect(produceRequest.prompt).toContain("commit every intended improvement");
     expect(extraction).toHaveBeenCalledWith(expect.stringContaining("<review>"), {
       signal: expect.any(AbortSignal),
       output: expect.objectContaining({ _tag: "object", tag: "review", maxRetries: 2 }),
@@ -46,9 +42,7 @@ describe("same-session review extraction", () => {
   });
 
   it("writes the complete reviewer output to the job artifact directory", async () => {
-    const extraction = vi.fn().mockResolvedValue({
-      commits: [], output: { verdict: "Approved", summary: "Looks good.", findings: [] },
-    });
+    const extraction = vi.fn().mockResolvedValue({ output: { summary: "Clean.", inlineComments: [], replies: [] } });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
     const extractor = createSameSessionReviewExtractor({
       sandbox: { kind: "fake-sandbox" } as never,
@@ -57,13 +51,7 @@ describe("same-session review extraction", () => {
       createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
     });
 
-    await extractor.review({
-      pullRequestNumber: 220,
-      revision,
-      checkoutPath: "/safe/disposable-checkout",
-      model: "reviewer-model",
-      artifactDirectory: "/jobs/review-artifacts/pr-220",
-    });
+    await extractor.review({ ...request, artifactDirectory: "/jobs/review-artifacts/pr-220" });
 
     expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({
       logging: { type: "file", path: "/jobs/review-artifacts/pr-220/review.log", verbose: true },
@@ -73,34 +61,21 @@ describe("same-session review extraction", () => {
     }));
   });
 
-  it("keeps valid repository-relative inline locations", async () => {
-    const extraction = vi.fn().mockResolvedValue({
-      commits: [],
-      output: {
-        verdict: "Changes requested",
-        summary: "A defect was found.",
-        findings: [{
-          summary: "Incorrect boundary",
-          details: "The condition excludes the final record.",
-          location: { path: ".sandcastle/review-automation.ts", line: 96, side: "RIGHT" },
-        }],
-      },
-    });
+  it("rejects malformed structured output after retrying extraction in the same session", async () => {
+    const extraction = vi.fn().mockRejectedValue(new Error("structured output failed"));
+    const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
     const extractor = createSameSessionReviewExtractor({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
-      runAgent: vi.fn().mockResolvedValue({ commits: [], resume: extraction }) as never,
+      runAgent: runAgent as never,
       createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
     });
 
-    await expect(extractor.review({
-      pullRequestNumber: 220,
-      revision,
-      checkoutPath: "/safe/disposable-checkout",
-      model: "reviewer-model",
-    })).resolves.toMatchObject({
-      findings: [{ location: { path: ".sandcastle/review-automation.ts", line: 96, side: "RIGHT" } }],
-    });
+    await expect(extractor.review(request)).rejects.toThrow("structured output failed");
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(extraction).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      output: expect.objectContaining({ maxRetries: 2 }),
+    }));
   });
 
   it("aborts the running reviewer when its deadline expires", async () => {
@@ -116,28 +91,7 @@ describe("same-session review extraction", () => {
       createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
     });
 
-    await expect(extractor.review({
-      pullRequestNumber: 220,
-      revision,
-      checkoutPath: "/safe/disposable-checkout",
-      model: "reviewer-model",
-    })).rejects.toThrow("Reviewer execution timed out");
+    await expect(extractor.review(request)).rejects.toThrow("Reviewer execution timed out");
     expect(signal?.aborted).toBe(true);
-  });
-
-  it("fails closed when the produce pass does not expose a resumable session", async () => {
-    const extractor = createSameSessionReviewExtractor({
-      sandbox: { kind: "fake-sandbox" } as never,
-      hooks: { sandbox: { onSandboxReady: [] } },
-      runAgent: vi.fn().mockResolvedValue({ commits: [] }) as never,
-      createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
-    });
-
-    await expect(extractor.review({
-      pullRequestNumber: 220,
-      revision,
-      checkoutPath: "/safe/disposable-checkout",
-      model: "reviewer-model",
-    })).rejects.toThrow("Reviewer session identity is unavailable");
   });
 });

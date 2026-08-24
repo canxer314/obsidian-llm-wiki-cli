@@ -1,11 +1,13 @@
 import { loadSandboxStartup } from "./sandbox.ts";
 import { createSameSessionReviewExtractor } from "./review-extraction.ts";
 
-const [pullRequestNumber, revision, checkoutPath, model, artifactDirectory] = process.argv.slice(2);
+const [pullRequestNumber, branch, revision, checkoutPath, reviewThreadsJson, model, artifactDirectory] = process.argv.slice(2);
 if (
   pullRequestNumber === undefined ||
+  branch === undefined ||
   revision === undefined ||
   checkoutPath === undefined ||
+  reviewThreadsJson === undefined ||
   model === undefined ||
   artifactDirectory === undefined
 ) {
@@ -20,8 +22,10 @@ const reviewer = createSameSessionReviewExtractor({
 });
 const review = await reviewer.review({
   pullRequestNumber: Number(pullRequestNumber),
+  branch,
   revision,
   checkoutPath,
+  reviewThreads: JSON.parse(reviewThreadsJson),
   model,
   artifactDirectory,
 });
