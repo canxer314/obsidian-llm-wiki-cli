@@ -63,15 +63,19 @@ export function createProcessReviewRunner(options: {
   return {
     async review(request: {
       readonly pullRequestNumber: number;
+      readonly branch: string;
       readonly revision: string;
       readonly checkoutPath: string;
+      readonly reviewThreads: readonly import("./review-automation.ts").ReviewThreadComment[];
       readonly model: string;
       readonly artifactDirectory: string;
     }): Promise<ExtractedReview> {
       const arguments_ = [
         String(request.pullRequestNumber),
+        request.branch,
         request.revision,
         request.checkoutPath,
+        JSON.stringify(request.reviewThreads),
         request.model,
         request.artifactDirectory,
       ];

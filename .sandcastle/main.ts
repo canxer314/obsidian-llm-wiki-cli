@@ -20,6 +20,7 @@ import {
 import { createProcessArchitectureReviewRunner } from "./architecture-review-process-runner.ts";
 import { runReviewAutomationCommand } from "./review-automation.ts";
 import { createProcessReviewRunner } from "./review-process-runner.ts";
+import { createReviewPublisher } from "./review-publisher.ts";
 import {
   createReviewArtifactDirectory,
   removeExpiredReviewArtifacts,
@@ -66,6 +67,10 @@ try {
     }
   };
   const reviewer = createProcessReviewRunner({});
+  const reviewPublisher = createReviewPublisher({
+    sourceRepositoryPath: repositoryPath,
+    gitEnvironment: startup.childEnvironments.git,
+  });
   const updater = createProcessBranchUpdater({
     resolver: createProcessBranchUpdateConflictResolver({ model: startup.models.implementer }),
   });
@@ -161,7 +166,10 @@ try {
   });
   const result = await runAutomationCli(process.argv.slice(2), {
     runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runReviewAutomationCommand({ pullRequestNumber }, {
-      github: automationGithub,
+      github: {
+        ...automationGithub,
+        publishReview: (request) => automationGithub.publishReview(request),
+      },
       checkout: createTargetCheckout({
         sourceRepositoryPath: repositoryPath,
         checkoutRoot: resolve(import.meta.dirname, "jobs"),
@@ -169,21 +177,23 @@ try {
         dependencyEnvironment: startup.childEnvironments.dependencies,
       }),
       reviewer: {
-        review: async ({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath }) => {
+        review: async ({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads }) => {
           const artifactDirectory = await createReviewArtifactDirectory({
             root: artifactRoot,
             jobId,
           });
           return reviewer.review({
             pullRequestNumber: currentPullRequestNumber,
+            branch,
             revision,
             checkoutPath,
+            reviewThreads,
             model: startup.models.reviewer,
             artifactDirectory,
           });
         },
       },
-      publisher: automationGithub,
+      publisher: reviewPublisher,
       lease: {
         acquire: (currentPullRequestNumber) => acquirePullRequestLease({
           root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
@@ -316,7 +326,10 @@ try {
           return;
         }
         await runReviewAutomationCommand({ pullRequestNumber: command.number }, {
-          github: automationGithub,
+          github: {
+            ...automationGithub,
+            publishReview: (request) => automationGithub.publishReview(request),
+          },
           checkout: createTargetCheckout({
             sourceRepositoryPath: repositoryPath,
             checkoutRoot: resolve(import.meta.dirname, "jobs"),
@@ -324,12 +337,12 @@ try {
             dependencyEnvironment: startup.childEnvironments.dependencies,
           }),
           reviewer: {
-            review: async ({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath }) => {
+            review: async ({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads }) => {
               const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId });
-              return reviewer.review({ pullRequestNumber: currentPullRequestNumber, revision, checkoutPath, model: startup.models.reviewer, artifactDirectory });
+              return reviewer.review({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads, model: startup.models.reviewer, artifactDirectory });
             },
           },
-          publisher: automationGithub,
+          publisher: reviewPublisher,
           createJobId: () => jobId,
         });
       },
