@@ -82,15 +82,20 @@ export async function loadSandboxStartup(
     uid: process.getuid?.() ?? 1000,
     gid: process.getgid?.() ?? 1000,
   });
+  const childEnvironments = createChildEnvironments({
+    ...config.environment,
+    ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }),
+    ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
+  });
   return {
     sandbox: createSandboxProvider(config.environment, imageName),
     automationSandbox: createSandboxProvider(
-      createChildEnvironments(config.environment).claude,
+      childEnvironments.claude,
       imageName,
     ),
     environment: config.environment,
     proxyEnvironment: config.proxyEnvironment,
-    childEnvironments: createChildEnvironments(config.environment),
+    childEnvironments,
     models: config.models,
   };
 }

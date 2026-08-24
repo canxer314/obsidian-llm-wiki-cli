@@ -43,7 +43,7 @@ export function createChildEnvironments(environment: Readonly<Record<string, str
   return {
     dependencies: processEnvironment,
     git: processEnvironment,
-    github: { ...transport, ...pick(environment, ["GH_TOKEN"]) },
+    github: { ...transport, ...pick(environment, ["GH_TOKEN", "PATH"]) },
     claude: { ...transport, ...pick(environment, CLAUDE_NAMES) },
   };
 }

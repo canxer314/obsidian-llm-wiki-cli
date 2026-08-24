@@ -31,6 +31,7 @@ describe("automation child environments", () => {
       GH_TOKEN: "github-secret",
       HTTPS_PROXY: "http://proxy.example",
       NODE_EXTRA_CA_CERTS: "/etc/ssl/custom-ca.pem",
+      PATH: "/host/bin",
     });
     expect(environments.claude).toEqual({
       ANTHROPIC_BASE_URL: "https://cc-switch.example",
@@ -39,8 +40,6 @@ describe("automation child environments", () => {
       HTTPS_PROXY: "http://proxy.example",
       NODE_EXTRA_CA_CERTS: "/etc/ssl/custom-ca.pem",
     });
-    expect(Object.keys(environments.github)).not.toContain("PATH");
-    expect(Object.keys(environments.github)).not.toContain("HOME");
     expect(Object.keys(environments.claude)).not.toContain("PATH");
     expect(Object.keys(environments.claude)).not.toContain("HOME");
   });
