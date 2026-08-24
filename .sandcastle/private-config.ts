@@ -121,6 +121,51 @@ async function readPrivateEnvironment(envPath: string): Promise<Record<string, s
   }
 }
 
+function resolveProxyReferences(
+  environment: Readonly<Record<string, string>>,
+  privateEnvironment: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const resolved = { ...environment };
+  for (const name of PROXY_ENVIRONMENT_NAMES) {
+    const configured = environment[name];
+    if (configured === undefined) continue;
+    const source = privateEnvironment[name] === undefined
+      ? "Claude Code user settings"
+      : "Sandcastle private environment";
+    if (configured !== `\${${name}}`) {
+      if (/^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(configured)) {
+        throw new SandcastleConfigError(
+          `${name} reference from ${source} must use the exact \${${name}} syntax`,
+        );
+      }
+      if (configured.includes("${")) {
+        throw new SandcastleConfigError(
+          `${name} reference from ${source} is malformed`,
+        );
+      }
+      continue;
+    }
+    const hostValue = process.env[name];
+    if (hostValue === undefined) {
+      throw new SandcastleConfigError(
+        `${name} reference from ${source} is missing its process environment variable`,
+      );
+    }
+    if (hostValue.length === 0) {
+      throw new SandcastleConfigError(
+        `${name} reference from ${source} has an empty process environment value`,
+      );
+    }
+    if (hostValue.trim().length === 0) {
+      throw new SandcastleConfigError(
+        `${name} reference from ${source} has a whitespace-only process environment value`,
+      );
+    }
+    resolved[name] = hostValue;
+  }
+  return resolved;
+}
+
 function requireConfiguration(environment: Readonly<Record<string, string>>): void {
   const missing: string[] = [];
   if (environment.ANTHROPIC_BASE_URL === undefined) missing.push("ANTHROPIC_BASE_URL");
@@ -155,7 +200,10 @@ export async function loadSandcastleConfig(
     readClaudeEnvironment(paths.settingsPath),
     readPrivateEnvironment(paths.envPath),
   ]);
-  const merged = { ...claudeEnvironment, ...privateEnvironment };
+  const merged = resolveProxyReferences(
+    { ...claudeEnvironment, ...privateEnvironment },
+    privateEnvironment,
+  );
   requireConfiguration(merged);
   const models = resolveModels(merged);
   const environment = Object.fromEntries(

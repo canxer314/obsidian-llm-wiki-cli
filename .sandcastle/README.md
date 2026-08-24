@@ -41,10 +41,15 @@ $EDITOR ~/.config/sandcastle/env
 `.env.example` lists the whitelisted keys. The startup adapter reads only
 routing, authentication, model-mapping, and proxy environment variables from
 `~/.claude/settings.json`; non-empty whitelisted values in the private file
-override those settings. Startup fails before creating an Agent Session if the
-file is missing, is not mode `0600`, or required routing/authentication values
-are unavailable. Startup logs contain counts only, never routes, model names,
-proxy addresses, or secrets.
+override those settings. A proxy key can use an exact same-name reference such
+as `HTTPS_PROXY=${HTTPS_PROXY}`. Each Sandcastle startup resolves it once from
+the launching Node.js process environment; that same-cased host variable must
+exist and contain non-whitespace text. Uppercase and lowercase proxy keys are
+independent, and the resolved value is passed through without trimming or
+further expansion. Startup fails before creating an Agent Session if the file
+is missing, is not mode `0600`, required routing/authentication values are
+unavailable, or a proxy reference is invalid. Startup logs contain counts only,
+never routes, model names, proxy addresses, or secrets.
 
 The default model is the Claude Code `opus` alias. `SANDCASTLE_MODEL` changes
 the local default, while `SANDCASTLE_PLANNER_MODEL`,
