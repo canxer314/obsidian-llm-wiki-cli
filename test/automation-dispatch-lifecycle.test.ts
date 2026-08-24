@@ -9,6 +9,7 @@ const scheduler = {
   track: async (_identity: string, action: () => Promise<void>) => action(),
 };
 const promotion = { scan: async () => ({ status: "scanned" as const, promoted: [], refused: [] }) };
+const readiness = { verifyGithubAgentAuthentication: async () => {} };
 
 describe("Automation Command dispatch lifecycle", () => {
   it("fails closed when required labels are unavailable", async () => {
@@ -16,6 +17,7 @@ describe("Automation Command dispatch lifecycle", () => {
     await expect(dispatchAutomationCommands({}, {
       scheduler,
       promotion,
+      readiness,
       github: { verifyLabels: async () => { throw new Error("Missing required Automation Command label: agent:review"); }, listCommands },
       run: vi.fn(),
     })).rejects.toThrow("Missing required Automation Command label: agent:review");
@@ -29,6 +31,7 @@ describe("Automation Command dispatch lifecycle", () => {
     await dispatchAutomationCommands({}, {
       scheduler,
       promotion,
+      readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => commands },
       run,
     });

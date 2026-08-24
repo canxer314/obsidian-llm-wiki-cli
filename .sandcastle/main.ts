@@ -11,6 +11,11 @@ import {
 } from "./docker-image.ts";
 import { createAutomationGithubPort, createAutomationDispatchGithubPort } from "./automation-github.ts";
 import { dispatchAutomationCommands } from "./automation-dispatch.ts";
+import {
+  githubAgentReadiness,
+  githubAgentReadinessRequiredFor,
+  requireGithubAgentReadiness,
+} from "./github-readiness.ts";
 import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
@@ -181,7 +186,17 @@ try {
     createJobId: () => jobId,
   });
   const result = await runAutomationCli(process.argv.slice(2), {
-    preflight: () => requireSandcastleImage({ image: startup.imageName }),
+    preflight: async (operation) => {
+      await requireSandcastleImage({ image: startup.imageName });
+      if (githubAgentReadinessRequiredFor(operation)) {
+        await requireGithubAgentReadiness({
+          image: startup.imageName,
+          uid: startup.uid,
+          gid: startup.gid,
+          environment: startup.childEnvironments.githubAgent,
+        });
+      }
+    },
     buildImage: async () => {
       await buildSandcastleImage({
         repositoryPath: startup.repositoryPath,
@@ -305,6 +320,14 @@ try {
     }, {
       scheduler,
       github: dispatchGithub,
+      readiness: {
+        verifyGithubAgentAuthentication: () => requireGithubAgentReadiness({
+          image: startup.imageName,
+          uid: startup.uid,
+          gid: startup.gid,
+          environment: startup.childEnvironments.githubAgent,
+        }),
+      },
       promotion: {
         scan: () => runQueuePromotionScan({ github: dispatchGithub }),
       },
@@ -394,6 +417,12 @@ try {
     }),
     inspect: async () => ({
       imageReadiness: await sandcastleImageReadiness({ image: startup.imageName }),
+      githubAgentReadiness: await githubAgentReadiness({
+        image: startup.imageName,
+        uid: startup.uid,
+        gid: startup.gid,
+        environment: startup.childEnvironments.githubAgent,
+      }),
       ...await inspectAutomationCommands({ github: dispatchGithub, scheduler }),
     }),
     runImplement: (issueNumber) => runIssueImplementation(issueNumber),

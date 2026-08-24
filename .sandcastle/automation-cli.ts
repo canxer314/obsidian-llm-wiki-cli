@@ -15,7 +15,7 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
     readonly runSplit: (issueNumber: number) => Promise<TSplit>;
     readonly runUpdate: (pullRequestNumber: number) => Promise<TUpdate>;
     readonly dispatch?: (concurrency?: number) => Promise<TDispatch>;
-    readonly preflight?: () => Promise<void>;
+    readonly preflight?: (operation: string) => Promise<void>;
     readonly inspect?: () => Promise<TInspect>;
     readonly setupLabels?: () => Promise<TSetup>;
     readonly buildImage?: () => Promise<TBuildImage>;
@@ -28,7 +28,7 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
   }
   if (argv[0] === "architecture-review") {
     if (argv.length !== 1 || dependencies.architectureReview === undefined) throw new AutomationCliError("Expected: architecture-review");
-    await dependencies.preflight?.();
+    await dependencies.preflight?.("architecture-review");
     return dependencies.architectureReview();
   }
   if (argv[0] === "setup-labels") {
@@ -45,13 +45,13 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
       throw new AutomationCliError("Expected: dispatch [--concurrency <positive-number>]");
     }
     if (option === undefined) {
-      await dependencies.preflight?.();
+      await dependencies.preflight?.("dispatch");
       return dependencies.dispatch();
     }
     if (value === undefined || !/^[1-9]\d*$/u.test(value) || !Number.isSafeInteger(Number(value))) {
       throw new AutomationCliError("dispatch concurrency requires a positive number");
     }
-    await dependencies.preflight?.();
+    await dependencies.preflight?.("dispatch");
     return dependencies.dispatch(Number(value));
   }
   const [command, operation, number, ...remaining] = argv;
@@ -69,7 +69,7 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
   if (!/^[1-9]\d*$/u.test(number) || !Number.isSafeInteger(Number(number))) {
     throw new AutomationCliError(`${operation} requires a positive ${operation === "implement" || operation === "implement-prd" || operation === "split" ? "Issue" : "Pull Request"} number`);
   }
-  await dependencies.preflight?.();
+  await dependencies.preflight?.(operation);
   if (operation === "review") return dependencies.runReview(Number(number));
   if (operation === "feedback") return dependencies.runFeedback(Number(number));
   if (operation === "implement") return dependencies.runImplement(Number(number));

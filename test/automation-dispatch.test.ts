@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { inspectAutomationCommands } from "../.sandcastle/automation-inspector.js";
 import { dispatchAutomationCommands } from "../.sandcastle/automation-dispatch.js";
+import { GithubAgentReadinessError } from "../.sandcastle/github-readiness.js";
 import { commandEligibility, commandPriority, compareCommands, type AutomationOperation } from "../.sandcastle/automation-command.js";
 
 const sha = "a".repeat(40);
@@ -34,6 +35,7 @@ function command(overrides: Partial<{
 }
 
 const promotion = { scan: async () => ({ status: "scanned" as const, promoted: [], refused: [] }) };
+const readiness = { verifyGithubAgentAuthentication: async () => {} };
 
 describe("Automation Command dispatch", () => {
   it("selects one bounded deterministic compatible frontier and waits for it", async () => {
@@ -51,6 +53,7 @@ describe("Automation Command dispatch", () => {
     const round = dispatchAutomationCommands({ concurrency: 2 }, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
+      readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => [first, second, conflicting] },
       run,
     });
@@ -79,6 +82,7 @@ describe("Automation Command dispatch", () => {
     const result = await dispatchAutomationCommands({ concurrency: 2 }, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
+      readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => commands },
       run,
     });
@@ -130,6 +134,7 @@ describe("Automation Command dispatch", () => {
     const result = await dispatchAutomationCommands({}, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
+      readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => [splitPrd, implementPrd] },
       run,
     });
@@ -145,6 +150,7 @@ describe("Automation Command dispatch", () => {
     const result = await dispatchAutomationCommands({ concurrency: 2 }, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
+      readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => [implementIssue, implementPrd] },
       run,
     });
@@ -167,6 +173,7 @@ describe("Automation Command dispatch", () => {
     const round = dispatchAutomationCommands({ concurrency: 2 }, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
+      readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => [failing, slow] },
       run,
     });
@@ -184,13 +191,16 @@ describe("Automation Command dispatch", () => {
 
   it("does no discovery while the host scheduler lock is unavailable", async () => {
     const listCommands = vi.fn();
+    const verifyGithubAgentAuthentication = vi.fn();
     await expect(dispatchAutomationCommands({}, {
       scheduler: { acquire: async () => undefined, prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
+      readiness: { verifyGithubAgentAuthentication },
       github: { verifyLabels: async () => {}, listCommands },
       run: vi.fn(),
     })).resolves.toEqual({ status: "locked" });
     expect(listCommands).not.toHaveBeenCalled();
+    expect(verifyGithubAgentAuthentication).not.toHaveBeenCalled();
   });
 
   it("fails closed before execution when labels are inconsistent or blocked", async () => {
@@ -200,6 +210,7 @@ describe("Automation Command dispatch", () => {
     await dispatchAutomationCommands({}, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
+      readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => [inconsistent, blocked] },
       run,
     });
@@ -215,10 +226,11 @@ describe("Automation Command dispatch", () => {
         listCommands: async () => { order.push("discover"); return []; },
       },
       promotion: { scan: async () => { order.push("promote"); } },
+      readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
       run: vi.fn(),
     });
     expect(result).toEqual({ status: "dispatched", selected: [] });
-    expect(order).toEqual(["promote", "discover"]);
+    expect(order).toEqual(["probe", "promote", "discover"]);
   });
 
   it("fails the round closed without discovery or execution when promotion cannot read dependency state", async () => {
@@ -228,10 +240,57 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       github: { verifyLabels: async () => {}, listCommands },
       promotion: { scan: async () => { throw new Error("GitHub dependency state is unavailable"); } },
+      readiness,
       run,
     })).rejects.toThrow("GitHub dependency state is unavailable");
     expect(listCommands).not.toHaveBeenCalled();
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before any acquisition, promotion, or GitHub mutation when container authentication readiness fails", async () => {
+    const events: string[] = [];
+    const listCommands = vi.fn(async () => { events.push("discover"); return []; });
+    const verifyLabels = vi.fn(async () => { events.push("labels"); });
+    const scan = vi.fn(async () => { events.push("promote"); });
+    const prepare = vi.fn(async () => { events.push("prepare"); });
+    const run = vi.fn(async () => { events.push("run"); });
+    const readinessError = new GithubAgentReadinessError("invalid");
+
+    await expect(dispatchAutomationCommands({}, {
+      scheduler: {
+        acquire: async () => ({ release: async () => {} }),
+        prepare,
+        track: async (_identity, action) => action(),
+      },
+      github: { verifyLabels, listCommands },
+      promotion: { scan },
+      readiness: { verifyGithubAgentAuthentication: async () => { events.push("probe"); throw readinessError; } },
+      run,
+    })).rejects.toBe(readinessError);
+
+    // The probe is the first step after the lock: no promotion, label
+    // verification, discovery, or execution happens after it fails.
+    expect(events).toEqual(["probe"]);
+    expect(listCommands).not.toHaveBeenCalled();
+    expect(verifyLabels).not.toHaveBeenCalled();
+    expect(scan).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("runs the container GitHub authentication probe before promotion and discovery", async () => {
+    const order: string[] = [];
+    await expect(dispatchAutomationCommands({}, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      github: {
+        verifyLabels: async () => {},
+        listCommands: async () => { order.push("discover"); return []; },
+      },
+      promotion: { scan: async () => { order.push("promote"); } },
+      readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
+      run: vi.fn(),
+    })).resolves.toEqual({ status: "dispatched", selected: [] });
+    expect(order).toEqual(["probe", "promote", "discover"]);
   });
 });
 

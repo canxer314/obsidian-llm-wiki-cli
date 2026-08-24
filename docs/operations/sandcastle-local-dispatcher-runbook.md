@@ -47,6 +47,25 @@ npm run sandcastle -- inspect
 
 A `"missing"` result means no Automation Command may run. Every explicit execution, scheduled dispatch round, and architecture review fails before command acquisition until `build-image` succeeds. This failure does not consume a trigger label, add `agent:in-progress`, or create Blocked Automation. Do not create or label a canary and do not enable either timer until inspection reports `ready`.
 
+## Agent-container GitHub readiness
+
+GitHub-capable Agent Sessions authenticate through `GH_TOKEN` read from the container environment only (#267). Before a scheduled dispatch round acquires any Automation Work Item, and before every explicit GitHub-capable operation (`run review`, `run implement`, `run implement-prd`, `run split`, `run feedback`), the Dispatcher runs a read-only `gh auth status` probe inside the exact content-addressed Agent image with the exact GitHub-capable Agent environment (transport and Claude/API allowlist plus `GH_TOKEN`). The probe never mutates GitHub, and its raw output is never logged, retained, or written to GitHub diagnostics.
+
+Failure classifications:
+
+- `missing` — `GH_TOKEN` is absent from the private environment file. Add it there, then re-run the operation or the next dispatch round.
+- `invalid` — the configured `GH_TOKEN` does not authenticate. Refresh it in the private environment file.
+- `unavailable` — the probe itself could not run (missing image, missing `gh` inside the image, container network failure, Docker unavailable). Diagnose through `inspect` and the dispatch-round log.
+
+A missing or invalid result fails the round or explicit operation closed before Work Item acquisition: no trigger label is removed, no `agent:in-progress` or `agent:blocked` label is added, and no diagnostic comment is written. The Automation Work Item is left untouched and the next round or retry picks it up after the credential is restored. Verify readiness through the read-only inspection command, which reports the probe result alongside image readiness:
+
+```bash
+npm run sandcastle -- inspect
+# JSON output must contain: "imageReadiness":"ready" and "githubAgentReadiness":"ready"
+```
+
+GitHub-independent operations (`run update-branch`, `architecture-review`, `setup-labels`, `inspect`) never run the probe and never receive the GitHub-capable environment.
+
 ## Label setup
 
 Labels are the only command surface. Initialize them once, idempotently:
@@ -127,6 +146,8 @@ npm run sandcastle -- architecture-review                 # manual architecture 
 npm run sandcastle -- dispatch [--concurrency <1-8>]      # one bounded round (default 2; env: SANDCASTLE_DISPATCH_CONCURRENCY)
 ```
 
+GitHub-capable operations (`run review`, `run implement`, `run implement-prd`, `run split`, `run feedback`) run the Agent-container GitHub readiness probe as part of preflight, before any label or diagnostic mutation. `run update-branch` and `architecture-review` never do.
+
 PRD implementation holds a mandatory cross-process issue lease for the complete child operation. Its implementer performs the upstream-compatible ordinary push to the accumulating `sandcastle/prd-<n>` branch; it does not force-push. The controlled publisher remains limited to feedback implementation, where an explicit `--force-with-lease` protects an existing Pull Request branch. Moving normal PRD publication into that publisher would add branch/PR recovery state without improving the lease guarantee, so it is intentionally not used.
 
 ## Blocked Automation diagnosis
@@ -192,8 +213,8 @@ The old and new write paths must never be active at the same time. Before enabli
 
 1. Stop the retired Sandcastle watch process and verify no old job is active (no watch process, no running Docker job containers).
 2. Discard Legacy Run State — never adopt, resume, or reconcile it. Cleanup is limited to the exact recovery path above.
-3. Prepare the protected private environment file (mode `0600`), run `npm run sandcastle -- build-image`, then run `npm run sandcastle -- inspect` and require `"imageReadiness":"ready"`.
-4. Run `setup-labels`, then run `inspect` again and confirm a clean frontier with image readiness still `ready`.
+3. Prepare the protected private environment file (mode `0600`), run `npm run sandcastle -- build-image`, then run `npm run sandcastle -- inspect` and require `"imageReadiness":"ready"` and `"githubAgentReadiness":"ready"`.
+4. Run `setup-labels`, then run `inspect` again and confirm a clean frontier with image and Agent-container GitHub readiness still `ready`.
 5. Run the canary sequence above with timers disabled. If repository image inputs change at any point, rebuild and re-verify before continuing.
 6. Only after canaries 1-7 pass and image readiness is still `ready`: `systemctl --user enable --now sandcastle-dispatch.timer`.
 7. Only after canary 8 passes and image readiness is still `ready`: `systemctl --user enable --now sandcastle-architecture-review.timer`.

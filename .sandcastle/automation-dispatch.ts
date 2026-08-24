@@ -18,6 +18,12 @@ export interface AutomationDispatchPorts {
   readonly promotion: {
     scan(): Promise<QueuePromotionResult>;
   };
+  readonly readiness: {
+    // Read-only GitHub authentication probe inside the exact Agent image and
+    // GitHub-capable environment; must fail closed before any acquisition,
+    // promotion, label, or diagnostic mutation.
+    verifyGithubAgentAuthentication(): Promise<void>;
+  };
   readonly run: (command: AutomationCommand) => Promise<void>;
 }
 
@@ -28,6 +34,7 @@ export async function dispatchAutomationCommands(
   const lock = await ports.scheduler.acquire();
   if (lock === undefined) return { status: "locked" };
   try {
+    await ports.readiness.verifyGithubAgentAuthentication();
     await ports.scheduler.prepare();
     await ports.github.verifyLabels();
     await ports.promotion.scan();
