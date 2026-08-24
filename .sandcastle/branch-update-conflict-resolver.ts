@@ -57,7 +57,7 @@ export function createBranchUpdateConflictResolverSession(options: {
         sandbox: options.sandbox,
         cwd: request.checkoutPath,
         hooks: options.hooks,
-        branchStrategy: { type: "head" },
+        branchStrategy: { type: "branch", branch: request.branch },
         maxIterations: 1,
         name: `branch-update-pr-${request.pullRequestNumber}`,
         prompt: resolutionPrompt(request),

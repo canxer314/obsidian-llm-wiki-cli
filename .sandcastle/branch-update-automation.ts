@@ -1,9 +1,5 @@
 import { redact as redactFailureSummary } from "./redaction.ts";
 
-// The updater's outcome mirrors the upstream update-branch baseline: an
-// already-up-to-date branch short-circuits without merging or pushing, a clean
-// merge publishes immediately, and an agent-resolved conflict additionally
-// carries the comment the resolution agent reported.
 export type BranchUpdateResult =
   | { readonly status: "up-to-date" }
   | { readonly status: "updated"; readonly revision: string; readonly comment?: string };

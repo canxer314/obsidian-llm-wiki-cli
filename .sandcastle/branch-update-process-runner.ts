@@ -50,8 +50,6 @@ export function createProcessBranchUpdater(options: {
       const baseSha = await revisionOf(`origin/${request.baseBranch}`);
       const mergeBase = (await git(["merge-base", "HEAD", `origin/${request.baseBranch}`])).stdout.trim();
 
-      // Upstream short-circuit: the base is already fully contained in the
-      // branch, so there is nothing to merge or push.
       if (mergeBase === baseSha) return { status: "up-to-date" };
 
       try {
@@ -72,8 +70,6 @@ export function createProcessBranchUpdater(options: {
           checkoutPath: request.checkoutPath,
           conflicts,
         });
-        // Fail closed, as the upstream baseline does: the agent must have
-        // committed, and no conflicted path may remain before the lease push.
         const postSha = await revisionOf("HEAD");
         if (postSha === preMergeSha) {
           throw new Error("Conflict-resolution agent produced no commits");
