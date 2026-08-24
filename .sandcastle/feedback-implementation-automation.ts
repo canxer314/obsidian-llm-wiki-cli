@@ -6,6 +6,7 @@ export interface FeedbackImplementationPorts {
     readPullRequest(pullRequestNumber: number): Promise<ReviewAutomationPullRequest & { readonly headRefName: string }>;
     addPullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     removePullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
+    addRefusalDiagnostic?(pullRequestNumber: number, reason: string): Promise<void>;
     addFeedbackBlockedDiagnostic?(
       pullRequestNumber: number,
       diagnostic: { readonly reason: "feedback-execution"; readonly jobId: string; readonly summary: string },
@@ -65,8 +66,16 @@ export async function runFeedbackImplementationAutomationCommand(
     return { status: "refused", reason: `Pull Request #${request.pullRequestNumber} is already being processed` };
   }
   const pullRequest = await ports.github.readPullRequest(request.pullRequestNumber);
+  // Business preflight refusal (#219 story 17): remove the trigger and
+  // explain on the Automation Work Item, without agent:blocked, so an
+  // inapplicable request (e.g. a fork Pull Request) does not re-refuse
+  // every round.
   const reason = refusal(pullRequest);
-  if (reason !== undefined) return { status: "refused", reason };
+  if (reason !== undefined) {
+    await ports.github.removePullRequestLabel(pullRequest.number, "agent:implement");
+    await ports.github.addRefusalDiagnostic?.(pullRequest.number, reason);
+    return { status: "refused", reason };
+  }
 
   const lease = await ports.lease.acquire(pullRequest.number);
   if (lease === undefined) {
@@ -76,8 +85,15 @@ export async function runFeedbackImplementationAutomationCommand(
   try {
     const current = await ports.github.readPullRequest(pullRequest.number);
     const currentReason = refusal(current);
-    if (currentReason !== undefined || current.headSha !== pullRequest.headSha) {
-      return { status: "refused", reason: currentReason ?? `Pull Request #${pullRequest.number} head changed while feedback implementation was being acquired` };
+    if (currentReason !== undefined) {
+      await ports.github.removePullRequestLabel(pullRequest.number, "agent:implement");
+      await ports.github.addRefusalDiagnostic?.(pullRequest.number, currentReason);
+      return { status: "refused", reason: currentReason };
+    }
+    if (current.headSha !== pullRequest.headSha) {
+      // A moved head is a race, not a business refusal: keep the trigger so
+      // the next dispatch round implements feedback on the new head.
+      return { status: "refused", reason: `Pull Request #${pullRequest.number} head changed while feedback implementation was being acquired` };
     }
     await ports.github.addPullRequestLabel(pullRequest.number, "agent:in-progress");
     try {

@@ -112,7 +112,7 @@ describe("queued Issue promotion", () => {
     expect(scanned.github.removeIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses to promote a queued sub-Issue and marks it blocked instead", async () => {
+  it("refuses to promote a queued sub-Issue by clearing the queue and explaining, without blocking it", async () => {
     const scanned = ports({
       queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
       state: { labels: ["agent:queued"], parentNumber: 12, blockers: [] },
@@ -120,9 +120,21 @@ describe("queued Issue promotion", () => {
 
     await expect(runQueuePromotionScan(scanned)).resolves.toEqual({ status: "scanned", promoted: [], refused: [5] });
     expect(scanned.github.removeIssueLabel).toHaveBeenCalledWith(5, "agent:queued");
-    expect(scanned.github.addIssueLabel).toHaveBeenCalledWith(5, "agent:blocked");
-    expect(scanned.github.addIssueLabel).not.toHaveBeenCalledWith(5, "agent:implement");
+    expect(scanned.github.addIssueLabel).not.toHaveBeenCalled();
     expect(scanned.github.addSubIssueRefusalDiagnostic).toHaveBeenCalledWith(5, 12);
+  });
+
+  it("comments a sub-Issue refusal before clearing the queue so an interrupted refusal stays visible", async () => {
+    const order: string[] = [];
+    const scanned = ports({
+      queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
+      state: { labels: ["agent:queued"], parentNumber: 12, blockers: [] },
+    });
+    scanned.github.addSubIssueRefusalDiagnostic.mockImplementation(async () => { order.push("comment"); });
+    scanned.github.removeIssueLabel.mockImplementation(async () => { order.push("remove-queued"); });
+
+    await runQueuePromotionScan(scanned);
+    expect(order).toEqual(["comment", "remove-queued"]);
   });
 
   it("does not request duplicate work for an already-promoted Issue on a repeated scan", async () => {

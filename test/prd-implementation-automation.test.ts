@@ -228,7 +228,7 @@ describe("PRD implementation automation command", () => {
     expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses and blocks a PRD whose children are all closed", async () => {
+  it("refuses a PRD whose children are all closed without blocking it", async () => {
     const ports = portsFor({
       github: { readPrd: vi.fn().mockResolvedValue(prd({ subIssueCount: 2 })) },
     });
@@ -241,8 +241,7 @@ describe("PRD implementation automation command", () => {
 
     expect(ports.implementer.implement).not.toHaveBeenCalled();
     expect(ports.github.removeIssueLabel).toHaveBeenCalledWith(226, "agent:implement");
-    expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
-    expect(ports.github.addIssueLabel).not.toHaveBeenCalledWith(226, "agent:in-progress");
+    expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
   it("refuses an Issue without sub-issues as not a PRD", async () => {
@@ -260,7 +259,7 @@ describe("PRD implementation automation command", () => {
     expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses and blocks a nested PRD", async () => {
+  it("refuses a nested PRD without blocking it", async () => {
     const ports = portsFor({
       github: { readPrd: vi.fn().mockResolvedValue(prd({ parentNumber: 219 })) },
     });
@@ -271,10 +270,10 @@ describe("PRD implementation automation command", () => {
     });
 
     expect(ports.github.listChildren).not.toHaveBeenCalled();
-    expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
+    expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses and blocks a PRD whose child has its own sub-issues", async () => {
+  it("refuses a PRD whose child has its own sub-issues without blocking it", async () => {
     const ports = portsFor();
     ports.github.listChildren.mockResolvedValue([child(301, { subIssueCount: 1 }), child(302)]);
 
@@ -284,7 +283,7 @@ describe("PRD implementation automation command", () => {
     });
 
     expect(ports.implementer.implement).not.toHaveBeenCalled();
-    expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
+    expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
   it("blocks execution failures without requesting a continuation", async () => {

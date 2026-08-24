@@ -12,6 +12,7 @@ import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { createTargetCheckout, removeExpiredFailureCheckouts } from "./target-checkout.ts";
 import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
 import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
+import { createProcessBranchUpdateConflictResolver } from "./branch-update-conflict-process-runner.ts";
 import {
   ARCHITECTURE_REVIEW_IDENTITY,
   runArchitectureReviewAutomationCommand,
@@ -75,7 +76,10 @@ try {
     }
   };
   const reviewer = createProcessReviewRunner({});
-  const updater = createProcessBranchUpdater({ environment: startup.childEnvironments.git });
+  const updater = createProcessBranchUpdater({
+    environment: startup.childEnvironments.git,
+    resolver: createProcessBranchUpdateConflictResolver({ model: startup.models.implementer }),
+  });
   const architectureReviewer = createProcessArchitectureReviewRunner({});
   const implementer = createProcessImplementer({
     plannerModel: startup.models.planner,
@@ -87,6 +91,85 @@ try {
   });
   const feedbackImplementer = createProcessFeedbackImplementer({ model: startup.models.implementer });
   const prdSplitter = createProcessPrdSplitter({ model: startup.models.planner });
+  const runIssueImplementation = (issueNumber: number) => runImplementationAutomationCommand({ issueNumber }, {
+    github: {
+      readIssue: (currentIssueNumber) => automationGithub.readIssue(currentIssueNumber),
+      findReusableImplementation: (request) => {
+        const findReusableImplementation = automationGithub.findReusableImplementation;
+        if (findReusableImplementation === undefined) {
+          throw new Error("Implementation Pull Request lookup is unavailable");
+        }
+        return findReusableImplementation(request);
+      },
+      publishExistingImplementation: (request) => {
+        const publishExistingImplementation = automationGithub.publishExistingImplementation;
+        if (publishExistingImplementation === undefined) {
+          throw new Error("Implementation Pull Request publication is unavailable");
+        }
+        return publishExistingImplementation(request);
+      },
+      addIssueLabel: (currentIssueNumber, label) => automationGithub.addIssueLabel(currentIssueNumber, label),
+      removeIssueLabel: (currentIssueNumber, label) => automationGithub.removeIssueLabel(currentIssueNumber, label),
+      addRefusalDiagnostic: (currentIssueNumber, reason) => {
+        const addRefusalDiagnostic = automationGithub.addRefusalDiagnostic;
+        return addRefusalDiagnostic === undefined
+          ? Promise.resolve()
+          : addRefusalDiagnostic(currentIssueNumber, reason);
+      },
+      addImplementationBlockedDiagnostic: (currentIssueNumber, diagnostic) => {
+        const addImplementationBlockedDiagnostic = automationGithub.addImplementationBlockedDiagnostic;
+        return addImplementationBlockedDiagnostic === undefined
+          ? Promise.resolve()
+          : addImplementationBlockedDiagnostic(currentIssueNumber, diagnostic);
+      },
+    },
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `implementation-${jobId}`),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    implementer,
+    lease: {
+      acquire: (currentIssueNumber) => acquireImplementationLease({
+        root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
+        issueNumber: currentIssueNumber,
+      }),
+    },
+    createJobId: () => jobId,
+  });
+  const runPrdImplementation = (issueNumber: number) => runPrdImplementationAutomationCommand({ issueNumber }, {
+    github: automationGithub,
+    pullRequests: automationGithub,
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `prd-implementation-${jobId}`),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    implementer: prdImplementer,
+    lease: {
+      acquire: (currentIssueNumber) => acquireImplementationLease({
+        root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
+        issueNumber: currentIssueNumber,
+      }),
+    },
+    createJobId: () => jobId,
+  });
+  const runPrdSplit = (issueNumber: number) => runPrdSplitAutomationCommand({ issueNumber }, {
+    github: automationGithub,
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    splitter: prdSplitter,
+    publisher: automationGithub,
+    createJobId: () => jobId,
+  });
   const result = await runAutomationCli(process.argv.slice(2), {
     runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runReviewAutomationCommand({ pullRequestNumber }, {
       github: automationGithub,
@@ -243,6 +326,18 @@ try {
           });
           return;
         }
+        if (command.operation === "implement-issue") {
+          await runIssueImplementation(command.number);
+          return;
+        }
+        if (command.operation === "implement-prd") {
+          await runPrdImplementation(command.number);
+          return;
+        }
+        if (command.operation === "split-prd") {
+          await runPrdSplit(command.number);
+          return;
+        }
         await runReviewAutomationCommand({ pullRequestNumber: command.number }, {
           github: automationGithub,
           checkout: createTargetCheckout({
@@ -269,85 +364,9 @@ try {
       },
     }),
     inspect: () => inspectAutomationCommands({ github: dispatchGithub, scheduler }),
-    runImplement: (issueNumber) => runImplementationAutomationCommand({ issueNumber }, {
-      github: {
-        readIssue: (currentIssueNumber) => automationGithub.readIssue(currentIssueNumber),
-        findReusableImplementation: (request) => {
-          const findReusableImplementation = automationGithub.findReusableImplementation;
-          if (findReusableImplementation === undefined) {
-            throw new Error("Implementation Pull Request lookup is unavailable");
-          }
-          return findReusableImplementation(request);
-        },
-        publishExistingImplementation: (request) => {
-          const publishExistingImplementation = automationGithub.publishExistingImplementation;
-          if (publishExistingImplementation === undefined) {
-            throw new Error("Implementation Pull Request publication is unavailable");
-          }
-          return publishExistingImplementation(request);
-        },
-        addIssueLabel: (currentIssueNumber, label) => automationGithub.addIssueLabel(currentIssueNumber, label),
-        removeIssueLabel: (currentIssueNumber, label) => automationGithub.removeIssueLabel(currentIssueNumber, label),
-        addRefusalDiagnostic: (currentIssueNumber, reason) => {
-          const addRefusalDiagnostic = automationGithub.addRefusalDiagnostic;
-          return addRefusalDiagnostic === undefined
-            ? Promise.resolve()
-            : addRefusalDiagnostic(currentIssueNumber, reason);
-        },
-        addImplementationBlockedDiagnostic: (currentIssueNumber, diagnostic) => {
-          const addImplementationBlockedDiagnostic = automationGithub.addImplementationBlockedDiagnostic;
-          return addImplementationBlockedDiagnostic === undefined
-            ? Promise.resolve()
-            : addImplementationBlockedDiagnostic(currentIssueNumber, diagnostic);
-        },
-      },
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        createJobDirectory: () => resolve(import.meta.dirname, "jobs", `implementation-${jobId}`),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      implementer,
-      lease: {
-        acquire: (currentIssueNumber) => acquireImplementationLease({
-          root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
-          issueNumber: currentIssueNumber,
-        }),
-      },
-      createJobId: () => jobId,
-    }),
-    runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => runPrdImplementationAutomationCommand({ issueNumber }, {
-      github: automationGithub,
-      pullRequests: automationGithub,
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        createJobDirectory: () => resolve(import.meta.dirname, "jobs", `prd-implementation-${jobId}`),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      implementer: prdImplementer,
-      lease: {
-        acquire: (currentIssueNumber) => acquireImplementationLease({
-          root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
-          issueNumber: currentIssueNumber,
-        }),
-      },
-      createJobId: () => jobId,
-    })),
-    runSplit: (issueNumber) => runPrdSplitAutomationCommand({ issueNumber }, {
-      github: automationGithub,
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      splitter: prdSplitter,
-      publisher: automationGithub,
-      createJobId: () => jobId,
-    }),
+    runImplement: (issueNumber) => runIssueImplementation(issueNumber),
+    runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => runPrdImplementation(issueNumber)),
+    runSplit: (issueNumber) => runPrdSplit(issueNumber),
   });
   console.log(JSON.stringify(result));
 } catch (error) {

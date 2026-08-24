@@ -1,5 +1,9 @@
 import { redact as redactFailureSummary } from "./redaction.ts";
 
+export type BranchUpdateResult =
+  | { readonly status: "up-to-date" }
+  | { readonly status: "updated"; readonly revision: string; readonly comment?: string };
+
 export interface BranchUpdatePullRequest {
   readonly number: number;
   readonly state: string;
@@ -17,6 +21,8 @@ export interface BranchUpdateAutomationPorts {
     readPullRequest(pullRequestNumber: number): Promise<BranchUpdatePullRequest>;
     addPullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     removePullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
+    addRefusalDiagnostic?(pullRequestNumber: number, reason: string): Promise<void>;
+    addBranchUpdateComment?(pullRequestNumber: number, body: string): Promise<void>;
     addBranchUpdateBlockedDiagnostic?(
       pullRequestNumber: number,
       diagnostic: {
@@ -39,7 +45,7 @@ export interface BranchUpdateAutomationPorts {
       readonly baseBranch: string;
       readonly revision: string;
       readonly checkoutPath: string;
-    }): Promise<{ readonly revision: string }>;
+    }): Promise<BranchUpdateResult>;
   };
   readonly lease: {
     acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> | void } | undefined>;
@@ -49,6 +55,7 @@ export interface BranchUpdateAutomationPorts {
 
 export type BranchUpdateAutomationResult =
   | { readonly status: "updated"; readonly revision: string }
+  | { readonly status: "up-to-date" }
   | { readonly status: "refused"; readonly reason: string }
   | { readonly status: "blocked"; readonly reason: "branch-update-execution"; readonly jobId: string };
 
@@ -90,8 +97,16 @@ export async function runBranchUpdateAutomationCommand(
   }
   activePullRequestNumbers.add(pullRequest.number);
   try {
+    // Business preflight refusal (#219 story 17): remove the trigger and
+    // explain on the Automation Work Item, without agent:blocked, so an
+    // inapplicable request (e.g. a fork Pull Request) does not re-refuse
+    // every round.
     const reason = refusal(pullRequest);
-    if (reason !== undefined) return { status: "refused", reason };
+    if (reason !== undefined) {
+      await ports.github.removePullRequestLabel(pullRequest.number, "agent:update-branch");
+      await ports.github.addRefusalDiagnostic?.(pullRequest.number, reason);
+      return { status: "refused", reason };
+    }
 
     await ports.github.addPullRequestLabel(pullRequest.number, "agent:in-progress");
     try {
@@ -118,8 +133,18 @@ export async function runBranchUpdateAutomationCommand(
         revision: pullRequest.headSha,
         checkoutPath,
       }));
+      if (result.status === "up-to-date") {
+        await ports.github.addBranchUpdateComment?.(
+          pullRequest.number,
+          `\`agent:update-branch\`: branch is already up to date with \`origin/${pullRequest.baseRefName}\`. No merge needed.`,
+        );
+        return { status: "up-to-date" };
+      }
       if (!/^[0-9a-f]{40}$/u.test(result.revision)) {
         throw new Error("Branch update did not publish a full revision");
+      }
+      if (result.comment !== undefined) {
+        await ports.github.addBranchUpdateComment?.(pullRequest.number, result.comment);
       }
       return { status: "updated", revision: result.revision };
     } catch (error) {

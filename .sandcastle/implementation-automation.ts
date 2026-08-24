@@ -111,18 +111,28 @@ export async function runImplementationAutomationCommand(
       if (result !== undefined) return { status: "implemented", ...result };
       throw new Error(`Implementation branch ${existing.branch} requires publication recovery`);
     }
+    // Business preflight refusal (#219 story 17): remove the trigger and
+    // explain on the Automation Work Item, without agent:blocked, so an
+    // inapplicable request does not re-refuse every dispatch round.
     const reason = refusal(issue);
     if (reason !== undefined) {
+      await ports.github.removeIssueLabel(issue.number, "agent:implement");
       await ports.github.addRefusalDiagnostic?.(issue.number, reason);
       return { status: "refused", reason };
     }
 
     const currentIssue = await ports.github.readIssue(issue.number);
     const currentReason = refusal(currentIssue);
-    if (currentReason !== undefined || currentIssue.baseRevision !== issue.baseRevision) {
-      const unavailableReason = currentReason ?? `Issue #${issue.number} changed its authorized base revision`;
-      await ports.github.addRefusalDiagnostic?.(issue.number, unavailableReason);
-      return { status: "refused", reason: unavailableReason };
+    if (currentReason !== undefined) {
+      await ports.github.removeIssueLabel(issue.number, "agent:implement");
+      await ports.github.addRefusalDiagnostic?.(issue.number, currentReason);
+      return { status: "refused", reason: currentReason };
+    }
+    if (currentIssue.baseRevision !== issue.baseRevision) {
+      // A moved base revision is a race, not a business refusal: keep the
+      // trigger (and stay silent) so the next dispatch round re-reads the
+      // authorized revision instead of spamming a comment every round.
+      return { status: "refused", reason: `Issue #${issue.number} changed its authorized base revision` };
     }
     const acquired = ports.github.claimIssue === undefined
       ? (await ports.github.addIssueLabel(issue.number, "agent:in-progress"), "acquired")

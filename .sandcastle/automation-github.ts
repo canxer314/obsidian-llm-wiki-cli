@@ -108,7 +108,20 @@ function splitBody(prdNumber: number, slice: PrdSlice): string {
   return `## Parent PRD\n\n#${prdNumber}\n\n## What to build\n\n${slice.whatToBuild}\n\n## Acceptance criteria\n\n${slice.acceptanceCriteria.map((criterion) => `- [ ] ${criterion}`).join("\n")}\n`;
 }
 
-const automationLabels = ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked", "agent:queued"] as const;
+const automationLabels = ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked", "agent:queued", "agent:to-issues"] as const;
+
+const pullRequestCommandLabels = ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"] as const;
+const issueCommandLabels = ["agent:implement", "agent:to-issues", "agent:in-progress", "agent:blocked"] as const;
+
+interface ListedWorkItem {
+  readonly number: number;
+  readonly labels: readonly { readonly name: string }[];
+}
+
+interface IssueCommandShape {
+  readonly parent: { readonly number: number } | null;
+  readonly subIssues: { readonly totalCount: number };
+}
 
 export function createAutomationDispatchGithubPort(options: {
   readonly execute?: Execute;
@@ -122,6 +135,23 @@ export function createAutomationDispatchGithubPort(options: {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
+  const listOpenByLabel = async (kind: "pr" | "issue", label: string): Promise<readonly ListedWorkItem[]> => {
+    const { stdout } = await execute(
+      "gh", [kind, "list", "--state", "open", "--label", label, "--json", "number,labels", "--limit", "100"], options.environment,
+    );
+    return JSON.parse(stdout) as readonly ListedWorkItem[];
+  };
+  const readIssueShape = async (issueNumber: number): Promise<IssueCommandShape> => {
+    const { stdout } = await execute("gh", [
+      "api", "graphql", "-f",
+      "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number} subIssues(first:1){totalCount}}}}",
+      "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`,
+      "--jq", ".data.repository.issue",
+    ], options.environment);
+    const shape = JSON.parse(stdout) as IssueCommandShape | null;
+    if (shape === null) throw new Error(`Issue #${issueNumber} shape is unreadable`);
+    return shape;
+  };
   return {
     async verifyLabels() {
       const { stdout } = await execute("gh", ["label", "list", "--limit", "100", "--json", "name"], options.environment);
@@ -180,20 +210,27 @@ export function createAutomationDispatchGithubPort(options: {
     async addSubIssueRefusalDiagnostic(issueNumber, parentNumber) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent PRD instead. Cleared \`agent:queued\` and added \`agent:blocked\`.`,
+        `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent PRD instead. Cleared \`agent:queued\`.`,
       ], options.environment);
     },
     async listCommands() {
-      const responses = await Promise.all(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"].map((label) => execute(
-        "gh", ["pr", "list", "--state", "open", "--label", label, "--json", "number,labels", "--limit", "100"], options.environment,
-      )));
-      const pullRequests = new Map<number, { readonly number: number; readonly labels: readonly { readonly name: string }[] }>();
-      for (const response of responses) {
-        for (const pullRequest of JSON.parse(response.stdout) as readonly { readonly number: number; readonly labels: readonly { readonly name: string }[] }[]) {
+      const responses = await Promise.all([
+        ...pullRequestCommandLabels.map((label) => listOpenByLabel("pr", label)),
+        ...issueCommandLabels.map((label) => listOpenByLabel("issue", label)),
+      ]);
+      const pullRequests = new Map<number, ListedWorkItem>();
+      for (const response of responses.slice(0, pullRequestCommandLabels.length)) {
+        for (const pullRequest of response) {
           pullRequests.set(pullRequest.number, pullRequest);
         }
       }
-      return [...pullRequests.values()].flatMap((pullRequest) => {
+      const issues = new Map<number, ListedWorkItem>();
+      for (const response of responses.slice(pullRequestCommandLabels.length)) {
+        for (const issue of response) {
+          issues.set(issue.number, issue);
+        }
+      }
+      const pullRequestCommands = [...pullRequests.values()].flatMap((pullRequest) => {
         const labels = pullRequest.labels.map(({ name }) => name);
         return (["update-branch", "implement", "review"] as const)
           .filter((operation) => labels.includes(`agent:${operation}`))
@@ -204,6 +241,54 @@ export function createAutomationDispatchGithubPort(options: {
             labels,
           }));
       });
+      // Issue-side triggers are only meaningful on top-level Work Items, so
+      // shape reads happen before routing: sub-issues are driven by their
+      // parent PRD and never become dispatch commands themselves.
+      const triggers = (labels: readonly string[]) =>
+        labels.includes("agent:implement") || labels.includes("agent:to-issues");
+      const candidates = await Promise.all([...issues.values()]
+        .filter((issue) => triggers(issue.labels.map(({ name }) => name)))
+        .sort((left, right) => left.number - right.number)
+        .map(async (issue) => {
+          const labels = issue.labels.map(({ name }) => name);
+          const shape = await readIssueShape(issue.number);
+          // A plain Issue that already has an open implementation Pull Request
+          // is owned by the Pull Request command families, not by Issue
+          // implementation.
+          let hasOpenImplementationPullRequest = false;
+          if (shape.parent === null && shape.subIssues.totalCount === 0 && labels.includes("agent:implement")) {
+            const { stdout } = await execute(
+              "gh", ["pr", "list", "--head", `sandcastle/issue-${issue.number}`, "--state", "open", "--json", "number", "--limit", "1"], options.environment,
+            );
+            hasOpenImplementationPullRequest = (JSON.parse(stdout) as readonly unknown[]).length > 0;
+          }
+          return { number: issue.number, labels, shape, hasOpenImplementationPullRequest };
+        }));
+      const issueCommands = candidates.flatMap((candidate) => {
+        const { number, labels, shape } = candidate;
+        if (shape.parent !== null) return [];
+        const commands: {
+          readonly number: number;
+          readonly operation: "implement-issue" | "implement-prd" | "split-prd";
+          readonly identity: string;
+          readonly labels: readonly string[];
+        }[] = [];
+        if (labels.includes("agent:implement")) {
+          if (shape.subIssues.totalCount > 0) {
+            commands.push({ number, operation: "implement-prd", identity: `prd:${number}`, labels });
+          } else if (!candidate.hasOpenImplementationPullRequest) {
+            commands.push({ number, operation: "implement-issue", identity: `issue:${number}`, labels });
+          }
+        }
+        // When both triggers are present, only the higher-priority
+        // implementation command runs (#219); the split trigger stays for a
+        // later round so one Work Item never runs two operations at once.
+        if (labels.includes("agent:to-issues") && !labels.includes("agent:implement")) {
+          commands.push({ number, operation: "split-prd", identity: `prd:${number}`, labels });
+        }
+        return commands;
+      });
+      return [...pullRequestCommands, ...issueCommands];
     },
   };
 }
@@ -375,7 +460,13 @@ export function createAutomationGithubPort(options: {
       await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
     },
     async addRefusalDiagnostic(issueNumber, reason) {
-      await execute("gh", ["issue", "comment", String(issueNumber), "--body", reason], options.environment);
+      // The issues comments endpoint carries both Issue and Pull Request
+      // conversation comments, so one diagnostic port serves every
+      // operation's business refusal (#219 story 17).
+      await execute("gh", [
+        "api", `repos/{owner}/{repo}/issues/${issueNumber}/comments`,
+        "-f", `body=${reason}`,
+      ], options.environment);
     },
     async addImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
@@ -560,6 +651,11 @@ export function createAutomationGithubPort(options: {
       await execute("gh", [
         "pr", "comment", String(pullRequestNumber), "--body",
         `Automation review is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:review, then retry.`,
+      ], options.environment);
+    },
+    async addBranchUpdateComment(pullRequestNumber, body) {
+      await execute("gh", [
+        "pr", "comment", String(pullRequestNumber), "--body", body,
       ], options.environment);
     },
     async addBranchUpdateBlockedDiagnostic(pullRequestNumber, diagnostic) {

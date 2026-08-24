@@ -65,7 +65,7 @@ describe("implementation automation command", () => {
     expect(github.addIssueLabel).not.toHaveBeenCalledWith(221, "agent:blocked");
   });
 
-  it("refuses an inapplicable Issue without mutating it or blocking automation", async () => {
+  it("refuses an inapplicable Issue by removing the trigger and explaining, without blocking automation", async () => {
     const github = {
       readIssue: vi.fn().mockResolvedValue({
         number: 221,
@@ -86,7 +86,7 @@ describe("implementation automation command", () => {
     })).resolves.toEqual({ status: "refused", reason: "Issue #221 is not queued for implementation" });
 
     expect(github.addIssueLabel).not.toHaveBeenCalled();
-    expect(github.removeIssueLabel).not.toHaveBeenCalled();
+    expect(github.removeIssueLabel).toHaveBeenCalledWith(221, "agent:implement");
     expect(github.addRefusalDiagnostic).toHaveBeenCalledWith(221, "Issue #221 is not queued for implementation");
   });
 
