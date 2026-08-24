@@ -9,6 +9,13 @@ import { runAutomationCli } from "../.sandcastle/automation-cli.js";
 
 const executeFile = promisify(execFile);
 const unitDirectory = resolve(import.meta.dirname, "..", ".sandcastle", "systemd");
+const runbookPath = resolve(
+  import.meta.dirname,
+  "..",
+  "docs",
+  "operations",
+  "sandcastle-local-dispatcher-runbook.md",
+);
 
 type UnitFile = Readonly<Record<string, Readonly<Record<string, string>>>>;
 
@@ -115,6 +122,21 @@ describe("systemd Dispatcher templates", () => {
       runFeedback: vi.fn(), runSplit: vi.fn(), runUpdate: vi.fn(), architectureReview,
     })).resolves.toEqual({ status: "skipped" });
     expect(architectureReview).toHaveBeenCalledOnce();
+  });
+
+  it("documents image build and read-only verification before canaries and timer activation", async () => {
+    const runbook = await readFile(runbookPath, "utf8");
+    const build = runbook.indexOf("npm run sandcastle -- build-image");
+    const verify = runbook.indexOf('"imageReadiness":"ready"');
+    const canaries = runbook.indexOf("## Canary sequence");
+    const enableDispatch = runbook.indexOf("systemctl --user enable --now sandcastle-dispatch.timer");
+    const enableArchitecture = runbook.indexOf("systemctl --user enable --now sandcastle-architecture-review.timer");
+
+    expect(build).toBeGreaterThan(-1);
+    expect(verify).toBeGreaterThan(build);
+    expect(canaries).toBeGreaterThan(verify);
+    expect(enableDispatch).toBeGreaterThan(canaries);
+    expect(enableArchitecture).toBeGreaterThan(enableDispatch);
   });
 
   it("passes offline systemd unit verification without enabling or starting anything", async (context) => {

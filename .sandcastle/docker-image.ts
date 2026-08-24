@@ -40,6 +40,43 @@ const PROXY_ENVIRONMENT_NAMES = [
   "no_proxy",
 ] as const;
 
+export interface DockerImageInspectionProcess {
+  inspect(image: string): Promise<boolean>;
+}
+
+export const dockerImageInspectionProcess: DockerImageInspectionProcess = {
+  inspect: (image) =>
+    new Promise((resolvePromise, reject) => {
+      const child = spawn("docker", ["image", "inspect", image], {
+        stdio: "ignore",
+      });
+      child.on("error", () => {
+        reject(new Error("Could not inspect Sandcastle Docker image readiness"));
+      });
+      child.on("close", (exitCode) => resolvePromise(exitCode === 0));
+    }),
+};
+
+export async function sandcastleImageReadiness(options: {
+  readonly image: string;
+  readonly process?: DockerImageInspectionProcess;
+}): Promise<"ready" | "missing"> {
+  return await (options.process ?? dockerImageInspectionProcess).inspect(options.image)
+    ? "ready"
+    : "missing";
+}
+
+export async function requireSandcastleImage(options: {
+  readonly image: string;
+  readonly process?: DockerImageInspectionProcess;
+}): Promise<void> {
+  if (await sandcastleImageReadiness(options) === "missing") {
+    throw new Error(
+      "Sandcastle Docker image is not ready; run `npm run sandcastle -- build-image`",
+    );
+  }
+}
+
 export interface DockerImageProcess {
   run(
     command: string,
@@ -57,12 +94,14 @@ export const dockerImageProcess: DockerImageProcess = {
       const child = spawn(command, args, {
         cwd: options.cwd,
         env: { ...process.env, ...options.environment },
-        stdio: "inherit",
+        stdio: "ignore",
       });
-      child.on("error", reject);
+      child.on("error", () => {
+        reject(new Error("Could not build Sandcastle Docker image"));
+      });
       child.on("close", (exitCode) => {
         if (exitCode === 0) resolvePromise();
-        else reject(new Error(`${command} exited with status ${exitCode ?? 1}`));
+        else reject(new Error("Could not build Sandcastle Docker image"));
       });
     }),
 };

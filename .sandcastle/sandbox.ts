@@ -64,6 +64,10 @@ function createSandboxProvider(
 export async function loadSandboxStartup(
   paths: Partial<SandcastleConfigPaths> = {},
 ): Promise<{
+  readonly repositoryPath: string;
+  readonly uid: number;
+  readonly gid: number;
+  readonly imageName: string;
   readonly sandbox: ReturnType<typeof createSandboxProvider>;
   readonly automationSandbox: ReturnType<typeof createSandboxProvider>;
   readonly environment: Readonly<Record<string, string>>;
@@ -77,17 +81,19 @@ export async function loadSandboxStartup(
     ...(paths.log === undefined ? {} : { log: paths.log }),
   });
   const repositoryPath = resolve(import.meta.dirname, "..");
-  const imageName = await sandcastleImageName({
-    repositoryPath,
-    uid: process.getuid?.() ?? 1000,
-    gid: process.getgid?.() ?? 1000,
-  });
+  const uid = process.getuid?.() ?? 1000;
+  const gid = process.getgid?.() ?? 1000;
+  const imageName = await sandcastleImageName({ repositoryPath, uid, gid });
   const childEnvironments = createChildEnvironments({
     ...config.environment,
     ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }),
     ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
   });
   return {
+    repositoryPath,
+    uid,
+    gid,
+    imageName,
     sandbox: createSandboxProvider(config.environment, imageName),
     automationSandbox: createSandboxProvider(
       childEnvironments.claude,

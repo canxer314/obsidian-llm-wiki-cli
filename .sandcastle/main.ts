@@ -4,6 +4,11 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { runAutomationCli } from "./automation-cli.ts";
+import {
+  buildSandcastleImage,
+  requireSandcastleImage,
+  sandcastleImageReadiness,
+} from "./docker-image.ts";
 import { createAutomationGithubPort, createAutomationDispatchGithubPort } from "./automation-github.ts";
 import { dispatchAutomationCommands } from "./automation-dispatch.ts";
 import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
@@ -176,6 +181,17 @@ try {
     createJobId: () => jobId,
   });
   const result = await runAutomationCli(process.argv.slice(2), {
+    preflight: () => requireSandcastleImage({ image: startup.imageName }),
+    buildImage: async () => {
+      await buildSandcastleImage({
+        repositoryPath: startup.repositoryPath,
+        uid: startup.uid,
+        gid: startup.gid,
+        environment: startup.proxyEnvironment,
+        image: startup.imageName,
+      });
+      return { status: "image-ready" } as const;
+    },
     runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runReviewAutomationCommand({ pullRequestNumber }, {
       github: {
         ...automationGithub,
@@ -376,7 +392,10 @@ try {
         });
       },
     }),
-    inspect: () => inspectAutomationCommands({ github: dispatchGithub, scheduler }),
+    inspect: async () => ({
+      imageReadiness: await sandcastleImageReadiness({ image: startup.imageName }),
+      ...await inspectAutomationCommands({ github: dispatchGithub, scheduler }),
+    }),
     runImplement: (issueNumber) => runIssueImplementation(issueNumber),
     runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => runPrdImplementation(issueNumber)),
     runSplit: (issueNumber) => runPrdSplit(issueNumber),
