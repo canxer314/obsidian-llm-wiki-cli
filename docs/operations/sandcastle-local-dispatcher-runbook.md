@@ -2,7 +2,7 @@
 
 Operator runbook for deploying, inspecting, and canarying the local WSL Dispatcher that replaced the retired Sandcastle claim/watch pipeline. Canonical terms (Automation Command, Automation Work Item, Blocked Automation, Dispatcher, Target Checkout, Legacy Run State) are defined in `CONTEXT.md`.
 
-The Dispatcher runs directly from the trusted local `master` checkout through Node 24 type stripping. There is no build, installer, release directory, symlink, or rollback mechanism.
+The Dispatcher runs directly from the trusted local `master` checkout through Node 24 type stripping. There is no TypeScript build, installer, release directory, symlink, or rollback mechanism. Its Agent workers use a separate content-addressed local Docker image prepared below.
 
 ## Protected configuration
 
@@ -27,6 +27,25 @@ Startup fails closed when the file is missing, is not a regular file, or has any
 - `SANDCASTLE_MODEL`, `SANDCASTLE_PLANNER_MODEL`, `SANDCASTLE_IMPLEMENTER_MODEL`, `SANDCASTLE_REVIEWER_MODEL` — role model selection (default `opus`).
 
 Precedence is: repository non-sensitive defaults < whitelisted `env` values from `~/.claude/settings.json` < the private environment file < non-sensitive CLI options. Startup diagnostics report counts only — never routes, model names, proxy addresses, or secret values.
+
+## Docker image readiness
+
+Prepare the exact content-addressed image selected by Dispatcher startup after the protected configuration is valid:
+
+```bash
+npm run sandcastle -- build-image
+```
+
+The command is idempotent and uses the same repository inputs, host UID/GID, and protected proxy configuration as Agent runtime startup. It never prints the selected image name, proxy values, credentials, or raw Docker output. Re-run it after pulling changes to the Dockerfile, dependency manifests, or lockfile; the selected image changes when any image input changes.
+
+Verify readiness through the read-only inspection command:
+
+```bash
+npm run sandcastle -- inspect
+# JSON output must contain: "imageReadiness":"ready"
+```
+
+A `"missing"` result means no Automation Command may run. Every explicit execution, scheduled dispatch round, and architecture review fails before command acquisition until `build-image` succeeds. This failure does not consume a trigger label, add `agent:in-progress`, or create Blocked Automation. Do not create or label a canary and do not enable either timer until inspection reports `ready`.
 
 ## Label setup
 
@@ -91,7 +110,7 @@ Behavior notes:
 npm run sandcastle -- inspect
 ```
 
-Prints the current command frontier with per-command eligibility (`eligible`, `blocked`, `stale-in-progress`, `inconsistent`), retry guidance, and locally active jobs. It never mutates GitHub or local state. A Work Item carrying both a trigger and `agent:in-progress` (partial label mutation) is reported as `inconsistent` and is never executed.
+Prints Docker image readiness, the current command frontier with per-command eligibility (`eligible`, `blocked`, `stale-in-progress`, `inconsistent`), retry guidance, and locally active jobs. It never mutates GitHub or local state. A Work Item carrying both a trigger and `agent:in-progress` (partial label mutation) is reported as `inconsistent` and is never executed.
 
 ## Explicit operation execution
 
@@ -173,11 +192,11 @@ The old and new write paths must never be active at the same time. Before enabli
 
 1. Stop the retired Sandcastle watch process and verify no old job is active (no watch process, no running Docker job containers).
 2. Discard Legacy Run State — never adopt, resume, or reconcile it. Cleanup is limited to the exact recovery path above.
-3. Run `setup-labels` and prepare the protected private environment file (mode `0600`).
-4. Run `inspect` manually and confirm a clean frontier.
-5. Run the canary sequence above with timers disabled.
-6. Only after canaries 1-7 pass: `systemctl --user enable --now sandcastle-dispatch.timer`.
-7. Only after canary 8 passes: `systemctl --user enable --now sandcastle-architecture-review.timer`.
+3. Prepare the protected private environment file (mode `0600`), run `npm run sandcastle -- build-image`, then run `npm run sandcastle -- inspect` and require `"imageReadiness":"ready"`.
+4. Run `setup-labels`, then run `inspect` again and confirm a clean frontier with image readiness still `ready`.
+5. Run the canary sequence above with timers disabled. If repository image inputs change at any point, rebuild and re-verify before continuing.
+6. Only after canaries 1-7 pass and image readiness is still `ready`: `systemctl --user enable --now sandcastle-dispatch.timer`.
+7. Only after canary 8 passes and image readiness is still `ready`: `systemctl --user enable --now sandcastle-architecture-review.timer`.
 
 GitHub Actions is not a fallback consumer: two consumers would reintroduce duplicate execution. If the replacement must be paused, `systemctl --user stop sandcastle-dispatch.timer sandcastle-architecture-review.timer` — do not start the retired writer instead.
 

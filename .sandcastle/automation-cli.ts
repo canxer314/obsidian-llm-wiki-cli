@@ -5,7 +5,7 @@ export class AutomationCliError extends Error {
   }
 }
 
-export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeedback, TSplit, TUpdate, TDispatch, TInspect, TSetup, TArchitectureReview>(
+export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeedback, TSplit, TUpdate, TDispatch, TInspect, TSetup, TBuildImage, TArchitectureReview>(
   argv: readonly string[],
   dependencies: {
     readonly runReview: (pullRequestNumber: number) => Promise<TReview>;
@@ -15,13 +15,20 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
     readonly runSplit: (issueNumber: number) => Promise<TSplit>;
     readonly runUpdate: (pullRequestNumber: number) => Promise<TUpdate>;
     readonly dispatch?: (concurrency?: number) => Promise<TDispatch>;
+    readonly preflight?: () => Promise<void>;
     readonly inspect?: () => Promise<TInspect>;
     readonly setupLabels?: () => Promise<TSetup>;
+    readonly buildImage?: () => Promise<TBuildImage>;
     readonly architectureReview?: () => Promise<TArchitectureReview>;
   },
-): Promise<TReview | TImplement | TImplementPrd | TFeedback | TSplit | TUpdate | TDispatch | TInspect | TSetup | TArchitectureReview> {
+): Promise<TReview | TImplement | TImplementPrd | TFeedback | TSplit | TUpdate | TDispatch | TInspect | TSetup | TBuildImage | TArchitectureReview> {
+  if (argv[0] === "build-image") {
+    if (argv.length !== 1 || dependencies.buildImage === undefined) throw new AutomationCliError("Expected: build-image");
+    return dependencies.buildImage();
+  }
   if (argv[0] === "architecture-review") {
     if (argv.length !== 1 || dependencies.architectureReview === undefined) throw new AutomationCliError("Expected: architecture-review");
+    await dependencies.preflight?.();
     return dependencies.architectureReview();
   }
   if (argv[0] === "setup-labels") {
@@ -37,10 +44,14 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
     if (dependencies.dispatch === undefined || remaining.length > 0 || (option !== undefined && option !== "--concurrency")) {
       throw new AutomationCliError("Expected: dispatch [--concurrency <positive-number>]");
     }
-    if (option === undefined) return dependencies.dispatch();
+    if (option === undefined) {
+      await dependencies.preflight?.();
+      return dependencies.dispatch();
+    }
     if (value === undefined || !/^[1-9]\d*$/u.test(value) || !Number.isSafeInteger(Number(value))) {
       throw new AutomationCliError("dispatch concurrency requires a positive number");
     }
+    await dependencies.preflight?.();
     return dependencies.dispatch(Number(value));
   }
   const [command, operation, number, ...remaining] = argv;
@@ -58,6 +69,7 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
   if (!/^[1-9]\d*$/u.test(number) || !Number.isSafeInteger(Number(number))) {
     throw new AutomationCliError(`${operation} requires a positive ${operation === "implement" || operation === "implement-prd" || operation === "split" ? "Issue" : "Pull Request"} number`);
   }
+  await dependencies.preflight?.();
   if (operation === "review") return dependencies.runReview(Number(number));
   if (operation === "feedback") return dependencies.runFeedback(Number(number));
   if (operation === "implement") return dependencies.runImplement(Number(number));

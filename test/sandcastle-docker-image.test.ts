@@ -1,15 +1,20 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
 import {
   buildSandcastleImage,
   dockerResourceSuffix,
+  requireSandcastleImage,
   sandcastleImageName,
+  sandcastleImageReadiness,
+  type DockerImageInspectionProcess,
   type DockerImageProcess,
 } from "../.sandcastle/docker-image.js";
+import { loadSandboxStartup } from "../.sandcastle/sandbox.js";
 
 async function imageFixture(lock = "lock-a"): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-image-"));
@@ -70,6 +75,69 @@ describe("Sandcastle Docker image builder", () => {
     );
     expect(run.mock.calls[0]?.[1].join(" ")).not.toContain("proxy.invalid");
     expect(run.mock.calls[0]?.[1].join(" ")).not.toContain("must-not-pass");
+  });
+
+  it("builds the exact content-addressed image selected for runtime", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandcastle-startup-"));
+    const settingsPath = join(root, "settings.json");
+    const envPath = join(root, "env");
+    await writeFile(settingsPath, JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: "http://provider.invalid",
+        ANTHROPIC_AUTH_TOKEN: "settings-secret",
+      },
+    }));
+    await writeFile(
+      envPath,
+      "GH_TOKEN=github-secret\nHTTPS_PROXY=http://proxy.invalid:7890\n",
+      { mode: 0o600 },
+    );
+    await chmod(envPath, 0o600);
+    const repositoryPath = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+    const expectedImage = await sandcastleImageName({
+      repositoryPath,
+      uid: process.getuid?.() ?? 1000,
+      gid: process.getgid?.() ?? 1000,
+    });
+    const run = vi.fn<DockerImageProcess["run"]>(async () => undefined);
+
+    try {
+      const startup = await loadSandboxStartup({ settingsPath, envPath });
+
+      expect(startup.imageName).toBe(expectedImage);
+      await expect(buildSandcastleImage({
+        repositoryPath: startup.repositoryPath,
+        uid: startup.uid,
+        gid: startup.gid,
+        environment: startup.proxyEnvironment,
+        image: startup.imageName,
+        process: { run },
+      })).resolves.toBe(expectedImage);
+      expect(run.mock.calls[0]?.[1]).toContain(expectedImage);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("checks image readiness without exposing the selected image or Docker output", async () => {
+    const inspect = vi.fn<DockerImageInspectionProcess["inspect"]>()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const process = { inspect };
+    const image = "sandcastle:private-content-addressed-name";
+
+    await expect(sandcastleImageReadiness({ image, process })).resolves.toBe("ready");
+    await expect(sandcastleImageReadiness({ image, process })).resolves.toBe("missing");
+    await expect(requireSandcastleImage({ image, process })).rejects.toThrow(
+      "Sandcastle Docker image is not ready; run `npm run sandcastle -- build-image`",
+    );
+
+    expect(inspect).toHaveBeenCalledWith(image);
+    const error = await requireSandcastleImage({
+      image,
+      process: { inspect: async () => false },
+    }).catch((caught: unknown) => String(caught));
+    expect(error).not.toContain(image);
   });
 
   it("isolates image tags when dependency inputs differ", async () => {

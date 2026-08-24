@@ -20,6 +20,71 @@ describe("automation command CLI", () => {
     expect(inspect).toHaveBeenCalledOnce();
   });
 
+  it("wires the fixed idempotent image build command through the real parser", async () => {
+    const buildImage = vi.fn().mockResolvedValue({ status: "image-ready" });
+
+    await expect(runAutomationCli(["build-image"], {
+      runReview: vi.fn(), runImplement: vi.fn(), runFeedback: vi.fn(), runSplit: vi.fn(),
+      buildImage,
+    })).resolves.toEqual({ status: "image-ready" });
+
+    expect(buildImage).toHaveBeenCalledOnce();
+    await expect(runAutomationCli(["build-image", "private-image-name"], {
+      runReview: vi.fn(), runImplement: vi.fn(), buildImage,
+    })).rejects.toEqual(new AutomationCliError("Expected: build-image"));
+  });
+
+  it("fails image readiness before dispatch can acquire an Automation Command", async () => {
+    const events: string[] = [];
+    const preflight = vi.fn(async () => {
+      events.push("preflight");
+      throw new Error("Sandcastle Docker image is not ready; run `npm run sandcastle -- build-image`");
+    });
+    const dispatch = vi.fn(async () => {
+      events.push("dispatch");
+      return { status: "dispatched" as const };
+    });
+
+    await expect(runAutomationCli(["dispatch"], {
+      runReview: vi.fn(), runImplement: vi.fn(), runFeedback: vi.fn(), runSplit: vi.fn(),
+      preflight, dispatch,
+    })).rejects.toThrow("Sandcastle Docker image is not ready");
+
+    expect(events).toEqual(["preflight"]);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("fails image readiness before an explicit operation can acquire its Work Item", async () => {
+    const runImplement = vi.fn();
+    const preflight = vi.fn().mockRejectedValue(
+      new Error("Sandcastle Docker image is not ready; run `npm run sandcastle -- build-image`"),
+    );
+
+    await expect(runAutomationCli(["run", "implement", "259"], {
+      runReview: vi.fn(), runImplement, runFeedback: vi.fn(), runSplit: vi.fn(), preflight,
+    })).rejects.toThrow("Sandcastle Docker image is not ready");
+
+    expect(preflight).toHaveBeenCalledOnce();
+    expect(runImplement).not.toHaveBeenCalled();
+  });
+
+  it("keeps inspection read-only when image readiness is missing", async () => {
+    const preflight = vi.fn().mockRejectedValue(new Error("image missing"));
+    const inspect = vi.fn().mockResolvedValue({
+      imageReadiness: "missing",
+      commands: [],
+      activeJobs: [],
+    });
+
+    await expect(runAutomationCli(["inspect"], {
+      runReview: vi.fn(), runImplement: vi.fn(), runFeedback: vi.fn(), runSplit: vi.fn(),
+      preflight, inspect,
+    })).resolves.toEqual({ imageReadiness: "missing", commands: [], activeJobs: [] });
+
+    expect(preflight).not.toHaveBeenCalled();
+    expect(inspect).toHaveBeenCalledOnce();
+  });
+
   it("runs the fixed trusted architecture-review command without a Work Item number", async () => {
     const architectureReview = vi.fn().mockResolvedValue({ status: "skipped" });
     await expect(runAutomationCli(["architecture-review"], {
