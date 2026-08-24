@@ -1,5 +1,13 @@
 import { redact as redactFailureSummary } from "./redaction.ts";
 
+// The updater's outcome mirrors the upstream update-branch baseline: an
+// already-up-to-date branch short-circuits without merging or pushing, a clean
+// merge publishes immediately, and an agent-resolved conflict additionally
+// carries the comment the resolution agent reported.
+export type BranchUpdateResult =
+  | { readonly status: "up-to-date" }
+  | { readonly status: "updated"; readonly revision: string; readonly comment?: string };
+
 export interface BranchUpdatePullRequest {
   readonly number: number;
   readonly state: string;
@@ -18,6 +26,7 @@ export interface BranchUpdateAutomationPorts {
     addPullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     removePullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     addRefusalDiagnostic?(pullRequestNumber: number, reason: string): Promise<void>;
+    addBranchUpdateComment?(pullRequestNumber: number, body: string): Promise<void>;
     addBranchUpdateBlockedDiagnostic?(
       pullRequestNumber: number,
       diagnostic: {
@@ -40,7 +49,7 @@ export interface BranchUpdateAutomationPorts {
       readonly baseBranch: string;
       readonly revision: string;
       readonly checkoutPath: string;
-    }): Promise<{ readonly revision: string }>;
+    }): Promise<BranchUpdateResult>;
   };
   readonly lease?: {
     acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> } | undefined>;
@@ -50,6 +59,7 @@ export interface BranchUpdateAutomationPorts {
 
 export type BranchUpdateAutomationResult =
   | { readonly status: "updated"; readonly revision: string }
+  | { readonly status: "up-to-date" }
   | { readonly status: "refused"; readonly reason: string }
   | { readonly status: "blocked"; readonly reason: "branch-update-execution"; readonly jobId: string };
 
@@ -127,8 +137,18 @@ export async function runBranchUpdateAutomationCommand(
         revision: pullRequest.headSha,
         checkoutPath,
       }));
+      if (result.status === "up-to-date") {
+        await ports.github.addBranchUpdateComment?.(
+          pullRequest.number,
+          `\`agent:update-branch\`: branch is already up to date with \`origin/${pullRequest.baseRefName}\`. No merge needed.`,
+        );
+        return { status: "up-to-date" };
+      }
       if (!/^[0-9a-f]{40}$/u.test(result.revision)) {
         throw new Error("Branch update did not publish a full revision");
+      }
+      if (result.comment !== undefined) {
+        await ports.github.addBranchUpdateComment?.(pullRequest.number, result.comment);
       }
       return { status: "updated", revision: result.revision };
     } catch (error) {
