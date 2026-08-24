@@ -33,6 +33,8 @@ export function createReviewPublisher(options: {
       if (branch.length === 0 || branch.startsWith("-") || branch.includes("..")) {
         throw new Error("Review publication branch is invalid");
       }
+      await git(["-C", checkoutPath, "config", "user.name", "claude-code[bot]"]);
+      await git(["-C", checkoutPath, "config", "user.email", "claude-code[bot]@users.noreply.github.com"]);
       await git(["-C", checkoutPath, "checkout", "-B", branch, revision]);
       const { stdout } = await git(["-C", checkoutPath, "rev-parse", "HEAD"]);
       if (stdout.trim() !== revision) {

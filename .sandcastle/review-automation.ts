@@ -86,7 +86,7 @@ export interface ReviewAutomationPorts {
 }
 
 export type ReviewAutomationResult =
-  | { readonly status: "reviewed"; readonly revision: string }
+  | { readonly status: "reviewed"; readonly revision: string; readonly verdict: "improved" | "clean" }
   | { readonly status: "refused"; readonly reason: string }
   | { readonly status: "blocked"; readonly reason: "review-execution"; readonly jobId: string };
 
@@ -151,7 +151,11 @@ export async function runReviewAutomationCommand(
           .map((reply) => ports.github.replyToReviewThread({ pullRequestNumber: pullRequest.number, reply })));
         return publishedRevision;
       });
-      return { status: "reviewed", revision };
+      return {
+        status: "reviewed",
+        revision,
+        verdict: revision === pullRequest.headSha ? "clean" : "improved",
+      };
     } catch {
       const jobId = ports.createJobId?.() ?? "local-review-job";
       await Promise.allSettled([

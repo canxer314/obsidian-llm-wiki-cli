@@ -54,7 +54,7 @@ describe("review automation command", () => {
     });
     const dependencies = ports(events, reviewer);
 
-    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies)).resolves.toEqual({ status: "reviewed", revision: improvedRevision });
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies)).resolves.toEqual({ status: "reviewed", revision: improvedRevision, verdict: "improved" });
 
     expect(reviewer).toHaveBeenCalledWith({
       pullRequestNumber: 220,
@@ -76,7 +76,7 @@ describe("review automation command", () => {
     const dependencies = ports(events, vi.fn().mockResolvedValue({ summary: "Clean.", inlineComments: [], replies: [] }));
     dependencies.publisher.publish.mockResolvedValue(revision);
 
-    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies)).resolves.toEqual({ status: "reviewed", revision });
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies)).resolves.toEqual({ status: "reviewed", revision, verdict: "clean" });
     expect(dependencies.github.publishReview).toHaveBeenCalledWith(expect.objectContaining({ revision }));
     expect(dependencies.github.markPullRequestReady).toHaveBeenCalledWith(220);
   });
