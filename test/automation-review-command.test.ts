@@ -3,234 +3,107 @@ import { describe, expect, it, vi } from "vitest";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
-const lease = { acquire: vi.fn(async () => ({ release: async () => {} })) };
+const improvedRevision = "abcdef0123456789abcdef0123456789abcdef01";
+
+function pullRequest(labels = ["agent:review"]) {
+  return {
+    number: 220,
+    state: "OPEN",
+    isDraft: true,
+    baseRepository: "canxer314/obsidian-llm-wiki-cli",
+    headRepository: "canxer314/obsidian-llm-wiki-cli",
+    headRefName: "feature/review",
+    headSha: revision,
+    labels,
+  };
+}
+
+function ports(events: string[], reviewer = vi.fn().mockResolvedValue({ summary: "Improved the branch.", inlineComments: [], replies: [] })) {
+  const github = {
+    readPullRequest: vi.fn().mockResolvedValueOnce(pullRequest()).mockResolvedValueOnce(pullRequest(["agent:review", "agent:in-progress"])),
+    readUnresolvedReviewThreads: vi.fn().mockResolvedValue([{ commentId: "PRRC_1", author: "maintainer", body: "Please fix this." }]),
+    addPullRequestLabel: vi.fn(async (_number: number, label: string) => { events.push(`add:${label}`); }),
+    removePullRequestLabel: vi.fn(async (_number: number, label: string) => { events.push(`remove:${label}`); }),
+    publishReview: vi.fn(async (request) => { events.push(`review:${request.revision}`); }),
+    markPullRequestReady: vi.fn(async () => { events.push("ready"); }),
+    replyToReviewThread: vi.fn(async ({ reply }) => { events.push(`reply:${reply.commentId}`); }),
+    addBlockedDiagnostic: vi.fn(async () => { events.push("blocked"); }),
+  };
+  const publisher = {
+    prepare: vi.fn(async (_checkout: string, branch: string, expectedRevision: string) => { events.push(`prepare:${branch}:${expectedRevision}`); }),
+    publish: vi.fn(async ({ expectedRevision }) => {
+      events.push(`push:${expectedRevision}`);
+      return improvedRevision;
+    }),
+  };
+  return {
+    github,
+    checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
+    reviewer: { review: reviewer },
+    publisher,
+    lease: { acquire: vi.fn(async () => ({ release: async () => {} })) },
+  };
+}
 
 describe("review automation command", () => {
-  it("acquires an eligible Draft Pull Request and publishes a review for its acquired revision", async () => {
+  it("publishes the reviewer-improved head, marks the PR ready, and replies to known threads", async () => {
     const events: string[] = [];
-    const github = {
-      readPullRequest: vi.fn()
-        .mockResolvedValueOnce({
-          number: 220,
-          state: "OPEN",
-          isDraft: true,
-          baseRepository: "canxer314/obsidian-llm-wiki-cli",
-          headRepository: "canxer314/obsidian-llm-wiki-cli",
-          headSha: revision,
-          labels: ["agent:review"],
-        })
-        .mockResolvedValueOnce({
-          number: 220,
-          state: "OPEN",
-          isDraft: true,
-          baseRepository: "canxer314/obsidian-llm-wiki-cli",
-          headRepository: "canxer314/obsidian-llm-wiki-cli",
-          headSha: revision,
-          labels: ["agent:review", "agent:in-progress"],
-        }),
-      addPullRequestLabel: vi.fn(async (_number: number, label: string) => {
-        events.push(`add:${label}`);
-      }),
-      removePullRequestLabel: vi.fn(async (_number: number, label: string) => {
-        events.push(`remove:${label}`);
-      }),
-    };
-    const checkout = {
-      withCheckout: vi.fn(async (request, action) => {
-        events.push(`checkout:${request.revision}`);
-        return action("/safe/disposable-checkout");
-      }),
-    };
-    const reviewer = {
-      review: vi.fn(async (request) => {
-        events.push(`review:${request.revision}`);
-        return { verdict: "Approved" as const, summary: "Looks good.", findings: [] };
-      }),
-    };
-    const publisher = {
-      publish: vi.fn(async (request) => {
-        events.push(`publish:${request.revision}`);
-      }),
-    };
+    const reviewer = vi.fn().mockResolvedValue({
+      summary: "Improved a validation path.",
+      inlineComments: [{ path: "src/file.ts", line: 12, body: "This is now safe." }],
+      replies: [{ commentId: "PRRC_1", body: "Fixed in the review commit." }, { commentId: "unknown", body: "Must not post." }],
+    });
+    const dependencies = ports(events, reviewer);
 
-    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
-      github,
-      checkout,
-      reviewer,
-      publisher,
-      lease,
-    })).resolves.toEqual({ status: "reviewed", revision });
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies)).resolves.toEqual({ status: "reviewed", revision: improvedRevision, verdict: "improved" });
 
-    expect(events).toEqual([
-      "add:agent:in-progress",
-      "remove:agent:review",
-      `checkout:${revision}`,
-      `review:${revision}`,
-      `publish:${revision}`,
-      "remove:agent:in-progress",
-    ]);
-    expect(checkout.withCheckout).toHaveBeenCalledWith({
+    expect(reviewer).toHaveBeenCalledWith({
       pullRequestNumber: 220,
-      revision,
-    }, expect.any(Function));
-    expect(reviewer.review).toHaveBeenCalledWith({
-      pullRequestNumber: 220,
+      branch: "feature/review",
       revision,
       checkoutPath: "/safe/disposable-checkout",
+      reviewThreads: [{ commentId: "PRRC_1", author: "maintainer", body: "Please fix this." }],
     });
-    expect(publisher.publish).toHaveBeenCalledWith({
-      pullRequestNumber: 220,
-      revision,
-      review: { verdict: "Approved", summary: "Looks good.", findings: [] },
-    });
-    expect(github.addPullRequestLabel).not.toHaveBeenCalledWith(220, "agent:blocked");
-  });
-
-  it("refuses an in-progress request without touching the trigger an in-flight run still owns", async () => {
-    const github = {
-      readPullRequest: vi.fn().mockResolvedValue({
-        number: 220,
-        state: "OPEN",
-        isDraft: true,
-        baseRepository: "canxer314/obsidian-llm-wiki-cli",
-        headRepository: "canxer314/obsidian-llm-wiki-cli",
-        headSha: revision,
-        labels: ["agent:review", "agent:in-progress"],
-      }),
-      addPullRequestLabel: vi.fn(),
-      removePullRequestLabel: vi.fn(),
-      addRefusalDiagnostic: vi.fn(),
-    };
-
-    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
-      github,
-      checkout: { withCheckout: vi.fn() },
-      reviewer: { review: vi.fn() },
-      publisher: { publish: vi.fn() },
-      lease,
-    })).resolves.toEqual({ status: "refused", reason: "Pull Request #220 is already in progress" });
-
-    expect(github.addPullRequestLabel).not.toHaveBeenCalled();
-    expect(github.removePullRequestLabel).not.toHaveBeenCalled();
-    expect(github.addRefusalDiagnostic).not.toHaveBeenCalled();
-  });
-
-  it("refuses a fork before checkout or Agent execution", async () => {
-    const checkout = { withCheckout: vi.fn() };
-    const reviewer = { review: vi.fn() };
-    const github = {
-      readPullRequest: vi.fn().mockResolvedValue({
-        number: 220,
-        state: "OPEN",
-        isDraft: true,
-        baseRepository: "canxer314/obsidian-llm-wiki-cli",
-        headRepository: "contributor/obsidian-llm-wiki-cli",
-        headSha: revision,
-        labels: ["agent:review"],
-      }),
-      addPullRequestLabel: vi.fn(),
-      removePullRequestLabel: vi.fn(),
-      addRefusalDiagnostic: vi.fn(),
-    };
-
-    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
-      github,
-      checkout,
-      reviewer,
-      publisher: { publish: vi.fn() },
-      lease,
-    })).resolves.toEqual({ status: "refused", reason: "Pull Request #220 must not originate from a fork" });
-
-    expect(github.removePullRequestLabel).toHaveBeenCalledWith(220, "agent:review");
-    expect(github.addRefusalDiagnostic).toHaveBeenCalledWith(220, "Pull Request #220 must not originate from a fork");
-    expect(github.addPullRequestLabel).not.toHaveBeenCalled();
-    expect(checkout.withCheckout).not.toHaveBeenCalled();
-    expect(reviewer.review).not.toHaveBeenCalled();
-  });
-
-  it("retains the blocked result when blocked reporting itself fails", async () => {
-    const github = {
-      readPullRequest: vi.fn().mockResolvedValue({
-        number: 220,
-        state: "OPEN",
-        isDraft: true,
-        baseRepository: "canxer314/obsidian-llm-wiki-cli",
-        headRepository: "canxer314/obsidian-llm-wiki-cli",
-        headSha: revision,
-        labels: ["agent:review"],
-      }),
-      addPullRequestLabel: vi.fn()
-        .mockResolvedValueOnce(undefined)
-        .mockRejectedValueOnce(new Error("GitHub unavailable")),
-      removePullRequestLabel: vi.fn().mockRejectedValue(new Error("GitHub unavailable")),
-      addBlockedDiagnostic: vi.fn().mockRejectedValue(new Error("GitHub unavailable")),
-    };
-
-    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
-      github,
-      checkout: {
-        withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")),
-      },
-      reviewer: { review: vi.fn().mockRejectedValue(new Error("Agent execution failed")) },
-      publisher: { publish: vi.fn() },
-      lease,
-      createJobId: () => "job-220",
-    })).resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
-  });
-
-  it("blocks an acquired Pull Request when review execution fails without publishing a rejection", async () => {
-    const events: string[] = [];
-    const failure = new Error("Agent execution failed");
-    const github = {
-      readPullRequest: vi.fn()
-        .mockResolvedValueOnce({
-          number: 220,
-          state: "OPEN",
-          isDraft: true,
-          baseRepository: "canxer314/obsidian-llm-wiki-cli",
-          headRepository: "canxer314/obsidian-llm-wiki-cli",
-          headSha: revision,
-          labels: ["agent:review"],
-        })
-        .mockResolvedValueOnce({
-          number: 220,
-          state: "OPEN",
-          isDraft: true,
-          baseRepository: "canxer314/obsidian-llm-wiki-cli",
-          headRepository: "canxer314/obsidian-llm-wiki-cli",
-          headSha: revision,
-          labels: ["agent:review", "agent:in-progress"],
-        }),
-      addPullRequestLabel: vi.fn(async (_number: number, label: string) => {
-        events.push(`add:${label}`);
-      }),
-      removePullRequestLabel: vi.fn(async (_number: number, label: string) => {
-        events.push(`remove:${label}`);
-      }),
-      addBlockedDiagnostic: vi.fn(async (_number: number, diagnostic) => {
-        events.push(`blocked:${diagnostic.reason}`);
-      }),
-    };
-    const publisher = { publish: vi.fn() };
-
-    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
-      github,
-      checkout: {
-        withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")),
-      },
-      reviewer: { review: vi.fn().mockRejectedValue(failure) },
-      publisher,
-      lease,
-      createJobId: () => "job-220",
-    })).resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
-
+    expect(dependencies.publisher.publish).toHaveBeenCalledWith({ checkoutPath: "/safe/disposable-checkout", branch: "feature/review", expectedRevision: revision });
+    expect(dependencies.github.publishReview).toHaveBeenCalledWith(expect.objectContaining({ revision: improvedRevision }));
     expect(events).toEqual([
-      "add:agent:in-progress",
-      "remove:agent:review",
-      "add:agent:blocked",
-      "blocked:review-execution",
-      "remove:agent:in-progress",
+      "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`, `push:${revision}`,
+      `review:${improvedRevision}`, "ready", "reply:PRRC_1", "remove:agent:in-progress",
     ]);
-    expect(publisher.publish).not.toHaveBeenCalled();
+  });
+
+  it("publishes a clean review at the original head when the reviewer makes no commit", async () => {
+    const events: string[] = [];
+    const dependencies = ports(events, vi.fn().mockResolvedValue({ summary: "Clean.", inlineComments: [], replies: [] }));
+    dependencies.publisher.publish.mockResolvedValue(revision);
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies)).resolves.toEqual({ status: "reviewed", revision, verdict: "clean" });
+    expect(dependencies.github.publishReview).toHaveBeenCalledWith(expect.objectContaining({ revision }));
+    expect(dependencies.github.markPullRequestReady).toHaveBeenCalledWith(220);
+  });
+
+  it("blocks and leaves the Draft PR open without a fabricated review when the lease rejects the push", async () => {
+    const events: string[] = [];
+    const dependencies = ports(events);
+    dependencies.publisher.publish.mockRejectedValue(new Error("stale info"));
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, { ...dependencies, createJobId: () => "job-220" }))
+      .resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
+
+    expect(dependencies.github.publishReview).not.toHaveBeenCalled();
+    expect(dependencies.github.markPullRequestReady).not.toHaveBeenCalled();
+    expect(dependencies.github.addPullRequestLabel).toHaveBeenCalledWith(220, "agent:blocked");
+    expect(dependencies.github.removePullRequestLabel).toHaveBeenCalledWith(220, "agent:in-progress");
+  });
+
+  it("refuses an in-progress request without touching the trigger", async () => {
+    const events: string[] = [];
+    const dependencies = ports(events);
+    dependencies.github.readPullRequest.mockReset();
+    dependencies.github.readPullRequest.mockResolvedValue(pullRequest(["agent:review", "agent:in-progress"]));
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies))
+      .resolves.toEqual({ status: "refused", reason: "Pull Request #220 is already in progress" });
+    expect(dependencies.github.removePullRequestLabel).not.toHaveBeenCalled();
   });
 });

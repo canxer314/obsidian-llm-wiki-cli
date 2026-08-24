@@ -16,7 +16,6 @@ import type { QueuePromotionPorts } from "./queue-promotion-automation.ts";
 import type {
   PublishedReview,
   ReviewAutomationPorts,
-  ReviewFinding,
 } from "./review-automation.ts";
 
 const executeFile = promisify(execFile);
@@ -27,17 +26,8 @@ type Execute = (
   environment?: Readonly<Record<string, string>>,
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
-function reviewEvent(review: PublishedReview): "APPROVE" | "REQUEST_CHANGES" {
-  return review.verdict === "Approved" ? "APPROVE" : "REQUEST_CHANGES";
-}
-
-function findingBody(finding: ReviewFinding): string {
-  return `**${finding.summary}**: ${finding.details}`;
-}
-
 function reviewBody(review: PublishedReview): string {
-  if (review.findings.length === 0) return review.summary;
-  return `${review.summary}\n\n${review.findings.map((finding) => `- ${findingBody(finding)}`).join("\n")}`;
+  return review.summary;
 }
 
 interface InlineComment {
@@ -85,21 +75,20 @@ function inlineComments(
   review: PublishedReview,
   locations: ReadonlyMap<string, { readonly LEFT: ReadonlySet<number>; readonly RIGHT: ReadonlySet<number> }>,
 ): readonly InlineComment[] {
-  return review.findings.flatMap((finding) => {
-    if (finding.location === undefined) return [];
-    const { path, line, side } = finding.location;
+  return review.inlineComments.flatMap((comment) => {
+    const { path, line, body } = comment;
     if (
       path.length === 0 ||
       path.startsWith("/") ||
       path.split("/").includes("..") ||
       !Number.isSafeInteger(line) ||
       line < 1 ||
-      (side !== "LEFT" && side !== "RIGHT")
+      body.length === 0
     ) {
       throw new Error("Review inline comment location is invalid");
     }
-    return locations.get(path)?.[side].has(line) === true
-      ? [{ path, line, side, body: findingBody(finding) }]
+    return locations.get(path)?.RIGHT.has(line) === true
+      ? [{ path, line, side: "RIGHT", body }]
       : [];
   });
 }
@@ -296,7 +285,7 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ReviewAutomationPorts["publisher"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
+}): ReviewAutomationPorts["github"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
@@ -635,6 +624,32 @@ export function createAutomationGithubPort(options: {
         labels: pullRequest.labels.map(({ name }) => name),
       };
     },
+    async readUnresolvedReviewThreads(pullRequestNumber) {
+      const { stdout } = await execute("gh", [
+        "api", "graphql", "-f",
+        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:50){nodes{id path line originalLine body author{login}}}}}}}}",
+        "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${pullRequestNumber}`,
+        "--jq", ".data.repository.pullRequest.reviewThreads.nodes",
+      ], options.environment);
+      const threads = JSON.parse(stdout) as readonly {
+        readonly isResolved: boolean;
+        readonly comments: { readonly nodes: readonly {
+          readonly id: string;
+          readonly path: string | null;
+          readonly line: number | null;
+          readonly originalLine: number | null;
+          readonly body: string;
+          readonly author: { readonly login: string } | null;
+        }[] };
+      }[];
+      return threads.filter(({ isResolved }) => !isResolved).flatMap(({ comments }) => comments.nodes.map((comment) => ({
+        commentId: comment.id,
+        ...(comment.path === null ? {} : { path: comment.path }),
+        ...(comment.line === null && comment.originalLine === null ? {} : { line: comment.line ?? comment.originalLine! }),
+        author: comment.author?.login ?? "unknown",
+        body: comment.body,
+      })));
+    },
     async addPullRequestLabel(pullRequestNumber, label) {
       await execute("gh", ["pr", "edit", String(pullRequestNumber), "--add-label", label], options.environment);
     },
@@ -664,7 +679,7 @@ export function createAutomationGithubPort(options: {
         `Automation branch update is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/branch-update-${diagnostic.jobId}. Remove agent:blocked, restore agent:update-branch, then retry.`,
       ], options.environment);
     },
-    async publish(request) {
+    async publishReview(request) {
       const { stdout: headOutput } = await execute("gh", [
         "pr", "view", String(request.pullRequestNumber), "--json", "headRefOid", "--jq", ".headRefOid",
       ], options.environment);
@@ -679,7 +694,7 @@ export function createAutomationGithubPort(options: {
       await execute("gh", [
         "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/reviews`, "--method", "POST",
         "-f", `commit_id=${request.revision}`,
-        "-f", `event=${reviewEvent(request.review)}`,
+        "-f", "event=COMMENT",
         "-f", `body=${reviewBody(request.review)}`,
         ...comments.flatMap((comment, index) => [
           "-f", `comments[${index}][path]=${comment.path}`,
@@ -687,6 +702,23 @@ export function createAutomationGithubPort(options: {
           "-f", `comments[${index}][side]=${comment.side}`,
           "-f", `comments[${index}][body]=${comment.body}`,
         ]),
+      ], options.environment);
+    },
+    async markPullRequestReady(pullRequestNumber) {
+      await execute("gh", ["pr", "ready", String(pullRequestNumber)], options.environment);
+    },
+    async replyToReviewThread(request) {
+      const { stdout } = await execute("gh", [
+        "api", "graphql",
+        "-f", "query=query($id:ID!){node(id:$id){... on PullRequestReviewComment{databaseId}}}",
+        "-F", `id=${request.reply.commentId}`,
+        "--jq", ".data.node.databaseId",
+      ], options.environment);
+      const commentId = stdout.trim();
+      if (!/^\d+$/u.test(commentId)) return;
+      await execute("gh", [
+        "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/comments/${commentId}/replies`,
+        "--method", "POST", "-f", `body=${request.reply.body}`,
       ], options.environment);
     },
   };

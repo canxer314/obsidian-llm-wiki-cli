@@ -9,43 +9,48 @@ import {
 } from "@ai-hero/sandcastle";
 import { z } from "zod";
 
-import type { ReviewFinding } from "./review-automation.ts";
+import type { PublishedReview, ReviewThreadComment } from "./review-automation.ts";
 
-export interface ExtractedReview {
-  readonly verdict: "Approved" | "Changes requested";
-  readonly summary: string;
-  readonly findings: readonly ReviewFinding[];
-}
+export type ExtractedReview = PublishedReview;
 
-const reviewFindingSchema = z.strictObject({
-  summary: z.string().min(1),
-  details: z.string().min(1),
-  location: z.strictObject({
-    path: z.string().min(1).refine((path) => !path.startsWith("/") && !path.includes(".."), {
-      message: "location path must be repository-relative",
-    }),
-    line: z.number().int().positive(),
-    side: z.enum(["LEFT", "RIGHT"]),
-  }).optional(),
+const inlineCommentSchema = z.strictObject({
+  path: z.string().min(1).refine((path) => !path.startsWith("/") && !path.split("/").includes(".."), {
+    message: "inline comment path must be repository-relative",
+  }),
+  line: z.number().int().positive(),
+  body: z.string().min(1),
+});
+
+const replySchema = z.strictObject({
+  commentId: z.string().min(1),
+  body: z.string().min(1),
 });
 
 const reviewSchema = z.strictObject({
-  verdict: z.enum(["Approved", "Changes requested"]),
   summary: z.string().min(1),
-  findings: z.array(reviewFindingSchema),
-}).refine(
-  (review) => review.verdict === "Approved" || review.findings.length > 0,
-  { message: "Changes requested requires at least one finding", path: ["findings"] },
-);
+  inlineComments: z.array(inlineCommentSchema).default([]),
+  replies: z.array(replySchema).default([]),
+});
 
-const producePrompt = (pullRequestNumber: number, revision: string) => `
-Review Pull Request #${pullRequestNumber} at exact revision ${revision}.
+function producePrompt(request: {
+  readonly pullRequestNumber: number;
+  readonly branch: string;
+  readonly revision: string;
+  readonly reviewThreads: readonly ReviewThreadComment[];
+}): string {
+  return `Review Pull Request #${request.pullRequestNumber} on branch ${request.branch}, which starts at exact revision ${request.revision}.
 
-Inspect the Git diff, implementation, tests, repository standards, and originating Issue. Do not modify files, commit, push, or publish GitHub feedback. Develop a complete review with concrete correctness, security, or specification findings where applicable. Keep your review in this session for a subsequent formatting request.
-`;
+Inspect the Git diff, implementation, tests, repository standards, and originating Issue. Actively improve correct, in-scope problems you find: make the smallest correct changes, run appropriate checks, and commit every intended improvement on the existing branch. Do not create an Issue, branch, or Pull Request. Do not run gh auth setup-git, git push, rebase, or force-push; a controlled publisher will push your local commits after you exit.
+
+Unresolved review threads are below. Address code-review requests when appropriate and prepare a reply for each addressed or substantively declined request. Only reply to one of these exact comment IDs.
+
+${JSON.stringify(request.reviewThreads, null, 2)}
+
+Keep your review in this session for a subsequent formatting request.`;
+}
 
 const extractionPrompt = `
-Now emit the review you just produced as one JSON object inside <review> tags. The verdict must be exactly Approved or Changes requested. Include a concise summary and a findings array. Each finding must have a concrete summary and details; use an empty findings array when approved. When a finding applies to a changed line, include its repository-relative path, exact diff line number, and LEFT or RIGHT side in location; omit location when no valid diff location exists.
+Now emit the review you just completed as one JSON object inside <review> tags. Do not make further code changes. Include a concise summary, inlineComments, and replies. Each inline comment requires a repository-relative path, exact current line number, and body. Each reply requires an exact commentId from the provided unresolved review threads and body. Use empty arrays when none apply.
 `;
 
 const REVIEW_TIMEOUT_MILLISECONDS = 30 * 60 * 1000;
@@ -63,8 +68,10 @@ export function createSameSessionReviewExtractor(options: {
   return {
     async review(request: {
       readonly pullRequestNumber: number;
+      readonly branch: string;
       readonly revision: string;
       readonly checkoutPath: string;
+      readonly reviewThreads: readonly ReviewThreadComment[];
       readonly model: string;
       readonly artifactDirectory?: string;
     }): Promise<ExtractedReview> {
@@ -74,39 +81,34 @@ export function createSameSessionReviewExtractor(options: {
         options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
       );
       try {
+        const logging = request.artifactDirectory === undefined ? undefined : {
+          type: "file" as const,
+          path: join(request.artifactDirectory, "review.log"),
+          verbose: true,
+        };
         const produced = await runAgent({
-        agent: createAgent(
-          request.model,
-          options.agentEnvironment === undefined ? undefined : { env: { ...options.agentEnvironment } },
-        ),
-        sandbox: options.sandbox,
-        hooks: options.hooks,
-        cwd: request.checkoutPath,
-        ...(request.artifactDirectory === undefined ? {} : {
-          logging: { type: "file" as const, path: join(request.artifactDirectory, "review.log"), verbose: true },
-        }),
-        signal: controller.signal,
-        branchStrategy: { type: "head" },
-        maxIterations: 1,
-        prompt: producePrompt(request.pullRequestNumber, request.revision),
-      });
-      if (produced.commits.length > 0) {
-        throw new Error("Reviewer session must not create commits");
-      }
-      if (produced.resume === undefined) {
-        throw new Error("Reviewer session identity is unavailable");
-      }
-      const extracted = await produced.resume(extractionPrompt, {
-        ...(request.artifactDirectory === undefined ? {} : {
-          logging: { type: "file" as const, path: join(request.artifactDirectory, "review.log"), verbose: true },
-        }),
-        signal: controller.signal,
-        output: Output.object({ tag: "review", schema: reviewSchema, maxRetries: 2 }),
-      }) as unknown as { readonly commits: readonly unknown[]; readonly output: ExtractedReview };
-      if (extracted.commits.length > 0) {
-        throw new Error("Reviewer session must not create commits");
-      }
-      return extracted.output;
+          agent: createAgent(
+            request.model,
+            options.agentEnvironment === undefined ? undefined : { env: { ...options.agentEnvironment } },
+          ),
+          sandbox: options.sandbox,
+          hooks: options.hooks,
+          cwd: request.checkoutPath,
+          ...(logging === undefined ? {} : { logging }),
+          signal: controller.signal,
+          branchStrategy: { type: "branch", branch: request.branch },
+          maxIterations: 1,
+          prompt: producePrompt(request),
+        });
+        if (produced.resume === undefined) {
+          throw new Error("Reviewer session identity is unavailable");
+        }
+        const extracted = await produced.resume(extractionPrompt, {
+          ...(logging === undefined ? {} : { logging }),
+          signal: controller.signal,
+          output: Output.object({ tag: "review", schema: reviewSchema, maxRetries: 2 }),
+        }) as unknown as { readonly output: ExtractedReview };
+        return extracted.output;
       } finally {
         clearTimeout(timeout);
       }

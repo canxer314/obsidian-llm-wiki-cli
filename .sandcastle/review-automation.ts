@@ -4,31 +4,52 @@ export interface ReviewAutomationPullRequest {
   readonly isDraft: boolean;
   readonly baseRepository: string;
   readonly headRepository: string;
+  readonly headRefName: string;
   readonly headSha: string;
   readonly labels: readonly string[];
 }
 
-export interface ReviewFinding {
-  readonly summary: string;
-  readonly details: string;
-  readonly location?: {
-    readonly path: string;
-    readonly line: number;
-    readonly side: "LEFT" | "RIGHT";
-  };
+export interface ReviewInlineComment {
+  readonly path: string;
+  readonly line: number;
+  readonly body: string;
+}
+
+export interface ReviewReply {
+  readonly commentId: string;
+  readonly body: string;
 }
 
 export interface PublishedReview {
-  readonly verdict: "Approved" | "Changes requested";
   readonly summary: string;
-  readonly findings: readonly ReviewFinding[];
+  readonly inlineComments: readonly ReviewInlineComment[];
+  readonly replies: readonly ReviewReply[];
+}
+
+export interface ReviewThreadComment {
+  readonly commentId: string;
+  readonly path?: string;
+  readonly line?: number;
+  readonly author: string;
+  readonly body: string;
 }
 
 export interface ReviewAutomationPorts {
   readonly github: {
     readPullRequest(pullRequestNumber: number): Promise<ReviewAutomationPullRequest>;
+    readUnresolvedReviewThreads(pullRequestNumber: number): Promise<readonly ReviewThreadComment[]>;
     addPullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     removePullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
+    publishReview(request: {
+      readonly pullRequestNumber: number;
+      readonly revision: string;
+      readonly review: PublishedReview;
+    }): Promise<void>;
+    markPullRequestReady(pullRequestNumber: number): Promise<void>;
+    replyToReviewThread(request: {
+      readonly pullRequestNumber: number;
+      readonly reply: ReviewReply;
+    }): Promise<void>;
     addRefusalDiagnostic?(pullRequestNumber: number, reason: string): Promise<void>;
     addBlockedDiagnostic?(
       pullRequestNumber: number,
@@ -44,16 +65,19 @@ export interface ReviewAutomationPorts {
   readonly reviewer: {
     review(request: {
       readonly pullRequestNumber: number;
+      readonly branch: string;
       readonly revision: string;
       readonly checkoutPath: string;
+      readonly reviewThreads: readonly ReviewThreadComment[];
     }): Promise<PublishedReview>;
   };
   readonly publisher: {
+    prepare(checkoutPath: string, branch: string, revision: string): Promise<void>;
     publish(request: {
-      readonly pullRequestNumber: number;
-      readonly revision: string;
-      readonly review: PublishedReview;
-    }): Promise<void>;
+      readonly checkoutPath: string;
+      readonly branch: string;
+      readonly expectedRevision: string;
+    }): Promise<string>;
   };
   readonly lease: {
     acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> | void } | undefined>;
@@ -62,7 +86,7 @@ export interface ReviewAutomationPorts {
 }
 
 export type ReviewAutomationResult =
-  | { readonly status: "reviewed"; readonly revision: string }
+  | { readonly status: "reviewed"; readonly revision: string; readonly verdict: "improved" | "clean" }
   | { readonly status: "refused"; readonly reason: string }
   | { readonly status: "blocked"; readonly reason: "review-execution"; readonly jobId: string };
 
@@ -84,13 +108,6 @@ export async function runReviewAutomationCommand(
   const pullRequest = await ports.github.readPullRequest(request.pullRequestNumber);
   const reason = refusal(pullRequest);
   if (reason !== undefined) {
-    // An in-progress Pull Request is owned by an in-flight run whose
-    // acquisition protocol requires the trigger to still be present, so a
-    // concurrent refusal must not touch it; every other refusal is a
-    // business preflight refusal (#219 story 17): remove the trigger and
-    // explain on the Automation Work Item, without agent:blocked, so an
-    // inapplicable request (e.g. a fork Pull Request) does not re-refuse
-    // every round.
     if (pullRequest.labels.includes("agent:in-progress")) return { status: "refused", reason };
     await ports.github.removePullRequestLabel(pullRequest.number, "agent:review");
     await ports.github.addRefusalDiagnostic?.(pullRequest.number, reason);
@@ -104,15 +121,41 @@ export async function runReviewAutomationCommand(
       const acquiredPullRequest = await ports.github.readPullRequest(pullRequest.number);
       if (
         acquiredPullRequest.state !== "OPEN" ||
+        acquiredPullRequest.headSha !== pullRequest.headSha ||
         !acquiredPullRequest.labels.includes("agent:review") ||
         !acquiredPullRequest.labels.includes("agent:in-progress") ||
         acquiredPullRequest.labels.includes("agent:blocked")
       ) throw new Error(`Pull Request #${pullRequest.number} changed while review was being acquired`);
       await ports.github.removePullRequestLabel(pullRequest.number, "agent:review");
-      await ports.checkout.withCheckout({ pullRequestNumber: pullRequest.number, revision: pullRequest.headSha }, async (checkoutPath) => {
-        const review = await ports.reviewer.review({ pullRequestNumber: pullRequest.number, revision: pullRequest.headSha, checkoutPath });
-        await ports.publisher.publish({ pullRequestNumber: pullRequest.number, revision: pullRequest.headSha, review });
+      const reviewThreads = await ports.github.readUnresolvedReviewThreads(pullRequest.number);
+      const revision = await ports.checkout.withCheckout({ pullRequestNumber: pullRequest.number, revision: pullRequest.headSha }, async (checkoutPath) => {
+        await ports.publisher.prepare(checkoutPath, pullRequest.headRefName, pullRequest.headSha);
+        const review = await ports.reviewer.review({
+          pullRequestNumber: pullRequest.number,
+          branch: pullRequest.headRefName,
+          revision: pullRequest.headSha,
+          checkoutPath,
+          reviewThreads,
+        });
+        const publishedRevision = await ports.publisher.publish({
+          checkoutPath,
+          branch: pullRequest.headRefName,
+          expectedRevision: pullRequest.headSha,
+        });
+        if (!/^[0-9a-f]{40}$/u.test(publishedRevision)) throw new Error("Review publication did not produce a full revision");
+        await ports.github.publishReview({ pullRequestNumber: pullRequest.number, revision: publishedRevision, review });
+        await ports.github.markPullRequestReady(pullRequest.number);
+        const validReplyIds = new Set(reviewThreads.map(({ commentId }) => commentId));
+        await Promise.all(review.replies
+          .filter(({ commentId }) => validReplyIds.has(commentId))
+          .map((reply) => ports.github.replyToReviewThread({ pullRequestNumber: pullRequest.number, reply })));
+        return publishedRevision;
       });
+      return {
+        status: "reviewed",
+        revision,
+        verdict: revision === pullRequest.headSha ? "clean" : "improved",
+      };
     } catch {
       const jobId = ports.createJobId?.() ?? "local-review-job";
       await Promise.allSettled([
@@ -123,7 +166,6 @@ export async function runReviewAutomationCommand(
     } finally {
       await ports.github.removePullRequestLabel(pullRequest.number, "agent:in-progress").catch(() => undefined);
     }
-    return { status: "reviewed", revision: pullRequest.headSha };
   } finally {
     await lease.release();
   }

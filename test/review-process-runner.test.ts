@@ -39,8 +39,10 @@ describe("reviewer process runner", () => {
 
     await expect(runner.review({
       pullRequestNumber: 220,
+      branch: "feature/review",
       revision,
       checkoutPath: "/jobs/review-220",
+      reviewThreads: [],
       model: "reviewer-model",
       artifactDirectory: "/jobs/review-artifacts/job-220",
     })).rejects.toThrow("Reviewer execution timed out");
@@ -57,14 +59,16 @@ describe("reviewer process runner", () => {
     });
     const review = runner.review({
       pullRequestNumber: 220,
+      branch: "feature/review",
       revision,
       checkoutPath: "/jobs/review-220",
+      reviewThreads: [],
       model: "reviewer-model",
       artifactDirectory: "/jobs/review-artifacts/job-220",
     });
-    process.stdout?.emit("data", `${JSON.stringify({ verdict: "Approved", summary: "Looks good.", findings: [] })}\n`);
+    process.stdout?.emit("data", `${JSON.stringify({ summary: "Looks good.", inlineComments: [], replies: [] })}\n`);
     process.emit("close", 0);
 
-    await expect(review).resolves.toEqual({ verdict: "Approved", summary: "Looks good.", findings: [] });
+    await expect(review).resolves.toEqual({ summary: "Looks good.", inlineComments: [], replies: [] });
   });
 });

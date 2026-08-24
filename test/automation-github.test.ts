@@ -249,19 +249,16 @@ describe("automation GitHub port", () => {
       headSha: revision,
       labels: ["agent:review"],
     });
-    await github.publish({
+    await github.publishReview({
       pullRequestNumber: 220,
       revision,
       review: {
-        verdict: "Changes requested",
         summary: "One problem.",
-        findings: [{
-          summary: "Incorrect boundary",
-          details: "The condition excludes the final record.",
-          location: { path: ".sandcastle/review-automation.ts", line: 93, side: "RIGHT" },
-        }],
+        inlineComments: [{ path: ".sandcastle/review-automation.ts", line: 93, body: "Incorrect boundary." }],
+        replies: [],
       },
     });
+    await github.markPullRequestReady(220);
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
       "pr", "view", "220", "--json",
@@ -273,14 +270,15 @@ describe("automation GitHub port", () => {
     expect(execute).toHaveBeenNthCalledWith(3, "gh", [
       "api", "repos/{owner}/{repo}/pulls/220/files", "--method", "GET", "--paginate",
     ], undefined);
-    expect(execute).toHaveBeenLastCalledWith("gh", [
+    expect(execute).toHaveBeenLastCalledWith("gh", ["pr", "ready", "220"], undefined);
+    expect(execute).toHaveBeenNthCalledWith(4, "gh", [
       "api", "repos/{owner}/{repo}/pulls/220/reviews", "--method", "POST",
-      "-f", `commit_id=${revision}`, "-f", "event=REQUEST_CHANGES",
-      "-f", "body=One problem.\n\n- **Incorrect boundary**: The condition excludes the final record.",
+      "-f", `commit_id=${revision}`, "-f", "event=COMMENT",
+      "-f", "body=One problem.",
       "-f", "comments[0][path]=.sandcastle/review-automation.ts",
       "-f", "comments[0][line]=93",
       "-f", "comments[0][side]=RIGHT",
-      "-f", "comments[0][body]=**Incorrect boundary**: The condition excludes the final record.",
+      "-f", "comments[0][body]=Incorrect boundary.",
     ], undefined);
   });
 
@@ -387,10 +385,10 @@ describe("automation GitHub port", () => {
       execute: vi.fn().mockResolvedValue({ stdout: `${"a".repeat(40)}\n`, stderr: "" }),
     });
 
-    await expect(github.publish({
+    await expect(github.publishReview({
       pullRequestNumber: 220,
       revision,
-      review: { verdict: "Approved", summary: "Looks good.", findings: [] },
+      review: { summary: "Looks good.", inlineComments: [], replies: [] },
     })).rejects.toThrow("Pull Request head changed before review publication");
   });
 
@@ -401,17 +399,13 @@ describe("automation GitHub port", () => {
       .mockResolvedValue({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await github.publish({
+    await github.publishReview({
       pullRequestNumber: 220,
       revision,
       review: {
-        verdict: "Changes requested",
         summary: "One problem.",
-        findings: [{
-          summary: "Incorrect boundary",
-          details: "The condition excludes the final record.",
-          location: { path: ".sandcastle/review-automation.ts", line: 96, side: "RIGHT" },
-        }],
+        inlineComments: [{ path: ".sandcastle/review-automation.ts", line: 96, body: "Not in the diff." }],
+        replies: [],
       },
     });
 
@@ -427,17 +421,13 @@ describe("automation GitHub port", () => {
         .mockResolvedValueOnce({ stdout: "[]", stderr: "" }),
     });
 
-    await expect(github.publish({
+    await expect(github.publishReview({
       pullRequestNumber: 220,
       revision,
       review: {
-        verdict: "Changes requested",
         summary: "One problem.",
-        findings: [{
-          summary: "Incorrect boundary",
-          details: "The condition excludes the final record.",
-          location: { path: "../outside.ts", line: 96, side: "RIGHT" },
-        }],
+        inlineComments: [{ path: "../outside.ts", line: 96, body: "Invalid path." }],
+        replies: [],
       },
     })).rejects.toThrow("Review inline comment location is invalid");
   });
@@ -509,5 +499,19 @@ describe("automation GitHub port", () => {
       title: "Deepen the search indexer",
       body: "body",
     })).resolves.toEqual({ issueNumber: 241, issueUrl: "https://example.test/issues/241" });
+  });
+
+  it("resolves a GraphQL node ID before posting a thread reply", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "12345\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await github.replyToReviewThread({ pullRequestNumber: 220, reply: { commentId: "PRRC_1", body: "Fixed." } });
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", expect.arrayContaining(["api", "graphql", "-F", "id=PRRC_1"]), undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "api", "repos/{owner}/{repo}/pulls/220/comments/12345/replies", "--method", "POST", "-f", "body=Fixed.",
+    ], undefined);
   });
 });
