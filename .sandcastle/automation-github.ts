@@ -666,6 +666,11 @@ export function createAutomationGithubPort(options: {
         `Automation review is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:review, then retry.`,
       ], options.environment);
     },
+    async addBranchUpdateComment(pullRequestNumber, body) {
+      await execute("gh", [
+        "pr", "comment", String(pullRequestNumber), "--body", body,
+      ], options.environment);
+    },
     async addBranchUpdateBlockedDiagnostic(pullRequestNumber, diagnostic) {
       await execute("gh", [
         "pr", "comment", String(pullRequestNumber), "--body",

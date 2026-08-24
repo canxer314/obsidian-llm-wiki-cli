@@ -12,6 +12,7 @@ import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { createTargetCheckout } from "./target-checkout.ts";
 import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
 import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
+import { createProcessBranchUpdateConflictResolver } from "./branch-update-conflict-process-runner.ts";
 import {
   ARCHITECTURE_REVIEW_IDENTITY,
   runArchitectureReviewAutomationCommand,
@@ -70,7 +71,9 @@ try {
     sourceRepositoryPath: repositoryPath,
     gitEnvironment: startup.childEnvironments.git,
   });
-  const updater = createProcessBranchUpdater({});
+  const updater = createProcessBranchUpdater({
+    resolver: createProcessBranchUpdateConflictResolver({ model: startup.models.implementer }),
+  });
   const architectureReviewer = createProcessArchitectureReviewRunner({});
   const implementer = createProcessImplementer({
     plannerModel: startup.models.planner,
