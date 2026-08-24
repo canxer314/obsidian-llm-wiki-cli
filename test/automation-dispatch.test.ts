@@ -247,14 +247,17 @@ describe("Automation Command dispatch", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("fails closed before any acquisition, promotion, or GitHub mutation when container authentication readiness fails", async () => {
+  it.each([
+    { classification: "missing" as const },
+    { classification: "invalid" as const },
+  ])("fails closed before any acquisition, promotion, or GitHub mutation when container authentication is $classification", async ({ classification }) => {
     const events: string[] = [];
     const listCommands = vi.fn(async () => { events.push("discover"); return []; });
     const verifyLabels = vi.fn(async () => { events.push("labels"); });
     const scan = vi.fn(async () => { events.push("promote"); });
     const prepare = vi.fn(async () => { events.push("prepare"); });
     const run = vi.fn(async () => { events.push("run"); });
-    const readinessError = new GithubAgentReadinessError("invalid");
+    const readinessError = new GithubAgentReadinessError(classification);
 
     await expect(dispatchAutomationCommands({}, {
       scheduler: {
