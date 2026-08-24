@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -7,14 +8,35 @@ const executeFile = promisify(execFile);
 
 type Execute = (file: string, arguments_: readonly string[]) => Promise<{ readonly stdout: string }>;
 
+// The lock file carries the holder's process ID. A round that finds the file
+// held by a dead process reclaims it; a file without a readable PID (for
+// example one left between creation and the PID write by a hard kill) is
+// never reclaimed automatically and remains a manual operator case.
 async function acquireFileLock(path: string): Promise<{ release(): Promise<void> } | undefined> {
-  try {
-    const handle = await open(path, "wx");
-    return { release: async () => { await handle.close(); await import("node:fs/promises").then(({ unlink }) => unlink(path)); } };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
-    throw error;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await open(path, "wx");
+      await handle.writeFile(`${process.pid}\n`);
+      return { release: async () => { await handle.close(); await import("node:fs/promises").then(({ unlink }) => unlink(path)); } };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (attempt > 0 || !isStaleLock(await readFile(path, "utf8").catch(() => ""))) return undefined;
+      const stalePath = `${path}.stale-${randomUUID()}`;
+      try {
+        await rename(path, stalePath);
+      } catch (renameError) {
+        if ((renameError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw renameError;
+      }
+      await rm(stalePath, { force: true });
+    }
   }
+  return undefined;
+}
+
+function isStaleLock(content: string): boolean {
+  if (!/^\d+\n?$/u.test(content)) return false;
+  return !isProcessAlive(Number(content.trim()));
 }
 
 function isProcessAlive(processId: number): boolean {
@@ -40,9 +62,13 @@ export function createAutomationScheduler(options: {
   readonly repositoryPath?: string;
   readonly execute?: Execute;
   readonly acquireLock?: () => Promise<{ release(): Promise<void> } | undefined>;
+  readonly environment?: Readonly<Record<string, string>>;
 }) {
   const execute = options.execute ?? (async (file, arguments_) => {
-    const result = await executeFile(file, [...arguments_], { cwd: options.repositoryPath });
+    const result = await executeFile(file, [...arguments_], {
+      cwd: options.repositoryPath,
+      ...(options.environment === undefined ? {} : { env: options.environment }),
+    });
     return { stdout: result.stdout };
   });
   const repositoryPath = options.repositoryPath ?? process.cwd();

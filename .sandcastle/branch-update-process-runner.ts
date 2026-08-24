@@ -8,9 +8,10 @@ export function createProcessBranchUpdater(options: {
     file: string,
     arguments_: readonly string[],
   ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+  readonly environment?: Readonly<Record<string, string>>;
 }) {
   const execute = options.execute ?? (async (file, arguments_) => {
-    const result = await executeFile(file, [...arguments_]);
+    const result = await executeFile(file, [...arguments_], options.environment === undefined ? {} : { env: options.environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
   return {

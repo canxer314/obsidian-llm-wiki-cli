@@ -1,6 +1,10 @@
+import { mkdtemp, mkdir, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
-import { createTargetCheckout } from "../.sandcastle/target-checkout.js";
+import { createTargetCheckout, removeExpiredFailureCheckouts } from "../.sandcastle/target-checkout.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const remote = "https://github.com/example/repository.git";
@@ -89,5 +93,41 @@ describe("Target Checkout", () => {
 
     expect(action).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["checkout"]));
+  });
+});
+
+describe("Failed Target Checkout retention", () => {
+  it("sweeps failure directories older than seven days and preserves structural directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "failure-checkout-retention-"));
+    try {
+      const now = Date.now();
+      const sevenDays = 7 * 24 * 60 * 60 * 1000;
+      const expired = join(root, "feedback-old-job");
+      const recent = join(root, "branch-update-new-job");
+      const preserved = join(root, "pull-request-leases");
+      await mkdir(expired);
+      await mkdir(recent);
+      await mkdir(preserved);
+      await writeFile(join(root, "note.txt"), "not a directory");
+      const old = new Date(now - sevenDays - 1000);
+      await utimes(expired, old, old);
+      await utimes(preserved, old, old);
+
+      await removeExpiredFailureCheckouts({
+        root,
+        preserve: ["review-artifacts", "pull-request-leases", "implementation-leases"],
+        now,
+      });
+
+      expect((await readdir(root)).sort()).toEqual(["branch-update-new-job", "note.txt", "pull-request-leases"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a missing jobs root", async () => {
+    await expect(removeExpiredFailureCheckouts({
+      root: join(tmpdir(), "failure-checkout-retention-missing-root"),
+    })).resolves.toBeUndefined();
   });
 });

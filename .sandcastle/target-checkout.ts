@@ -1,10 +1,38 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const executeFile = promisify(execFile);
+
+// Failed or timed-out Target Checkouts stay on disk for diagnosis and follow
+// the same seven-day retention policy as review artifacts.
+const FAILURE_CHECKOUT_RETENTION_MILLISECONDS = 7 * 24 * 60 * 60 * 1000;
+
+export async function removeExpiredFailureCheckouts(options: {
+  readonly root: string;
+  readonly preserve?: readonly string[];
+  readonly now?: number;
+}): Promise<void> {
+  const preserve = new Set(options.preserve ?? []);
+  let entries;
+  try {
+    entries = await readdir(options.root, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const expiredBefore = (options.now ?? Date.now()) - FAILURE_CHECKOUT_RETENTION_MILLISECONDS;
+  await Promise.all(entries
+    .filter((entry) => entry.isDirectory() && !preserve.has(entry.name))
+    .map(async (entry) => {
+      const path = join(options.root, entry.name);
+      if ((await stat(path)).mtimeMs < expiredBefore) {
+        await rm(path, { recursive: true, force: true });
+      }
+    }));
+}
 
 export interface TargetCheckout {
   withCheckout<TResult>(

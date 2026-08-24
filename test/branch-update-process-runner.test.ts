@@ -28,4 +28,17 @@ describe("process branch updater", () => {
       "origin", "HEAD:refs/heads/sandcastle/issue-221",
     ]);
   });
+
+  it("spawns git through the purpose-specific environment instead of inheriting the parent", async () => {
+    const updater = createProcessBranchUpdater({
+      environment: { PATH: "/definitely-not-on-this-host", HOME: "/tmp" },
+    });
+
+    await expect(updater.update({
+      branch: "sandcastle/issue-221",
+      baseBranch: "master",
+      revision,
+      checkoutPath: "/safe/disposable-checkout",
+    })).rejects.toThrow(/spawn git ENOENT/u);
+  });
 });

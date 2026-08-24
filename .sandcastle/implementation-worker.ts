@@ -37,7 +37,7 @@ const pullRequest = await implementIssue({
   model: implementerModel,
   session: implementerSession,
   checkoutPath,
-  github: new GithubCliPort(),
+  github: new GithubCliPort(undefined, undefined, startup.childEnvironments.github),
 });
 if (pullRequest.headSha === baseRevision) {
   throw new Error("Implementer did not advance the authorized base revision");

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runImplementationAutomationCommand } from "../.sandcastle/implementation-automation.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
+const lease = { acquire: vi.fn(async () => ({ release: async () => {} })) };
 
 describe("implementation automation command", () => {
   it("acquires an eligible Issue and runs the Implementer in a Target Checkout at its authorized base revision", async () => {
@@ -47,6 +48,7 @@ describe("implementation automation command", () => {
       github,
       checkout,
       implementer,
+      lease,
     })).resolves.toEqual({
       status: "implemented",
       branch: "sandcastle/issue-221",
@@ -80,6 +82,7 @@ describe("implementation automation command", () => {
       github,
       checkout: { withCheckout: vi.fn() },
       implementer: { implement: vi.fn() },
+      lease,
     })).resolves.toEqual({ status: "refused", reason: "Issue #221 is not queued for implementation" });
 
     expect(github.addIssueLabel).not.toHaveBeenCalled();
@@ -109,9 +112,9 @@ describe("implementation automation command", () => {
       }),
     };
 
-    const first = runImplementationAutomationCommand({ issueNumber: 221 }, { github, checkout, implementer });
+    const first = runImplementationAutomationCommand({ issueNumber: 221 }, { github, checkout, implementer, lease });
     await vi.waitFor(() => expect(implementer.implement).toHaveBeenCalledOnce());
-    await expect(runImplementationAutomationCommand({ issueNumber: 221 }, { github, checkout, implementer }))
+    await expect(runImplementationAutomationCommand({ issueNumber: 221 }, { github, checkout, implementer, lease }))
       .resolves.toEqual({ status: "refused", reason: "Issue #221 is already being implemented" });
     releaseImplementation();
     await first;
@@ -137,6 +140,7 @@ describe("implementation automation command", () => {
       github,
       checkout,
       implementer,
+      lease,
     })).resolves.toEqual({
       status: "implemented",
       branch: "sandcastle/issue-221",
@@ -169,6 +173,7 @@ describe("implementation automation command", () => {
       github,
       checkout,
       implementer,
+      lease,
     })).resolves.toEqual({
       status: "implemented",
       branch: "sandcastle/issue-221",
@@ -199,6 +204,7 @@ describe("implementation automation command", () => {
       github,
       checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
       implementer: { implement: vi.fn().mockRejectedValue(new Error("push failed")) },
+      lease,
       createJobId: () => "job-221",
     })).resolves.toEqual({ status: "blocked", reason: "implementation-execution", jobId: "job-221" });
 
@@ -232,6 +238,7 @@ describe("implementation automation command", () => {
       github,
       checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
       implementer: { implement: vi.fn().mockRejectedValue(new Error("Implementation execution timed out")) },
+      lease,
       createJobId: () => "job-221",
     })).resolves.toEqual({ status: "blocked", reason: "implementation-execution", jobId: "job-221" });
 

@@ -13,11 +13,6 @@ type Execute = (
   arguments_: readonly string[],
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
-const executeFile: Execute = async (file, arguments_) => {
-  const result = await execFileAsync(file, [...arguments_]);
-  return { stdout: result.stdout, stderr: result.stderr };
-};
-
 type Wait = (milliseconds: number) => Promise<void>;
 
 const wait: Wait = (milliseconds) => new Promise((resolve) => {
@@ -80,8 +75,15 @@ export class GithubCliPort implements ImplementerGithubPort {
   private readonly run: Execute;
   private readonly wait: Wait;
 
-  constructor(execute: Execute = executeFile, waitForRetry: Wait = wait) {
-    this.run = execute;
+  constructor(
+    execute?: Execute,
+    waitForRetry: Wait = wait,
+    environment?: Readonly<Record<string, string>>,
+  ) {
+    this.run = execute ?? (async (file, arguments_) => {
+      const result = await execFileAsync(file, [...arguments_], environment === undefined ? {} : { env: environment });
+      return { stdout: result.stdout, stderr: result.stderr };
+    });
     this.wait = waitForRetry;
   }
 

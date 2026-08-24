@@ -9,7 +9,7 @@ import { dispatchAutomationCommands } from "./automation-dispatch.ts";
 import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
-import { createTargetCheckout } from "./target-checkout.ts";
+import { createTargetCheckout, removeExpiredFailureCheckouts } from "./target-checkout.ts";
 import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
 import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
 import {
@@ -39,8 +39,15 @@ import {
 
 try {
   const repositoryPath = resolve(import.meta.dirname, "..");
-  const artifactRoot = resolve(import.meta.dirname, "jobs", "review-artifacts");
-  if (process.argv[2] !== "inspect") await removeExpiredReviewArtifacts({ root: artifactRoot });
+  const jobsRoot = resolve(import.meta.dirname, "jobs");
+  const artifactRoot = resolve(jobsRoot, "review-artifacts");
+  if (process.argv[2] !== "inspect") {
+    await removeExpiredReviewArtifacts({ root: artifactRoot });
+    await removeExpiredFailureCheckouts({
+      root: jobsRoot,
+      preserve: ["review-artifacts", "pull-request-leases", "implementation-leases"],
+    });
+  }
   const startup = await loadSandboxStartup();
   const jobId = randomUUID();
   const automationGithub = createAutomationGithubPort({
@@ -49,7 +56,10 @@ try {
   const dispatchGithub = createAutomationDispatchGithubPort({
     environment: startup.childEnvironments.github,
   });
-  const scheduler = createAutomationScheduler({ repositoryPath });
+  const scheduler = createAutomationScheduler({
+    repositoryPath,
+    environment: startup.childEnvironments.git,
+  });
   const withScheduler = async <T>(identity: string, action: () => Promise<T>): Promise<T> => {
     const lock = await scheduler.acquire();
     if (lock === undefined) throw new Error("Dispatcher is already running");
@@ -65,7 +75,7 @@ try {
     }
   };
   const reviewer = createProcessReviewRunner({});
-  const updater = createProcessBranchUpdater({});
+  const updater = createProcessBranchUpdater({ environment: startup.childEnvironments.git });
   const architectureReviewer = createProcessArchitectureReviewRunner({});
   const implementer = createProcessImplementer({
     plannerModel: startup.models.planner,
@@ -201,6 +211,12 @@ try {
               dependencyEnvironment: startup.childEnvironments.dependencies,
             }),
             updater,
+            lease: {
+              acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+                root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+                pullRequestNumber: currentPullRequestNumber,
+              }),
+            },
             createJobId: () => jobId,
           });
           return;
@@ -217,6 +233,12 @@ try {
             }),
             publisher: createFeedbackPublisher({ sourceRepositoryPath: repositoryPath, gitEnvironment: startup.childEnvironments.git }),
             implementer: feedbackImplementer,
+            lease: {
+              acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+                root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+                pullRequestNumber: currentPullRequestNumber,
+              }),
+            },
             createJobId: () => jobId,
           });
           return;
@@ -236,6 +258,12 @@ try {
             },
           },
           publisher: automationGithub,
+          lease: {
+            acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+              root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+              pullRequestNumber: currentPullRequestNumber,
+            }),
+          },
           createJobId: () => jobId,
         });
       },

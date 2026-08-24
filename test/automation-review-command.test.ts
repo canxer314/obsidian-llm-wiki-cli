@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
+const lease = { acquire: vi.fn(async () => ({ release: async () => {} })) };
 
 describe("review automation command", () => {
   it("acquires an eligible Draft Pull Request and publishes a review for its acquired revision", async () => {
@@ -57,6 +58,7 @@ describe("review automation command", () => {
       checkout,
       reviewer,
       publisher,
+      lease,
     })).resolves.toEqual({ status: "reviewed", revision });
 
     expect(events).toEqual([
@@ -104,6 +106,7 @@ describe("review automation command", () => {
       checkout: { withCheckout: vi.fn() },
       reviewer: { review: vi.fn() },
       publisher: { publish: vi.fn() },
+      lease,
     })).rejects.toThrow("already in progress");
 
     expect(github.addPullRequestLabel).not.toHaveBeenCalled();
@@ -132,6 +135,7 @@ describe("review automation command", () => {
       checkout,
       reviewer,
       publisher: { publish: vi.fn() },
+      lease,
     })).rejects.toThrow("must not originate from a fork");
 
     expect(checkout.withCheckout).not.toHaveBeenCalled();
@@ -163,6 +167,7 @@ describe("review automation command", () => {
       },
       reviewer: { review: vi.fn().mockRejectedValue(new Error("Agent execution failed")) },
       publisher: { publish: vi.fn() },
+      lease,
       createJobId: () => "job-220",
     })).resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
   });
@@ -209,6 +214,7 @@ describe("review automation command", () => {
       },
       reviewer: { review: vi.fn().mockRejectedValue(failure) },
       publisher,
+      lease,
       createJobId: () => "job-220",
     })).resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
 

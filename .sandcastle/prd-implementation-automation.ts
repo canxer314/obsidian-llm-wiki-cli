@@ -60,8 +60,8 @@ export interface PrdImplementationAutomationPorts {
       readonly checkoutPath: string;
     }): Promise<{ readonly branch: string; readonly headSha: string }>;
   };
-  readonly lease?: {
-    acquire(prdNumber: number): Promise<{ release(): Promise<void> } | undefined>;
+  readonly lease: {
+    acquire(prdNumber: number): Promise<{ release(): Promise<void> | void } | undefined>;
   };
   readonly createJobId?: () => string;
 }
@@ -107,10 +107,8 @@ export async function runPrdImplementationAutomationCommand(
     await ports.github.addRefusalDiagnostic?.(prd.number, reason);
     return { status: "refused", reason };
   }
-  const lease = ports.lease === undefined
-    ? undefined
-    : await ports.lease.acquire(prd.number);
-  if (ports.lease !== undefined && lease === undefined) {
+  const lease = await ports.lease.acquire(prd.number);
+  if (lease === undefined) {
     const unavailableReason = `PRD #${prd.number} is already being implemented`;
     await ports.github.addRefusalDiagnostic?.(prd.number, unavailableReason);
     return { status: "refused", reason: unavailableReason };
@@ -168,6 +166,18 @@ export async function runPrdImplementationAutomationCommand(
     try {
       let implemented: { readonly branch: string; readonly headSha: string };
       try {
+        const claimed = await ports.github.readPrd(prd.number);
+        if (
+          claimed.state !== "OPEN" ||
+          claimed.baseRevision !== prd.baseRevision ||
+          !claimed.labels.includes("agent:in-progress") ||
+          claimed.labels.includes("agent:implement") ||
+          claimed.labels.includes("agent:blocked") ||
+          claimed.subIssueCount !== prd.subIssueCount ||
+          claimed.parentNumber !== prd.parentNumber
+        ) {
+          throw new Error(`Issue #${prd.number} changed while PRD implementation was being acquired`);
+        }
         implemented = await ports.checkout.withCheckout({
           pullRequestNumber: prd.number,
           revision: prd.baseRevision,
@@ -220,6 +230,6 @@ export async function runPrdImplementationAutomationCommand(
     }
   } finally {
     activePrdNumbers.delete(prd.number);
-    await lease?.release();
+    await lease.release();
   }
 }

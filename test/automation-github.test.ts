@@ -48,6 +48,34 @@ describe("automation GitHub port", () => {
     await expect(github.readIssue(221)).resolves.toEqual(expect.objectContaining({ state: "OPEN" }));
   });
 
+  it("counts all PRD sub-issues across REST pages", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({
+        number: 226,
+        title: "A PRD",
+        state: "open",
+        labels: [{ name: "agent:implement" }],
+        pull_request: null,
+      }), stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "1\n".repeat(47), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readPrd(226)).resolves.toEqual({
+      number: 226,
+      title: "A PRD",
+      state: "OPEN",
+      labels: ["agent:implement"],
+      baseRevision: revision,
+      subIssueCount: 47,
+    });
+
+    expect(execute).toHaveBeenNthCalledWith(3, "gh", [
+      "api", "repos/{owner}/{repo}/issues/226/sub_issues", "--paginate", "--jq", ".[] | 1",
+    ], undefined);
+  });
+
   it("lists PRD children in order with open blockers and nested sub-issue counts", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({
