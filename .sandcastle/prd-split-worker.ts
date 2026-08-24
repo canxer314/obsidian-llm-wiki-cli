@@ -13,9 +13,8 @@ if (
 
 const startup = await loadSandboxStartup();
 const slices = await createSameSessionPrdSplitExtractor({
-  sandbox: startup.automationSandbox,
+  sandbox: startup.githubAgentSandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
-  agentEnvironment: startup.childEnvironments.claude,
 }).split({
   prdNumber: Number(prdNumber),
   title,

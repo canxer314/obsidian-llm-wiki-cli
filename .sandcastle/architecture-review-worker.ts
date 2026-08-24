@@ -23,7 +23,6 @@ const startup = await loadSandboxStartup();
 const reviewer = createSameSessionArchitectureReviewExtractor({
   sandbox: startup.automationSandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
-  agentEnvironment: startup.childEnvironments.claude,
 });
 const outcome = await reviewer.review({
   revision,

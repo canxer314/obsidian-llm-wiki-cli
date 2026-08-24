@@ -14,7 +14,7 @@ if (
 
 const startup = await loadSandboxStartup();
 await createFeedbackImplementerSession({
-  sandbox: startup.automationSandbox,
+  sandbox: startup.githubAgentSandbox,
   hooks: sandboxHooksFor("implementer"),
 }).run({
   model,

@@ -18,7 +18,7 @@ if (
 
 const startup = await loadSandboxStartup();
 const plannerSession = createSandcastlePlannerSession({
-  sandbox: startup.automationSandbox,
+  sandbox: startup.githubAgentSandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
   checkoutPath,
 });
@@ -29,7 +29,7 @@ const plan = await planIssue({
 });
 if (plan.status === "blocked") throw new Error(plan.blockingReason);
 const implementerSession = createSandcastleImplementerSession({
-  sandbox: startup.automationSandbox,
+  sandbox: startup.githubAgentSandbox,
   hooks: sandboxHooksFor("implementer"),
 });
 const pullRequest = await implementIssue({

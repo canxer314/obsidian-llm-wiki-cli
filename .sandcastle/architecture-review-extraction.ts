@@ -59,7 +59,6 @@ export function createSameSessionArchitectureReviewExtractor(options: {
   readonly hooks: SandboxHooks;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
-  readonly agentEnvironment?: Readonly<Record<string, string>>;
   readonly timeoutMilliseconds?: number;
 }) {
   const runAgent = options.runAgent ?? run;
@@ -79,10 +78,7 @@ export function createSameSessionArchitectureReviewExtractor(options: {
       );
       try {
         const produced = await runAgent({
-        agent: createAgent(
-          request.model,
-          options.agentEnvironment === undefined ? undefined : { env: { ...options.agentEnvironment } },
-        ),
+        agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: options.hooks,
         cwd: request.checkoutPath,

@@ -16,9 +16,8 @@ if (
 
 const startup = await loadSandboxStartup();
 const reviewer = createSameSessionReviewExtractor({
-  sandbox: startup.automationSandbox,
+  sandbox: startup.githubAgentSandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
-  agentEnvironment: startup.childEnvironments.claude,
 });
 const review = await reviewer.review({
   pullRequestNumber: Number(pullRequestNumber),

@@ -22,6 +22,10 @@ const CLAUDE_NAMES = [
 // environments that spawn them.
 const PROCESS_NAMES = ["PATH", "HOME"] as const;
 
+// The GitHub CLI authenticates through GH_TOKEN read from its environment;
+// the token value never appears in command arguments.
+const GITHUB_NAMES = ["GH_TOKEN"] as const;
+
 function pick(
   environment: Readonly<Record<string, string>>,
   names: readonly string[],
@@ -37,13 +41,21 @@ export function createChildEnvironments(environment: Readonly<Record<string, str
   readonly git: Readonly<Record<string, string>>;
   readonly github: Readonly<Record<string, string>>;
   readonly claude: Readonly<Record<string, string>>;
+  readonly githubAgent: Readonly<Record<string, string>>;
 } {
   const transport = pick(environment, TRANSPORT_NAMES);
   const processEnvironment = { ...transport, ...pick(environment, PROCESS_NAMES) };
+  const claude = { ...transport, ...pick(environment, CLAUDE_NAMES) };
   return {
     dependencies: processEnvironment,
     git: processEnvironment,
-    github: { ...transport, ...pick(environment, ["GH_TOKEN", "PATH"]) },
-    claude: { ...transport, ...pick(environment, CLAUDE_NAMES) },
+    github: { ...transport, ...pick(environment, [...GITHUB_NAMES, "PATH"]) },
+    claude,
+    // GitHub-capable Agent Session container environment: the Claude/API
+    // allowlist plus GH_TOKEN on top of the transport allowlist. No process
+    // variables — the Agent Session container resolves PATH and HOME itself,
+    // and no Dispatcher model-routing or private host configuration enters
+    // the container.
+    githubAgent: { ...claude, ...pick(environment, GITHUB_NAMES) },
   };
 }
