@@ -44,9 +44,20 @@ routing, authentication, model-mapping, and proxy environment variables from
 override those settings. A proxy key can use an exact same-name reference such
 as `HTTPS_PROXY=${HTTPS_PROXY}`. Each Sandcastle startup resolves it once from
 the launching Node.js process environment; that same-cased host variable must
-exist and contain non-whitespace text. Uppercase and lowercase proxy keys are
-independent, and the resolved value is passed through without trimming or
-further expansion. Startup fails before creating an Agent Session if the file
+exist and contain non-whitespace text. Expansion is single-level: the resolved
+host value is passed through byte-for-byte, and any `${...}` or `$NAME` text it
+contains is opaque data that is never expanded again. Only the exact
+whole-value braced same-name form is accepted. Unbraced values such as
+`$HTTPS_PROXY`, cross-key or arbitrary references such as `${HTTP_PROXY}` or
+`${OTHER}`, concatenated values, shell default-value expressions such as
+`${HTTPS_PROXY:-http://fictional-fallback.example}`, and nested or otherwise
+reference-like values are rejected at startup with a configuration error that
+names only the affected key, the winning source, and a safe reason. Literal
+text containing the sequence `${` must use URL percent encoding (for example
+`%24%7B...%7D`) rather than shell escaping, because Sandcastle implements no
+escape grammar. Uppercase and lowercase proxy keys are independent, and the
+resolved value is passed through without trimming or further expansion.
+Startup fails before creating an Agent Session if the file
 is missing, is not mode `0600`, required routing/authentication values are
 unavailable, or a proxy reference is invalid. Startup logs contain counts only,
 never routes, model names, proxy addresses, or secrets.
