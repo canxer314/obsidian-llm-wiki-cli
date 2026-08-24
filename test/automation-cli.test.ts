@@ -29,6 +29,44 @@ describe("automation command CLI", () => {
     expect(runUpdate).toHaveBeenCalledWith(225);
   });
 
+  it("passes the operation name to the preflight for every gated command", async () => {
+    const preflight = vi.fn();
+    const dependencies = {
+      runReview: vi.fn(), runFeedback: vi.fn(), runImplement: vi.fn(), runImplementPrd: vi.fn(), runSplit: vi.fn(), runUpdate: vi.fn(),
+      dispatch: vi.fn(), architectureReview: vi.fn(), preflight,
+    };
+    await runAutomationCli(["run", "review", "220"], dependencies);
+    await runAutomationCli(["run", "feedback", "221"], dependencies);
+    await runAutomationCli(["run", "implement", "222"], dependencies);
+    await runAutomationCli(["run", "implement-prd", "226"], dependencies);
+    await runAutomationCli(["run", "split", "223"], dependencies);
+    await runAutomationCli(["run", "update-branch", "225"], dependencies);
+    await runAutomationCli(["dispatch"], dependencies);
+    await runAutomationCli(["architecture-review"], dependencies);
+    expect(preflight.mock.calls).toEqual([
+      ["review"],
+      ["feedback"],
+      ["implement"],
+      ["implement-prd"],
+      ["split"],
+      ["update-branch"],
+      ["dispatch"],
+      ["architecture-review"],
+    ]);
+  });
+
+  it("never runs the preflight for build-image, setup-labels, or inspect", async () => {
+    const preflight = vi.fn();
+    const dependencies = {
+      runReview: vi.fn(), runFeedback: vi.fn(), runImplement: vi.fn(), runImplementPrd: vi.fn(), runSplit: vi.fn(), runUpdate: vi.fn(),
+      buildImage: vi.fn(), setupLabels: vi.fn(), inspect: vi.fn(), preflight,
+    };
+    await runAutomationCli(["build-image"], dependencies);
+    await runAutomationCli(["setup-labels"], dependencies);
+    await runAutomationCli(["inspect"], dependencies);
+    expect(preflight).not.toHaveBeenCalled();
+  });
+
   it.each([
     [[], usage],
     [["run", "anything", "220"], "Unknown automation operation: anything"],
