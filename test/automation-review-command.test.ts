@@ -41,6 +41,7 @@ function ports(events: string[], reviewer = vi.fn().mockResolvedValue({ summary:
     checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
     reviewer: { review: reviewer },
     publisher,
+    lease: { acquire: vi.fn(async () => ({ release: async () => {} })) },
   };
 }
 

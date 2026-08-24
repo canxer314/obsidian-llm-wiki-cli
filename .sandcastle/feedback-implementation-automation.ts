@@ -34,8 +34,8 @@ export interface FeedbackImplementationPorts {
       readonly checkoutPath: string;
     }): Promise<void>;
   };
-  readonly lease?: {
-    acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> } | undefined>;
+  readonly lease: {
+    acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> | void } | undefined>;
   };
   readonly createJobId?: () => string;
 }
@@ -77,8 +77,8 @@ export async function runFeedbackImplementationAutomationCommand(
     return { status: "refused", reason };
   }
 
-  const lease = ports.lease === undefined ? undefined : await ports.lease.acquire(pullRequest.number);
-  if (ports.lease !== undefined && lease === undefined) {
+  const lease = await ports.lease.acquire(pullRequest.number);
+  if (lease === undefined) {
     return { status: "refused", reason: `Pull Request #${pullRequest.number} is already being processed` };
   }
   activePullRequestNumbers.add(pullRequest.number);
@@ -148,6 +148,6 @@ export async function runFeedbackImplementationAutomationCommand(
     }
   } finally {
     activePullRequestNumbers.delete(pullRequest.number);
-    await lease?.release();
+    await lease.release();
   }
 }

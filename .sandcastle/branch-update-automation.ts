@@ -47,8 +47,8 @@ export interface BranchUpdateAutomationPorts {
       readonly checkoutPath: string;
     }): Promise<BranchUpdateResult>;
   };
-  readonly lease?: {
-    acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> } | undefined>;
+  readonly lease: {
+    acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> | void } | undefined>;
   };
   readonly createJobId?: () => string;
 }
@@ -91,8 +91,8 @@ export async function runBranchUpdateAutomationCommand(
     };
   }
   const pullRequest = await ports.github.readPullRequest(request.pullRequestNumber);
-  const lease = ports.lease === undefined ? undefined : await ports.lease.acquire(pullRequest.number);
-  if (ports.lease !== undefined && lease === undefined) {
+  const lease = await ports.lease.acquire(pullRequest.number);
+  if (lease === undefined) {
     return { status: "refused", reason: `Pull Request #${pullRequest.number} is already being updated` };
   }
   activePullRequestNumbers.add(pullRequest.number);
@@ -164,6 +164,6 @@ export async function runBranchUpdateAutomationCommand(
     }
   } finally {
     activePullRequestNumbers.delete(pullRequest.number);
-    await lease?.release();
+    await lease.release();
   }
 }

@@ -41,6 +41,7 @@ function ports() {
     checkout: {
       withCheckout: vi.fn(async (_request, action) => action("/checkout")),
     },
+    lease: { acquire: vi.fn(async () => ({ release: async () => {} })) },
     createJobId: () => "feedback-job",
   };
 }

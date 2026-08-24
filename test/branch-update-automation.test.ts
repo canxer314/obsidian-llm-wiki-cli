@@ -4,6 +4,7 @@ import { runBranchUpdateAutomationCommand } from "../.sandcastle/branch-update-a
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const updatedRevision = "fedcba9876543210fedcba9876543210fedcba98";
+const lease = { acquire: vi.fn(async () => ({ release: async () => {} })) };
 
 function pullRequest(labels = ["agent:update-branch"], headSha = revision) {
   return {
@@ -48,7 +49,7 @@ describe("branch update automation command", () => {
       }),
     };
 
-    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, { github, checkout, updater }))
+    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, { github, checkout, updater, lease }))
       .resolves.toEqual({ status: "updated", revision: updatedRevision });
 
     expect(events).toEqual([
@@ -75,6 +76,7 @@ describe("branch update automation command", () => {
       github,
       checkout: { withCheckout: vi.fn() },
       updater: { update: vi.fn() },
+      lease,
       createJobId: () => "job-225",
     })).resolves.toEqual({ status: "blocked", reason: "branch-update-execution", jobId: "job-225" });
 
@@ -106,6 +108,7 @@ describe("branch update automation command", () => {
       github,
       checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
       updater: { update: vi.fn().mockRejectedValue(new Error("stale info: lease rejected")) },
+      lease,
       createJobId: () => "job-225",
     })).resolves.toEqual({ status: "blocked", reason: "branch-update-execution", jobId: "job-225" });
 
@@ -126,7 +129,7 @@ describe("branch update automation command", () => {
     const checkout = { withCheckout: vi.fn() };
     const updater = { update: vi.fn() };
 
-    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, { github, checkout, updater }))
+    await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, { github, checkout, updater, lease }))
       .resolves.toEqual({ status: "refused", reason: "Pull Request #225 is not queued for branch update" });
 
     expect(github.addPullRequestLabel).not.toHaveBeenCalled();
@@ -151,6 +154,7 @@ describe("branch update automation command", () => {
       github,
       checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
       updater,
+      lease,
     })).resolves.toEqual({ status: "up-to-date" });
 
     expect(github.addBranchUpdateComment).toHaveBeenCalledWith(
@@ -175,6 +179,7 @@ describe("branch update automation command", () => {
       updater: { update: vi.fn().mockResolvedValue({
         status: "updated", revision: updatedRevision, comment: "Resolved src/index.ts.",
       }) },
+      lease,
     })).resolves.toEqual({ status: "updated", revision: updatedRevision });
 
     expect(github.addBranchUpdateComment).toHaveBeenCalledWith(225, "Resolved src/index.ts.");
@@ -194,6 +199,7 @@ describe("branch update automation command", () => {
       github,
       checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
       updater: { update: vi.fn().mockRejectedValue(new Error("merge conflict in src/index.ts")) },
+      lease,
       createJobId: () => "job-225",
     })).resolves.toEqual({ status: "blocked", reason: "branch-update-execution", jobId: "job-225" });
 
@@ -225,6 +231,7 @@ describe("branch update automation command", () => {
       github,
       checkout: { withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")) },
       updater,
+      lease,
     };
     const first = runBranchUpdateAutomationCommand({ pullRequestNumber: 225 }, ports);
     await vi.waitFor(() => expect(updater.update).toHaveBeenCalledOnce());

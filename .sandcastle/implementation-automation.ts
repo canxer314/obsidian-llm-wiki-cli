@@ -48,8 +48,8 @@ export interface ImplementationAutomationPorts {
       readonly checkoutPath: string;
     }): Promise<{ readonly branch: string; readonly pullRequestUrl: string }>;
   };
-  readonly lease?: {
-    acquire(issueNumber: number): Promise<{ release(): Promise<void> } | undefined>;
+  readonly lease: {
+    acquire(issueNumber: number): Promise<{ release(): Promise<void> | void } | undefined>;
   };
   readonly createJobId?: () => string;
 }
@@ -88,10 +88,8 @@ export async function runImplementationAutomationCommand(
   }
   const issue = await ports.github.readIssue(request.issueNumber);
   const branch = reusableBranch(issue.number);
-  const lease = ports.lease === undefined
-    ? undefined
-    : await ports.lease.acquire(issue.number);
-  if (ports.lease !== undefined && lease === undefined) {
+  const lease = await ports.lease.acquire(issue.number);
+  if (lease === undefined) {
     const unavailableReason = `Issue #${issue.number} is already being implemented`;
     await ports.github.addRefusalDiagnostic?.(issue.number, unavailableReason);
     return { status: "refused", reason: unavailableReason };
@@ -183,6 +181,6 @@ export async function runImplementationAutomationCommand(
     }
   } finally {
     activeIssueNumbers.delete(issue.number);
-    await lease?.release();
+    await lease.release();
   }
 }

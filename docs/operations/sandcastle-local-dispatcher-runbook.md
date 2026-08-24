@@ -81,6 +81,7 @@ Merging or copying the templates never starts either write path: the services ha
 Behavior notes:
 
 - A dispatch round that finds the scheduler lock held exits without work (`status: "locked"`); overlapping rounds never run concurrently.
+- `.sandcastle/dispatcher.lock` records the holder's process ID. A round that finds the lock held by a dead process (for example after a host crash) reclaims it automatically. The one remaining manual case is a lock file without a readable holder PID (left between creation and the PID write by a hard kill): it is never reclaimed automatically. Verify through `journalctl --user -u sandcastle-dispatch.service` and `inspect` that no dispatcher is running, then delete `.sandcastle/dispatcher.lock` by hand.
 - The architecture-review timer uses `Persistent=false`: a missed occurrence is never replayed. The next schedule or a manual run is sufficient.
 - Job time limits are enforced by the Dispatcher (process-group SIGTERM, grace, SIGKILL), so the units disable the oneshot start timeout.
 
@@ -106,6 +107,8 @@ npm run sandcastle -- run update-branch <pr-number>       # rebase/update the Pu
 npm run sandcastle -- architecture-review                 # manual architecture review
 npm run sandcastle -- dispatch [--concurrency <1-8>]      # one bounded round (default 2; env: SANDCASTLE_DISPATCH_CONCURRENCY)
 ```
+
+PRD implementation holds a mandatory cross-process issue lease for the complete child operation. Its implementer performs the upstream-compatible ordinary push to the accumulating `sandcastle/prd-<n>` branch; it does not force-push. The controlled publisher remains limited to feedback implementation, where an explicit `--force-with-lease` protects an existing Pull Request branch. Moving normal PRD publication into that publisher would add branch/PR recovery state without improving the lease guarantee, so it is intentionally not used.
 
 ## Blocked Automation diagnosis
 
@@ -134,7 +137,7 @@ The agreed retention policy is seven days for successful and failed job artifact
 
 - Success: the Target Checkout is deleted automatically; small job metadata and logs are retained.
 - Failure or timeout: the Target Checkout, output, and logs are retained locally for diagnosis.
-- Review artifacts under `.sandcastle/jobs/review-artifacts/` expire automatically after seven days (swept on each command start). Other retained job directories under `.sandcastle/jobs/` are removed by the operator after diagnosis, within the seven-day policy.
+- Review artifacts under `.sandcastle/jobs/review-artifacts/` expire automatically after seven days (swept on each command start). Failed or timed-out Target Checkouts and other retained job directories under `.sandcastle/jobs/` follow the same seven-day sweep; only structural state (`review-artifacts/`, `pull-request-leases/`, `implementation-leases/`) is excluded. The operator may still remove retained directories earlier, after diagnosis.
 - Dispatch-round logs use the systemd journal and follow journald retention.
 
 ## Safe cleanup boundaries

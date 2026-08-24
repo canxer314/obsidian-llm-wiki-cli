@@ -16,14 +16,28 @@ function prd(overrides = {}) {
   };
 }
 
+// Mirrors the label lifecycle: the post-claim re-read observes the labels that
+// the add/remove calls actually published.
+function claimedGithub(events: string[], extras = {}) {
+  const labels = new Set(["agent:to-issues"]);
+  return {
+    readPrd: vi.fn(async () => prd({ labels: [...labels] })),
+    addIssueLabel: vi.fn(async (_number: number, label: string) => {
+      labels.add(label);
+      events.push(`add:${label}`);
+    }),
+    removeIssueLabel: vi.fn(async (_number: number, label: string) => {
+      labels.delete(label);
+      events.push(`remove:${label}`);
+    }),
+    ...extras,
+  };
+}
+
 describe("PRD split automation command", () => {
   it("acquires an eligible PRD, splits it in its authorized checkout, and publishes children", async () => {
     const events: string[] = [];
-    const github = {
-      readPrd: vi.fn().mockResolvedValue(prd()),
-      addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
-      removeIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`remove:${label}`)),
-    };
+    const github = claimedGithub(events);
     const slices = [{ title: "Create a vertical slice", whatToBuild: "Deliver one complete path.", acceptanceCriteria: ["It works"] }];
 
     await expect(runPrdSplitAutomationCommand({ issueNumber: 223 }, {
@@ -75,12 +89,9 @@ describe("PRD split automation command", () => {
 
   it("blocks partial publication without rerunning the produce pass", async () => {
     const splitter = { split: vi.fn().mockResolvedValue([{ title: "Slice", whatToBuild: "Build it.", acceptanceCriteria: ["It works"] }]) };
-    const github = {
-      readPrd: vi.fn().mockResolvedValue(prd()),
-      addIssueLabel: vi.fn().mockResolvedValue(undefined),
-      removeIssueLabel: vi.fn().mockResolvedValue(undefined),
+    const github = claimedGithub([], {
       addSplitBlockedDiagnostic: vi.fn().mockResolvedValue(undefined),
-    };
+    });
 
     await expect(runPrdSplitAutomationCommand({ issueNumber: 223 }, {
       github,
@@ -96,12 +107,9 @@ describe("PRD split automation command", () => {
 
   it("blocks execution failures and always clears visible acquisition", async () => {
     const events: string[] = [];
-    const github = {
-      readPrd: vi.fn().mockResolvedValue(prd()),
-      addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
-      removeIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`remove:${label}`)),
+    const github = claimedGithub(events, {
       addSplitBlockedDiagnostic: vi.fn(async (_number: number, diagnostic) => events.push(`blocked:${diagnostic.jobId}`)),
-    };
+    });
 
     await expect(runPrdSplitAutomationCommand({ issueNumber: 223 }, {
       github,
@@ -120,14 +128,39 @@ describe("PRD split automation command", () => {
     ]);
   });
 
+  it("blocks when the PRD target changes while splitting is being acquired", async () => {
+    const events: string[] = [];
+    const github = claimedGithub(events, {
+      addSplitBlockedDiagnostic: vi.fn(async (_number: number, diagnostic) => events.push(`blocked:${diagnostic.jobId}`)),
+    });
+    github.readPrd
+      .mockResolvedValueOnce(prd())
+      .mockResolvedValueOnce(prd({
+        labels: ["agent:in-progress"],
+        baseRevision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }));
+    const splitter = { split: vi.fn() };
+    const checkout = { withCheckout: vi.fn() };
+
+    await expect(runPrdSplitAutomationCommand({ issueNumber: 223 }, {
+      github,
+      checkout,
+      splitter,
+      publisher: { publishPrdSplit: vi.fn() },
+      createJobId: () => "job-223",
+    })).resolves.toEqual({ status: "blocked", reason: "prd-split-execution", jobId: "job-223" });
+
+    expect(checkout.withCheckout).not.toHaveBeenCalled();
+    expect(splitter.split).not.toHaveBeenCalled();
+    expect(github.addIssueLabel).toHaveBeenCalledWith(223, "agent:blocked");
+    expect(github.removeIssueLabel).toHaveBeenCalledWith(223, "agent:in-progress");
+  });
+
   it("blocks the PRD and retains the local job reference when the split job times out", async () => {
     const events: string[] = [];
-    const github = {
-      readPrd: vi.fn().mockResolvedValue(prd()),
-      addIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`add:${label}`)),
-      removeIssueLabel: vi.fn(async (_number: number, label: string) => events.push(`remove:${label}`)),
+    const github = claimedGithub(events, {
       addSplitBlockedDiagnostic: vi.fn(async (_number: number, diagnostic) => events.push(`blocked:${diagnostic.jobId}`)),
-    };
+    });
     const publisher = { publishPrdSplit: vi.fn() };
 
     await expect(runPrdSplitAutomationCommand({ issueNumber: 223 }, {

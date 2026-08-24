@@ -33,14 +33,22 @@ function portsFor(overrides: {
   readonly pullRequests?: Record<string, unknown>;
   readonly checkout?: Record<string, unknown>;
   readonly implementer?: Record<string, unknown>;
+  readonly lease?: Record<string, unknown>;
   readonly createJobId?: () => string;
 } = {}) {
   const events: string[] = [];
+  const labels = new Set(["agent:implement"]);
   const github = {
-    readPrd: vi.fn().mockResolvedValue(prd()),
+    readPrd: vi.fn(async () => prd({ labels: [...labels] })),
     listChildren: vi.fn(),
-    addIssueLabel: vi.fn(async (number: number, label: string) => events.push(`add:${number}:${label}`)),
-    removeIssueLabel: vi.fn(async (number: number, label: string) => events.push(`remove:${number}:${label}`)),
+    addIssueLabel: vi.fn(async (number: number, label: string) => {
+      labels.add(label);
+      events.push(`add:${number}:${label}`);
+    }),
+    removeIssueLabel: vi.fn(async (number: number, label: string) => {
+      labels.delete(label);
+      events.push(`remove:${number}:${label}`);
+    }),
     addRefusalDiagnostic: vi.fn(async (number: number, reason: string) => events.push(`refusal:${number}:${reason}`)),
     closeImplementedChild: vi.fn(async (request: { childNumber: number; revision: string }) => events.push(`close:${request.childNumber}:${request.revision}`)),
     addPrdImplementationBlockedDiagnostic: vi.fn(async (number: number, diagnostic: { jobId: string }) => events.push(`blocked:${number}:${diagnostic.jobId}`)),
@@ -70,7 +78,11 @@ function portsFor(overrides: {
     }),
     ...overrides.implementer,
   };
-  return { events, github, pullRequests, checkout, implementer, createJobId: overrides.createJobId };
+  const lease = {
+    acquire: vi.fn(async () => ({ release: async () => {} })),
+    ...overrides.lease,
+  };
+  return { events, github, pullRequests, checkout, implementer, lease, createJobId: overrides.createJobId };
 }
 
 describe("PRD implementation automation command", () => {
@@ -116,6 +128,46 @@ describe("PRD implementation automation command", () => {
     ]);
     expect(ports.github.addIssueLabel).not.toHaveBeenCalledWith(226, "agent:blocked");
     expect(ports.pullRequests.addPullRequestLabel).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the cross-process lease is unavailable before selecting a child", async () => {
+    const ports = portsFor({ lease: { acquire: vi.fn(async () => undefined) } });
+
+    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+      status: "refused",
+      reason: "PRD #226 is already being implemented",
+    });
+
+    expect(ports.github.listChildren).not.toHaveBeenCalled();
+    expect(ports.checkout.withCheckout).not.toHaveBeenCalled();
+    expect(ports.implementer.implement).not.toHaveBeenCalled();
+  });
+
+  it("blocks when the PRD target changes while implementation is being acquired", async () => {
+    const ports = portsFor({ createJobId: () => "job-226" });
+    const initialRead = ports.github.readPrd;
+    let reads = 0;
+    ports.github.readPrd = vi.fn(async () => {
+      reads += 1;
+      return reads === 1
+        ? initialRead()
+        : prd({
+          labels: ["agent:in-progress"],
+          baseRevision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        });
+    });
+    ports.github.listChildren.mockResolvedValue([child(301), child(302), child(303)]);
+
+    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+      status: "blocked",
+      reason: "prd-implementation-execution",
+      jobId: "job-226",
+    });
+
+    expect(ports.implementer.implement).not.toHaveBeenCalled();
+    expect(ports.checkout.withCheckout).not.toHaveBeenCalled();
+    expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
+    expect(ports.github.removeIssueLabel).toHaveBeenCalledWith(226, "agent:in-progress");
   });
 
   it("skips completed children and implements the first still-open intermediate child", async () => {
@@ -304,8 +356,9 @@ describe("PRD implementation automation command", () => {
     ports.github.listChildren
       .mockResolvedValueOnce([child(301), child(302)])
       .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302)]);
+    const statefulAddIssueLabel = ports.github.addIssueLabel;
     ports.github.addIssueLabel = vi.fn(async (number: number, label: string) => {
-      ports.events.push(`add:${number}:${label}`);
+      await statefulAddIssueLabel(number, label);
       if (label === "agent:implement") throw new Error("label publication failed");
     });
 

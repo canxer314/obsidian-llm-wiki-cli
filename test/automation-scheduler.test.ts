@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -80,5 +80,64 @@ describe("Automation scheduler", () => {
     } finally {
       await rm(repositoryPath, { recursive: true, force: true });
     }
+  });
+
+  it("records the holder PID in the dispatcher lock and excludes concurrent holders", async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), "automation-scheduler-lock-"));
+    try {
+      const first = createAutomationScheduler({ repositoryPath, execute: vi.fn() });
+      const second = createAutomationScheduler({ repositoryPath, execute: vi.fn() });
+      await mkdir(join(repositoryPath, ".sandcastle"), { recursive: true });
+      const lock = await first.acquire();
+      expect(lock).toBeDefined();
+      expect(
+        await readFile(join(repositoryPath, ".sandcastle", "dispatcher.lock"), "utf8"),
+      ).toBe(`${process.pid}\n`);
+      expect(await second.acquire()).toBeUndefined();
+      await lock!.release();
+      expect(await second.acquire()).toBeDefined();
+    } finally {
+      await rm(repositoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it("reclaims a dispatcher lock whose recorded holder PID is dead", async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), "automation-scheduler-stale-lock-"));
+    try {
+      const lockPath = join(repositoryPath, ".sandcastle", "dispatcher.lock");
+      await mkdir(join(repositoryPath, ".sandcastle"), { recursive: true });
+      await writeFile(lockPath, "999999\n");
+      const scheduler = createAutomationScheduler({ repositoryPath, execute: vi.fn() });
+
+      const lock = await scheduler.acquire();
+      expect(lock).toBeDefined();
+      expect(await readFile(lockPath, "utf8")).toBe(`${process.pid}\n`);
+      await lock!.release();
+    } finally {
+      await rm(repositoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it("never reclaims a dispatcher lock without a readable holder PID", async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), "automation-scheduler-manual-lock-"));
+    try {
+      const lockPath = join(repositoryPath, ".sandcastle", "dispatcher.lock");
+      await mkdir(join(repositoryPath, ".sandcastle"), { recursive: true });
+      await writeFile(lockPath, "");
+      const scheduler = createAutomationScheduler({ repositoryPath, execute: vi.fn() });
+
+      expect(await scheduler.acquire()).toBeUndefined();
+      expect(await readFile(lockPath, "utf8")).toBe("");
+    } finally {
+      await rm(repositoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it("spawns git through the purpose-specific environment instead of inheriting the parent", async () => {
+    const scheduler = createAutomationScheduler({
+      environment: { PATH: "/definitely-not-on-this-host", HOME: "/tmp" },
+    });
+
+    await expect(scheduler.prepare()).rejects.toThrow(/spawn git ENOENT/u);
   });
 });

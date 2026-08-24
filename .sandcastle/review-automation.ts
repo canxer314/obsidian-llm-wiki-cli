@@ -79,8 +79,8 @@ export interface ReviewAutomationPorts {
       readonly expectedRevision: string;
     }): Promise<string>;
   };
-  readonly lease?: {
-    acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> } | undefined>;
+  readonly lease: {
+    acquire(pullRequestNumber: number): Promise<{ release(): Promise<void> | void } | undefined>;
   };
   readonly createJobId?: () => string;
 }
@@ -113,8 +113,8 @@ export async function runReviewAutomationCommand(
     await ports.github.addRefusalDiagnostic?.(pullRequest.number, reason);
     return { status: "refused", reason };
   }
-  const lease = ports.lease === undefined ? undefined : await ports.lease.acquire(pullRequest.number);
-  if (ports.lease !== undefined && lease === undefined) throw new Error(`Pull Request #${pullRequest.number} is already in progress`);
+  const lease = await ports.lease.acquire(pullRequest.number);
+  if (lease === undefined) throw new Error(`Pull Request #${pullRequest.number} is already in progress`);
   try {
     await ports.github.addPullRequestLabel(pullRequest.number, "agent:in-progress");
     try {
@@ -167,6 +167,6 @@ export async function runReviewAutomationCommand(
       await ports.github.removePullRequestLabel(pullRequest.number, "agent:in-progress").catch(() => undefined);
     }
   } finally {
-    await lease?.release();
+    await lease.release();
   }
 }

@@ -123,8 +123,8 @@ describe("publication path (real git repositories)", () => {
     await writeFile(join(contributorPath, "master-change.txt"), "master moved\n");
     await commitAll(contributorPath, "master advances");
     await git(["-C", contributorPath, "push", "origin", "master"]);
-    const { checkout } = createFixtureCheckout(trustedPath);
-    const updater = createProcessBranchUpdater({});
+    const { checkout, environments } = createFixtureCheckout(trustedPath);
+    const updater = createProcessBranchUpdater({ environment: environments.git });
 
     const result = await checkout.withCheckout(
       { pullRequestNumber: 1, revision: pullRequestHead },

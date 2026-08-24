@@ -211,4 +211,18 @@ describe("Sandcastle GitHub CLI adapter", () => {
       })).rejects.toBeInstanceOf(GithubVerificationError);
     }
   });
+
+  it("spawns gh through the purpose-specific environment instead of inheriting the parent", async () => {
+    const github = new GithubCliPort(undefined, undefined, {
+      PATH: "/definitely-not-on-this-host",
+      HOME: "/tmp",
+    });
+
+    await expect(github.verifyImplementation({
+      issueNumber: 103,
+      branch: "sandcastle/issue-103",
+      expectedHeadSha: "abc123",
+      allowsAutomationChanges: false,
+    })).rejects.toThrow(/spawn gh ENOENT/u);
+  });
 });

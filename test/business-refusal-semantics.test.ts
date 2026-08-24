@@ -15,6 +15,7 @@ import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js"
 // execution side effects. Execution failure remains the only blocked path.
 
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
+const lease = { acquire: vi.fn(async () => ({ release: async () => {} })) };
 
 function issue(overrides = {}) {
   return {
@@ -109,7 +110,7 @@ describe("business refusal semantics (#247)", () => {
       const checkout = { withCheckout: vi.fn() };
       const implementer = { implement: vi.fn() };
 
-      await expect(runImplementationAutomationCommand({ issueNumber: 247 }, { github, checkout, implementer }))
+      await expect(runImplementationAutomationCommand({ issueNumber: 247 }, { github, checkout, implementer, lease }))
         .resolves.toEqual({ status: "refused", reason });
 
       expect(github.removeIssueLabel).toHaveBeenCalledWith(247, "agent:implement");
@@ -136,6 +137,7 @@ describe("business refusal semantics (#247)", () => {
       },
       checkout: { withCheckout: vi.fn() },
       implementer: { implement: vi.fn() },
+      lease,
     });
 
     it.each(prdPreflightRefusals)("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
@@ -235,7 +237,7 @@ describe("business refusal semantics (#247)", () => {
       const implementer = { implement: vi.fn() };
 
       await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 249 }, {
-        github, checkout, publisher, implementer,
+        github, checkout, publisher, implementer, lease,
       })).resolves.toEqual({ status: "refused", reason });
 
       expect(github.removePullRequestLabel).toHaveBeenCalledWith(249, "agent:implement");
@@ -258,7 +260,7 @@ describe("business refusal semantics (#247)", () => {
       const checkout = { withCheckout: vi.fn() };
       const updater = { update: vi.fn() };
 
-      await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 249 }, { github, checkout, updater }))
+      await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 249 }, { github, checkout, updater, lease }))
         .resolves.toEqual({ status: "refused", reason });
 
       expect(github.removePullRequestLabel).toHaveBeenCalledWith(249, "agent:update-branch");
@@ -282,7 +284,7 @@ describe("business refusal semantics (#247)", () => {
       const publisher = { publish: vi.fn() };
 
       await expect(runReviewAutomationCommand({ pullRequestNumber: 249 }, {
-        github, checkout, reviewer, publisher,
+        github, checkout, reviewer, publisher, lease,
       })).resolves.toEqual({ status: "refused", reason });
 
       expect(github.removePullRequestLabel).toHaveBeenCalledWith(249, "agent:review");
@@ -304,7 +306,7 @@ describe("business refusal semantics (#247)", () => {
       const reviewer = { review: vi.fn() };
 
       await expect(runReviewAutomationCommand({ pullRequestNumber: 249 }, {
-        github, checkout, reviewer, publisher: { publish: vi.fn() },
+        github, checkout, reviewer, publisher: { publish: vi.fn() }, lease,
       })).resolves.toEqual({ status: "refused", reason: "Pull Request #249 is already in progress" });
 
       expect(github.addPullRequestLabel).not.toHaveBeenCalled();

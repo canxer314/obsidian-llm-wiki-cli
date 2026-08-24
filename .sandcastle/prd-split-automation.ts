@@ -68,6 +68,18 @@ export async function runPrdSplitAutomationCommand(
   await ports.github.addIssueLabel(issue.number, "agent:in-progress");
   try {
     await ports.github.removeIssueLabel(issue.number, "agent:to-issues");
+    const claimed = await ports.github.readPrd(issue.number);
+    if (
+      claimed.state !== "OPEN" ||
+      claimed.baseRevision !== issue.baseRevision ||
+      claimed.subIssueCount !== 0 ||
+      claimed.parentNumber !== undefined ||
+      !claimed.labels.includes("agent:in-progress") ||
+      claimed.labels.includes("agent:to-issues") ||
+      claimed.labels.includes("agent:blocked")
+    ) {
+      throw new Error(`Issue #${issue.number} changed while PRD split was being acquired`);
+    }
     const childIssueNumbers = await ports.checkout.withCheckout({
       pullRequestNumber: issue.number,
       revision: issue.baseRevision,

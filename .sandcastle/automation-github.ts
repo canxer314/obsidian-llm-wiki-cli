@@ -364,7 +364,9 @@ export function createAutomationGithubPort(options: {
           "--jq", "{number, title, state, labels, pull_request}",
         ], options.environment),
         readHeadSha(),
-        execute("gh", ["api", `repos/{owner}/{repo}/issues/${issueNumber}/sub_issues`, "--jq", "length"], options.environment),
+        execute("gh", [
+          "api", `repos/{owner}/{repo}/issues/${issueNumber}/sub_issues`, "--paginate", "--jq", ".[] | 1",
+        ], options.environment),
         execute("gh", [
           "api", "graphql", "-f",
           "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number}}}}",
@@ -388,7 +390,7 @@ export function createAutomationGithubPort(options: {
         state: issue.state.toUpperCase(),
         labels: issue.labels.map(({ name }) => name),
         baseRevision,
-        subIssueCount: Number(subIssuesOutput.trim()),
+        subIssueCount: subIssuesOutput.split("\n").filter((line) => line.trim().length > 0).length,
         ...(parentNumber.length === 0 ? {} : { parentNumber: Number(parentNumber) }),
       };
     },
