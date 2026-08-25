@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
@@ -61,8 +63,39 @@ function createSandboxProvider(
   });
 }
 
+const executeFile = promisify(execFile);
+
+interface GitIdentity {
+  readonly name: string;
+  readonly email: string;
+}
+
+// Container Agent commits are authored with the trusted checkout's git
+// identity: the container HOME has no .gitconfig, so startup reads
+// user.name/user.email and injects them into the GitHub-capable Agent
+// environment as GIT_AUTHOR_*/GIT_COMMITTER_* variables (#269). The values
+// are non-sensitive and never enter logs, retained artifacts, GitHub
+// diagnostics, or error messages beyond the identity itself.
+async function readGitIdentity(repositoryPath: string): Promise<GitIdentity> {
+  const readValue = async (key: string): Promise<string> => {
+    try {
+      const { stdout } = await executeFile("git", ["-C", repositoryPath, "config", "--get", key], { encoding: "utf8" });
+      return stdout.trim();
+    } catch (error) {
+      // git exits 1 when the key is unset; treat that as an absent identity.
+      if ((error as { code?: number }).code === 1) return "";
+      throw error;
+    }
+  };
+  const [name, email] = await Promise.all([readValue("user.name"), readValue("user.email")]);
+  return { name, email };
+}
+
 export async function loadSandboxStartup(
   paths: Partial<SandcastleConfigPaths> = {},
+  options: {
+    readonly readGitIdentity?: (repositoryPath: string) => Promise<GitIdentity>;
+  } = {},
 ): Promise<{
   readonly repositoryPath: string;
   readonly uid: number;
@@ -85,8 +118,19 @@ export async function loadSandboxStartup(
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
   const imageName = await sandcastleImageName({ repositoryPath, uid, gid });
+  const gitIdentity = await (options.readGitIdentity ?? readGitIdentity)(repositoryPath);
+  if (gitIdentity.name.length === 0 || gitIdentity.email.length === 0) {
+    throw new Error(
+      "The trusted repository checkout has no configured git user.name/user.email; " +
+      "Agent container commits require a git identity",
+    );
+  }
   const childEnvironments = createChildEnvironments({
     ...config.environment,
+    GIT_AUTHOR_NAME: gitIdentity.name,
+    GIT_AUTHOR_EMAIL: gitIdentity.email,
+    GIT_COMMITTER_NAME: gitIdentity.name,
+    GIT_COMMITTER_EMAIL: gitIdentity.email,
     ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }),
     ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
   });

@@ -102,7 +102,9 @@ describe("Sandcastle Docker image builder", () => {
     const run = vi.fn<DockerImageProcess["run"]>(async () => undefined);
 
     try {
-      const startup = await loadSandboxStartup({ settingsPath, envPath });
+      const startup = await loadSandboxStartup({ settingsPath, envPath }, {
+        readGitIdentity: async () => ({ name: "canxer", email: "canxer314@live.com" }),
+      });
 
       expect(startup.imageName).toBe(expectedImage);
       await expect(buildSandcastleImage({
