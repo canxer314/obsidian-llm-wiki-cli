@@ -32,7 +32,7 @@ const probeArguments = [
   "host",
   "--user",
   "1000:1000",
-  ...Object.entries(probeEnvironment).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
+  ...Object.keys(probeEnvironment).flatMap((name) => ["-e", name]),
   "--entrypoint",
   "sh",
   image,
@@ -41,6 +41,25 @@ const probeArguments = [
 ];
 
 describe("GitHub-capable Agent container readiness", () => {
+  it("passes the exact GitHub-capable Agent environment through Docker without placing values in argv", async () => {
+    const process = processReturning({ exitCode: 0 });
+
+    await expect(githubAgentReadiness({
+      image,
+      uid: 1000,
+      gid: 1000,
+      environment,
+      process,
+    })).resolves.toBe("ready");
+
+    expect(process.run).toHaveBeenCalledWith(probeArguments, probeEnvironment);
+    const arguments_ = process.run.mock.calls[0]?.[0] ?? [];
+    for (const value of Object.values(environment)) {
+      expect(arguments_).not.toContain(value);
+      expect(arguments_.join("\0")).not.toContain(value);
+    }
+  });
+
   it("runs a read-only gh authentication probe against the exact image and environment", async () => {
     const process = processReturning({ exitCode: 0 });
 
@@ -53,7 +72,7 @@ describe("GitHub-capable Agent container readiness", () => {
     })).resolves.toBe("ready");
 
     expect(process.run).toHaveBeenCalledOnce();
-    expect(process.run).toHaveBeenCalledWith(probeArguments);
+    expect(process.run).toHaveBeenCalledWith(probeArguments, probeEnvironment);
   });
 
   it("classifies a missing GH_TOKEN without starting a container", async () => {
