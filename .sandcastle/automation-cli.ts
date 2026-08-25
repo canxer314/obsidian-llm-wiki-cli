@@ -5,13 +5,57 @@ export class AutomationCliError extends Error {
   }
 }
 
+// A controlled feedback reconcile authorization (#293): the operator supplies
+// the durable facts — acquired revision, expected POST, reply intent — that
+// plain observe-first dispatch deliberately never assumes.
+export interface FeedbackReconcileRequest {
+  readonly baseRevision?: string;
+  readonly expectedPost?: string;
+  readonly expectedReply?: { readonly rootCommentId: string; readonly body: string };
+}
+
+const RECONCILE_USAGE =
+  "Expected: reconcile feedback <pull-request-number> [--base-revision <revision>] [--expected-post <revision>] [--reply-root <id>] [--reply-body <text>]";
+const FULL_REVISION = /^[0-9a-f]{40}$/u;
+
+export function parseReconcileFlags(flags: readonly string[]): FeedbackReconcileRequest {
+  let baseRevision: string | undefined;
+  let expectedPost: string | undefined;
+  let replyRoot: string | undefined;
+  let replyBody: string | undefined;
+  for (let index = 0; index < flags.length; index += 2) {
+    const flag = flags[index];
+    const value = flags[index + 1];
+    if (value === undefined) throw new AutomationCliError(`${flag} requires a value`);
+    if (flag === "--base-revision" || flag === "--expected-post") {
+      if (!FULL_REVISION.test(value)) throw new AutomationCliError(`${flag} requires a 40-character revision`);
+      if (flag === "--base-revision") baseRevision = value;
+      else expectedPost = value;
+    } else if (flag === "--reply-root") {
+      replyRoot = value;
+    } else if (flag === "--reply-body") {
+      replyBody = value;
+    } else {
+      throw new AutomationCliError(`Unknown reconcile flag: ${flag}`);
+    }
+  }
+  if ((replyRoot === undefined) !== (replyBody === undefined)) {
+    throw new AutomationCliError("--reply-root and --reply-body must be provided together");
+  }
+  return {
+    ...(baseRevision === undefined ? {} : { baseRevision }),
+    ...(expectedPost === undefined ? {} : { expectedPost }),
+    ...(replyRoot === undefined || replyBody === undefined ? {} : { expectedReply: { rootCommentId: replyRoot, body: replyBody } }),
+  };
+}
+
 export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeedback, TSplit, TUpdate, TDispatch, TInspect, TSetup, TBuildImage, TArchitectureReview>(
   argv: readonly string[],
   dependencies: {
     readonly runReview: (pullRequestNumber: number) => Promise<TReview>;
     readonly runImplement: (issueNumber: number) => Promise<TImplement>;
     readonly runImplementPrd: (issueNumber: number) => Promise<TImplementPrd>;
-    readonly runFeedback: (pullRequestNumber: number) => Promise<TFeedback>;
+    readonly runFeedback: (pullRequestNumber: number, reconcile?: FeedbackReconcileRequest) => Promise<TFeedback>;
     readonly runSplit: (issueNumber: number) => Promise<TSplit>;
     readonly runUpdate: (pullRequestNumber: number) => Promise<TUpdate>;
     readonly dispatch?: (concurrency?: number) => Promise<TDispatch>;
@@ -39,6 +83,15 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
     if (argv.length !== 1 || dependencies.inspect === undefined) throw new AutomationCliError("Expected: inspect");
     return dependencies.inspect();
   }
+  if (argv[0] === "reconcile") {
+    const [_command, operation, number, ...flags] = argv;
+    if (operation !== "feedback" || number === undefined) throw new AutomationCliError(RECONCILE_USAGE);
+    if (!/^[1-9]\d*$/u.test(number) || !Number.isSafeInteger(Number(number))) {
+      throw new AutomationCliError("reconcile feedback requires a positive Pull Request number");
+    }
+    await dependencies.preflight?.("feedback");
+    return dependencies.runFeedback(Number(number), parseReconcileFlags(flags));
+  }
   if (argv[0] === "dispatch") {
     const [_command, option, value, ...remaining] = argv;
     if (dependencies.dispatch === undefined || remaining.length > 0 || (option !== undefined && option !== "--concurrency")) {
@@ -64,7 +117,7 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
     if (command === "run" && operation !== undefined && !["review", "implement", "implement-prd", "feedback", "split", "update-branch"].includes(operation)) {
       throw new AutomationCliError(`Unknown automation operation: ${operation}`);
     }
-    throw new AutomationCliError("Expected: run review <pull-request-number>, run feedback <pull-request-number>, run implement <issue-number>, run implement-prd <issue-number>, run split <issue-number>, or run update-branch <pull-request-number>");
+    throw new AutomationCliError(`Expected: run review <pull-request-number>, run feedback <pull-request-number>, run implement <issue-number>, run implement-prd <issue-number>, run split <issue-number>, run update-branch <pull-request-number>, or ${RECONCILE_USAGE.replace("Expected: ", "")}`);
   }
   if (!/^[1-9]\d*$/u.test(number) || !Number.isSafeInteger(Number(number))) {
     throw new AutomationCliError(`${operation} requires a positive ${operation === "implement" || operation === "implement-prd" || operation === "split" ? "Issue" : "Pull Request"} number`);

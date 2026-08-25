@@ -207,7 +207,7 @@ Run each canary with timers disabled and only while `inspect` reports both `"ima
 
 1. **Issue implementation** — create a small dedicated Issue, add `agent:implement`, then `npm run sandcastle -- run implement <n>`. Verify a `sandcastle/issue-<n>` branch and Draft Pull Request appear.
 2. **Pull Request review** — add `agent:review` to that Draft Pull Request, then `npm run sandcastle -- run review <pr>`. Verify the published review identifies the exact reviewed commit.
-3. **Feedback implementation** — leave a change request on the Pull Request, add `agent:implement`, then `npm run sandcastle -- run feedback <pr>`. Verify the fix is pushed to the existing branch.
+3. **Feedback implementation** — leave a change request on the Pull Request, add `agent:implement`, then `npm run sandcastle -- run feedback <pr>`. Verify the fix is pushed to the existing branch and that the implementation reply carries the `feedback-reconcile` provenance marker.
 4. **Branch update** — add `agent:update-branch`, then `npm run sandcastle -- run update-branch <pr>`. Verify the branch is updated from `master` with an explicit force-with-lease push.
 5. **PRD split** — create a dedicated PRD Issue, add `agent:to-issues`, then `npm run sandcastle -- run split <n>`. Verify self-contained child Issues are created.
 6. **PRD continuation and final review** — add `agent:implement` to the PRD, then `npm run sandcastle -- run implement-prd <n>`. Verify exactly one eligible child is implemented and the next child is requested automatically; when the final child completes, verify Pull Request review is requested automatically.
@@ -231,6 +231,14 @@ The old and new write paths must never be active at the same time. Before enabli
 GitHub Actions is not a fallback consumer: two consumers would reintroduce duplicate execution. If the replacement must be paused, `systemctl --user stop sandcastle-dispatch.timer sandcastle-architecture-review.timer` — do not start the retired writer instead.
 
 Verify activation with `systemctl --user list-timers` and `journalctl --user -u sandcastle-dispatch.service -f`.
+
+## Feedback publication convergence and reconciliation
+
+Feedback implementation is the single publication owner for both the branch push and the canonical implementation reply (#293). The Agent creates the local commit and returns the reply intent as structured output (`<feedback-reply>` with `rootCommentId` and `body`); it must never write to GitHub. The orchestrator publishes the reply with a bounded machine-readable marker (`<!-- feedback-reconcile op=feedback pr=<n> pre=<PRE> post=<POST> root=<root> -->`) and reads the marker back so a lost response cannot duplicate the reply.
+
+After a push the orchestrator polls the Pull Request head within a conservative bound (up to five reads with attempt-scaled backoff — two-second increments, ~20 seconds in total by default, injectable in tests): a temporary observation of the acquired revision is propagation, explicitly transient read errors may retry, and a different third-party SHA fails closed without a second push. A `blocked` result is typed by stage — `feedback-execution`, `feedback-publication`, `feedback-convergence`, `feedback-head-conflict`, `feedback-reply`, `feedback-reconciliation`, or `feedback-finalization` — and carries the published revision when publication already occurred. Public diagnostics stay classified and never include execution summaries, paths, credentials, or stack traces.
+
+A subsequent authorized invocation observes durable GitHub state before running the Agent or publishing anything. Exactly one marker reply matching the observed head with a direct-child parent relation adopts the existing POST without rerunning; multiple or conflicting candidates fail closed; a strict unique legacy reply can be adopted only when the acquired revision is supplied by a controlled reconcile authorization; and a reply-only completion runs only when the POST and reply intent are provided explicitly. An adopted completion reports the independently verified revision and reconciles managed labels; cleanup failures are reflected in the typed result rather than silently ignored.
 
 ## Automated verification
 

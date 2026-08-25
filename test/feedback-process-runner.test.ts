@@ -60,7 +60,7 @@ describe("feedback implementation process runner", () => {
     await expectDescendantDead(descendant);
   });
 
-  it("runs the feedback worker to completion", async () => {
+  it("runs the feedback worker to completion and returns the reply intent", async () => {
     const process = child(530);
     const start = vi.fn().mockReturnValue(process);
     const runner = createProcessFeedbackImplementer({
@@ -74,10 +74,15 @@ describe("feedback implementation process runner", () => {
       revision,
       checkoutPath: "/jobs/feedback-224",
     });
-    process.stdout?.emit("data", `${JSON.stringify({ status: "implemented" })}\n`);
+    process.stdout?.emit("data", `${JSON.stringify({
+      status: "implemented",
+      reply: { rootCommentId: "PRRC_root", body: "Fixed." },
+    })}\n`);
     process.emit("close", 0);
 
-    await expect(implemented).resolves.toBeUndefined();
+    await expect(implemented).resolves.toEqual({
+      reply: { rootCommentId: "PRRC_root", body: "Fixed." },
+    });
     expect(start).toHaveBeenCalledWith([
       "224",
       "feature/feedback",

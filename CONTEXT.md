@@ -65,8 +65,16 @@ The durable repository record — a GitHub Issue or Pull Request — that carrie
 _Avoid_: Ticket database row, local work record
 
 **Blocked Automation**:
-An operation failure (execution, timeout, push, or publication) marked with `agent:blocked` that requires operator inspection and deliberate manual retry. It never terminalizes the Automation Work Item and is never retried automatically.
+An operation failure (execution, timeout, push, or publication) marked with `agent:blocked` that requires operator inspection and deliberate manual retry. It never terminalizes the Automation Work Item and is never retried automatically. Feedback failures are typed by stage (`feedback-execution`, `feedback-publication`, `feedback-convergence`, `feedback-head-conflict`, `feedback-reply`, `feedback-reconciliation`, `feedback-finalization`) and carry the published revision when publication already occurred, so an operator can classify safe action without guessing.
 _Avoid_: Terminal failure, dead letter, automatic retry
+
+**Canonical Implementation Reply**:
+The single orchestrator-owned review-thread reply for a feedback implementation, carrying a bounded machine-readable marker (`feedback-reconcile op=feedback pr=<n> pre=<PRE> post=<POST> root=<root>`) embedded in an otherwise human-readable body. The orchestrator reads the marker back after posting so a lost response cannot duplicate the reply; the Agent never writes to GitHub.
+_Avoid_: Agent-owned reply, duplicate reply, machine-only ledger comment
+
+**Feedback Reconcile Authorization**:
+The controlled re-entry entry for feedback implementation. It observes durable GitHub state before running an Agent or publishing anything: exactly one matching canonical reply adopts the existing POST without re-running; strict unique legacy evidence may be adopted only when the operator supplies the acquired revision; a reply-only completion runs only when the POST and reply intent are provided explicitly; multiple or conflicting candidates fail closed. Plain observe-first dispatch must never be used to re-enter a post-publication state.
+_Avoid_: Whole-job retry, heuristic pick, second publication
 
 **Dispatcher**:
 The thin trusted local scheduler that runs directly from the trusted local `master` checkout. It owns discovery, acquisition labels, bounded concurrency, Target Checkout creation, job time limits, and read-only inspection — never operation-specific business behavior.

@@ -293,7 +293,12 @@ try {
       },
       createJobId: () => jobId,
     })),
-    runFeedback: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementationAutomationCommand({ pullRequestNumber }, {
+    runFeedback: (pullRequestNumber, reconcile) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementationAutomationCommand({
+      pullRequestNumber,
+      ...(reconcile?.baseRevision === undefined ? {} : { baseRevision: reconcile.baseRevision }),
+      ...(reconcile?.expectedPost === undefined ? {} : { expectedPost: reconcile.expectedPost }),
+      ...(reconcile?.expectedReply === undefined ? {} : { expectedReply: reconcile.expectedReply }),
+    }, {
       github: automationGithub,
       checkout: createTargetCheckout({
         sourceRepositoryPath: repositoryPath,
