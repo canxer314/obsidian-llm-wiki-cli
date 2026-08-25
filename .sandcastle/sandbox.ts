@@ -46,10 +46,11 @@ export const plannerSandboxHooks = {
 } as const;
 
 export function sandboxHooksFor(
-  role: "planner" | "implementer" | "reviewer" | "merger",
+  role: "planner" | "implementer" | "feedback" | "reviewer" | "merger",
 ) {
   if (role === "planner") return plannerSandboxHooks;
-  return role === "implementer" ? sandboxHooks : repairSandboxHooks;
+  if (role === "implementer") return sandboxHooks;
+  return repairSandboxHooks;
 }
 
 function createSandboxProvider(

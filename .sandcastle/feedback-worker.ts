@@ -15,7 +15,7 @@ if (
 const startup = await loadSandboxStartup();
 await createFeedbackImplementerSession({
   sandbox: startup.githubAgentSandbox,
-  hooks: sandboxHooksFor("implementer"),
+  hooks: sandboxHooksFor("feedback"),
 }).run({
   model,
   pullRequestNumber: Number(pullRequestNumber),
