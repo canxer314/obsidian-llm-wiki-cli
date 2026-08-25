@@ -137,12 +137,26 @@ describe("review automation command", () => {
       "api", "repos/{owner}/{repo}/pulls/220",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
-      "pr", "edit", "220", "--remove-label", "agent:review",
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/220/labels/agent%3Areview",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(3, "gh", [
       "api", "repos/{owner}/{repo}/issues/220/comments",
       "-f", "body=Pull Request #220 must not originate from a fork",
     ], undefined);
+    expect(dependencies.reviewer.review).not.toHaveBeenCalled();
+    expect(dependencies.checkout.withCheckout).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it("leaves the trigger untouched when the acquisition label cannot be added", async () => {
+    const events: string[] = [];
+    const dependencies = ports(events);
+    dependencies.github.addPullRequestLabel.mockRejectedValueOnce(new Error("label transport failed"));
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies))
+      .rejects.toThrow("label transport failed");
+    expect(dependencies.github.removePullRequestLabel).not.toHaveBeenCalled();
+    expect(dependencies.github.addBlockedDiagnostic).not.toHaveBeenCalled();
     expect(dependencies.reviewer.review).not.toHaveBeenCalled();
     expect(dependencies.checkout.withCheckout).not.toHaveBeenCalled();
     expect(events).toEqual([]);

@@ -6,6 +6,22 @@ describe("Automation Command GitHub discovery", () => {
   const emptyIssueListings = ["agent:implement", "agent:to-issues", "agent:in-progress", "agent:blocked"]
     .map(() => ({ stdout: "[]", stderr: "" }));
 
+  it("mutates queue labels through stable REST endpoints", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await port.addIssueLabel(5, "agent:implement");
+    await port.removeIssueLabel(5, "agent:queued/next");
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "--method", "POST", "repos/{owner}/{repo}/issues/5/labels",
+      "-f", "labels[]=agent:implement",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/5/labels/agent%3Aqueued%2Fnext",
+    ], undefined);
+  });
+
   it("discovers trusted Pull Request trigger and state labels with one shared identity", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify([{ number: 19, labels: [{ name: "agent:update-branch" }] }]), stderr: "" })
