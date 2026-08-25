@@ -218,12 +218,17 @@ describe("automation GitHub port", () => {
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
           number: 220,
-          state: "OPEN",
-          isDraft: true,
-          baseRepository: { nameWithOwner: "canxer314/obsidian-llm-wiki-cli" },
-          headRepository: { nameWithOwner: "canxer314/obsidian-llm-wiki-cli" },
-          headRefName: "feedback-branch",
-          headRefOid: revision,
+          state: "open",
+          draft: true,
+          base: {
+            ref: "master",
+            repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+          },
+          head: {
+            ref: "feedback-branch",
+            sha: revision,
+            repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+          },
           labels: [{ name: "agent:review" }],
         }),
         stderr: "",
@@ -245,6 +250,7 @@ describe("automation GitHub port", () => {
       isDraft: true,
       baseRepository: "canxer314/obsidian-llm-wiki-cli",
       headRepository: "canxer314/obsidian-llm-wiki-cli",
+      baseRefName: "master",
       headRefName: "feedback-branch",
       headSha: revision,
       labels: ["agent:review"],
@@ -261,8 +267,7 @@ describe("automation GitHub port", () => {
     await github.markPullRequestReady(220);
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
-      "pr", "view", "220", "--json",
-      "number,state,isDraft,baseRepository,headRepository,baseRefName,headRefName,headRefOid,labels",
+      "api", "repos/{owner}/{repo}/pulls/220",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "pr", "view", "220", "--json", "headRefOid", "--jq", ".headRefOid",
@@ -280,6 +285,64 @@ describe("automation GitHub port", () => {
       "-f", "comments[0][side]=RIGHT",
       "-f", "comments[0][body]=Incorrect boundary.",
     ], undefined);
+  });
+
+  it("preserves fork repository identity from the stable Pull Request REST shape", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        number: 220,
+        state: "open",
+        draft: true,
+        base: {
+          ref: "master",
+          repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+        },
+        head: {
+          ref: "contributor-branch",
+          sha: revision,
+          repo: { full_name: "contributor/obsidian-llm-wiki-cli" },
+        },
+        labels: [{ name: "agent:review" }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readPullRequest(220)).resolves.toEqual({
+      number: 220,
+      state: "OPEN",
+      isDraft: true,
+      baseRepository: "canxer314/obsidian-llm-wiki-cli",
+      headRepository: "contributor/obsidian-llm-wiki-cli",
+      baseRefName: "master",
+      headRefName: "contributor-branch",
+      headSha: revision,
+      labels: ["agent:review"],
+    });
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "api", "repos/{owner}/{repo}/pulls/220",
+    ], undefined);
+  });
+
+  it("fails closed when the Pull Request REST shape has no repository identity", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        number: 220,
+        state: "open",
+        draft: true,
+        base: {
+          ref: "master",
+          repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+        },
+        head: { ref: "deleted-fork-branch", sha: revision, repo: null },
+        labels: [{ name: "agent:review" }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readPullRequest(220))
+      .rejects.toThrow("Pull Request #220 repository identity is unavailable");
   });
 
   it("reads an ordinary Issue whose REST pull request field is null", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createAutomationGithubPort } from "../.sandcastle/automation-github.js";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
@@ -94,6 +95,73 @@ describe("review automation command", () => {
     expect(dependencies.github.markPullRequestReady).not.toHaveBeenCalled();
     expect(dependencies.github.addPullRequestLabel).toHaveBeenCalledWith(220, "agent:blocked");
     expect(dependencies.github.removePullRequestLabel).toHaveBeenCalledWith(220, "agent:in-progress");
+  });
+
+  it("refuses a fork decoded through the stable Pull Request REST shape before Agent execution", async () => {
+    const events: string[] = [];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          number: 220,
+          state: "open",
+          draft: true,
+          base: {
+            ref: "master",
+            repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+          },
+          head: {
+            ref: "contributor-branch",
+            sha: revision,
+            repo: { full_name: "contributor/obsidian-llm-wiki-cli" },
+          },
+          labels: [{ name: "agent:review" }],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValue({ stdout: "", stderr: "" });
+    const dependencies = ports(events);
+    const github = createAutomationGithubPort({ execute });
+    const reviewGithub = {
+      ...dependencies.github,
+      readPullRequest: github.readPullRequest,
+      removePullRequestLabel: github.removePullRequestLabel,
+      addRefusalDiagnostic: github.addRefusalDiagnostic,
+    };
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
+      ...dependencies,
+      github: reviewGithub,
+    }))
+      .resolves.toEqual({ status: "refused", reason: "Pull Request #220 must not originate from a fork" });
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "repos/{owner}/{repo}/pulls/220",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "pr", "edit", "220", "--remove-label", "agent:review",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(3, "gh", [
+      "api", "repos/{owner}/{repo}/issues/220/comments",
+      "-f", "body=Pull Request #220 must not originate from a fork",
+    ], undefined);
+    expect(dependencies.reviewer.review).not.toHaveBeenCalled();
+    expect(dependencies.checkout.withCheckout).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it("leaves the trigger and all mutation ports untouched when the initial Pull Request read fails", async () => {
+    const events: string[] = [];
+    const dependencies = ports(events);
+    dependencies.github.readPullRequest.mockReset();
+    dependencies.github.readPullRequest.mockRejectedValue(new Error("Pull Request shape is unreadable"));
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies))
+      .rejects.toThrow("Pull Request shape is unreadable");
+    expect(dependencies.github.addPullRequestLabel).not.toHaveBeenCalled();
+    expect(dependencies.github.removePullRequestLabel).not.toHaveBeenCalled();
+    expect(dependencies.github.addBlockedDiagnostic).not.toHaveBeenCalled();
+    expect(dependencies.reviewer.review).not.toHaveBeenCalled();
+    expect(dependencies.checkout.withCheckout).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
   });
 
   it("refuses an in-progress request without touching the trigger", async () => {

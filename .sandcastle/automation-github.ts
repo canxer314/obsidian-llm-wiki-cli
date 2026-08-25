@@ -595,32 +595,35 @@ export function createAutomationGithubPort(options: {
     },
     async readPullRequest(pullRequestNumber) {
       const { stdout } = await execute("gh", [
-        "pr", "view", String(pullRequestNumber), "--json",
-        "number,state,isDraft,baseRepository,headRepository,baseRefName,headRefName,headRefOid,labels",
+        "api", `repos/{owner}/{repo}/pulls/${pullRequestNumber}`,
       ], options.environment);
       const pullRequest = JSON.parse(stdout) as {
         readonly number: number;
         readonly state: string;
-        readonly isDraft: boolean;
-        readonly baseRepository: { readonly nameWithOwner: string } | null;
-        readonly headRepository: { readonly nameWithOwner: string } | null;
-        readonly baseRefName: string;
-        readonly headRefName: string;
-        readonly headRefOid: string;
+        readonly draft: boolean;
+        readonly base: {
+          readonly ref: string;
+          readonly repo: { readonly full_name: string } | null;
+        };
+        readonly head: {
+          readonly ref: string;
+          readonly sha: string;
+          readonly repo: { readonly full_name: string } | null;
+        };
         readonly labels: readonly { readonly name: string }[];
       };
-      if (pullRequest.baseRepository === null || pullRequest.headRepository === null) {
+      if (pullRequest.base.repo === null || pullRequest.head.repo === null) {
         throw new Error(`Pull Request #${pullRequestNumber} repository identity is unavailable`);
       }
       return {
         number: pullRequest.number,
-        state: pullRequest.state,
-        isDraft: pullRequest.isDraft,
-        baseRepository: pullRequest.baseRepository.nameWithOwner,
-        headRepository: pullRequest.headRepository.nameWithOwner,
-        baseRefName: pullRequest.baseRefName,
-        headRefName: pullRequest.headRefName,
-        headSha: pullRequest.headRefOid,
+        state: pullRequest.state.toUpperCase(),
+        isDraft: pullRequest.draft,
+        baseRepository: pullRequest.base.repo.full_name,
+        headRepository: pullRequest.head.repo.full_name,
+        baseRefName: pullRequest.base.ref,
+        headRefName: pullRequest.head.ref,
+        headSha: pullRequest.head.sha,
         labels: pullRequest.labels.map(({ name }) => name),
       };
     },
