@@ -128,6 +128,16 @@ export class GithubAgentReadinessError extends Error {
   }
 }
 
+export async function inspectGithubAgentReadiness(options: {
+  readonly image: string;
+  readonly uid: number;
+  readonly gid: number;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly process?: GithubAgentReadinessProcess;
+}): Promise<{ readonly githubAgentReadiness: GithubAgentReadiness }> {
+  return { githubAgentReadiness: await githubAgentReadiness(options) };
+}
+
 export async function requireGithubAgentReadiness(options: {
   readonly image: string;
   readonly uid: number;

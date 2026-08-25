@@ -18,6 +18,7 @@ vi.mock("@ai-hero/sandcastle/sandboxes/docker", () => ({
 }));
 
 import { loadSandboxStartup } from "../.sandcastle/sandbox.js";
+import { inspectGithubAgentReadiness } from "../.sandcastle/github-readiness.js";
 
 const roots: string[] = [];
 const originalHttpsProxy = process.env.HTTPS_PROXY;
@@ -36,6 +37,38 @@ afterEach(async () => {
 });
 
 describe("Sandcastle proxy startup", () => {
+  it("loads a mode-0600 provider configuration without GH_TOKEN and reports missing without probing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandcastle-proxy-startup-"));
+    roots.push(root);
+    const settingsPath = join(root, "settings.json");
+    const envPath = join(root, ".env");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "https://claude.example",
+          ANTHROPIC_AUTH_TOKEN: "claude-secret",
+        },
+      }),
+    );
+    await writeFile(envPath, "", { mode: 0o600 });
+    await chmod(envPath, 0o600);
+    const probe = vi.fn();
+
+    const startup = await loadSandboxStartup({ settingsPath, envPath }, { readGitIdentity: gitIdentityStub });
+    const inspection = await inspectGithubAgentReadiness({
+      image: startup.imageName,
+      uid: startup.uid,
+      gid: startup.gid,
+      environment: startup.childEnvironments.githubAgent,
+      process: { run: probe },
+    });
+
+    expect(inspection).toEqual({ githubAgentReadiness: "missing" });
+    expect(probe).not.toHaveBeenCalled();
+    expect(startup.childEnvironments.githubAgent.GH_TOKEN).toBeUndefined();
+  });
+
   it("passes one resolved value to every sandbox and every child environment", async () => {
     const root = await mkdtemp(join(tmpdir(), "sandcastle-proxy-startup-"));
     roots.push(root);

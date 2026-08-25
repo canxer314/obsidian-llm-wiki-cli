@@ -19,9 +19,9 @@ install -m 600 /dev/null ~/.config/sandcastle/env   # or: touch + chmod 600
 $EDITOR ~/.config/sandcastle/env
 ```
 
-Startup fails closed when the file is missing, is not a regular file, or has any other mode. Only whitelisted keys are read:
+Startup fails closed when the file is missing, is not a regular file, has any other mode, or lacks the provider configuration (`ANTHROPIC_BASE_URL` and either `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`). `GH_TOKEN` is intentionally not a startup prerequisite: a missing token reaches the read-only Agent-container readiness classification as `"missing"`, without launching its probe container. Only whitelisted keys are read:
 
-- `GH_TOKEN` — repository-scoped fine-grained PAT (Metadata read; Contents, Issues, Pull requests, Commit statuses read/write). Never place it in remote URLs, Git config, command-line arguments, or unit files.
+- `GH_TOKEN` — optional only for read-only `inspect`; it is required by the Agent-container readiness preflight before any GitHub-capable operation can acquire a Work Item. Use a repository-scoped fine-grained PAT (Metadata read; Contents, Issues, Pull requests, Commit statuses read/write). Never place it in remote URLs, Git config, command-line arguments, or unit files.
 - `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` — CC-Switch routing, authentication, and model mapping.
 - `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and lowercase variants) — WSL transport settings.
 - `SANDCASTLE_MODEL`, `SANDCASTLE_PLANNER_MODEL`, `SANDCASTLE_IMPLEMENTER_MODEL`, `SANDCASTLE_REVIEWER_MODEL` — role model selection (default `opus`).
