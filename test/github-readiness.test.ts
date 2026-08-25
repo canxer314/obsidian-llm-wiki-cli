@@ -1,7 +1,13 @@
+import { EventEmitter } from "node:events";
+import { spawn, type ChildProcess } from "node:child_process";
+
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 
 import {
   githubAgentReadiness,
+  githubAgentReadinessProcess,
   githubAgentReadinessRequiredFor,
   GithubAgentReadinessError,
   requireGithubAgentReadiness,
@@ -15,6 +21,17 @@ const environment: Readonly<Record<string, string>> = {
   ANTHROPIC_AUTH_TOKEN: "settings-secret",
   GH_TOKEN: "github_pat_must-not-leak",
 };
+
+function dockerChild(): ChildProcess & EventEmitter {
+  const process = new EventEmitter() as ChildProcess & EventEmitter;
+  Object.defineProperties(process, {
+    stdout: { value: new EventEmitter() },
+    stderr: { value: new EventEmitter() },
+  });
+  return process;
+}
+
+const mockSpawn = vi.mocked(spawn);
 
 function result(overrides: Partial<{ stdout: string; stderr: string; exitCode: number }>) {
   return { stdout: "", stderr: "", exitCode: 0, ...overrides };
@@ -42,18 +59,17 @@ const probeArguments = [
 
 describe("GitHub-capable Agent container readiness", () => {
   it("passes the exact GitHub-capable Agent environment through Docker without placing values in argv", async () => {
-    const process = processReturning({ exitCode: 0 });
+    const child = dockerChild();
+    mockSpawn.mockReturnValue(child);
+    const probe = githubAgentReadinessProcess.run(probeArguments, probeEnvironment);
+    child.emit("close", 0);
 
-    await expect(githubAgentReadiness({
-      image,
-      uid: 1000,
-      gid: 1000,
-      environment,
-      process,
-    })).resolves.toBe("ready");
-
-    expect(process.run).toHaveBeenCalledWith(probeArguments, probeEnvironment);
-    const arguments_ = process.run.mock.calls[0]?.[0] ?? [];
+    await expect(probe).resolves.toEqual(result({}));
+    expect(mockSpawn).toHaveBeenCalledWith("docker", probeArguments, {
+      env: probeEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const arguments_ = mockSpawn.mock.calls[0]?.[1] ?? [];
     for (const value of Object.values(environment)) {
       expect(arguments_).not.toContain(value);
       expect(arguments_.join("\0")).not.toContain(value);
