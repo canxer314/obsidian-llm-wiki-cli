@@ -92,7 +92,7 @@ export function createSameSessionReviewExtractor(options: {
           cwd: request.checkoutPath,
           ...(logging === undefined ? {} : { logging }),
           signal: controller.signal,
-          branchStrategy: { type: "branch", branch: request.branch },
+          branchStrategy: { type: "head" },
           maxIterations: 1,
           prompt: producePrompt(request),
         });
