@@ -233,6 +233,47 @@ describe("automation GitHub port", () => {
     })).rejects.toThrow("head changed before Pull Request publication");
   });
 
+  it("publishes only classified blocked diagnostics without worker summaries", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+    const summary = "worker stdout: token=secret; command failed";
+
+    await github.addImplementationBlockedDiagnostic(221, {
+      reason: "implementation-execution",
+      jobId: "job-221",
+      summary,
+    });
+    await github.addPrdImplementationBlockedDiagnostic(226, {
+      reason: "prd-implementation-execution",
+      jobId: "job-226",
+      summary,
+      childNumber: 301,
+    });
+    await github.addFeedbackBlockedDiagnostic(224, {
+      reason: "feedback-execution",
+      jobId: "job-224",
+      summary,
+    });
+    await github.addBranchUpdateBlockedDiagnostic(220, {
+      reason: "branch-update-execution",
+      jobId: "job-220",
+      summary,
+    });
+
+    const bodies = execute.mock.calls.map(([, arguments_]) => {
+      const bodyIndex = (arguments_ as readonly string[]).indexOf("--body");
+      return (arguments_ as readonly string[])[bodyIndex + 1];
+    });
+    expect(bodies).toEqual([
+      "Automation implementation is blocked (implementation-execution; job job-221). Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation feedback implementation is blocked (feedback-execution; job job-224). Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation branch update is blocked (branch-update-execution; job job-220). Remove agent:blocked, restore agent:update-branch, then retry.",
+    ]);
+    expect(bodies).not.toContain(expect.stringContaining(summary));
+    expect(bodies).not.toContain(expect.stringContaining(".sandcastle/jobs"));
+  });
+
   it("publishes classified PRD implementation and child failure diagnostics", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
@@ -247,7 +288,7 @@ describe("automation GitHub port", () => {
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
       "issue", "comment", "226", "--body",
-      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226; push failed) while implementing sub-issue #301. Local diagnostics are retained at .sandcastle/jobs/prd-implementation-job-226. Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "issue", "comment", "301", "--body",

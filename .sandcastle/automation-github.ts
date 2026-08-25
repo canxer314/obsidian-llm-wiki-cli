@@ -494,7 +494,7 @@ export function createAutomationGithubPort(options: {
     async addImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/implementation-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async addSplitBlockedDiagnostic(issueNumber, diagnostic) {
@@ -536,7 +536,7 @@ export function createAutomationGithubPort(options: {
     async addPrdImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Automation PRD implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}) while implementing sub-issue #${diagnostic.childNumber}. Local diagnostics are retained at .sandcastle/jobs/prd-implementation-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation PRD implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}) while implementing sub-issue #${diagnostic.childNumber}. Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async addChildFailureDiagnostic(childNumber, diagnostic) {
@@ -696,7 +696,7 @@ export function createAutomationGithubPort(options: {
     async addFeedbackBlockedDiagnostic(pullRequestNumber, diagnostic) {
       await execute("gh", [
         "pr", "comment", String(pullRequestNumber), "--body",
-        `Automation feedback implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/feedback-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation feedback implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async addBlockedDiagnostic(pullRequestNumber, diagnostic) {
@@ -713,7 +713,7 @@ export function createAutomationGithubPort(options: {
     async addBranchUpdateBlockedDiagnostic(pullRequestNumber, diagnostic) {
       await execute("gh", [
         "pr", "comment", String(pullRequestNumber), "--body",
-        `Automation branch update is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/branch-update-${diagnostic.jobId}. Remove agent:blocked, restore agent:update-branch, then retry.`,
+        `Automation branch update is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:update-branch, then retry.`,
       ], options.environment);
     },
     async publishReview(request) {

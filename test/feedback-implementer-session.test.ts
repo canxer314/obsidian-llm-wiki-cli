@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackImplementerSession } from "../.sandcastle/feedback-implementer-session.js";
 
 describe("feedback Implementer session adapter", () => {
-  it("limits the agent to committing feedback locally for controlled publication", async () => {
+  it("uses the prepared Target Checkout directly so its commit remains available to the controlled publisher", async () => {
     const runAgent = vi.fn().mockResolvedValue({ branch: "feature/feedback", commits: [] });
     const session = createFeedbackImplementerSession({
       sandbox: { kind: "fake-sandbox" } as never,
@@ -22,7 +22,7 @@ describe("feedback Implementer session adapter", () => {
 
     const request = runAgent.mock.calls[0]![0];
     expect(request.cwd).toBe("/checkout");
-    expect(request.branchStrategy).toEqual({ type: "branch", branch: "feature/feedback" });
+    expect(request.branchStrategy).toEqual({ type: "head" });
     expect(request.prompt).toContain("Pull Request #224");
     expect(request.prompt).toContain("Do not create an Issue, branch, or Pull Request");
     expect(request.prompt).toContain("Do not run gh auth setup-git, git push, rebase, or force-push");
