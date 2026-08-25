@@ -18,7 +18,7 @@ vi.mock("@ai-hero/sandcastle/sandboxes/docker", () => ({
 }));
 
 import { loadSandboxStartup } from "../.sandcastle/sandbox.js";
-import { githubAgentReadiness } from "../.sandcastle/github-readiness.js";
+import { inspectGithubAgentReadiness } from "../.sandcastle/github-readiness.js";
 
 const roots: string[] = [];
 const originalHttpsProxy = process.env.HTTPS_PROXY;
@@ -56,7 +56,7 @@ describe("Sandcastle proxy startup", () => {
     const probe = vi.fn();
 
     const startup = await loadSandboxStartup({ settingsPath, envPath }, { readGitIdentity: gitIdentityStub });
-    const readiness = await githubAgentReadiness({
+    const inspection = await inspectGithubAgentReadiness({
       image: startup.imageName,
       uid: startup.uid,
       gid: startup.gid,
@@ -64,7 +64,7 @@ describe("Sandcastle proxy startup", () => {
       process: { run: probe },
     });
 
-    expect(readiness).toBe("missing");
+    expect(inspection).toEqual({ githubAgentReadiness: "missing" });
     expect(probe).not.toHaveBeenCalled();
     expect(startup.childEnvironments.githubAgent.GH_TOKEN).toBeUndefined();
   });

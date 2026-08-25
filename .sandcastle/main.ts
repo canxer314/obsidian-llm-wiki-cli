@@ -12,7 +12,7 @@ import {
 import { createAutomationGithubPort, createAutomationDispatchGithubPort } from "./automation-github.ts";
 import { dispatchAutomationCommands } from "./automation-dispatch.ts";
 import {
-  githubAgentReadiness,
+  inspectGithubAgentReadiness,
   githubAgentReadinessRequiredFor,
   requireGithubAgentReadiness,
 } from "./github-readiness.ts";
@@ -417,7 +417,7 @@ try {
     }),
     inspect: async () => ({
       imageReadiness: await sandcastleImageReadiness({ image: startup.imageName }),
-      githubAgentReadiness: await githubAgentReadiness({
+      ...await inspectGithubAgentReadiness({
         image: startup.imageName,
         uid: startup.uid,
         gid: startup.gid,
