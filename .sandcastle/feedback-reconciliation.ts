@@ -91,6 +91,11 @@ export async function classifyFeedbackReconciliation(request: {
     }
     return { status: "adopt", post: headSha };
   }
+  // Legacy adoption is strictly evidence-based: a single candidate reply
+  // implies one relevant root request and one linked implementation reply;
+  // its unique full POST match plus the direct-child parentage proof stand in
+  // for the marker the pre-marker Canary shape never carried. Any ambiguity
+  // fails closed rather than guessing (#293).
   if (legacy !== undefined) {
     if (baseRevision === undefined) {
       return { status: "fail-closed", reason: "legacy feedback evidence lacks the acquired revision" };

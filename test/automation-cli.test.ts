@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AutomationCliError, runAutomationCli } from "../.sandcastle/automation-cli.js";
 
-const usage = "Expected: run review <pull-request-number>, run feedback <pull-request-number>, run implement <issue-number>, run implement-prd <issue-number>, run split <issue-number>, or run update-branch <pull-request-number>";
+const usage = "Expected: run review <pull-request-number>, run feedback <pull-request-number>, run implement <issue-number>, run implement-prd <issue-number>, run split <issue-number>, run update-branch <pull-request-number>, or reconcile feedback <pull-request-number> [--base-revision <revision>] [--expected-post <revision>] [--reply-root <id>] [--reply-body <text>]";
 
 describe("automation command CLI", () => {
   it("dispatches only fixed review, feedback, implement, implement-prd, split, and update-branch operations", async () => {
@@ -65,6 +65,53 @@ describe("automation command CLI", () => {
     await runAutomationCli(["setup-labels"], dependencies);
     await runAutomationCli(["inspect"], dependencies);
     expect(preflight).not.toHaveBeenCalled();
+  });
+
+  it("routes a controlled reconcile authorization to the feedback operation", async () => {
+    const runFeedback = vi.fn().mockResolvedValue({ status: "implemented-feedback" });
+    const dependencies = {
+      runReview: vi.fn(), runFeedback, runImplement: vi.fn(), runImplementPrd: vi.fn(), runSplit: vi.fn(), runUpdate: vi.fn(),
+    };
+
+    await expect(runAutomationCli(["reconcile", "feedback", "221", "--base-revision", "a".repeat(40)], dependencies))
+      .resolves.toEqual({ status: "implemented-feedback" });
+    expect(runFeedback).toHaveBeenCalledWith(221, { baseRevision: "a".repeat(40) });
+
+    await expect(runAutomationCli(["reconcile", "feedback", "221", "--expected-post", "b".repeat(40), "--reply-root", "PRRC_x", "--reply-body", "Fixed."], dependencies))
+      .resolves.toEqual({ status: "implemented-feedback" });
+    expect(runFeedback).toHaveBeenCalledWith(221, {
+      expectedPost: "b".repeat(40),
+      expectedReply: { rootCommentId: "PRRC_x", body: "Fixed." },
+    });
+  });
+
+  it("runs the feedback preflight for a reconcile authorization", async () => {
+    const preflight = vi.fn();
+    await runAutomationCli(["reconcile", "feedback", "221", "--base-revision", "a".repeat(40)], {
+      runReview: vi.fn(), runFeedback: vi.fn(), runImplement: vi.fn(), runImplementPrd: vi.fn(), runSplit: vi.fn(), runUpdate: vi.fn(),
+      preflight,
+    });
+    expect(preflight).toHaveBeenCalledWith("feedback");
+  });
+
+  it.each([
+    [["reconcile", "implement", "221"], "Expected: reconcile feedback <pull-request-number> [--base-revision <revision>] [--expected-post <revision>] [--reply-root <id>] [--reply-body <text>]"],
+    [["reconcile", "feedback", "0"], "reconcile feedback requires a positive Pull Request number"],
+    [["reconcile", "feedback", "221", "--base-revision", "nope"], "--base-revision requires a 40-character revision"],
+    [["reconcile", "feedback", "221", "--expected-post", "nope"], "--expected-post requires a 40-character revision"],
+    [["reconcile", "feedback", "221", "--reply-root", "PRRC_x"], "--reply-root and --reply-body must be provided together"],
+    [["reconcile", "feedback", "221", "--reply-body", "Fixed."], "--reply-root and --reply-body must be provided together"],
+    [["reconcile", "feedback", "221", "--unknown", "x"], "Unknown reconcile flag: --unknown"],
+    [["reconcile", "feedback", "221", "--base-revision"], "--base-revision requires a value"],
+  ])("rejects malformed reconcile command shapes", async (argv, message) => {
+    await expect(runAutomationCli(argv, {
+      runReview: vi.fn(),
+      runFeedback: vi.fn(),
+      runImplement: vi.fn(),
+      runImplementPrd: vi.fn(),
+      runSplit: vi.fn(),
+      runUpdate: vi.fn(),
+    })).rejects.toEqual(new AutomationCliError(message));
   });
 
   it.each([

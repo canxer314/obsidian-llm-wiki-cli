@@ -367,6 +367,101 @@ describe("feedback implementation automation", () => {
     expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
   });
 
+  it("types a non-transient post-push read failure as convergence with the published revision", async () => {
+    const subject = ports({ headReads: [PRE, PRE, PRE, POST] });
+    subject.github.readPullRequest.mockReset()
+      .mockResolvedValueOnce(pullRequest(PRE))
+      .mockResolvedValueOnce(pullRequest(PRE))
+      .mockResolvedValueOnce(pullRequest(PRE, ["agent:in-progress"]))
+      .mockRejectedValueOnce(new Error("unexpected read failure"))
+      .mockResolvedValue(pullRequest(POST, ["agent:in-progress"]));
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-convergence",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+  });
+
+  it("types a readback read failure as a reply-stage failure with the published revision", async () => {
+    const subject = ports({ headReads: [PRE, PRE, PRE, POST] });
+    subject.github.readFeedbackReplies.mockReset()
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("readback read failed"))
+      .mockResolvedValue([marker()]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reply",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+  });
+
+  it("types a reply-target read failure as a reply-stage failure with the published revision", async () => {
+    const subject = ports({ headReads: [PRE, PRE, PRE, POST] });
+    subject.github.readUnresolvedReviewThreads.mockRejectedValue(new Error("threads unavailable"));
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reply",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
+  });
+
+  it("adopts strict unique legacy evidence when the acquired revision is authorized", async () => {
+    const subject = ports({
+      headReads: [POST, POST, POST, POST],
+      replies: [markerReply(`Implemented in ${POST}.`)],
+      parentOf: () => PRE,
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, baseRevision: PRE }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+  });
+
+  it("fails closed on legacy evidence without an authorized acquired revision", async () => {
+    const subject = ports({
+      headReads: [POST, POST, POST, POST],
+      replies: [markerReply(`Implemented in ${POST}.`)],
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reconciliation",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+  });
+
   it("blocks the work item and retains the local job diagnostic when the feedback job times out", async () => {
     const subject = ports();
     subject.implementer.implement.mockRejectedValue(new Error("Feedback implementation execution timed out"));

@@ -122,6 +122,14 @@ describe("feedback publication reconciliation", () => {
     })).resolves.toEqual({ status: "fail-closed", reason: expect.stringContaining("legacy") });
   });
 
+  it("adopts legacy evidence with one relevant root despite unrelated replies", async () => {
+    await expect(classify({
+      headSha: POST,
+      replies: [reply("Looks good."), reply(`Implemented in ${POST}.`)],
+      parent: PRE,
+    })).resolves.toEqual({ status: "adopt", post: POST });
+  });
+
   it("fails closed when legacy evidence does not descend from the acquired revision", async () => {
     await expect(classify({
       headSha: POST,

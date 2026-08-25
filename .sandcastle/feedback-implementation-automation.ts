@@ -1,5 +1,5 @@
 import { redact as redactFailureSummary } from "./redaction.ts";
-import type { ReviewAutomationPullRequest, ReviewThreadComment } from "./review-automation.js";
+import type { ReviewAutomationPullRequest, ReviewReply, ReviewThreadComment } from "./review-automation.js";
 import {
   classifyFeedbackReconciliation,
   countFeedbackMarkerReplies,
@@ -7,7 +7,7 @@ import {
   type FeedbackReplyMarker,
   type FeedbackThreadReply,
 } from "./feedback-reconciliation.ts";
-import { convergeFeedbackHead } from "./feedback-convergence.ts";
+import { convergeFeedbackHead, type FeedbackConvergence } from "./feedback-convergence.ts";
 
 export interface FeedbackReplyIntent {
   readonly rootCommentId: string;
@@ -39,7 +39,7 @@ export interface FeedbackImplementationPorts {
     removePullRequestLabel(pullRequestNumber: number, label: string): Promise<void>;
     replyToReviewThread(request: {
       readonly pullRequestNumber: number;
-      readonly reply: { readonly commentId: string; readonly body: string };
+      readonly reply: ReviewReply;
     }): Promise<void>;
     addRefusalDiagnostic?(pullRequestNumber: number, reason: string): Promise<void>;
     addFeedbackBlockedDiagnostic?(
@@ -159,17 +159,29 @@ async function publishCanonicalReply(request: {
     rootCommentId: request.rootCommentId,
   };
   const markerBody = `${request.body}\n\n${feedbackReplyMarker(marker)}`;
+  const readReplyCount = async (): Promise<number> => {
+    try {
+      return countFeedbackMarkerReplies(
+        await request.github.readFeedbackReplies(request.pullRequestNumber),
+        marker,
+      );
+    } catch (error) {
+      // A failed readback is itself a reply-stage failure: the POST already
+      // landed, so the typed outcome must carry it (#293).
+      throw new FeedbackStageError(
+        "feedback-reply",
+        error instanceof Error ? error.message : String(error),
+        request.post,
+      );
+    }
+  };
   try {
     await request.github.replyToReviewThread({
       pullRequestNumber: request.pullRequestNumber,
       reply: { commentId: request.rootCommentId, body: markerBody },
     });
   } catch (error) {
-    const landed = countFeedbackMarkerReplies(
-      await request.github.readFeedbackReplies(request.pullRequestNumber),
-      marker,
-    );
-    if (landed !== 1) {
+    if ((await readReplyCount()) !== 1) {
       throw new FeedbackStageError(
         "feedback-reply",
         error instanceof Error ? error.message : String(error),
@@ -177,8 +189,7 @@ async function publishCanonicalReply(request: {
       );
     }
   }
-  const after = await request.github.readFeedbackReplies(request.pullRequestNumber);
-  if (countFeedbackMarkerReplies(after, marker) !== 1) {
+  if ((await readReplyCount()) !== 1) {
     throw new FeedbackStageError(
       "feedback-reply",
       "Canonical feedback reply did not converge to exactly one marker",
@@ -204,6 +215,23 @@ async function settleBlockedState(
     diagnosticFailed: diagnostic.status === "rejected",
     inProgressCleanupFailed: inProgressCleanup.status === "rejected",
   };
+}
+
+// Every blocked path shares one shape: settle the managed labels and return
+// the typed outcome with the settle failures attached (#293).
+async function blockAndSettle(
+  ports: FeedbackImplementationPorts,
+  pullRequestNumber: number,
+  jobId: string,
+  reason: FeedbackBlockedReason,
+  summary: string,
+  extra?: { readonly revision?: string },
+): Promise<FeedbackImplementationResult> {
+  const finalization = await settleBlockedState(ports, pullRequestNumber, jobId, reason, summary);
+  return blocked(jobId, reason, summary, {
+    ...(extra?.revision === undefined ? {} : { revision: extra.revision }),
+    finalization,
+  });
 }
 
 // Reconciliation finalization: adopted or reply-only completions must leave
@@ -258,13 +286,11 @@ export async function runFeedbackImplementationAutomationCommand(
       return finalizeAdopted(request.pullRequestNumber, reconciliation.post, jobId, ports);
     case "reply-only": {
       if (request.expectedReply === undefined) {
-        const finalization = await settleBlockedState(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", "Reply-only completion requires the reply intent");
-        return blocked(jobId, "feedback-reconciliation", "Reply-only completion requires the reply intent", { finalization });
+        return blockAndSettle(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", "Reply-only completion requires the reply intent");
       }
       const parent = await ports.github.readCommitParent(reconciliation.post);
       if (parent === undefined) {
-        const finalization = await settleBlockedState(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", "Reply-only completion cannot prove the acquired revision");
-        return blocked(jobId, "feedback-reconciliation", "Reply-only completion cannot prove the acquired revision", { finalization });
+        return blockAndSettle(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", "Reply-only completion cannot prove the acquired revision");
       }
       try {
         await publishCanonicalReply({
@@ -277,17 +303,12 @@ export async function runFeedbackImplementationAutomationCommand(
         });
       } catch (error) {
         const summary = redactFailureSummary(error instanceof Error ? error.message : String(error));
-        const finalization = await settleBlockedState(ports, request.pullRequestNumber, jobId, "feedback-reply", summary);
-        return blocked(jobId, "feedback-reply", summary, {
-          revision: reconciliation.post,
-          finalization,
-        });
+        return blockAndSettle(ports, request.pullRequestNumber, jobId, "feedback-reply", summary, { revision: reconciliation.post });
       }
       return finalizeAdopted(request.pullRequestNumber, reconciliation.post, jobId, ports);
     }
     case "fail-closed": {
-      const finalization = await settleBlockedState(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", reconciliation.reason);
-      return blocked(jobId, "feedback-reconciliation", reconciliation.reason, { finalization });
+      return blockAndSettle(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", reconciliation.reason);
     }
     case "proceed":
       break;
@@ -309,6 +330,7 @@ export async function runFeedbackImplementationAutomationCommand(
     return { status: "refused", reason: `Pull Request #${pullRequest.number} is already being processed` };
   }
   activePullRequestNumbers.add(pullRequest.number);
+  let publishedRevision: string | undefined;
   try {
     const current = await ports.github.readPullRequest(pullRequest.number);
     const currentReason = refusal(current);
@@ -334,6 +356,9 @@ export async function runFeedbackImplementationAutomationCommand(
       ) {
         throw new Error(`Pull Request #${pullRequest.number} changed while feedback implementation was being acquired`);
       }
+      // Once the controlled publisher returns, every later failure is
+      // post-publication: the typed outcome must carry the published revision
+      // and never masquerade as a pre-publication execution failure (#293).
       const revision = await ports.checkout.withCheckout({
         pullRequestNumber: pullRequest.number,
         revision: pullRequest.headSha,
@@ -350,7 +375,6 @@ export async function runFeedbackImplementationAutomationCommand(
         } catch (error) {
           throw new FeedbackStageError("feedback-execution", error instanceof Error ? error.message : String(error));
         }
-        let publishedRevision: string;
         try {
           publishedRevision = await ports.publisher.publish({
             checkoutPath,
@@ -360,7 +384,16 @@ export async function runFeedbackImplementationAutomationCommand(
         } catch (error) {
           throw new FeedbackStageError("feedback-publication", error instanceof Error ? error.message : String(error));
         }
-        const threads = await ports.github.readUnresolvedReviewThreads(pullRequest.number);
+        let threads: readonly ReviewThreadComment[];
+        try {
+          threads = await ports.github.readUnresolvedReviewThreads(pullRequest.number);
+        } catch (error) {
+          throw new FeedbackStageError(
+            "feedback-reply",
+            error instanceof Error ? error.message : String(error),
+            publishedRevision,
+          );
+        }
         if (!threads.some((thread) => thread.commentId === outcome.reply.rootCommentId)) {
           throw new FeedbackStageError(
             "feedback-reply",
@@ -368,16 +401,28 @@ export async function runFeedbackImplementationAutomationCommand(
             publishedRevision,
           );
         }
-        const convergence = await convergeFeedbackHead({
-          expectedPost: publishedRevision,
-          acquiredPre: pullRequest.headSha,
-          readHead: async () => (await ports.github.readPullRequest(pullRequest.number)).headSha,
-          isTransientReadError: ports.isTransientReadError ?? (() => false),
-          attempts: ports.convergenceAttempts ?? CONVERGENCE_ATTEMPTS,
-          wait: async (attempt) => {
-            await waitFor(ports, attempt * CONVERGENCE_POLL_DELAY_MILLISECONDS);
-          },
-        });
+        let convergence: FeedbackConvergence;
+        try {
+          convergence = await convergeFeedbackHead({
+            expectedPost: publishedRevision,
+            acquiredPre: pullRequest.headSha,
+            readHead: async () => (await ports.github.readPullRequest(pullRequest.number)).headSha,
+            isTransientReadError: ports.isTransientReadError ?? (() => false),
+            attempts: ports.convergenceAttempts ?? CONVERGENCE_ATTEMPTS,
+            wait: async (attempt) => {
+              await waitFor(ports, attempt * CONVERGENCE_POLL_DELAY_MILLISECONDS);
+            },
+          });
+        } catch (error) {
+          // Non-transient head-read errors are post-push convergence
+          // failures, not execution failures (#293).
+          if (error instanceof FeedbackStageError) throw error;
+          throw new FeedbackStageError(
+            "feedback-convergence",
+            error instanceof Error ? error.message : String(error),
+            publishedRevision,
+          );
+        }
         if (convergence.status === "indeterminate") {
           throw new FeedbackStageError(
             "feedback-convergence",
@@ -416,12 +461,15 @@ export async function runFeedbackImplementationAutomationCommand(
       return { status: "implemented", revision, reconciled: false };
     } catch (error) {
       const summary = redactFailureSummary(error instanceof Error ? error.message : String(error));
-      const stage = error instanceof FeedbackStageError ? error.stage : "feedback-execution";
-      const finalization = await settleBlockedState(ports, pullRequest.number, jobId, stage, summary);
-      return blocked(jobId, stage, summary, {
-        ...(error instanceof FeedbackStageError && error.revision !== undefined ? { revision: error.revision } : {}),
-        finalization,
-      });
+      const stage = error instanceof FeedbackStageError
+        ? error.stage
+        : publishedRevision === undefined
+          ? "feedback-execution"
+          : "feedback-convergence";
+      const revision = error instanceof FeedbackStageError && error.revision !== undefined
+        ? error.revision
+        : publishedRevision;
+      return blockAndSettle(ports, pullRequest.number, jobId, stage, summary, revision === undefined ? undefined : { revision });
     }
   } finally {
     activePullRequestNumbers.delete(pullRequest.number);
