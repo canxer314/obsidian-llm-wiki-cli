@@ -5,6 +5,48 @@ import { createAutomationGithubPort } from "../.sandcastle/automation-github.js"
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
 describe("automation GitHub port", () => {
+  it("mutates Issue and Pull Request labels through the shared REST endpoint", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const environment = { GH_TOKEN: "test-token" };
+    const github = createAutomationGithubPort({ execute, environment });
+
+    await github.addIssueLabel(221, "agent:implement");
+    await github.removeIssueLabel(221, "agent:to-issues/next");
+    await github.addPullRequestLabel(220, "agent:in-progress");
+    await github.removePullRequestLabel(220, "agent:review/next");
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "--method", "POST", "repos/{owner}/{repo}/issues/221/labels",
+      "-f", "labels[]=agent:implement",
+    ], environment);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/221/labels/agent%3Ato-issues%2Fnext",
+    ], environment);
+    expect(execute).toHaveBeenNthCalledWith(3, "gh", [
+      "api", "--method", "POST", "repos/{owner}/{repo}/issues/220/labels",
+      "-f", "labels[]=agent:in-progress",
+    ], environment);
+    expect(execute).toHaveBeenNthCalledWith(4, "gh", [
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/220/labels/agent%3Areview%2Fnext",
+    ], environment);
+    expect(execute.mock.calls).not.toContainEqual(expect.arrayContaining(["gh", expect.arrayContaining(["edit"])]));
+  });
+
+  it("treats only an explicitly absent REST label as an idempotent removal", async () => {
+    const missing = Object.assign(new Error("request failed"), {
+      stderr: "gh: Label does not exist (HTTP 404)",
+    });
+    const execute = vi.fn()
+      .mockRejectedValueOnce(missing)
+      .mockRejectedValueOnce(Object.assign(new Error("request failed"), {
+        stderr: "gh: Not Found (HTTP 404)",
+      }));
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.removeIssueLabel(221, "agent:blocked")).resolves.toBeUndefined();
+    await expect(github.removePullRequestLabel(220, "agent:review")).rejects.toThrow("request failed");
+  });
+
   it("publishes ordered self-contained child Issues with parent and dependency relationships", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: "https://example.test/issues/301\n", stderr: "" })

@@ -26,6 +26,38 @@ type Execute = (
   environment?: Readonly<Record<string, string>>,
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
+function missingLabel(error: unknown): boolean {
+  const details = [
+    error instanceof Error ? error.message : "",
+    typeof error === "object" && error !== null && "stderr" in error ? String(error.stderr) : "",
+  ].join("\n");
+  return /label does not exist/iu.test(details) && /\bHTTP 404\b/iu.test(details);
+}
+
+function createLabelMutations(
+  execute: Execute,
+  environment?: Readonly<Record<string, string>>,
+) {
+  return {
+    async add(workItemNumber: number, label: string): Promise<void> {
+      await execute("gh", [
+        "api", "--method", "POST", `repos/{owner}/{repo}/issues/${workItemNumber}/labels`,
+        "-f", `labels[]=${label}`,
+      ], environment);
+    },
+    async remove(workItemNumber: number, label: string): Promise<void> {
+      try {
+        await execute("gh", [
+          "api", "--method", "DELETE",
+          `repos/{owner}/{repo}/issues/${workItemNumber}/labels/${encodeURIComponent(label)}`,
+        ], environment);
+      } catch (error) {
+        if (!missingLabel(error)) throw error;
+      }
+    },
+  };
+}
+
 function reviewBody(review: PublishedReview): string {
   return review.summary;
 }
@@ -124,6 +156,7 @@ export function createAutomationDispatchGithubPort(options: {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
+  const labels = createLabelMutations(execute, options.environment);
   const listOpenByLabel = async (kind: "pr" | "issue", label: string): Promise<readonly ListedWorkItem[]> => {
     const { stdout } = await execute(
       "gh", [kind, "list", "--state", "open", "--label", label, "--json", "number,labels", "--limit", "100"], options.environment,
@@ -185,10 +218,10 @@ export function createAutomationDispatchGithubPort(options: {
       };
     },
     async addIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
+      await labels.add(issueNumber, label);
     },
     async removeIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
+      await labels.remove(issueNumber, label);
     },
     async addPromotionDiagnostic(issueNumber) {
       await execute("gh", [
@@ -290,6 +323,7 @@ export function createAutomationGithubPort(options: {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
+  const labels = createLabelMutations(execute, options.environment);
   const readHeadSha = async () => {
     const { stdout } = await execute("gh", [
       "api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha",
@@ -443,10 +477,10 @@ export function createAutomationGithubPort(options: {
       return { branch: request.branch, pullRequestUrl: stdout.trim() };
     },
     async addIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
+      await labels.add(issueNumber, label);
     },
     async removeIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
+      await labels.remove(issueNumber, label);
     },
     async addRefusalDiagnostic(issueNumber, reason) {
       // The issues comments endpoint carries both Issue and Pull Request
@@ -654,10 +688,10 @@ export function createAutomationGithubPort(options: {
       })));
     },
     async addPullRequestLabel(pullRequestNumber, label) {
-      await execute("gh", ["pr", "edit", String(pullRequestNumber), "--add-label", label], options.environment);
+      await labels.add(pullRequestNumber, label);
     },
     async removePullRequestLabel(pullRequestNumber, label) {
-      await execute("gh", ["pr", "edit", String(pullRequestNumber), "--remove-label", label], options.environment);
+      await labels.remove(pullRequestNumber, label);
     },
     async addFeedbackBlockedDiagnostic(pullRequestNumber, diagnostic) {
       await execute("gh", [
