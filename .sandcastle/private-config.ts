@@ -175,7 +175,6 @@ function requireConfiguration(environment: Readonly<Record<string, string>>): vo
   ) {
     missing.push("ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY");
   }
-  if (environment.GH_TOKEN === undefined) missing.push("GH_TOKEN");
   if (missing.length > 0) {
     throw new SandcastleConfigError(
       `Missing required Sandcastle configuration: ${missing.join(", ")}`,

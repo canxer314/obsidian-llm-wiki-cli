@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AutomationCliError, runAutomationCli } from "../.sandcastle/automation-cli.js";
+import { GithubAgentReadinessError } from "../.sandcastle/github-readiness.js";
 
 describe("automation command CLI", () => {
   it("dispatches one bounded round and reads inspection without allowing arbitrary operations", async () => {
@@ -52,6 +53,31 @@ describe("automation command CLI", () => {
 
     expect(events).toEqual(["preflight"]);
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["review", "259", "runReview"],
+    ["implement", "259", "runImplement"],
+    ["implement-prd", "259", "runImplementPrd"],
+    ["feedback", "259", "runFeedback"],
+    ["split", "259", "runSplit"],
+  ] as const)("fails missing GitHub-capable Agent readiness before $operation acquires its Work Item", async (operation, number, target) => {
+    const readinessError = new GithubAgentReadinessError("missing");
+    const preflight = vi.fn().mockRejectedValue(readinessError);
+    const dependencies = {
+      runReview: vi.fn(),
+      runImplement: vi.fn(),
+      runImplementPrd: vi.fn(),
+      runFeedback: vi.fn(),
+      runSplit: vi.fn(),
+      runUpdate: vi.fn(),
+      preflight,
+    };
+
+    await expect(runAutomationCli(["run", operation, number], dependencies)).rejects.toBe(readinessError);
+
+    expect(preflight).toHaveBeenCalledExactlyOnceWith(operation);
+    expect(dependencies[target]).not.toHaveBeenCalled();
   });
 
   it("fails image readiness before an explicit operation can acquire its Work Item", async () => {

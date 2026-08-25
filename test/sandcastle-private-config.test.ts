@@ -449,26 +449,25 @@ describe("Sandcastle private configuration adapter", () => {
     });
   });
 
-  it("fails before startup when a required value is missing without exposing secrets", async () => {
+  it("fails before startup when provider authentication is missing without exposing secrets", async () => {
     const { settingsPath, envPath } = await fixture();
     await writeFile(
       settingsPath,
       JSON.stringify({
         env: {
           ANTHROPIC_BASE_URL: "http://127.0.0.1:3456/token-in-url",
-          ANTHROPIC_AUTH_TOKEN: "settings-secret",
         },
       }),
     );
-    await writePrivateEnv(envPath, "GH_TOKEN=\n");
+    await writePrivateEnv(envPath, "GH_TOKEN=github-secret\n");
 
     const error = await loadSandcastleConfig({ settingsPath, envPath }).catch(
       (caught: unknown) => caught,
     );
 
     expect(error).toBeInstanceOf(SandcastleConfigError);
-    expect(String(error)).toContain("GH_TOKEN");
-    expect(String(error)).not.toContain("settings-secret");
+    expect(String(error)).toContain("ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY");
+    expect(String(error)).not.toContain("github-secret");
     expect(String(error)).not.toContain("token-in-url");
   });
 
