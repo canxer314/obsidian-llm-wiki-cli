@@ -415,16 +415,30 @@ try {
         });
       },
     }),
-    inspect: async () => ({
-      imageReadiness: await sandcastleImageReadiness({ image: startup.imageName }),
-      ...await inspectGithubAgentReadiness({
+    inspect: async () => {
+      const readiness = await inspectGithubAgentReadiness({
         image: startup.imageName,
         uid: startup.uid,
         gid: startup.gid,
         environment: startup.childEnvironments.githubAgent,
-      }),
-      ...await inspectAutomationCommands({ github: dispatchGithub, scheduler }),
-    }),
+      });
+      const activeJobs = await scheduler.activeJobs();
+      const imageReadiness = await sandcastleImageReadiness({ image: startup.imageName });
+      if (readiness.githubAgentReadiness !== "ready") {
+        return {
+          imageReadiness,
+          ...readiness,
+          commandInspection: "unavailable" as const,
+          activeJobs,
+        };
+      }
+      return {
+        imageReadiness,
+        ...readiness,
+        commandInspection: "available" as const,
+        ...await inspectAutomationCommands({ github: dispatchGithub, scheduler: { activeJobs: async () => activeJobs } }),
+      };
+    },
     runImplement: (issueNumber) => runIssueImplementation(issueNumber),
     runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => runPrdImplementation(issueNumber)),
     runSplit: (issueNumber) => runPrdSplit(issueNumber),
