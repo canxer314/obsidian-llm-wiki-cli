@@ -13,7 +13,10 @@ import { spawn } from "node:child_process";
 export type GithubAgentReadiness = "ready" | "missing" | "invalid" | "unavailable";
 
 export interface GithubAgentReadinessProcess {
-  run(args: readonly string[]): Promise<{
+  run(
+    args: readonly string[],
+    environment: Readonly<Record<string, string>>,
+  ): Promise<{
     readonly stdout: string;
     readonly stderr: string;
     readonly exitCode: number | null;
@@ -23,6 +26,10 @@ export interface GithubAgentReadinessProcess {
 const MISSING_AUTHENTICATION = /not logged in|no oauth token|no token (?:found|configured)/iu;
 const PROBE_INCAPABLE = /dial tcp|connection refused|could not resolve|timed out|no such file|command not found|unable to find image/i;
 const INVALID_AUTHENTICATION = /\b401\b|bad credentials|authentication failed|unauthorized|invalid token|could not fetch scopes/iu;
+
+function probeEnvironment(environment: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+  return { ...environment, HOME: "/home/agent" };
+}
 
 function probeArguments(options: {
   readonly image: string;
@@ -41,9 +48,9 @@ function probeArguments(options: {
     "host",
     "--user",
     `${options.uid}:${options.gid}`,
-    ...Object.entries({ ...options.environment, HOME: "/home/agent" }).flatMap(([name, value]) => [
+    ...Object.keys(probeEnvironment(options.environment)).flatMap((name) => [
       "-e",
-      `${name}=${value}`,
+      name,
     ]),
     "--entrypoint",
     "sh",
@@ -54,9 +61,12 @@ function probeArguments(options: {
 }
 
 export const githubAgentReadinessProcess: GithubAgentReadinessProcess = {
-  run: (args) =>
+  run: (args, environment) =>
     new Promise((resolvePromise, reject) => {
-      const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("docker", args, {
+        env: environment,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
       let stdout = "";
       let stderr = "";
       child.stdout?.on("data", (chunk: Buffer | string) => { stdout += String(chunk); });
@@ -90,7 +100,10 @@ export async function githubAgentReadiness(options: {
   if (options.environment.GH_TOKEN === undefined) return "missing";
   let result: { readonly stdout: string; readonly stderr: string; readonly exitCode: number | null };
   try {
-    result = await (options.process ?? githubAgentReadinessProcess).run(probeArguments(options));
+    result = await (options.process ?? githubAgentReadinessProcess).run(
+      probeArguments(options),
+      probeEnvironment(options.environment),
+    );
   } catch {
     return "unavailable";
   }
