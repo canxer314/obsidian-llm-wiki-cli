@@ -9,6 +9,10 @@ describe("automation child environments", () => {
       ANTHROPIC_AUTH_TOKEN: "claude-secret",
       ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5",
       GH_TOKEN: "github-secret",
+      GIT_AUTHOR_NAME: "canxer",
+      GIT_AUTHOR_EMAIL: "canxer314@live.com",
+      GIT_COMMITTER_NAME: "canxer",
+      GIT_COMMITTER_EMAIL: "canxer314@live.com",
       HTTP_PROXY: "http://uppercase-http.example",
       HTTPS_PROXY: "http://uppercase-https.example",
       NO_PROXY: "uppercase-no-proxy.example",
@@ -70,6 +74,10 @@ describe("automation child environments", () => {
       ANTHROPIC_AUTH_TOKEN: "claude-secret",
       ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5",
       GH_TOKEN: "github-secret",
+      GIT_AUTHOR_NAME: "canxer",
+      GIT_AUTHOR_EMAIL: "canxer314@live.com",
+      GIT_COMMITTER_NAME: "canxer",
+      GIT_COMMITTER_EMAIL: "canxer314@live.com",
       HTTP_PROXY: "http://uppercase-http.example",
       HTTPS_PROXY: "http://uppercase-https.example",
       NO_PROXY: "uppercase-no-proxy.example",
@@ -82,6 +90,31 @@ describe("automation child environments", () => {
     expect(Object.keys(environments.claude)).not.toContain("HOME");
     expect(Object.keys(environments.githubAgent)).not.toContain("PATH");
     expect(Object.keys(environments.githubAgent)).not.toContain("HOME");
+    // The git identity reaches only the container Agent environment; the host
+    // git processes already read user.name/user.email from the host HOME.
+    expect(environments.github).not.toHaveProperty("GIT_AUTHOR_NAME");
+    expect(environments.github).not.toHaveProperty("GIT_COMMITTER_EMAIL");
+  });
+
+  it("injects the operator git identity into the GitHub-capable Agent environment", () => {
+    const environments = createChildEnvironments({
+      ANTHROPIC_AUTH_TOKEN: "claude-secret",
+      GH_TOKEN: "github-secret",
+      GIT_AUTHOR_NAME: "operator",
+      GIT_AUTHOR_EMAIL: "operator@example.test",
+      GIT_COMMITTER_NAME: "operator",
+      GIT_COMMITTER_EMAIL: "operator@example.test",
+      PRIVATE_OPERATOR_TOKEN: "private-operator",
+    });
+
+    expect(environments.githubAgent).toEqual({
+      ANTHROPIC_AUTH_TOKEN: "claude-secret",
+      GH_TOKEN: "github-secret",
+      GIT_AUTHOR_NAME: "operator",
+      GIT_AUTHOR_EMAIL: "operator@example.test",
+      GIT_COMMITTER_NAME: "operator",
+      GIT_COMMITTER_EMAIL: "operator@example.test",
+    });
   });
 
   it("excludes unknown, private, and Dispatcher model-routing variables from the GitHub-capable Agent environment", () => {

@@ -85,6 +85,33 @@ describe("Automation Command GitHub discovery", () => {
     expect(execute).toHaveBeenNthCalledWith(16, "gh", ["pr", "list", "--head", "sandcastle/issue-34", "--state", "open", "--json", "number", "--limit", "1"], undefined);
   });
 
+  it("passes repository template fields to the graphql shape read as -F so gh expands them", async () => {
+    // gh 2.46 expands {owner}/{repo} placeholders in -F (typed) field values
+    // but not in -f (raw) field values; dispatch discovery failed closed with
+    // "Could not resolve to a Repository with the name '{owner}/{repo}'" when
+    // the shape read passed them as -f.
+    const execute = vi.fn();
+    for (const listing of emptyPullRequestListings()) execute.mockResolvedValueOnce(listing);
+    execute
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{ number: 31, labels: [{ name: "agent:implement" }] }]), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce(shapeResponse(null, 0))
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await expect(port.listCommands()).resolves.toEqual([
+      { number: 31, operation: "implement-issue", identity: "issue:31", labels: ["agent:implement"] },
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(10, "gh", [
+      "api", "graphql", "-f",
+      "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number} subIssues(first:1){totalCount}}}}",
+      "-F", "owner={owner}", "-F", "repo={repo}", "-F", "number=31",
+      "--jq", ".data.repository.issue",
+    ], undefined);
+  });
+
   it("discovers only the implementation command when an Issue carries both implementation and split triggers", async () => {
     const execute = vi.fn();
     for (const listing of emptyPullRequestListings()) execute.mockResolvedValueOnce(listing);

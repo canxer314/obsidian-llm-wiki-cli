@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 
-// The GitHub-capable Agent Session container environment carries only the
-// transport and Claude/API allowlists plus GH_TOKEN (#267), and the Agent
-// image installs the GitHub CLI. The readiness probe runs `gh auth status`
-// — a read-only token validation against api.github.com — inside that exact
-// content-addressed image and environment, so a missing or invalid container
-// credential fails closed before the Dispatcher acquires any Automation Work
-// Item for an operation that can start a GitHub-capable Agent, and before any
-// trigger, `agent:in-progress`, `agent:blocked`, or diagnostic mutation.
+// The GitHub-capable Agent Session container environment carries the
+// transport and Claude/API allowlists plus GH_TOKEN and the operator git
+// identity (#267, #269), and the Agent image installs the GitHub CLI. The
+// readiness probe runs `gh auth status` — a read-only token validation
+// against api.github.com — inside that exact content-addressed image and
+// environment, so a missing or invalid container credential fails closed
+// before the Dispatcher acquires any Automation Work Item for an operation
+// that can start a GitHub-capable Agent, and before any trigger,
+// `agent:in-progress`, `agent:blocked`, or diagnostic mutation.
 
 export type GithubAgentReadiness = "ready" | "missing" | "invalid" | "unavailable";
 

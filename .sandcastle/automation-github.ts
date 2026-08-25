@@ -134,7 +134,7 @@ export function createAutomationDispatchGithubPort(options: {
     const { stdout } = await execute("gh", [
       "api", "graphql", "-f",
       "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number} subIssues(first:1){totalCount}}}}",
-      "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`,
+      "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${issueNumber}`,
       "--jq", ".data.repository.issue",
     ], options.environment);
     const shape = JSON.parse(stdout) as IssueCommandShape | null;
@@ -167,7 +167,7 @@ export function createAutomationDispatchGithubPort(options: {
       const { stdout } = await execute("gh", [
         "api", "graphql", "-f",
         "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){labels(first:50){nodes{name} pageInfo{hasNextPage}} parent{number} blockedBy(first:100){nodes{number state} pageInfo{hasNextPage}}}}}",
-        "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`,
+        "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${issueNumber}`,
         "--jq", ".data.repository.issue",
       ], options.environment);
       const issue = JSON.parse(stdout) as {
@@ -370,7 +370,7 @@ export function createAutomationGithubPort(options: {
         execute("gh", [
           "api", "graphql", "-f",
           "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number}}}}",
-          "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`, "--jq", ".data.repository.issue.parent.number // empty",
+          "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${issueNumber}`, "--jq", ".data.repository.issue.parent.number // empty",
         ], options.environment),
       ]);
       const issue = JSON.parse(issueOutput) as {
@@ -628,7 +628,7 @@ export function createAutomationGithubPort(options: {
       const { stdout } = await execute("gh", [
         "api", "graphql", "-f",
         "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:50){nodes{id path line originalLine body author{login}}}}}}}}",
-        "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${pullRequestNumber}`,
+        "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${pullRequestNumber}`,
         "--jq", ".data.repository.pullRequest.reviewThreads.nodes",
       ], options.environment);
       const threads = JSON.parse(stdout) as readonly {

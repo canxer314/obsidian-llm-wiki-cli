@@ -26,6 +26,17 @@ const PROCESS_NAMES = ["PATH", "HOME"] as const;
 // the token value never appears in command arguments.
 const GITHUB_NAMES = ["GH_TOKEN"] as const;
 
+// Container Agent git commits are authored on the operator's behalf. The
+// container HOME has no .gitconfig and the checkout has no local identity, so
+// the identity reaches git through these non-sensitive environment variables
+// — the execution-proven extension of the GitHub-capable allowlist (#269).
+const GIT_IDENTITY_NAMES = [
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+] as const;
+
 function pick(
   environment: Readonly<Record<string, string>>,
   names: readonly string[],
@@ -52,10 +63,10 @@ export function createChildEnvironments(environment: Readonly<Record<string, str
     github: { ...transport, ...pick(environment, [...GITHUB_NAMES, "PATH"]) },
     claude,
     // GitHub-capable Agent Session container environment: the Claude/API
-    // allowlist plus GH_TOKEN on top of the transport allowlist. No process
-    // variables — the Agent Session container resolves PATH and HOME itself,
-    // and no Dispatcher model-routing or private host configuration enters
-    // the container.
-    githubAgent: { ...claude, ...pick(environment, GITHUB_NAMES) },
+    // allowlist plus GH_TOKEN and the operator git identity on top of the
+    // transport allowlist. No process variables — the Agent Session container
+    // resolves PATH and HOME itself, and no Dispatcher model-routing or
+    // private host configuration enters the container.
+    githubAgent: { ...claude, ...pick(environment, [...GITHUB_NAMES, ...GIT_IDENTITY_NAMES]) },
   };
 }

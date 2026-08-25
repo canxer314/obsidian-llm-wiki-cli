@@ -21,6 +21,10 @@ import { loadSandboxStartup } from "../.sandcastle/sandbox.js";
 
 const roots: string[] = [];
 const originalHttpsProxy = process.env.HTTPS_PROXY;
+const gitIdentityStub = vi.fn().mockResolvedValue({
+  name: "canxer",
+  email: "canxer314@live.com",
+});
 
 afterEach(async () => {
   dockerCalls.splice(0);
@@ -52,7 +56,7 @@ describe("Sandcastle proxy startup", () => {
     await writeFile(envPath, "GH_TOKEN=github-secret\n", { mode: 0o600 });
     await chmod(envPath, 0o600);
 
-    const startup = await loadSandboxStartup({ settingsPath, envPath });
+    const startup = await loadSandboxStartup({ settingsPath, envPath }, { readGitIdentity: gitIdentityStub });
 
     expect(startup.environment.HTTPS_PROXY).toBe(resolved);
     expect(startup.proxyEnvironment.HTTPS_PROXY).toBe(resolved);
@@ -97,7 +101,7 @@ describe("Sandcastle proxy startup", () => {
     await writeFile(envPath, "GH_TOKEN=github-secret\n", { mode: 0o600 });
     await chmod(envPath, 0o600);
 
-    const startup = await loadSandboxStartup({ settingsPath, envPath });
+    const startup = await loadSandboxStartup({ settingsPath, envPath }, { readGitIdentity: gitIdentityStub });
 
     expect(dockerCalls).toHaveLength(3);
     const automationSandbox = dockerCalls[1]?.env ?? {};
@@ -109,6 +113,10 @@ describe("Sandcastle proxy startup", () => {
       ANTHROPIC_BASE_URL: "https://claude.example",
       ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5",
       GH_TOKEN: "github-secret",
+      GIT_AUTHOR_NAME: "canxer",
+      GIT_AUTHOR_EMAIL: "canxer314@live.com",
+      GIT_COMMITTER_NAME: "canxer",
+      GIT_COMMITTER_EMAIL: "canxer314@live.com",
       HTTP_PROXY: "http://proxy.example",
     });
     expect(Object.keys(githubAgentSandbox)).not.toContain("PATH");
@@ -138,7 +146,7 @@ describe("Sandcastle proxy startup", () => {
     await writeFile(envPath, "GH_TOKEN=github-secret\n", { mode: 0o600 });
     await chmod(envPath, 0o600);
 
-    const error = await loadSandboxStartup({ settingsPath, envPath }).catch(
+    const error = await loadSandboxStartup({ settingsPath, envPath }, { readGitIdentity: gitIdentityStub }).catch(
       (caught: unknown) => caught,
     );
 
@@ -158,5 +166,32 @@ describe("Sandcastle proxy startup", () => {
     ]) {
       expect(diagnostic).not.toContain(sentinel);
     }
+  });
+
+  it("fails before creating either sandbox when the checkout has no git identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandcastle-proxy-startup-"));
+    roots.push(root);
+    const settingsPath = join(root, "settings.json");
+    const envPath = join(root, ".env");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "https://claude.example",
+          ANTHROPIC_AUTH_TOKEN: "claude-secret",
+        },
+      }),
+    );
+    await writeFile(envPath, "GH_TOKEN=github-secret\n", { mode: 0o600 });
+    await chmod(envPath, 0o600);
+    const missingIdentity = vi.fn().mockResolvedValue({ name: "", email: "" });
+
+    const error = await loadSandboxStartup({ settingsPath, envPath }, { readGitIdentity: missingIdentity }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("git identity");
+    expect(dockerCalls).toHaveLength(0);
   });
 });
