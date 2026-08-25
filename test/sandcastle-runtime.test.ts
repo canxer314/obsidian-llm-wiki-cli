@@ -44,7 +44,6 @@ describe("Sandcastle Docker runtime", () => {
       "loadSandboxStartup",
       "plannerSandboxHooks",
       "repairSandboxHooks",
-      "revisionCompatibleSandboxHooks",
       "sandboxHooks",
       "sandboxHooksFor",
     ]);
@@ -73,7 +72,7 @@ describe("Sandcastle Docker runtime", () => {
       sandboxModule.sandboxHooks,
     );
     expect(sandboxModule.sandboxHooksFor("feedback")).toBe(
-      sandboxModule.revisionCompatibleSandboxHooks,
+      sandboxModule.repairSandboxHooks,
     );
     for (const role of ["reviewer", "merger"] as const) {
       expect(sandboxModule.sandboxHooksFor(role)).toBe(
@@ -90,7 +89,7 @@ describe("Sandcastle Docker runtime", () => {
     expect(sandboxConfig).toMatch(/sha256sum --check --status/);
     expect(sandboxConfig).toMatch(/cmp --silent/);
     expect(sandboxConfig).toMatch(/timeout --signal=TERM --kill-after=10s 240s/);
-    const revisionCompatibleInstall = sandboxModule.revisionCompatibleSandboxHooks
+    const revisionCompatibleInstall = sandboxModule.sandboxHooksFor("feedback")
       .sandbox.onSandboxReady[0];
     expect(revisionCompatibleInstall).toEqual({
       command: expect.stringContaining("npm ci --prefer-offline"),

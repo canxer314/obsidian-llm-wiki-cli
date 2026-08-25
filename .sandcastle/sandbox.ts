@@ -39,8 +39,6 @@ export const repairSandboxHooks = {
   },
 } as const;
 
-export const revisionCompatibleSandboxHooks = repairSandboxHooks;
-
 export const plannerSandboxHooks = {
   sandbox: {
     onSandboxReady: [],
@@ -52,7 +50,7 @@ export function sandboxHooksFor(
 ) {
   if (role === "planner") return plannerSandboxHooks;
   if (role === "implementer") return sandboxHooks;
-  return role === "feedback" ? revisionCompatibleSandboxHooks : repairSandboxHooks;
+  return repairSandboxHooks;
 }
 
 function createSandboxProvider(
