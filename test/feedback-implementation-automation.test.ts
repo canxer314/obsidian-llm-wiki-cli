@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { runFeedbackImplementationAutomationCommand } from "../.sandcastle/feedback-implementation-automation.js";
+import { feedbackReplyMarker } from "../.sandcastle/feedback-reconciliation.js";
 
-const SHA_A = "a".repeat(40);
-const SHA_B = "b".repeat(40);
+const PRE = "a".repeat(40);
+const POST = "b".repeat(40);
+const OTHER = "c".repeat(40);
+const ROOT = "PRRC_root";
 
-function pullRequest(headSha = SHA_A, labels = ["agent:implement"]) {
+function pullRequest(headSha = PRE, labels = ["agent:implement"]) {
   return {
     number: 224,
     state: "OPEN",
@@ -18,22 +21,63 @@ function pullRequest(headSha = SHA_A, labels = ["agent:implement"]) {
   };
 }
 
-function ports() {
+function markerReply(body: string): { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string } {
+  return { rootCommentId: ROOT, replyCommentId: "PRRC_reply", body };
+}
+
+function marker(): { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string } {
+  return markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT }));
+}
+
+function ports(overrides: {
+  readonly headReads?: readonly string[];
+  readonly replies?: readonly { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string }[];
+  readonly readbackReplies?: readonly { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string }[];
+  readonly parentOf?: (sha: string) => string | undefined;
+  readonly implementReply?: { readonly rootCommentId: string; readonly body: string };
+  readonly publishError?: Error;
+  readonly replyError?: Error;
+  readonly isTransientReadError?: (error: unknown) => boolean;
+  readonly convergenceAttempts?: number;
+  readonly finalizationFailures?: readonly string[];
+  readonly blockedLabelFailure?: boolean;
+} = {}) {
+  const headReads = overrides.headReads ?? [PRE, PRE, PRE, POST];
+  let reads = 0;
   const github = {
-    readPullRequest: vi.fn()
-      .mockResolvedValueOnce(pullRequest())
-      .mockResolvedValueOnce(pullRequest())
-      .mockResolvedValueOnce(pullRequest(SHA_A, ["agent:in-progress"]))
-      .mockResolvedValueOnce(pullRequest(SHA_B, ["agent:in-progress"])),
-    addPullRequestLabel: vi.fn().mockResolvedValue(undefined),
-    removePullRequestLabel: vi.fn().mockResolvedValue(undefined),
+    readPullRequest: vi.fn(async () => {
+      const index = Math.min(reads, headReads.length - 1);
+      reads += 1;
+      return pullRequest(headReads[index], reads <= 2 ? ["agent:implement"] : ["agent:in-progress"]);
+    }),
+    readFeedbackReplies: vi.fn()
+      .mockResolvedValueOnce(overrides.replies ?? [])
+      .mockResolvedValue(overrides.readbackReplies ?? [marker()]),
+    readCommitParent: vi.fn(async (sha: string) => overrides.parentOf?.(sha)),
+    readUnresolvedReviewThreads: vi.fn().mockResolvedValue([{ commentId: ROOT, author: "reviewer", body: "Please fix." }]),
+    addPullRequestLabel: vi.fn(async (_number: number, label: string) => {
+      if (overrides.blockedLabelFailure && label === "agent:blocked") throw new Error("label unavailable");
+    }),
+    removePullRequestLabel: vi.fn(async (_number: number, label: string) => {
+      if (overrides.finalizationFailures?.includes(label)) throw new Error(`label ${label} removal failed`);
+    }),
     addFeedbackBlockedDiagnostic: vi.fn().mockResolvedValue(undefined),
+    replyToReviewThread: vi.fn(async () => {
+      if (overrides.replyError !== undefined) throw overrides.replyError;
+    }),
   };
   const publisher = {
     prepare: vi.fn().mockResolvedValue(undefined),
-    publish: vi.fn().mockResolvedValue(SHA_B),
+    publish: vi.fn(async () => {
+      if (overrides.publishError !== undefined) throw overrides.publishError;
+      return POST;
+    }),
   };
-  const implementer = { implement: vi.fn().mockResolvedValue(undefined) };
+  const implementer = {
+    implement: vi.fn().mockResolvedValue({
+      reply: overrides.implementReply ?? { rootCommentId: ROOT, body: "Fixed." },
+    }),
+  };
   return {
     github,
     publisher,
@@ -43,40 +87,281 @@ function ports() {
     },
     lease: { acquire: vi.fn(async () => ({ release: async () => {} })) },
     createJobId: () => "feedback-job",
+    wait: async () => {},
+    convergenceAttempts: overrides.convergenceAttempts,
+    isTransientReadError: overrides.isTransientReadError,
   };
 }
+
+const CLEAN_FINALIZATION = { blockedStateFailed: false, diagnosticFailed: false, inProgressCleanupFailed: false };
 
 describe("feedback implementation automation", () => {
   it("publishes only through the controlled publisher and verifies the existing PR head", async () => {
     const subject = ports();
 
     await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
-      .resolves.toEqual({ status: "implemented", revision: SHA_B });
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
-    expect(subject.publisher.prepare).toHaveBeenCalledWith("/checkout", "feature/feedback", SHA_A);
+    expect(subject.publisher.prepare).toHaveBeenCalledWith("/checkout", "feature/feedback", PRE);
     expect(subject.implementer.implement).toHaveBeenCalledWith({
       pullRequestNumber: 224,
       branch: "feature/feedback",
-      revision: SHA_A,
+      revision: PRE,
       checkoutPath: "/checkout",
     });
     expect(subject.publisher.publish).toHaveBeenCalledWith({
       checkoutPath: "/checkout",
       branch: "feature/feedback",
-      expectedRevision: SHA_A,
+      expectedRevision: PRE,
     });
   });
 
-  it("blocks the work item when the PR head differs after publication", async () => {
-    const subject = ports();
-    subject.github.readPullRequest.mockReset()
-      .mockResolvedValueOnce(pullRequest())
-      .mockResolvedValueOnce(pullRequest())
-      .mockResolvedValueOnce(pullRequest(SHA_A, ["agent:in-progress"]))
-      .mockResolvedValueOnce(pullRequest("c".repeat(40), ["agent:in-progress"]));
+  it("converges when the first post-push read still sees the acquired PRE", async () => {
+    const subject = ports({ headReads: [PRE, PRE, PRE, PRE, POST] });
 
     await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
-      .resolves.toEqual({ status: "blocked", reason: "feedback-execution", jobId: "feedback-job" });
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
+    expect(subject.github.readPullRequest).toHaveBeenCalledTimes(5);
+  });
+
+  it("retries only explicitly transient post-push read errors", async () => {
+    const transient = Object.assign(new Error("network reset"), { transient: true });
+    const subject = ports({
+      headReads: [PRE, PRE, PRE, POST],
+      isTransientReadError: (error: unknown) => (error as Error).message === "network reset",
+    });
+    subject.github.readPullRequest.mockReset()
+      .mockResolvedValueOnce(pullRequest(PRE))
+      .mockResolvedValueOnce(pullRequest(PRE))
+      .mockResolvedValueOnce(pullRequest(PRE, ["agent:in-progress"]))
+      .mockRejectedValueOnce(transient)
+      .mockResolvedValue(pullRequest(POST, ["agent:in-progress"]));
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.github.readPullRequest).toHaveBeenCalledTimes(5);
+  });
+
+  it("returns a typed indeterminate outcome when the head stays at PRE without a second push", async () => {
+    const subject = ports({ headReads: [PRE, PRE, PRE, PRE, PRE, PRE], convergenceAttempts: 3 });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-convergence",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+  });
+
+  it("fails closed on a third-party head without overwriting it", async () => {
+    const subject = ports({ headReads: [PRE, PRE, PRE, OTHER] });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-head-conflict",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+  });
+
+  it("blocks a reply publication failure with the published revision and adopts it on re-entry", async () => {
+    const first = ports({ replyError: new Error("reply lost") });
+    first.github.readFeedbackReplies.mockReset().mockResolvedValue([]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, first))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reply",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    // A later authorized invocation observes durable state before any Agent
+    // execution or publication and adopts the exact POST without rerunning.
+    const second = ports({
+      headReads: [POST, POST, POST, POST],
+      replies: [markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT }))],
+      parentOf: () => PRE,
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, second))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
+
+    expect(second.implementer.implement).not.toHaveBeenCalled();
+    expect(second.publisher.publish).not.toHaveBeenCalled();
+    expect(second.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(second.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(second.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+    expect(second.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:implement");
+  });
+
+  it("does not duplicate a reply whose POST landed even when the response was lost", async () => {
+    const subject = ports({ replyError: new Error("response lost") });
+    subject.github.readFeedbackReplies.mockReset()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([marker()])
+      .mockResolvedValue([marker()]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("performs a controlled reply-only completion without running the Agent or pushing", async () => {
+    const subject = ports({ headReads: [POST, POST, POST, POST], parentOf: () => PRE });
+
+    await expect(runFeedbackImplementationAutomationCommand({
+      pullRequestNumber: 224,
+      expectedPost: POST,
+      expectedReply: { rootCommentId: ROOT, body: "Fixed." },
+    }, subject)).resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledWith({
+      pullRequestNumber: 224,
+      reply: expect.objectContaining({ commentId: ROOT }),
+    });
+  });
+
+  it("fails closed on ambiguous publication evidence without touching anything", async () => {
+    const replies = [
+      markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT })),
+      markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT })),
+    ];
+    const subject = ports({ headReads: [POST, POST, POST, POST], replies });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reconciliation",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+  });
+
+  it("rejects a rejected force-with-lease publication as blocked without a retry", async () => {
+    const subject = ports({ publishError: new Error("stale info") });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-publication",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+  });
+
+  it("reflects an in-progress cleanup failure in a typed finalization outcome", async () => {
+    const subject = ports({ finalizationFailures: ["agent:in-progress"] });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-finalization",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: { blockedStateFailed: false, diagnosticFailed: false, inProgressCleanupFailed: true },
+      });
+  });
+
+  it("distinguishes a blocked-state mutation failure from the original execution failure", async () => {
+    const subject = ports({ replyError: new Error("reply lost"), blockedLabelFailure: true });
+    subject.github.readFeedbackReplies.mockReset().mockResolvedValue([]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reply",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: { blockedStateFailed: true, diagnosticFailed: false, inProgressCleanupFailed: false },
+      });
+  });
+
+  it("reconciles the current Canary-shaped state without Agent, push, or reply creation", async () => {
+    const subject = ports({
+      headReads: [POST, POST, POST, POST],
+      replies: [markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT }))],
+      parentOf: () => PRE,
+    });
+    subject.github.readPullRequest.mockReset()
+      .mockResolvedValue(pullRequest(POST, ["agent:blocked"]));
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.addPullRequestLabel).not.toHaveBeenCalled();
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+  });
+
+  it("rejects an Agent reply target that is not an unresolved review thread", async () => {
+    const subject = ports({ implementReply: { rootCommentId: "PRRC_nope", body: "Fixed." } });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reply",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+  });
+
+  it("blocks the work item when the PR head differs after publication", async () => {
+    const subject = ports({ headReads: [PRE, PRE, PRE, OTHER] });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-head-conflict",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        revision: POST,
+        finalization: CLEAN_FINALIZATION,
+      });
 
     expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
     expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
@@ -87,7 +372,13 @@ describe("feedback implementation automation", () => {
     subject.implementer.implement.mockRejectedValue(new Error("Feedback implementation execution timed out"));
 
     await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
-      .resolves.toEqual({ status: "blocked", reason: "feedback-execution", jobId: "feedback-job" });
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-execution",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        finalization: CLEAN_FINALIZATION,
+      });
 
     expect(subject.publisher.publish).not.toHaveBeenCalled();
     expect(subject.github.addFeedbackBlockedDiagnostic).toHaveBeenCalledWith(224, {

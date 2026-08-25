@@ -758,5 +758,25 @@ export function createAutomationGithubPort(options: {
         "--method", "POST", "-f", `body=${request.reply.body}`,
       ], options.environment);
     },
+    async readFeedbackReplies(pullRequestNumber) {
+      const { stdout } = await execute("gh", [
+        "api", "graphql", "-f",
+        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{comments(first:100){nodes{id replyTo{id} body}}}}}}}",
+        "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${pullRequestNumber}`,
+        "--jq", ".data.repository.pullRequest.reviewThreads.nodes[]?.comments.nodes[]? | select(.replyTo != null) | {rootCommentId: .replyTo.id, replyCommentId: .id, body}",
+      ], options.environment);
+      return stdout.split("\n").filter((line) => line.trim().length > 0).map((line) => JSON.parse(line) as {
+        readonly rootCommentId: string;
+        readonly replyCommentId: string;
+        readonly body: string;
+      });
+    },
+    async readCommitParent(sha) {
+      const { stdout } = await execute("gh", [
+        "api", `repos/{owner}/{repo}/commits/${sha}`, "--jq", ".parents[0].sha // empty",
+      ], options.environment);
+      const parent = stdout.trim();
+      return parent.length === 0 ? undefined : parent;
+    },
   };
 }

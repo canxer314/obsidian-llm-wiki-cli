@@ -660,4 +660,58 @@ describe("automation GitHub port", () => {
       "api", "repos/{owner}/{repo}/pulls/220/comments/12345/replies", "--method", "POST", "-f", "body=Fixed.",
     ], undefined);
   });
+
+  it("reads only review replies with their immutable root identities", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: [
+        JSON.stringify({ rootCommentId: "PRRC_root1", replyCommentId: "PRRC_reply1", body: "Fixed." }),
+        JSON.stringify({ rootCommentId: "PRRC_root2", replyCommentId: "PRRC_reply2", body: "Also fixed." }),
+      ].join("\n") + "\n",
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readFeedbackReplies(224)).resolves.toEqual([
+      { rootCommentId: "PRRC_root1", replyCommentId: "PRRC_reply1", body: "Fixed." },
+      { rootCommentId: "PRRC_root2", replyCommentId: "PRRC_reply2", body: "Also fixed." },
+    ]);
+
+    expect(execute).toHaveBeenCalledWith("gh", expect.arrayContaining([
+      "api", "graphql", "-f",
+      expect.stringContaining("replyTo"),
+      "-F", "number=224",
+    ]), undefined);
+  });
+
+  it("reads the first parent of a commit or reports none", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCommitParent("b".repeat(40))).resolves.toBe(revision);
+    await expect(github.readCommitParent("c".repeat(40))).resolves.toBeUndefined();
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "repos/{owner}/{repo}/commits/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "--jq", ".parents[0].sha // empty",
+    ], undefined);
+  });
+
+  it("publishes classified feedback blocked diagnostics without worker summaries", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await github.addFeedbackBlockedDiagnostic(224, {
+      reason: "feedback-convergence",
+      jobId: "job-224",
+      summary: "worker stdout: token=secret; push failed",
+    });
+
+    const body = execute.mock.calls[0]![1]!.find((argument, index, arguments_) => arguments_[index - 1] === "--body");
+    expect(body).toContain("feedback-convergence");
+    expect(body).toContain("job-224");
+    expect(body).not.toContain("secret");
+    expect(body).not.toContain("push failed");
+  });
 });

@@ -228,8 +228,12 @@ describe("business refusal semantics (#247)", () => {
     it.each(pullRequestRefusals("agent:implement"))("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
       const github = {
         readPullRequest: vi.fn().mockResolvedValue(pullRequest("agent:implement", overrides)),
+        readFeedbackReplies: vi.fn().mockResolvedValue([]),
+        readCommitParent: vi.fn().mockResolvedValue(undefined),
+        readUnresolvedReviewThreads: vi.fn().mockResolvedValue([]),
         addPullRequestLabel: vi.fn(),
         removePullRequestLabel: vi.fn(),
+        replyToReviewThread: vi.fn(),
         addRefusalDiagnostic: vi.fn(),
       };
       const checkout = { withCheckout: vi.fn() };

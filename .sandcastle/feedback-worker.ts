@@ -13,7 +13,7 @@ if (
 }
 
 const startup = await loadSandboxStartup();
-await createFeedbackImplementerSession({
+const reply = await createFeedbackImplementerSession({
   sandbox: startup.githubAgentSandbox,
   hooks: sandboxHooksFor("feedback"),
 }).run({
@@ -23,4 +23,4 @@ await createFeedbackImplementerSession({
   revision,
   checkoutPath,
 });
-console.log(JSON.stringify({ status: "implemented" }));
+console.log(JSON.stringify({ status: "implemented", reply }));
