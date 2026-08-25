@@ -13,7 +13,7 @@ const request = {
 };
 
 describe("same-session review extraction", () => {
-  it("lets the reviewer commit on the existing branch then extracts structured output by resuming that session", async () => {
+  it("uses the prepared Target Checkout directly so reviewer commits remain available to the publisher", async () => {
     const extraction = vi.fn().mockResolvedValue({ output: { summary: "Improved the branch.", inlineComments: [], replies: [] } });
     const runAgent = vi.fn().mockResolvedValue({ commits: [{}], resume: extraction });
     const extractor = createSameSessionReviewExtractor({
@@ -28,7 +28,7 @@ describe("same-session review extraction", () => {
     expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({
       cwd: request.checkoutPath,
       maxIterations: 1,
-      branchStrategy: { type: "branch", branch: request.branch },
+      branchStrategy: { type: "head" },
     }));
     const produceRequest = runAgent.mock.calls[0]![0];
     expect(produceRequest.prompt).toContain(`Pull Request #220 on branch ${request.branch}`);

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createAutomationGithubPort } from "../.sandcastle/automation-github.js";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
+import { createSameSessionReviewExtractor } from "../.sandcastle/review-extraction.js";
+import { createReviewPublisher } from "../.sandcastle/review-publisher.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const improvedRevision = "abcdef0123456789abcdef0123456789abcdef01";
@@ -81,6 +83,54 @@ describe("review automation command", () => {
     await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies)).resolves.toEqual({ status: "reviewed", revision, verdict: "clean" });
     expect(dependencies.github.publishReview).toHaveBeenCalledWith(expect.objectContaining({ revision }));
     expect(dependencies.github.markPullRequestReady).toHaveBeenCalledWith(220);
+  });
+
+  it.each([
+    { name: "clean review", reviewedRevision: revision, verdict: "clean" as const },
+    { name: "improved review", reviewedRevision: improvedRevision, verdict: "improved" as const },
+  ])("keeps the prepared Target Checkout available for a $name", async ({ reviewedRevision, verdict }) => {
+    const events: string[] = [];
+    let checkoutBranch: string | undefined;
+    let checkoutRevision: string | undefined;
+    const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+      if (arguments_[2] === "checkout") {
+        checkoutBranch = arguments_[4];
+        checkoutRevision = arguments_[5];
+      }
+      if (arguments_[2] === "rev-parse") return { stdout: `${checkoutRevision}\n`, stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    const extractor = createSameSessionReviewExtractor({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: { sandbox: { onSandboxReady: [] } },
+      runAgent: vi.fn(async (options: { readonly cwd: string; readonly branchStrategy: unknown }) => {
+        expect(checkoutBranch).toBe("feature/review");
+        expect(checkoutRevision).toBe(revision);
+        expect(options).toMatchObject({ cwd: "/safe/disposable-checkout", branchStrategy: { type: "head" } });
+        checkoutRevision = reviewedRevision;
+        return {
+          commits: reviewedRevision === revision ? [] : [{}],
+          resume: vi.fn().mockResolvedValue({ output: { summary: "Reviewed.", inlineComments: [], replies: [] } }),
+        };
+      }) as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
+    });
+    const dependencies = ports(events, (request) =>
+      extractor.review({ ...request, model: "reviewer-model" }),
+    );
+    dependencies.publisher = createReviewPublisher({ execute });
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies))
+      .resolves.toEqual({ status: "reviewed", revision: reviewedRevision, verdict });
+
+    expect(execute).toHaveBeenCalledWith("git", [
+      "-C", "/safe/disposable-checkout", "checkout", "-B", "feature/review", revision,
+    ]);
+    expect(execute).toHaveBeenCalledWith("git", [
+      "-C", "/safe/disposable-checkout", "push", "origin",
+      `--force-with-lease=refs/heads/feature/review:${revision}`,
+      "HEAD:refs/heads/feature/review",
+    ]);
   });
 
   it("blocks and leaves the Draft PR open without a fabricated review when the lease rejects the push", async () => {
