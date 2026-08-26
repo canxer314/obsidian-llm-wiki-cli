@@ -48,6 +48,7 @@ function ports(overrides: {
   readonly replyConvergenceAttempts?: number;
   readonly finalizationFailures?: readonly string[];
   readonly blockedLabelFailure?: boolean;
+  readonly diagnosticFailure?: boolean;
 } = {}) {
   const headReads = overrides.headReads ?? [PRE, PRE, PRE, POST];
   let reads = 0;
@@ -77,7 +78,9 @@ function ports(overrides: {
     removePullRequestLabel: vi.fn(async (_number: number, label: string) => {
       if (overrides.finalizationFailures?.includes(label)) throw new Error(`label ${label} removal failed`);
     }),
-    addFeedbackBlockedDiagnostic: vi.fn().mockResolvedValue(undefined),
+    addFeedbackBlockedDiagnostic: vi.fn(async () => {
+      if (overrides.diagnosticFailure) throw new Error("diagnostic unavailable");
+    }),
     replyToReviewThread: vi.fn(async (request: { readonly reply: { readonly body: string } }) => {
       if (overrides.replyError !== undefined) throw overrides.replyError;
       if (overrides.writeAddsMarker === true) {
@@ -524,6 +527,23 @@ describe("feedback implementation automation", () => {
       });
   });
 
+  it("records a diagnostic settlement failure without skipping blocked-label or cleanup attempts", async () => {
+    const subject = ports({ diagnosticFailure: true });
+    subject.implementer.implement.mockRejectedValue(new Error("execution failed"));
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-execution",
+        jobId: "feedback-job",
+        summary: "execution failed",
+        finalization: { blockedStateFailed: false, diagnosticFailed: true, inProgressCleanupFailed: false },
+      });
+
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+  });
+
   it("reconciles the current Canary-shaped state without Agent, push, or reply creation", async () => {
     const subject = ports({
       headReads: [POST, POST, POST, POST],
@@ -543,7 +563,7 @@ describe("feedback implementation automation", () => {
     expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
   });
 
-  it("rejects an Agent reply target that is not an unresolved review thread", async () => {
+  it("rejects a mismatching Agent reply root before publication or post-publication work", async () => {
     const subject = ports({ implementReply: { rootCommentId: "PRRC_nope", body: "Fixed." } });
 
     await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
@@ -552,12 +572,15 @@ describe("feedback implementation automation", () => {
         reason: "feedback-reply",
         jobId: "feedback-job",
         summary: expect.any(String),
-        revision: POST,
         finalization: CLEAN_FINALIZATION,
       });
 
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.readUnresolvedReviewThreads).not.toHaveBeenCalled();
     expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.readFeedbackReplies).not.toHaveBeenCalled();
     expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
   });
 
   it("blocks the work item when the PR head differs after publication", async () => {

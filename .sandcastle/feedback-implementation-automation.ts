@@ -425,6 +425,12 @@ export async function runFeedbackImplementationAutomationCommand(
         } catch (error) {
           throw new FeedbackStageError("feedback-execution", error instanceof Error ? error.message : String(error));
         }
+        if (outcome.reply.rootCommentId !== selectedIntent.rootCommentId) {
+          throw new FeedbackStageError(
+            "feedback-reply",
+            `Reply target ${outcome.reply.rootCommentId} does not match the selected feedback intent`,
+          );
+        }
         try {
           await assertIntentRemainsPending("Feedback intent changed while implementation was running");
         } catch (error) {
@@ -439,13 +445,6 @@ export async function runFeedbackImplementationAutomationCommand(
           });
         } catch (error) {
           throw new FeedbackStageError("feedback-publication", error instanceof Error ? error.message : String(error));
-        }
-        if (outcome.reply.rootCommentId !== selectedIntent.rootCommentId) {
-          throw new FeedbackStageError(
-            "feedback-reply",
-            `Reply target ${outcome.reply.rootCommentId} does not match the selected feedback intent`,
-            publishedRevision,
-          );
         }
         let threads: readonly ReviewThreadComment[];
         try {
