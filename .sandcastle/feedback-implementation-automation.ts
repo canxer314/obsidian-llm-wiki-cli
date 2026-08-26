@@ -10,6 +10,7 @@ import {
   type FeedbackThreadReply,
 } from "./feedback-reconciliation.ts";
 import { convergeFeedbackHead, type FeedbackConvergence } from "./feedback-convergence.ts";
+import type { GithubReadErrorClassification } from "./github-cli.ts";
 
 export interface FeedbackReplyIntent {
   readonly rootCommentId: string;
@@ -80,7 +81,7 @@ export interface FeedbackImplementationPorts {
   readonly wait?: (milliseconds: number) => Promise<void>;
   readonly convergenceAttempts?: number;
   readonly replyConvergenceAttempts?: number;
-  readonly isTransientReadError?: (error: unknown) => boolean;
+  readonly classifyReadError?: (error: unknown) => GithubReadErrorClassification;
 }
 
 export type FeedbackImplementationResult =
@@ -102,6 +103,7 @@ const activePullRequestNumbers = new Set<number>();
 // rather than repeated publication.
 const CONVERGENCE_ATTEMPTS = 5;
 const CONVERGENCE_POLL_DELAY_MILLISECONDS = 2000;
+const RATE_LIMIT_RETRY_DELAY_MILLISECONDS = 60_000;
 
 class FeedbackStageError extends Error {
   readonly stage: FeedbackBlockedReason;
@@ -158,7 +160,7 @@ async function publishCanonicalReply(request: {
   readonly github: FeedbackImplementationPorts["github"];
   readonly attempts: number;
   readonly wait: (milliseconds: number) => Promise<void>;
-  readonly isTransientReadError: (error: unknown) => boolean;
+  readonly classifyReadError: (error: unknown) => GithubReadErrorClassification;
 }): Promise<void> {
   const marker: FeedbackReplyMarker = {
     pullRequestNumber: request.pullRequestNumber,
@@ -169,7 +171,10 @@ async function publishCanonicalReply(request: {
   const markerBody = `${request.body}\n\n${feedbackReplyMarker(marker)}`;
   const readReplyCount = async (): Promise<number> => {
     let lastError: unknown;
-    for (let attempt = 0; attempt < request.attempts; attempt += 1) {
+    let rateLimitRetried = false;
+    let normalAttempts = 0;
+    for (;;) {
+      let classification: GithubReadErrorClassification = { kind: "transient" };
       try {
         const result = inspectFeedbackMarkerReplies(
           await request.github.readFeedbackReplies(request.pullRequestNumber),
@@ -182,18 +187,31 @@ async function publishCanonicalReply(request: {
         lastError = new Error("Canonical feedback reply is not yet visible");
       } catch (error) {
         if (error instanceof FeedbackStageError) throw error;
-        if (!request.isTransientReadError(error) && !(error instanceof Error && error.message === "Canonical feedback reply is not yet visible")) {
+        classification = request.classifyReadError(error);
+        if (classification.kind === "deterministic" && !(error instanceof Error && error.message === "Canonical feedback reply is not yet visible")) {
           throw new FeedbackStageError("feedback-reply", error instanceof Error ? error.message : String(error), request.post);
+        }
+        if (classification.kind === "rate-limited") {
+          if (rateLimitRetried) {
+            throw new FeedbackStageError("feedback-reply", error instanceof Error ? error.message : String(error), request.post);
+          }
+          rateLimitRetried = true;
+          lastError = error;
+          await request.wait(classification.retryAfterMilliseconds ?? RATE_LIMIT_RETRY_DELAY_MILLISECONDS);
+          continue;
         }
         lastError = error;
       }
-      if (attempt < request.attempts - 1) await request.wait(CONVERGENCE_POLL_DELAY_MILLISECONDS);
+      normalAttempts += 1;
+      if (normalAttempts >= request.attempts) {
+        throw new FeedbackStageError(
+          "feedback-reply",
+          lastError instanceof Error ? lastError.message : "Canonical feedback reply did not converge",
+          request.post,
+        );
+      }
+      await request.wait(CONVERGENCE_POLL_DELAY_MILLISECONDS);
     }
-    throw new FeedbackStageError(
-      "feedback-reply",
-      lastError instanceof Error ? lastError.message : "Canonical feedback reply did not converge",
-      request.post,
-    );
   };
   try {
     await request.github.replyToReviewThread({
@@ -359,7 +377,7 @@ export async function runFeedbackImplementationAutomationCommand(
           github: ports.github,
           attempts: ports.replyConvergenceAttempts ?? CONVERGENCE_ATTEMPTS,
           wait: (milliseconds) => waitFor(ports, milliseconds),
-          isTransientReadError: ports.isTransientReadError ?? (() => false),
+          classifyReadError: ports.classifyReadError ?? (() => ({ kind: "deterministic" })),
         });
       } catch (error) {
         const summary = redactFailureSummary(error instanceof Error ? error.message : String(error));
@@ -469,10 +487,12 @@ export async function runFeedbackImplementationAutomationCommand(
             expectedPost: publishedRevision,
             acquiredPre: pullRequest.headSha,
             readHead: async () => (await ports.github.readPullRequest(pullRequest.number)).headSha,
-            isTransientReadError: ports.isTransientReadError ?? (() => false),
+            classifyReadError: ports.classifyReadError ?? (() => ({ kind: "deterministic" })),
             attempts: ports.convergenceAttempts ?? CONVERGENCE_ATTEMPTS,
-            wait: async (attempt) => {
-              await waitFor(ports, attempt * CONVERGENCE_POLL_DELAY_MILLISECONDS);
+            wait: async (classification, attempt) => {
+              await waitFor(ports, classification.kind === "rate-limited"
+                ? classification.retryAfterMilliseconds ?? RATE_LIMIT_RETRY_DELAY_MILLISECONDS
+                : attempt * CONVERGENCE_POLL_DELAY_MILLISECONDS);
             },
           });
         } catch (error) {
@@ -518,7 +538,7 @@ export async function runFeedbackImplementationAutomationCommand(
           github: ports.github,
           attempts: ports.replyConvergenceAttempts ?? CONVERGENCE_ATTEMPTS,
           wait: (milliseconds) => waitFor(ports, milliseconds),
-          isTransientReadError: ports.isTransientReadError ?? (() => false),
+          classifyReadError: ports.classifyReadError ?? (() => ({ kind: "deterministic" })),
         });
         return publishedRevision;
       });

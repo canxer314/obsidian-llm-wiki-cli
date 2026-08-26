@@ -43,7 +43,7 @@ function ports(overrides: {
   readonly publishError?: Error;
   readonly replyError?: Error;
   readonly writeAddsMarker?: boolean;
-  readonly isTransientReadError?: (error: unknown) => boolean;
+  readonly classifyReadError?: (error: unknown) => { readonly kind: "transient" | "rate-limited" | "deterministic"; readonly retryAfterMilliseconds?: number };
   readonly convergenceAttempts?: number;
   readonly replyConvergenceAttempts?: number;
   readonly finalizationFailures?: readonly string[];
@@ -112,7 +112,7 @@ function ports(overrides: {
     wait: async () => {},
     convergenceAttempts: overrides.convergenceAttempts,
     replyConvergenceAttempts: overrides.replyConvergenceAttempts,
-    isTransientReadError: overrides.isTransientReadError,
+    classifyReadError: overrides.classifyReadError,
   };
 }
 
@@ -272,7 +272,9 @@ describe("feedback implementation automation", () => {
     const transient = Object.assign(new Error("network reset"), { transient: true });
     const subject = ports({
       headReads: [PRE, PRE, PRE, POST],
-      isTransientReadError: (error: unknown) => (error as Error).message === "network reset",
+      classifyReadError: (error: unknown) => (error as Error).message === "network reset"
+        ? { kind: "transient" }
+        : { kind: "deterministic" },
     });
     subject.github.readPullRequest.mockReset()
       .mockResolvedValueOnce(pullRequest(PRE))

@@ -17,7 +17,7 @@ describe("feedback head convergence", () => {
       expectedPost: POST,
       acquiredPre: PRE,
       readHead,
-      isTransientReadError: () => false,
+      classifyReadError: () => ({ kind: "deterministic" as const }),
       attempts: 3,
       wait: noWait,
     })).resolves.toEqual({ status: "converged", sha: POST });
@@ -32,7 +32,7 @@ describe("feedback head convergence", () => {
       expectedPost: POST,
       acquiredPre: PRE,
       readHead,
-      isTransientReadError: () => true,
+      classifyReadError: () => ({ kind: "transient" as const }),
       attempts: 3,
       wait: noWait,
     })).resolves.toEqual({ status: "converged", sha: POST });
@@ -45,7 +45,7 @@ describe("feedback head convergence", () => {
       expectedPost: POST,
       acquiredPre: PRE,
       readHead,
-      isTransientReadError: () => false,
+      classifyReadError: () => ({ kind: "deterministic" as const }),
       attempts: 3,
       wait: noWait,
     })).rejects.toThrow("unexpected shape");
@@ -58,7 +58,7 @@ describe("feedback head convergence", () => {
       expectedPost: POST,
       acquiredPre: PRE,
       readHead,
-      isTransientReadError: () => false,
+      classifyReadError: () => ({ kind: "deterministic" as const }),
       attempts: 3,
       wait: noWait,
     })).resolves.toEqual({ status: "indeterminate" });
@@ -71,7 +71,7 @@ describe("feedback head convergence", () => {
       expectedPost: POST,
       acquiredPre: PRE,
       readHead,
-      isTransientReadError: () => false,
+      classifyReadError: () => ({ kind: "deterministic" as const }),
       attempts: 3,
       wait: noWait,
     })).resolves.toEqual({ status: "race", sha: OTHER });
@@ -84,7 +84,7 @@ describe("feedback head convergence", () => {
       expectedPost: POST,
       acquiredPre: PRE,
       readHead,
-      isTransientReadError: () => true,
+      classifyReadError: () => ({ kind: "transient" as const }),
       attempts: 2,
       wait: noWait,
     })).resolves.toEqual({ status: "indeterminate" });
@@ -100,10 +100,65 @@ describe("feedback head convergence", () => {
       expectedPost: POST,
       acquiredPre: PRE,
       readHead,
-      isTransientReadError: () => false,
+      classifyReadError: () => ({ kind: "deterministic" as const }),
       attempts: 3,
-      wait: async (attempt) => { waits.push(attempt); },
+      wait: async (_classification, attempt) => { waits.push(attempt); },
     });
     expect(waits).toEqual([1]);
+  });
+  it("uses one dedicated rate-limit wait rather than propagation polling", async () => {
+    const waits: { readonly classification: string; readonly attempt: number }[] = [];
+    const readHead = vi.fn()
+      .mockRejectedValueOnce(new Error("HTTP 403: API rate limit exceeded"))
+      .mockResolvedValueOnce(POST);
+
+    await expect(convergeFeedbackHead({
+      expectedPost: POST,
+      acquiredPre: PRE,
+      readHead,
+      classifyReadError: (error) => error instanceof Error && error.message.includes("rate limit")
+        ? { kind: "rate-limited" }
+        : { kind: "deterministic" },
+      attempts: 3,
+      wait: async (classification, attempt) => { waits.push({ classification: classification.kind, attempt }); },
+    })).resolves.toEqual({ status: "converged", sha: POST });
+
+    expect(waits).toEqual([{ classification: "rate-limited", attempt: 1 }]);
+    expect(readHead).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed after a second rate-limit response", async () => {
+    const waits: string[] = [];
+    const readHead = vi.fn().mockRejectedValue(new Error("HTTP 429"));
+
+    await expect(convergeFeedbackHead({
+      expectedPost: POST,
+      acquiredPre: PRE,
+      readHead,
+      classifyReadError: () => ({ kind: "rate-limited" }),
+      attempts: 3,
+      wait: async (classification) => { waits.push(classification.kind); },
+    })).resolves.toEqual({ status: "indeterminate" });
+
+    expect(waits).toEqual(["rate-limited"]);
+    expect(readHead).toHaveBeenCalledTimes(2);
+  });
+  it("still performs the dedicated rate-limit retry after the normal polling budget is exhausted", async () => {
+    const waits: string[] = [];
+    const readHead = vi.fn()
+      .mockRejectedValueOnce(new Error("HTTP 429"))
+      .mockResolvedValueOnce(POST);
+
+    await expect(convergeFeedbackHead({
+      expectedPost: POST,
+      acquiredPre: PRE,
+      readHead,
+      classifyReadError: () => ({ kind: "rate-limited" }),
+      attempts: 1,
+      wait: async (classification) => { waits.push(classification.kind); },
+    })).resolves.toEqual({ status: "converged", sha: POST });
+
+    expect(waits).toEqual(["rate-limited"]);
+    expect(readHead).toHaveBeenCalledTimes(2);
   });
 });
