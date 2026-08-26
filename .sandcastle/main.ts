@@ -36,9 +36,8 @@ import {
   removeExpiredReviewArtifacts,
 } from "./review-artifacts.ts";
 import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
-import { runFeedbackImplementationAutomationCommand } from "./feedback-implementation-automation.ts";
+import { runFeedbackImplementation } from "./feedback-implementation-ports.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
-import { isTransientGithubReadError } from "./github-cli.ts";
 import { createProcessImplementer } from "./implementation-process-runner.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
 import { createProcessPrdImplementer } from "./prd-implementation-process-runner.ts";
@@ -294,7 +293,7 @@ try {
       },
       createJobId: () => jobId,
     })),
-    runFeedback: (pullRequestNumber, reconcile) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementationAutomationCommand({
+    runFeedback: (pullRequestNumber, reconcile) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementation({
       pullRequestNumber,
       ...(reconcile === undefined ? {} : { invocation: reconcile.invocation }),
       ...(reconcile?.baseRevision === undefined ? {} : { baseRevision: reconcile.baseRevision }),
@@ -321,7 +320,6 @@ try {
         }),
       },
       createJobId: () => jobId,
-      isTransientReadError: isTransientGithubReadError,
     })),
     dispatch: (concurrency) => dispatchAutomationCommands({
       concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
@@ -362,7 +360,7 @@ try {
           return;
         }
         if (command.operation === "implement") {
-          await runFeedbackImplementationAutomationCommand({ pullRequestNumber: command.number }, {
+          await runFeedbackImplementation({ pullRequestNumber: command.number }, {
             github: automationGithub,
             checkout: createTargetCheckout({
               sourceRepositoryPath: repositoryPath,
@@ -380,7 +378,6 @@ try {
               }),
             },
             createJobId: () => jobId,
-            isTransientReadError: isTransientGithubReadError,
           });
           return;
         }
