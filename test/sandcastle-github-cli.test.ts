@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { GithubCliPort, GithubVerificationError } from "../.sandcastle/github-cli.js";
 
+const target429Error = Object.assign(new Error("Command failed: gh issue view 429 --json number"), {
+  stderr: "HTTP 403: Resource not accessible by integration",
+});
+
 const encodedFile = (filename: string, previousFilename = ""): string =>
   Buffer.from(JSON.stringify([filename, previousFilename])).toString("base64");
 
@@ -225,6 +229,22 @@ describe("Sandcastle GitHub CLI adapter", () => {
       allowsAutomationChanges: false,
     })).rejects.toThrow(/spawn gh ENOENT/u);
   });
+  it("fails fast without a rate-limit retry when a target number is 429", async () => {
+    const execute = vi.fn().mockRejectedValue(target429Error);
+    const waits: number[] = [];
+    const github = new GithubCliPort(execute, async (milliseconds) => { waits.push(milliseconds); });
+
+    await expect(github.verifyImplementation({
+      issueNumber: 103,
+      branch: "sandcastle/issue-103",
+      expectedHeadSha: "abc123",
+      allowsAutomationChanges: false,
+    })).rejects.toBe(target429Error);
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
   it("uses one dedicated rate-limit wait instead of transport retry delays", async () => {
     const rateLimited = new Error("gh exited");
     Object.assign(rateLimited, { stderr: "HTTP 403: API rate limit exceeded" });

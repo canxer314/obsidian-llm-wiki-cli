@@ -22,6 +22,9 @@ const wait: Wait = (milliseconds) => new Promise((resolve) => {
 const MAX_GITHUB_ATTEMPTS = 3;
 const RETRY_DELAYS_MS = [100, 250] as const;
 const DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS = 60_000;
+// Node schedules larger one-shot delays almost immediately, so never pass one
+// through to a production timer.
+export const MAX_SAFE_ONE_SHOT_DELAY_MILLISECONDS = 2_147_483_647;
 const now = () => Date.now();
 
 export type GithubReadErrorClassification =
@@ -269,17 +272,20 @@ function isRetrySafeGithubRead(arguments_: readonly string[]): boolean {
   return methodIndex === -1 || arguments_[methodIndex + 1]?.toUpperCase() === "GET";
 }
 
-export function classifyGithubReadError(error: unknown): GithubReadErrorClassification {
+export function classifyGithubReadError(
+  error: unknown,
+  clock: () => number = now,
+): GithubReadErrorClassification {
   const message = [
     error instanceof Error ? error.message : "",
     errorStderr(error) ?? "",
   ].join("\n").toLowerCase();
   if (
-    /\b429\b/.test(message)
+    /\bhttp\s+429\b/.test(message)
     || /(?:api |secondary )?rate limit exceeded/.test(message)
     || /exceeded a secondary rate limit/.test(message)
   ) {
-    return { kind: "rate-limited", ...retryAfterHintMilliseconds(message) };
+    return { kind: "rate-limited", ...retryAfterHintMilliseconds(message, clock) };
   }
   if (
     /(?:unexpected )?eof/.test(message) ||
@@ -297,12 +303,26 @@ export function isTransientGithubReadError(error: unknown): boolean {
   return classifyGithubReadError(error).kind === "transient";
 }
 
-function retryAfterHintMilliseconds(message: string): { readonly retryAfterMilliseconds?: number } {
-  const retryAfter = /retry[- ]after\s*[:=]?\s*(\d+)\s*(?:s|sec|seconds)?\b/.exec(message);
-  if (retryAfter !== null) return { retryAfterMilliseconds: Math.max(60_000, Number(retryAfter[1]) * 1000) };
-  const reset = /x-ratelimit-reset\s*[:=]\s*(\d+)\b/.exec(message);
-  if (reset !== null) return { retryAfterMilliseconds: Math.max(60_000, Number(reset[1]) * 1000 - now()) };
+function retryAfterHintMilliseconds(
+  message: string,
+  clock: () => number,
+): { readonly retryAfterMilliseconds?: number } {
+  const retryAfter = /retry[- ]after\s*[:=]?\s*([^\s]+)(?:\s*(?:s|sec|seconds))?\b/.exec(message);
+  if (retryAfter !== null) return safeRateLimitDelay(Number(retryAfter[1]) * 1000);
+  const reset = /x-ratelimit-reset\s*[:=]\s*([^\s]+)\b/.exec(message);
+  if (reset !== null) return safeRateLimitDelay(Number(reset[1]) * 1000 - clock());
   return {};
+}
+
+function safeRateLimitDelay(milliseconds: number): { readonly retryAfterMilliseconds: number } {
+  if (
+    !Number.isFinite(milliseconds)
+    || milliseconds <= 0
+    || milliseconds > MAX_SAFE_ONE_SHOT_DELAY_MILLISECONDS
+  ) {
+    return { retryAfterMilliseconds: DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS };
+  }
+  return { retryAfterMilliseconds: Math.max(DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS, milliseconds) };
 }
 
 function errorStderr(error: unknown): string | null {

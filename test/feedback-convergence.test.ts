@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { convergeFeedbackHead } from "../.sandcastle/feedback-convergence.js";
+import { classifyGithubReadError } from "../.sandcastle/github-cli.js";
 
 const PRE = "a".repeat(40);
 const POST = "b".repeat(40);
@@ -106,6 +107,26 @@ describe("feedback head convergence", () => {
     });
     expect(waits).toEqual([1]);
   });
+  it("fails fast without waiting when the production classifier sees target number 429", async () => {
+    const waits: string[] = [];
+    const error = Object.assign(new Error("Command failed: gh pr view 429 --json headRefOid"), {
+      stderr: "HTTP 404 Not Found",
+    });
+    const readHead = vi.fn().mockRejectedValue(error);
+
+    await expect(convergeFeedbackHead({
+      expectedPost: POST,
+      acquiredPre: PRE,
+      readHead,
+      classifyReadError: classifyGithubReadError,
+      attempts: 3,
+      wait: async (classification) => { waits.push(classification.kind); },
+    })).rejects.toBe(error);
+
+    expect(readHead).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
   it("uses one dedicated rate-limit wait rather than propagation polling", async () => {
     const waits: { readonly classification: string; readonly attempt: number }[] = [];
     const readHead = vi.fn()
