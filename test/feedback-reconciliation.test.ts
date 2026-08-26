@@ -20,6 +20,8 @@ function classify(request: {
   readonly headSha: string;
   readonly baseRevision?: string;
   readonly expectedPost?: string;
+  readonly expectedReplyRootCommentId?: string;
+  readonly intentRootCommentId?: string;
   readonly replies?: readonly { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string }[];
   readonly parent?: string | undefined;
 }) {
@@ -28,6 +30,8 @@ function classify(request: {
     headSha: request.headSha,
     baseRevision: "baseRevision" in request ? request.baseRevision : PRE,
     expectedPost: request.expectedPost,
+    expectedReplyRootCommentId: request.expectedReplyRootCommentId,
+    intentRootCommentId: request.intentRootCommentId,
     replies: request.replies ?? [],
     parentOf: async () => request.parent,
   });
@@ -64,6 +68,88 @@ describe("feedback publication reconciliation", () => {
     expect(countFeedbackMarkerReplies([matching, otherPost], marker)).toBe(1);
     expect(countFeedbackMarkerReplies([otherPost], marker)).toBe(0);
     expect(countFeedbackMarkerReplies([matching, matching], marker)).toBe(2);
+  });
+
+  it("does not adopt an earlier marker when the selected unresolved root is newer", async () => {
+    const historicalRoot = "PRRC_previous";
+    await expect(classify({
+      headSha: POST,
+      baseRevision: undefined,
+      intentRootCommentId: ROOT,
+      replies: [reply(
+        feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: historicalRoot }),
+        historicalRoot,
+      )],
+      parent: PRE,
+    })).resolves.toEqual({ status: "proceed" });
+  });
+
+  it("fails closed when a current marker encodes a root other than its linked thread", async () => {
+    await expect(classify({
+      headSha: POST,
+      baseRevision: PRE,
+      intentRootCommentId: ROOT,
+      replies: [reply(
+        feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: "PRRC_forged" }),
+      )],
+      parent: PRE,
+    })).resolves.toEqual({ status: "fail-closed", reason: expect.stringContaining("root") });
+  });
+
+  it("does not let historical markers poison a new selected root", async () => {
+    await expect(classify({
+      headSha: POST,
+      baseRevision: undefined,
+      intentRootCommentId: ROOT,
+      replies: [
+        reply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: "PRRC_old_one" }), "PRRC_old_one"),
+        reply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: "PRRC_old_two" }), "PRRC_old_two"),
+      ],
+      parent: PRE,
+    })).resolves.toEqual({ status: "proceed" });
+  });
+
+  it("fails closed when a same-thread follow-up follows current marker evidence", async () => {
+    await expect(classify({
+      headSha: POST,
+      baseRevision: PRE,
+      intentRootCommentId: ROOT,
+      replies: [
+        reply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT })),
+        { rootCommentId: ROOT, replyCommentId: "PRRC_follow_up", body: "Please also address this." },
+      ],
+      parent: PRE,
+    })).resolves.toEqual({ status: "fail-closed", reason: expect.stringContaining("follow-up") });
+  });
+
+  it("does not treat current marker evidence as an ordinary-dispatch completion", async () => {
+    await expect(classify({
+      headSha: POST,
+      baseRevision: undefined,
+      intentRootCommentId: ROOT,
+      replies: [reply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT }))],
+      parent: PRE,
+    })).resolves.toEqual({ status: "fail-closed", reason: expect.stringContaining("reconcile") });
+  });
+
+  it("allows only explicit reconcile to adopt matching current marker evidence", async () => {
+    await expect(classify({
+      headSha: POST,
+      baseRevision: PRE,
+      intentRootCommentId: ROOT,
+      replies: [reply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT }))],
+      parent: PRE,
+    })).resolves.toEqual({ status: "adopt", post: POST });
+  });
+
+  it("refuses reply-only reconciliation when its target differs from the selected root", async () => {
+    await expect(classify({
+      headSha: POST,
+      expectedPost: POST,
+      intentRootCommentId: ROOT,
+      replies: [],
+      parent: PRE,
+    })).resolves.toEqual({ status: "fail-closed", reason: expect.stringContaining("reply-only") });
   });
 
   it("adopts the exact POST when one marker reply matches and POST is the direct child of PRE", async () => {
@@ -149,6 +235,16 @@ describe("feedback publication reconciliation", () => {
     })).resolves.toEqual({ status: "fail-closed", reason: expect.stringContaining("multiple") });
   });
 
+  it("fails closed when one reply contains multiple marker-shaped evidence", async () => {
+    const body = `${feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT })}\n${feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: OTHER, rootCommentId: ROOT })}`;
+
+    await expect(classify({
+      replies: [reply(body)],
+      intentRootCommentId: ROOT,
+      invocation: "reconcile",
+    })).resolves.toEqual({ status: "fail-closed", reason: expect.stringContaining("multiple marker") });
+  });
+
   it("fails closed when a marker and legacy candidate conflict", async () => {
     await expect(classify({
       headSha: POST,
@@ -172,6 +268,8 @@ describe("feedback publication reconciliation", () => {
     await expect(classify({
       headSha: POST,
       expectedPost: POST,
+      intentRootCommentId: ROOT,
+      expectedReplyRootCommentId: ROOT,
       parent: PRE,
     })).resolves.toEqual({ status: "reply-only", post: POST });
   });

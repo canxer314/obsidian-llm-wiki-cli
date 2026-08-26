@@ -75,11 +75,12 @@ describe("automation command CLI", () => {
 
     await expect(runAutomationCli(["reconcile", "feedback", "221", "--base-revision", "a".repeat(40)], dependencies))
       .resolves.toEqual({ status: "implemented-feedback" });
-    expect(runFeedback).toHaveBeenCalledWith(221, { baseRevision: "a".repeat(40) });
+    expect(runFeedback).toHaveBeenCalledWith(221, { invocation: "reconcile", baseRevision: "a".repeat(40) });
 
     await expect(runAutomationCli(["reconcile", "feedback", "221", "--expected-post", "b".repeat(40), "--reply-root", "PRRC_x", "--reply-body", "Fixed."], dependencies))
       .resolves.toEqual({ status: "implemented-feedback" });
     expect(runFeedback).toHaveBeenCalledWith(221, {
+      invocation: "reconcile",
       expectedPost: "b".repeat(40),
       expectedReply: { rootCommentId: "PRRC_x", body: "Fixed." },
     });

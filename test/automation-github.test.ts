@@ -661,12 +661,124 @@ describe("automation GitHub port", () => {
     ], undefined);
   });
 
+  it("reads complete unresolved feedback evidence with root-bound replies", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply", replyTo: { id: "PRRC_root" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCurrentUnresolvedFeedback(224)).resolves.toEqual({
+      unresolvedRootCommentIds: ["PRRC_root"],
+      replies: [{ rootCommentId: "PRRC_root", replyCommentId: "PRRC_reply", body: "Fixed." }],
+    });
+
+    expect(execute).toHaveBeenCalledWith("gh", expect.arrayContaining([
+      "api", "graphql", "-f", expect.stringContaining("pageInfo"), "-F", "number=224",
+    ]), undefined);
+  });
+
+  it("keeps nested replies attached to their immutable root", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply", replyTo: { id: "PRRC_root" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+              { id: "PRRC_nested", replyTo: { id: "PRRC_reply" }, body: "Follow-up", createdAt: "2026-01-03T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCurrentUnresolvedFeedback(224)).resolves.toEqual({
+      unresolvedRootCommentIds: ["PRRC_root"],
+      replies: [
+        { rootCommentId: "PRRC_root", replyCommentId: "PRRC_reply", body: "Fixed." },
+        { rootCommentId: "PRRC_root", replyCommentId: "PRRC_nested", body: "Follow-up" },
+      ],
+    });
+  });
+
+  it("reads marker evidence from a resolved feedback thread", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: true,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply", replyTo: { id: "PRRC_root" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readFeedbackReplies(224)).resolves.toEqual([
+      { rootCommentId: "PRRC_root", replyCommentId: "PRRC_reply", body: "Fixed." },
+    ]);
+  });
+  it("fails closed when feedback thread or comment evidence is truncated", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: true },
+        nodes: [],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCurrentUnresolvedFeedback(224)).rejects.toThrow("truncated");
+  });
+
   it("reads only review replies with their immutable root identities", async () => {
     const execute = vi.fn().mockResolvedValue({
-      stdout: [
-        JSON.stringify({ rootCommentId: "PRRC_root1", replyCommentId: "PRRC_reply1", body: "Fixed." }),
-        JSON.stringify({ rootCommentId: "PRRC_root2", replyCommentId: "PRRC_reply2", body: "Also fixed." }),
-      ].join("\n") + "\n",
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root1", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply1", replyTo: { id: "PRRC_root1" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }, {
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root2", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply2", replyTo: { id: "PRRC_root2" }, body: "Also fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
       stderr: "",
     });
     const github = createAutomationGithubPort({ execute });

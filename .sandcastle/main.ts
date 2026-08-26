@@ -38,6 +38,7 @@ import {
 import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
 import { runFeedbackImplementationAutomationCommand } from "./feedback-implementation-automation.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
+import { isTransientGithubReadError } from "./github-cli.ts";
 import { createProcessImplementer } from "./implementation-process-runner.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
 import { createProcessPrdImplementer } from "./prd-implementation-process-runner.ts";
@@ -295,6 +296,7 @@ try {
     })),
     runFeedback: (pullRequestNumber, reconcile) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementationAutomationCommand({
       pullRequestNumber,
+      ...(reconcile === undefined ? {} : { invocation: reconcile.invocation }),
       ...(reconcile?.baseRevision === undefined ? {} : { baseRevision: reconcile.baseRevision }),
       ...(reconcile?.expectedPost === undefined ? {} : { expectedPost: reconcile.expectedPost }),
       ...(reconcile?.expectedReply === undefined ? {} : { expectedReply: reconcile.expectedReply }),
@@ -319,6 +321,7 @@ try {
         }),
       },
       createJobId: () => jobId,
+      isTransientReadError: isTransientGithubReadError,
     })),
     dispatch: (concurrency) => dispatchAutomationCommands({
       concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
@@ -377,6 +380,7 @@ try {
               }),
             },
             createJobId: () => jobId,
+            isTransientReadError: isTransientGithubReadError,
           });
           return;
         }

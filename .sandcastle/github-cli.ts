@@ -106,7 +106,7 @@ export class GithubCliPort implements ImplementerGithubPort {
         return await this.run("gh", arguments_);
       } catch (error) {
         lastError = error;
-        if (!isTransientGithubError(error) || attempt === MAX_GITHUB_ATTEMPTS - 1) {
+        if (!isTransientGithubReadError(error) || attempt === MAX_GITHUB_ATTEMPTS - 1) {
           throw error;
         }
         await this.wait(RETRY_DELAYS_MS[attempt]!);
@@ -256,7 +256,7 @@ function isRetrySafeGithubRead(arguments_: readonly string[]): boolean {
   return methodIndex === -1 || arguments_[methodIndex + 1]?.toUpperCase() === "GET";
 }
 
-function isTransientGithubError(error: unknown): boolean {
+export function isTransientGithubReadError(error: unknown): boolean {
   const message = [
     error instanceof Error ? error.message : "",
     errorStderr(error) ?? "",
