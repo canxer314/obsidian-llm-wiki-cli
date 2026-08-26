@@ -53,6 +53,7 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     })).rejects.toThrow("Feedback implementation execution timed out");
 
     const descendant = Number(readFileSync(marker, "utf8"));
@@ -73,6 +74,7 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     });
     process.stdout?.emit("data", `${JSON.stringify({
       status: "implemented",
@@ -88,6 +90,7 @@ describe("feedback implementation process runner", () => {
       "feature/feedback",
       revision,
       "/jobs/feedback-224",
+      "PRRC_root",
       "implementer-model",
     ]);
   });
@@ -117,6 +120,7 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     })).rejects.toThrow("Feedback implementation execution timed out");
 
     expect(kill).toHaveBeenNthCalledWith(1, -531, "SIGTERM");
@@ -135,6 +139,7 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     });
     process.stderr?.emit("data", "Sandbox unavailable");
     process.emit("close", 1);

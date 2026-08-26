@@ -9,6 +9,7 @@ export class AutomationCliError extends Error {
 // the durable facts — acquired revision, expected POST, reply intent — that
 // plain observe-first dispatch deliberately never assumes.
 export interface FeedbackReconcileRequest {
+  readonly invocation: "reconcile";
   readonly baseRevision?: string;
   readonly expectedPost?: string;
   readonly expectedReply?: { readonly rootCommentId: string; readonly body: string };
@@ -43,6 +44,7 @@ export function parseReconcileFlags(flags: readonly string[]): FeedbackReconcile
     throw new AutomationCliError("--reply-root and --reply-body must be provided together");
   }
   return {
+    invocation: "reconcile",
     ...(baseRevision === undefined ? {} : { baseRevision }),
     ...(expectedPost === undefined ? {} : { expectedPost }),
     ...(replyRoot === undefined || replyBody === undefined ? {} : { expectedReply: { rootCommentId: replyRoot, body: replyBody } }),

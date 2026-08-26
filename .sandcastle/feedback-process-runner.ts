@@ -18,6 +18,7 @@ export function createProcessFeedbackImplementer(options: {
       readonly branch: string;
       readonly revision: string;
       readonly checkoutPath: string;
+      readonly rootCommentId: string;
     }): Promise<{ readonly reply: FeedbackReplyIntent }> {
       const result = await runAgentWorker({
         workerFile: "feedback-worker.ts",
@@ -27,6 +28,7 @@ export function createProcessFeedbackImplementer(options: {
           request.branch,
           request.revision,
           request.checkoutPath,
+          request.rootCommentId,
           options.model,
         ],
         timeoutMessage: "Feedback implementation execution timed out",

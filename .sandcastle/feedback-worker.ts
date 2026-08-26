@@ -1,12 +1,13 @@
 import { createFeedbackImplementerSession } from "./feedback-implementer-session.ts";
 import { loadSandboxStartup, sandboxHooksFor } from "./sandbox.ts";
 
-const [pullRequestNumber, branch, revision, checkoutPath, model] = process.argv.slice(2);
+const [pullRequestNumber, branch, revision, checkoutPath, rootCommentId, model] = process.argv.slice(2);
 if (
   pullRequestNumber === undefined ||
   branch === undefined ||
   revision === undefined ||
   checkoutPath === undefined ||
+  rootCommentId === undefined ||
   model === undefined
 ) {
   throw new Error("Expected feedback implementation worker arguments");
@@ -22,5 +23,6 @@ const reply = await createFeedbackImplementerSession({
   branch,
   revision,
   checkoutPath,
+  rootCommentId,
 });
 console.log(JSON.stringify({ status: "implemented", reply }));

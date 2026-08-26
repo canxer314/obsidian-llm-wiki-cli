@@ -21,29 +21,38 @@ function pullRequest(headSha = PRE, labels = ["agent:implement"]) {
   };
 }
 
-function markerReply(body: string): { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string } {
-  return { rootCommentId: ROOT, replyCommentId: "PRRC_reply", body };
+function markerReply(body: string, rootCommentId = ROOT): { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string } {
+  return { rootCommentId, replyCommentId: "PRRC_reply", body };
 }
 
-function marker(): { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string } {
-  return markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT }));
+function marker(rootCommentId = ROOT): { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string } {
+  return markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId }), rootCommentId);
 }
 
 function ports(overrides: {
   readonly headReads?: readonly string[];
   readonly replies?: readonly { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string }[];
+  readonly feedbackRoots?: readonly string[];
+  readonly feedbackStates?: readonly {
+    readonly unresolvedRootCommentIds: readonly string[];
+    readonly replies: readonly { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string }[];
+  }[];
   readonly readbackReplies?: readonly { readonly rootCommentId: string; readonly replyCommentId: string; readonly body: string }[];
   readonly parentOf?: (sha: string) => string | undefined;
   readonly implementReply?: { readonly rootCommentId: string; readonly body: string };
   readonly publishError?: Error;
   readonly replyError?: Error;
+  readonly writeAddsMarker?: boolean;
   readonly isTransientReadError?: (error: unknown) => boolean;
   readonly convergenceAttempts?: number;
+  readonly replyConvergenceAttempts?: number;
   readonly finalizationFailures?: readonly string[];
   readonly blockedLabelFailure?: boolean;
 } = {}) {
   const headReads = overrides.headReads ?? [PRE, PRE, PRE, POST];
   let reads = 0;
+  let canonicalReadback = overrides.readbackReplies ?? [marker()];
+  let feedbackReads = 0;
   const github = {
     readPullRequest: vi.fn(async () => {
       const index = Math.min(reads, headReads.length - 1);
@@ -51,8 +60,15 @@ function ports(overrides: {
       return pullRequest(headReads[index], reads <= 2 ? ["agent:implement"] : ["agent:in-progress"]);
     }),
     readFeedbackReplies: vi.fn()
-      .mockResolvedValueOnce(overrides.replies ?? [])
-      .mockResolvedValue(overrides.readbackReplies ?? [marker()]),
+      .mockImplementation(async () => canonicalReadback),
+    readCurrentUnresolvedFeedback: vi.fn(async () => {
+      const state = overrides.feedbackStates?.[Math.min(feedbackReads, overrides.feedbackStates.length - 1)];
+      feedbackReads += 1;
+      return state ?? {
+        unresolvedRootCommentIds: overrides.feedbackRoots ?? [ROOT],
+        replies: overrides.replies ?? [],
+      };
+    }),
     readCommitParent: vi.fn(async (sha: string) => overrides.parentOf?.(sha)),
     readUnresolvedReviewThreads: vi.fn().mockResolvedValue([{ commentId: ROOT, author: "reviewer", body: "Please fix." }]),
     addPullRequestLabel: vi.fn(async (_number: number, label: string) => {
@@ -62,8 +78,11 @@ function ports(overrides: {
       if (overrides.finalizationFailures?.includes(label)) throw new Error(`label ${label} removal failed`);
     }),
     addFeedbackBlockedDiagnostic: vi.fn().mockResolvedValue(undefined),
-    replyToReviewThread: vi.fn(async () => {
+    replyToReviewThread: vi.fn(async (request: { readonly reply: { readonly body: string } }) => {
       if (overrides.replyError !== undefined) throw overrides.replyError;
+      if (overrides.writeAddsMarker === true) {
+        canonicalReadback = [markerReply(request.reply.body)];
+      }
     }),
   };
   const publisher = {
@@ -89,6 +108,7 @@ function ports(overrides: {
     createJobId: () => "feedback-job",
     wait: async () => {},
     convergenceAttempts: overrides.convergenceAttempts,
+    replyConvergenceAttempts: overrides.replyConvergenceAttempts,
     isTransientReadError: overrides.isTransientReadError,
   };
 }
@@ -96,6 +116,79 @@ function ports(overrides: {
 const CLEAN_FINALIZATION = { blockedStateFailed: false, diagnosticFailed: false, inProgressCleanupFailed: false };
 
 describe("feedback implementation automation", () => {
+  it("does not adopt an old marker when a distinct unresolved root is the current intent", async () => {
+    const oldRoot = "PRRC_old";
+    const subject = ports({
+      headReads: [PRE, PRE, PRE, POST],
+      feedbackRoots: [ROOT],
+      writeAddsMarker: true,
+      readbackReplies: [marker(ROOT)],
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.implementer.implement).toHaveBeenCalledWith(expect.objectContaining({ rootCommentId: ROOT }));
+  });
+
+  it("selects a new root without historical marker rounds poisoning it", async () => {
+    const oldRoot = "PRRC_old";
+    const subject = ports({
+      feedbackRoots: [oldRoot, ROOT],
+      replies: [marker(oldRoot)],
+      parentOf: (sha) => sha === POST ? PRE : undefined,
+      writeAddsMarker: true,
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.implementer.implement).toHaveBeenCalledWith(expect.objectContaining({ rootCommentId: ROOT }));
+  });
+
+  it("fails closed before Agent execution when review state has multiple current roots", async () => {
+    const subject = ports({ feedbackRoots: [ROOT, "PRRC_other"] });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reconciliation",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before Agent execution when a thread already contains a non-canonical reply", async () => {
+    const subject = ports({ replies: [markerReply("A third-party reply")] });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reconciliation",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+  });
+
+  it("adopts matching evidence only for an explicit reconcile invocation", async () => {
+    const state = [marker(ROOT)];
+    const ordinary = ports({ headReads: [POST], replies: state, parentOf: () => PRE });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, ordinary))
+      .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation" }));
+
+    const reconcile = ports({ headReads: [POST], replies: state, parentOf: () => PRE });
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile" }, reconcile))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
+  });
   it("publishes only through the controlled publisher and verifies the existing PR head", async () => {
     const subject = ports();
 
@@ -108,6 +201,7 @@ describe("feedback implementation automation", () => {
       branch: "feature/feedback",
       revision: PRE,
       checkoutPath: "/checkout",
+      rootCommentId: ROOT,
     });
     expect(subject.publisher.publish).toHaveBeenCalledWith({
       checkoutPath: "/checkout",
@@ -116,6 +210,51 @@ describe("feedback implementation automation", () => {
     });
   });
 
+  it("does not publish when a second current feedback root appears during execution", async () => {
+    const subject = ports({
+      feedbackStates: [
+        { unresolvedRootCommentIds: [ROOT], replies: [] },
+        { unresolvedRootCommentIds: [ROOT, "PRRC_new"], replies: [] },
+      ],
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation" }));
+
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+  });
+
+  it("does not publish when the selected root receives a canonical marker during execution", async () => {
+    const subject = ports({
+      feedbackStates: [
+        { unresolvedRootCommentIds: [ROOT], replies: [] },
+        { unresolvedRootCommentIds: [ROOT], replies: [marker(ROOT)] },
+      ],
+      parentOf: (sha) => sha === POST ? PRE : undefined,
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation" }));
+
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+  });
+  it("does not reply after a same-thread follow-up appears post-publication", async () => {
+    const subject = ports({
+      feedbackStates: [
+        { unresolvedRootCommentIds: [ROOT], replies: [] },
+        { unresolvedRootCommentIds: [ROOT], replies: [] },
+        { unresolvedRootCommentIds: [ROOT], replies: [markerReply("Reviewer follow-up")] },
+      ],
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation", revision: POST }));
+
+    expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+  });
   it("converges when the first post-push read still sees the acquired PRE", async () => {
     const subject = ports({ headReads: [PRE, PRE, PRE, PRE, POST] });
 
@@ -204,7 +343,7 @@ describe("feedback implementation automation", () => {
       parentOf: () => PRE,
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, second))
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile", baseRevision: PRE }, second))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect(second.implementer.implement).not.toHaveBeenCalled();
@@ -215,12 +354,82 @@ describe("feedback implementation automation", () => {
     expect(second.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:implement");
   });
 
-  it("does not duplicate a reply whose POST landed even when the response was lost", async () => {
-    const subject = ports({ replyError: new Error("response lost") });
+  it("waits for delayed canonical reply visibility after a successful write without posting twice", async () => {
+    const subject = ports({ replyConvergenceAttempts: 3 });
     subject.github.readFeedbackReplies.mockReset()
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([marker()])
-      .mockResolvedValue([marker()]);
+      .mockResolvedValueOnce([marker(ROOT)]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+    expect(subject.github.readFeedbackReplies).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for delayed canonical reply visibility after an uncertain write without posting twice", async () => {
+    const subject = ports({ replyError: new Error("response lost"), replyConvergenceAttempts: 3 });
+    subject.github.readFeedbackReplies.mockReset()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([marker(ROOT)]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+    expect(subject.github.readFeedbackReplies).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not write a reply-only completion after feedback intent changes", async () => {
+    const subject = ports({
+      headReads: [POST],
+      parentOf: () => PRE,
+      feedbackStates: [
+        { unresolvedRootCommentIds: [ROOT], replies: [] },
+        { unresolvedRootCommentIds: [ROOT, "PRRC_new"], replies: [] },
+      ],
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({
+      pullRequestNumber: 224,
+      invocation: "reconcile",
+      expectedPost: POST,
+      expectedReply: { rootCommentId: ROOT, body: "Fixed." },
+    }, subject)).resolves.toEqual(expect.objectContaining({
+      status: "blocked",
+      reason: "feedback-reconciliation",
+      revision: POST,
+    }));
+
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+  });
+  it("does not retry a reply readback after an uncertain write has converged", async () => {
+    const subject = ports({ replyError: new Error("response lost"), replyConvergenceAttempts: 2 });
+    subject.github.readFeedbackReplies.mockReset()
+      .mockResolvedValueOnce([marker(ROOT)])
+      .mockResolvedValueOnce([]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+    expect(subject.github.readFeedbackReplies).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when canonical readback has a structurally conflicting marker", async () => {
+    const subject = ports({ replyConvergenceAttempts: 1 });
+    subject.github.readFeedbackReplies.mockReset().mockResolvedValue([
+      marker(ROOT),
+      markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: "PRRC_other" })),
+    ]);
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reply", revision: POST }));
+  });
+  it("does not duplicate a reply whose POST landed even when the response was lost", async () => {
+    const subject = ports({ replyError: new Error("response lost"), writeAddsMarker: true });
+    subject.github.readFeedbackReplies.mockReset()
+      .mockImplementation(async () => [marker(ROOT)]);
 
     await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
@@ -233,6 +442,7 @@ describe("feedback implementation automation", () => {
 
     await expect(runFeedbackImplementationAutomationCommand({
       pullRequestNumber: 224,
+      invocation: "reconcile",
       expectedPost: POST,
       expectedReply: { rootCommentId: ROOT, body: "Fixed." },
     }, subject)).resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
@@ -323,7 +533,7 @@ describe("feedback implementation automation", () => {
     subject.github.readPullRequest.mockReset()
       .mockResolvedValue(pullRequest(POST, ["agent:blocked"]));
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile", baseRevision: PRE }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect(subject.implementer.implement).not.toHaveBeenCalled();
@@ -433,7 +643,7 @@ describe("feedback implementation automation", () => {
       parentOf: () => PRE,
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, baseRevision: PRE }, subject))
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile", baseRevision: PRE }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect(subject.implementer.implement).not.toHaveBeenCalled();

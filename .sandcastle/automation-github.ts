@@ -8,6 +8,7 @@ import {
 } from "./architecture-review-automation.ts";
 import type { BranchUpdateAutomationPorts } from "./branch-update-automation.ts";
 import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
+import type { FeedbackThreadReply, FeedbackReviewState } from "./feedback-reconciliation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
 import type { PrdImplementationAutomationPorts } from "./prd-implementation-automation.ts";
 import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
@@ -329,6 +330,70 @@ export function createAutomationGithubPort(options: {
       "api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha",
     ], options.environment);
     return stdout.trim();
+  };
+  const readFeedbackThreadReplies = async (pullRequestNumber: number): Promise<{
+    readonly threads: readonly {
+      readonly isResolved: boolean;
+      readonly rootCommentId: string;
+      readonly replies: readonly FeedbackThreadReply[];
+    }[];
+  }> => {
+    const { stdout } = await execute("gh", [
+      "api", "graphql", "-f",
+      "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:100){pageInfo{hasNextPage} nodes{id replyTo{id} body createdAt}}}}}}}",
+      "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${pullRequestNumber}`,
+      "--jq", ".data.repository.pullRequest.reviewThreads",
+    ], options.environment);
+    const reviewThreads = JSON.parse(stdout) as {
+      readonly pageInfo: { readonly hasNextPage: boolean };
+      readonly nodes: readonly {
+        readonly isResolved: boolean;
+        readonly comments: {
+          readonly pageInfo: { readonly hasNextPage: boolean };
+          readonly nodes: readonly {
+            readonly id: string;
+            readonly replyTo: { readonly id: string } | null;
+            readonly body: string;
+            readonly createdAt: string;
+          }[];
+        };
+      }[];
+    };
+    if (reviewThreads.pageInfo.hasNextPage || reviewThreads.nodes.some(({ comments }) => comments.pageInfo.hasNextPage)) {
+      throw new Error(`Pull Request #${pullRequestNumber} feedback evidence is truncated`);
+    }
+    return {
+      threads: reviewThreads.nodes.map((thread) => {
+        const comments = new Map(thread.comments.nodes.map((comment) => [comment.id, comment]));
+        const roots = thread.comments.nodes.filter((comment) => comment.replyTo === null);
+        if (roots.length !== 1) throw new Error(`Pull Request #${pullRequestNumber} feedback thread root is unreadable`);
+        const root = roots[0]!;
+        const rootOf = (comment: typeof root): string => {
+          const visited = new Set<string>();
+          let current = comment;
+          while (current.replyTo !== null) {
+            if (visited.has(current.id)) throw new Error(`Pull Request #${pullRequestNumber} feedback reply chain is cyclic`);
+            visited.add(current.id);
+            const parent = comments.get(current.replyTo.id);
+            if (parent === undefined) throw new Error(`Pull Request #${pullRequestNumber} feedback reply chain is unreadable`);
+            current = parent;
+          }
+          return current.id;
+        };
+        return {
+          isResolved: thread.isResolved,
+          rootCommentId: root.id,
+          replies: thread.comments.nodes
+            .filter((comment) => comment.id !== root.id)
+            .map((comment) => {
+              if (rootOf(comment) !== root.id) throw new Error(`Pull Request #${pullRequestNumber} feedback reply belongs to another root`);
+              return { rootCommentId: root.id, replyCommentId: comment.id, body: comment.body, createdAt: comment.createdAt };
+            })
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.replyCommentId.localeCompare(right.replyCommentId))
+            .map(({ createdAt: _createdAt, ...reply }) => reply),
+        };
+      }),
+    };
   };
   return {
     async countOpenArchitectureReviewProposals() {
@@ -664,22 +729,31 @@ export function createAutomationGithubPort(options: {
     async readUnresolvedReviewThreads(pullRequestNumber) {
       const { stdout } = await execute("gh", [
         "api", "graphql", "-f",
-        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:50){nodes{id path line originalLine body author{login}}}}}}}}",
+        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:100){pageInfo{hasNextPage} nodes{id path line originalLine body author{login}}}}}}}}",
         "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${pullRequestNumber}`,
-        "--jq", ".data.repository.pullRequest.reviewThreads.nodes",
+        "--jq", ".data.repository.pullRequest.reviewThreads",
       ], options.environment);
-      const threads = JSON.parse(stdout) as readonly {
-        readonly isResolved: boolean;
-        readonly comments: { readonly nodes: readonly {
-          readonly id: string;
-          readonly path: string | null;
-          readonly line: number | null;
-          readonly originalLine: number | null;
-          readonly body: string;
-          readonly author: { readonly login: string } | null;
-        }[] };
-      }[];
-      return threads.filter(({ isResolved }) => !isResolved).flatMap(({ comments }) => comments.nodes.map((comment) => ({
+      const reviewThreads = JSON.parse(stdout) as {
+        readonly pageInfo: { readonly hasNextPage: boolean };
+        readonly nodes: readonly {
+          readonly isResolved: boolean;
+          readonly comments: {
+            readonly pageInfo: { readonly hasNextPage: boolean };
+            readonly nodes: readonly {
+              readonly id: string;
+              readonly path: string | null;
+              readonly line: number | null;
+              readonly originalLine: number | null;
+              readonly body: string;
+              readonly author: { readonly login: string } | null;
+            }[];
+          };
+        }[];
+      };
+      if (reviewThreads.pageInfo.hasNextPage || reviewThreads.nodes.some(({ comments }) => comments.pageInfo.hasNextPage)) {
+        throw new Error(`Pull Request #${pullRequestNumber} review thread evidence is truncated`);
+      }
+      return reviewThreads.nodes.filter(({ isResolved }) => !isResolved).flatMap(({ comments }) => comments.nodes.map((comment) => ({
         commentId: comment.id,
         ...(comment.path === null ? {} : { path: comment.path }),
         ...(comment.line === null && comment.originalLine === null ? {} : { line: comment.line ?? comment.originalLine! }),
@@ -758,18 +832,15 @@ export function createAutomationGithubPort(options: {
         "--method", "POST", "-f", `body=${request.reply.body}`,
       ], options.environment);
     },
+    async readCurrentUnresolvedFeedback(pullRequestNumber): Promise<FeedbackReviewState> {
+      const all = await readFeedbackThreadReplies(pullRequestNumber);
+      return {
+        unresolvedRootCommentIds: all.threads.filter((thread) => !thread.isResolved).map((thread) => thread.rootCommentId),
+        replies: all.threads.filter((thread) => !thread.isResolved).flatMap((thread) => thread.replies),
+      };
+    },
     async readFeedbackReplies(pullRequestNumber) {
-      const { stdout } = await execute("gh", [
-        "api", "graphql", "-f",
-        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{comments(first:100){nodes{id replyTo{id} body}}}}}}}",
-        "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${pullRequestNumber}`,
-        "--jq", ".data.repository.pullRequest.reviewThreads.nodes[]?.comments.nodes[]? | select(.replyTo != null) | {rootCommentId: .replyTo.id, replyCommentId: .id, body}",
-      ], options.environment);
-      return stdout.split("\n").filter((line) => line.trim().length > 0).map((line) => JSON.parse(line) as {
-        readonly rootCommentId: string;
-        readonly replyCommentId: string;
-        readonly body: string;
-      });
+      return (await readFeedbackThreadReplies(pullRequestNumber)).threads.flatMap((thread) => thread.replies);
     },
     async readCommitParent(sha) {
       const { stdout } = await execute("gh", [
