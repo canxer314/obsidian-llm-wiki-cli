@@ -1,9 +1,8 @@
+import type { GithubReadErrorClassification } from "./github-cli.ts";
+
 // Bounded post-publication convergence for feedback implementation (#293).
-// After the controlled publisher returns a POST, the orchestrator polls the
-// read-only Pull Request head: a temporary observation of the acquired PRE is
-// propagation, an explicitly transient read error may retry within the
-// budget, a third-party SHA is a real race, and exhaustion is indeterminate
-// so the caller must not repeat the push or reply.
+// After the controlled publisher returns, reads distinguish short propagation
+// from a rate limit, which gets one dedicated conservative retry.
 
 export type FeedbackConvergence =
   | { readonly status: "converged"; readonly sha: string }
@@ -14,28 +13,38 @@ export async function convergeFeedbackHead(request: {
   readonly expectedPost: string;
   readonly acquiredPre: string;
   readonly readHead: () => Promise<string>;
-  readonly isTransientReadError: (error: unknown) => boolean;
+  readonly classifyReadError: (error: unknown) => GithubReadErrorClassification;
   readonly attempts: number;
-  readonly wait: (attempt: number) => Promise<void>;
+  readonly wait: (classification: GithubReadErrorClassification, attempt: number) => Promise<void>;
 }): Promise<FeedbackConvergence> {
-  const { expectedPost, acquiredPre, readHead, isTransientReadError, attempts, wait } = request;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  const { expectedPost, acquiredPre, readHead, classifyReadError, attempts, wait } = request;
+  let rateLimitRetried = false;
+  let normalAttempts = 0;
+  for (;;) {
     let sha: string;
     try {
       sha = await readHead();
     } catch (error) {
-      if (!isTransientReadError(error)) throw error;
-      if (attempt === attempts - 1) return { status: "indeterminate" };
-      await wait(attempt + 1);
+      const classification = classifyReadError(error);
+      if (classification.kind === "deterministic") throw error;
+      if (classification.kind === "rate-limited") {
+        if (rateLimitRetried) return { status: "indeterminate" };
+        rateLimitRetried = true;
+        await wait(classification, normalAttempts + 1);
+        continue;
+      }
+      if (normalAttempts === attempts - 1) return { status: "indeterminate" };
+      normalAttempts += 1;
+      await wait(classification, normalAttempts);
       continue;
     }
     if (sha === expectedPost) return { status: "converged", sha };
     if (sha === acquiredPre) {
-      if (attempt === attempts - 1) return { status: "indeterminate" };
-      await wait(attempt + 1);
+      if (normalAttempts === attempts - 1) return { status: "indeterminate" };
+      normalAttempts += 1;
+      await wait({ kind: "transient" }, normalAttempts);
       continue;
     }
     return { status: "race", sha };
   }
-  return { status: "indeterminate" };
 }

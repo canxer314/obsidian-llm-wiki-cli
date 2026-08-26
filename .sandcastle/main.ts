@@ -36,7 +36,7 @@ import {
   removeExpiredReviewArtifacts,
 } from "./review-artifacts.ts";
 import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
-import { runFeedbackImplementation } from "./feedback-implementation-ports.ts";
+import { createFeedbackImplementationEntry } from "./feedback-implementation-ports.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
 import { createProcessImplementer } from "./implementation-process-runner.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
@@ -105,6 +105,28 @@ try {
     implementerModel: startup.models.implementer,
   });
   const feedbackImplementer = createProcessFeedbackImplementer({ model: startup.models.implementer });
+  const feedbackEntry = createFeedbackImplementationEntry((pullRequestNumber) => ({
+    github: automationGithub,
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    publisher: createFeedbackPublisher({
+      sourceRepositoryPath: repositoryPath,
+      gitEnvironment: startup.childEnvironments.git,
+    }),
+    implementer: feedbackImplementer,
+    lease: {
+      acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+        root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+        pullRequestNumber: currentPullRequestNumber,
+      }),
+    },
+    createJobId: () => jobId,
+  }));
   const prdSplitter = createProcessPrdSplitter({ model: startup.models.planner });
   const runIssueImplementation = (issueNumber: number) => runImplementationAutomationCommand({ issueNumber }, {
     github: {
@@ -293,34 +315,10 @@ try {
       },
       createJobId: () => jobId,
     })),
-    runFeedback: (pullRequestNumber, reconcile) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementation({
-      pullRequestNumber,
-      ...(reconcile === undefined ? {} : { invocation: reconcile.invocation }),
-      ...(reconcile?.baseRevision === undefined ? {} : { baseRevision: reconcile.baseRevision }),
-      ...(reconcile?.expectedPost === undefined ? {} : { expectedPost: reconcile.expectedPost }),
-      ...(reconcile?.expectedReply === undefined ? {} : { expectedReply: reconcile.expectedReply }),
-    }, {
-      github: automationGithub,
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      publisher: createFeedbackPublisher({
-        sourceRepositoryPath: repositoryPath,
-        gitEnvironment: startup.childEnvironments.git,
-      }),
-      implementer: feedbackImplementer,
-      lease: {
-        acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-          root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-          pullRequestNumber: currentPullRequestNumber,
-        }),
-      },
-      createJobId: () => jobId,
-    })),
+    runFeedback: (pullRequestNumber, reconcile) => withScheduler(
+      `pull-request:${pullRequestNumber}`,
+      () => feedbackEntry.runDirect(pullRequestNumber, reconcile),
+    ),
     dispatch: (concurrency) => dispatchAutomationCommands({
       concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
     }, {
@@ -360,25 +358,7 @@ try {
           return;
         }
         if (command.operation === "implement") {
-          await runFeedbackImplementation({ pullRequestNumber: command.number }, {
-            github: automationGithub,
-            checkout: createTargetCheckout({
-              sourceRepositoryPath: repositoryPath,
-              checkoutRoot: resolve(import.meta.dirname, "jobs"),
-              createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
-              gitEnvironment: startup.childEnvironments.git,
-              dependencyEnvironment: startup.childEnvironments.dependencies,
-            }),
-            publisher: createFeedbackPublisher({ sourceRepositoryPath: repositoryPath, gitEnvironment: startup.childEnvironments.git }),
-            implementer: feedbackImplementer,
-            lease: {
-              acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-                root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-                pullRequestNumber: currentPullRequestNumber,
-              }),
-            },
-            createJobId: () => jobId,
-          });
+          await feedbackEntry.runDispatcher(command.number);
           return;
         }
         if (command.operation === "implement-issue") {
