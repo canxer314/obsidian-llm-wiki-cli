@@ -8,6 +8,10 @@ const PRE = "a".repeat(40);
 const POST = "b".repeat(40);
 const ROOT = "PRRC_root";
 
+function target429Error(stderr: string): Error {
+  return Object.assign(new Error("Command failed: gh issue view 429 --json number"), { stderr });
+}
+
 function pullRequest(headSha = PRE, labels = ["agent:implement"]) {
   return {
     number: 224,
@@ -104,11 +108,46 @@ describe("feedback implementation production ports", () => {
     expect(classifyGithubReadError(error)).toEqual({ kind: "rate-limited" });
   });
 
-  it("honors a parseable rate-limit retry hint without shortening the minimum wait", () => {
+  it("honors only safe parseable rate-limit retry hints", () => {
     expect(classifyGithubReadError(new Error("HTTP 429 Retry-After: 90 seconds")))
       .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 90_000 });
     expect(classifyGithubReadError(new Error("HTTP 429 Retry-After: 5 seconds")))
       .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 Retry-After: 2147484 seconds")))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 Retry-After: 0 seconds")))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 Retry-After: Infinity seconds")))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 Retry-After: not-a-number seconds")))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 X-RateLimit-Reset: 0")))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 X-RateLimit-Reset: Infinity")))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 X-RateLimit-Reset: 9999999999999")))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 X-RateLimit-Reset: 1060"), () => 1_000_000))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 60_000 });
+    expect(classifyGithubReadError(new Error("HTTP 429 X-RateLimit-Reset: 1090"), () => 1_000_000))
+      .toEqual({ kind: "rate-limited", retryAfterMilliseconds: 90_000 });
+  });
+
+  it.each([
+    target429Error("GraphQL: Could not resolve to an issue or pull request with the number of 429. (repository.issue)"),
+    target429Error("HTTP 404 Not Found"),
+    target429Error("HTTP 403: Resource not accessible by integration"),
+  ])("does not mistake a target number 429 for rate limiting: %s", (error) => {
+    expect(classifyGithubReadError(error)).toEqual({ kind: "deterministic" });
+  });
+
+  it.each([
+    target429Error("HTTP 429 Too Many Requests"),
+    target429Error("HTTP 403: API rate limit exceeded"),
+    target429Error("HTTP 403: You have exceeded a secondary rate limit"),
+    target429Error("GraphQL API rate limit exceeded"),
+  ])("preserves semantic GitHub rate limits even with a target number 429: %s", (error) => {
+    expect(classifyGithubReadError(error)).toEqual({ kind: "rate-limited" });
   });
 
   it.each([
@@ -234,6 +273,36 @@ describe("feedback implementation production ports", () => {
 
     expect(waits).toEqual([2_000, 60_000]);
     expect(dependencies.github.readFeedbackReplies).toHaveBeenCalledTimes(2);
+    expect(dependencies.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails fast without a rate-limit wait or second write when canonical readback names target 429", async () => {
+    const dependencies = createPorts();
+    const error = target429Error("GraphQL: Could not resolve to an issue or pull request with the number of 429. (repository.issue)");
+    dependencies.github.readPullRequest.mockReset()
+      .mockResolvedValueOnce(pullRequest())
+      .mockResolvedValueOnce(pullRequest())
+      .mockResolvedValueOnce(pullRequest(PRE, ["agent:in-progress"]))
+      .mockResolvedValueOnce(pullRequest(POST, ["agent:in-progress"]));
+    dependencies.github.readFeedbackReplies.mockReset().mockRejectedValue(error);
+    const waits: number[] = [];
+
+    const result = await runFeedbackImplementation({ pullRequestNumber: 224 }, {
+      github: dependencies.github,
+      checkout: dependencies.checkout,
+      publisher: dependencies.publisher,
+      implementer: { implement: dependencies.implementer },
+      lease: dependencies.lease,
+      createJobId: () => "feedback-job",
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+      classifyReadError: classifyGithubReadError,
+      convergenceAttempts: 1,
+      replyConvergenceAttempts: 3,
+    });
+
+    expect(result).toMatchObject({ status: "blocked", reason: "feedback-reply", revision: POST });
+    expect(waits).toEqual([]);
+    expect(dependencies.github.readFeedbackReplies).toHaveBeenCalledTimes(1);
     expect(dependencies.github.replyToReviewThread).toHaveBeenCalledTimes(1);
   });
 
