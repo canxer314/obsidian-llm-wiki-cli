@@ -61,6 +61,8 @@ describe("Sandcastle Planner session adapter", () => {
       "Determine whether the Issue explicitly permits changes to Sandcastle or GitHub automation configuration",
     );
     expect(request.prompt).not.toContain(output.issue.body);
+    expect(request.prompt).not.toContain("shared accumulating branch");
+    expect(request.prompt).not.toContain("git fetch origin");
   });
 
   it("runs a fresh read-only Planner session with PRD child context", async () => {
@@ -87,13 +89,13 @@ describe("Sandcastle Planner session adapter", () => {
       "This Issue is one child of PRD #306, delivered on the shared accumulating branch sandcastle/prd-306",
     );
     expect(request.prompt).toContain(
-      "git fetch origin sandcastle/prd-306",
+      "If sandcastle/prd-306 already exists on origin, inspect the accumulated branch state with git fetch origin sandcastle/prd-306",
     );
     expect(request.prompt).toContain(
       "git show origin/sandcastle/prd-306:<path>",
     );
     expect(request.prompt).toContain(
-      "Plan against the accumulated branch state, not the bare base checkout",
+      "Plan against the accumulated branch state when it exists, not the bare base checkout",
     );
   });
 });
