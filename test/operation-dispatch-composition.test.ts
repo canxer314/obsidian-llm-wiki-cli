@@ -90,9 +90,9 @@ describe("Dispatcher operation composition", () => {
       await expect(subject.run()).resolves.toEqual({ status: "dispatched", selected: [dispatchCommand] });
       expect(subject.events).toEqual(expect.arrayContaining(["dispatcher-acquired", `track:${entry.identity}`]));
       expect(events).toEqual([
-        `github:queue-promoted:none:none:${publishedRevision}`,
         `checkout:${entry.operation}:100:${revision}`,
         `github:${entry.outcome}:100:/target/100:${publishedRevision}`,
+        `github:queue-promoted:none:none:${publishedRevision}`,
       ]);
     } else if (entry.family === "queue-promotion") {
       const subject = dispatcher([], operationDispatch);

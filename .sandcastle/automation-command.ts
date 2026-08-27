@@ -59,8 +59,8 @@ export function commandEligibility(command: AutomationCommand): AutomationComman
 // Accepted priority order (#219): 1 branch update, 2 Pull Request feedback
 // implementation, 3 Pull Request review, 4 PRD or Issue implementation,
 // 5 PRD split, 6 queue promotion, 7 architecture review. Queue promotion runs
-// as the pre-discovery scan and architecture review on its own schedule, so
-// the registry runs the six label-triggered families.
+// after the frozen label-triggered frontier and architecture review on its own
+// schedule, so the registry runs the six label-triggered families.
 const operationPriority: Readonly<Record<AutomationOperation, number>> = {
   "update-branch": 1,
   implement: 2,
