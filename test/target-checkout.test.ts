@@ -23,6 +23,10 @@ describe("Target Checkout", () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "Fixture Source\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "source@fixture.example\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
@@ -45,19 +49,31 @@ describe("Target Checkout", () => {
       "clone", "--no-checkout", "--no-local", remote, "/jobs/review-220-job-a",
     ]);
     expect(execute).toHaveBeenNthCalledWith(3, "git", [
-      "-C", "/jobs/review-220-job-a", "fetch", "--no-tags", "origin", revision,
+      "-C", "/trusted/source", "config", "--get", "user.name",
     ]);
     expect(execute).toHaveBeenNthCalledWith(4, "git", [
-      "-C", "/jobs/review-220-job-a", "rev-parse", "FETCH_HEAD",
+      "-C", "/trusted/source", "config", "--get", "user.email",
     ]);
     expect(execute).toHaveBeenNthCalledWith(5, "git", [
+      "-C", "/jobs/review-220-job-a", "config", "--local", "user.name", "Fixture Source",
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(6, "git", [
+      "-C", "/jobs/review-220-job-a", "config", "--local", "user.email", "source@fixture.example",
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(7, "git", [
+      "-C", "/jobs/review-220-job-a", "fetch", "--no-tags", "origin", revision,
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(8, "git", [
+      "-C", "/jobs/review-220-job-a", "rev-parse", "FETCH_HEAD",
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(9, "git", [
       "-C", "/jobs/review-220-job-a", "ls-tree", "-r", "--name-only", revision,
       "--", ".sandcastle/.env",
     ]);
-    expect(execute).toHaveBeenNthCalledWith(6, "git", [
+    expect(execute).toHaveBeenNthCalledWith(10, "git", [
       "-C", "/jobs/review-220-job-a", "checkout", "--detach", revision,
     ]);
-    expect(execute).toHaveBeenNthCalledWith(7, "npm", [
+    expect(execute).toHaveBeenNthCalledWith(11, "npm", [
       "--prefix", "/jobs/review-220-job-a", "ci", "--ignore-scripts",
     ]);
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree"]));
@@ -108,6 +124,10 @@ describe("Target Checkout", () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "Fixture Source\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "source@fixture.example\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "100644 blob\t.sandcastle/.env\n", stderr: "" });
@@ -124,6 +144,32 @@ describe("Target Checkout", () => {
 
     expect(action).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["checkout"]));
+  });
+
+  it.each([
+    ["unset key", vi.fn().mockRejectedValueOnce({ code: 1 })],
+    ["empty value", vi.fn().mockResolvedValueOnce({ stdout: "", stderr: "" })],
+  ])("rejects a source checkout without a git identity before fetching (%s)", async (_name, nameRead) => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockImplementationOnce(nameRead)
+      .mockResolvedValueOnce({ stdout: "source@fixture.example\n", stderr: "" });
+    const action = vi.fn();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: "/trusted/source",
+      checkoutRoot: "/jobs",
+      execute,
+      createJobDirectory: () => "/jobs/review-220-job-a",
+    });
+
+    await expect(checkout.withCheckout({ pullRequestNumber: 220, revision }, action))
+      .rejects.toThrow(
+        "no configured git user.name/user.email",
+      );
+
+    expect(action).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["fetch"]));
   });
 });
 
@@ -174,6 +220,8 @@ describe("Target Checkout real Git filesystem integration", () => {
     await git(["-C", contributorPath, "remote", "add", "origin", remotePath]);
     await git(["-C", contributorPath, "push", "origin", "master"]);
     await git(["clone", "--no-local", remotePath, trustedPath]);
+    await git(["-C", trustedPath, "config", "user.name", "Trusted Source"]);
+    await git(["-C", trustedPath, "config", "user.email", "trusted-source@example.test"]);
     // Production only accepts credential-free HTTPS remotes. Keep the bare
     // repository local while making the trusted source resolve the production
     // remote shape; the execution seam maps clone-only traffic to the fixture.
@@ -244,11 +292,11 @@ describe("Target Checkout real Git filesystem integration", () => {
         expect((await stat(join(checkoutPath, ".git"))).isDirectory()).toBe(true);
         expect(await pathExists(join(checkoutPath, ".git", "objects", "info", "alternates"))).toBe(false);
         expect(await pathExists(join(checkoutPath, "node_modules", ".installed-by-fake-npm"))).toBe(true);
+        expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.name"])).toBe("Trusted Source");
+        expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.email"])).toBe("trusted-source@example.test");
 
         // Simulate the Agent's ordinary publication preparation: the detached
         // checkout can create a commit and validate a push without changing source.
-        await git(["-C", checkoutPath, "config", "user.name", "Fixture Agent"]);
-        await git(["-C", checkoutPath, "config", "user.email", "agent@example.test"]);
         await writeFile(join(checkoutPath, `agent-result-${index}.txt`), "result\n");
         await git(["-C", checkoutPath, "add", "-A"]);
         await git(["-C", checkoutPath, "commit", "-m", "agent result"]);
