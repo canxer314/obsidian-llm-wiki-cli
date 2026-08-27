@@ -170,9 +170,13 @@ describe("Automation Command dispatch", () => {
       slowCompleted = true;
     });
 
+    const scan = vi.fn(async () => {
+      expect(slowCompleted).toBe(true);
+      throw new Error("GitHub dependency state is unavailable");
+    });
     const round = dispatchAutomationCommands({ concurrency: 2 }, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
-      promotion,
+      promotion: { scan },
       readiness,
       github: { verifyLabels: async () => {}, listCommands: async () => [failing, slow] },
       run,
@@ -187,6 +191,7 @@ describe("Automation Command dispatch", () => {
     releaseSlow();
     await expect(round).rejects.toThrow("review failed");
     expect(slowCompleted).toBe(true);
+    expect(scan).toHaveBeenCalledOnce();
   });
 
   it("does no discovery while the host scheduler lock is unavailable", async () => {
@@ -203,6 +208,18 @@ describe("Automation Command dispatch", () => {
     expect(verifyGithubAgentAuthentication).not.toHaveBeenCalled();
   });
 
+  it("rejects invalid concurrency before command discovery", async () => {
+    const listCommands = vi.fn();
+    await expect(dispatchAutomationCommands({ concurrency: 0 }, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      promotion,
+      readiness,
+      github: { verifyLabels: async () => {}, listCommands },
+      run: vi.fn(),
+    })).rejects.toThrow("Dispatch concurrency must be between 1 and 8");
+    expect(listCommands).not.toHaveBeenCalled();
+  });
+
   it("fails closed before execution when labels are inconsistent or blocked", async () => {
     const inconsistent = command({ labels: ["agent:review", "agent:in-progress"] });
     const blocked = command({ number: 11, labels: ["agent:review", "agent:blocked"] });
@@ -217,24 +234,35 @@ describe("Automation Command dispatch", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("reconciles queued Issue promotion from current state before discovering commands", async () => {
+  it("runs queue promotion after PRD split and defers promoted commands until the next bounded round", async () => {
     const order: string[] = [];
+    const splitPrd = command({ number: 218, operation: "split-prd", identity: "prd:218" });
+    const commands: ReturnType<typeof command>[] = [splitPrd];
+    const run = vi.fn(async () => { order.push("split"); });
     const result = await dispatchAutomationCommands({}, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       github: {
         verifyLabels: async () => {},
-        listCommands: async () => { order.push("discover"); return []; },
+        listCommands: async () => { order.push("discover"); return commands.slice(); },
       },
-      promotion: { scan: async () => { order.push("promote"); } },
+      promotion: {
+        scan: async () => {
+          order.push("promote");
+          commands.push(command({ number: 219, operation: "implement-issue", identity: "issue:219" }));
+          return { status: "scanned", promoted: [219], refused: [] };
+        },
+      },
       readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
-      run: vi.fn(),
+      run,
     });
-    expect(result).toEqual({ status: "dispatched", selected: [] });
-    expect(order).toEqual(["probe", "promote", "discover"]);
+    expect(result).toEqual({ status: "dispatched", selected: [splitPrd] });
+    expect(order).toEqual(["probe", "discover", "split", "promote"]);
+    expect(run).toHaveBeenCalledOnce();
   });
 
-  it("fails the round closed without discovery or execution when promotion cannot read dependency state", async () => {
-    const listCommands = vi.fn();
+  it("fails the round after the frozen frontier without executing promoted commands when promotion cannot read dependency state", async () => {
+    const existing = command({ number: 217 });
+    const listCommands = vi.fn(async () => [existing]);
     const run = vi.fn();
     await expect(dispatchAutomationCommands({}, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
@@ -243,8 +271,9 @@ describe("Automation Command dispatch", () => {
       readiness,
       run,
     })).rejects.toThrow("GitHub dependency state is unavailable");
-    expect(listCommands).not.toHaveBeenCalled();
-    expect(run).not.toHaveBeenCalled();
+    expect(listCommands).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledWith(existing);
   });
 
   it.each([
@@ -281,7 +310,7 @@ describe("Automation Command dispatch", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("runs the container GitHub authentication probe before promotion and discovery", async () => {
+  it("runs the container GitHub authentication probe before discovery and promotion", async () => {
     const order: string[] = [];
     await expect(dispatchAutomationCommands({}, {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
@@ -293,7 +322,7 @@ describe("Automation Command dispatch", () => {
       readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
       run: vi.fn(),
     })).resolves.toEqual({ status: "dispatched", selected: [] });
-    expect(order).toEqual(["probe", "promote", "discover"]);
+    expect(order).toEqual(["probe", "discover", "promote"]);
   });
 });
 

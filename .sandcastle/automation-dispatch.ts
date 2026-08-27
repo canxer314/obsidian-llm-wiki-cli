@@ -37,13 +37,13 @@ export async function dispatchAutomationCommands(
     await ports.readiness.verifyGithubAgentAuthentication();
     await ports.scheduler.prepare();
     await ports.github.verifyLabels();
-    await ports.promotion.scan();
     const limit = request.concurrency ?? 2;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) {
       throw new Error("Dispatch concurrency must be between 1 and 8");
     }
+    const commands = await ports.github.listCommands();
     const identities = new Set<string>();
-    const frontier = (await ports.github.listCommands())
+    const frontier = commands
       .filter((command) => commandEligibility(command) === "eligible")
       .sort(compareCommands)
       .filter((command) => !identities.has(command.identity) && (identities.add(command.identity), true));
@@ -57,8 +57,13 @@ export async function dispatchAutomationCommands(
       }
     });
     const outcomes = await Promise.allSettled(workers);
+    const promotionFailure = await ports.promotion.scan().then(
+      () => undefined,
+      (reason: unknown) => ({ reason }),
+    );
     const failure = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
     if (failure !== undefined) throw failure.reason;
+    if (promotionFailure !== undefined) throw promotionFailure.reason;
     return { status: "dispatched", selected: frontier };
   } finally {
     await lock.release();
