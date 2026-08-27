@@ -29,12 +29,16 @@ docker build \
 
 docker run \
   --detach \
+  --init \
   --name "${container_name}" \
   --network host \
   --user "$(id -u):$(id -g)" \
   --volume "${worktree_path}:/home/agent/workspace" \
   --workdir /home/agent/workspace \
   "${image_name}" >/dev/null
+
+init_enabled="$(docker inspect --format '{{.HostConfig.Init}}' "${container_name}")"
+[[ "${init_enabled}" == "true" ]]
 
 network_mode="$(docker inspect --format '{{.HostConfig.NetworkMode}}' "${container_name}")"
 [[ "${network_mode}" == "host" ]]

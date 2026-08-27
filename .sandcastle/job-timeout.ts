@@ -17,7 +17,22 @@ export async function runJobWithTimeout(options: {
   const completed = child.exited.then(() => false);
   const timeout = await Promise.race([completed, timedOut]);
   if (timer !== undefined) clearTimeout(timer);
-  if (!timeout) return { status: "completed" };
+  if (!timeout) {
+    const groupExited = await Promise.race([
+      child.groupExited.then(() => false),
+      options.wait(options.graceMilliseconds).then(() => true),
+    ]);
+    if (groupExited) {
+      options.kill(-child.pid, "SIGTERM");
+      const forced = await Promise.race([
+        child.groupExited.then(() => false),
+        options.wait(options.graceMilliseconds).then(() => true),
+      ]);
+      if (forced) options.kill(-child.pid, "SIGKILL");
+      await child.groupExited;
+    }
+    return { status: "completed" };
+  }
 
   options.kill(-child.pid, "SIGTERM");
   const forced = await Promise.race([

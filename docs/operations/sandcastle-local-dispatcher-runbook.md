@@ -19,9 +19,9 @@ install -m 600 /dev/null ~/.config/sandcastle/env   # or: touch + chmod 600
 $EDITOR ~/.config/sandcastle/env
 ```
 
-Startup fails closed when the file is missing, is not a regular file, or has any other mode. Only whitelisted keys are read:
+Startup fails closed when the file is missing, is not a regular file, has any other mode, or lacks the provider configuration (`ANTHROPIC_BASE_URL` and either `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`). `GH_TOKEN` is intentionally not a startup prerequisite: a missing token reaches the read-only Agent-container readiness classification as `"missing"`, without launching its probe container. Only whitelisted keys are read:
 
-- `GH_TOKEN` — repository-scoped fine-grained PAT (Metadata read; Contents, Issues, Pull requests, Commit statuses read/write). Never place it in remote URLs, Git config, command-line arguments, or unit files.
+- `GH_TOKEN` — optional only for read-only `inspect`; it is required by the Agent-container readiness preflight before any GitHub-capable operation can acquire a Work Item. Use a repository-scoped fine-grained PAT (Metadata read; Contents, Issues, Pull requests, Commit statuses read/write). Never place it in remote URLs, Git config, command-line arguments, or unit files.
 - `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` — CC-Switch routing, authentication, and model mapping.
 - `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and lowercase variants) — WSL transport settings.
 - `SANDCASTLE_MODEL`, `SANDCASTLE_PLANNER_MODEL`, `SANDCASTLE_IMPLEMENTER_MODEL`, `SANDCASTLE_REVIEWER_MODEL` — role model selection (default `opus`).
@@ -47,9 +47,13 @@ npm run sandcastle -- inspect
 
 A `"missing"` result means no Automation Command may run. Every explicit execution, scheduled dispatch round, and architecture review fails before command acquisition until `build-image` succeeds. This failure does not consume a trigger label, add `agent:in-progress`, or create Blocked Automation. Do not create or label a canary and do not enable either timer until inspection reports `ready`.
 
+`"ready"` classifies the image selected from the current trusted checkout as present and usable; it does not prove that an older acquired Pull Request revision has the same manifest seed. Current-base Issue and PRD implementation retain the strict image-input checksum and offline install, while feedback on an acquired exact revision uses the runtime guard and frozen install with image-cache preference and bounded network fallback.
+
 ## Agent-container GitHub readiness
 
-GitHub-capable Agent Sessions authenticate through `GH_TOKEN` read from the container environment only (#267). Before a scheduled dispatch round acquires any Automation Work Item, and before every explicit GitHub-capable operation (`run review`, `run implement`, `run implement-prd`, `run split`, `run feedback`), the Dispatcher runs a read-only `gh auth status` probe inside the exact content-addressed Agent image with the exact GitHub-capable Agent environment (transport and Claude/API allowlist plus `GH_TOKEN`). The probe never mutates GitHub, and its raw output is never logged, retained, or written to GitHub diagnostics.
+GitHub-capable Agent Sessions authenticate through `GH_TOKEN` read from the container environment only (#267). Before a scheduled dispatch round acquires any Automation Work Item, and before every explicit GitHub-capable operation (`run review`, `run implement`, `run implement-prd`, `run split`, `run feedback`), the Dispatcher runs a read-only `gh auth status` probe inside the exact content-addressed Agent image with the exact GitHub-capable Agent environment (transport and Claude/API allowlist plus `GH_TOKEN` and the git identity variables described below). The probe never mutates GitHub. Token values and raw readiness-command output must never be copied into logs, retained artifacts, GitHub diagnostics, or error messages — only the classified result (`ready`, `missing`, `invalid`, `unavailable`) may be reported. When the result is not `ready`, `inspect` does not query the remote command frontier: its `commandInspection` field is explicitly `"unavailable"`, never an empty `commands` list.
+
+The GitHub-capable Agent environment also carries the operator git identity (`GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` and `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` read from the trusted checkout's git config) because container Agents commit on the operator's behalf and the container `HOME` has no `.gitconfig` (#269). Startup fails closed when the trusted checkout has no `user.name`/`user.email`. Identity values are non-sensitive but still never copied into GitHub diagnostics.
 
 Failure classifications:
 
@@ -129,7 +133,7 @@ Behavior notes:
 npm run sandcastle -- inspect
 ```
 
-Prints Docker image readiness, the current command frontier with per-command eligibility (`eligible`, `blocked`, `stale-in-progress`, `inconsistent`), retry guidance, and locally active jobs. It never mutates GitHub or local state. A Work Item carrying both a trigger and `agent:in-progress` (partial label mutation) is reported as `inconsistent` and is never executed.
+Prints Docker image readiness, Agent-container GitHub readiness, and locally active jobs. When `githubAgentReadiness` is `ready`, it also returns `commandInspection:"available"` and the current remote command frontier with per-command eligibility (`eligible`, `blocked`, `stale-in-progress`, `inconsistent`) plus retry guidance. When readiness is `missing`, `invalid`, or `unavailable`, it returns `commandInspection:"unavailable"` and omits `commands`; this means no remote queue was queried, not that the queue is empty. It never mutates GitHub or local state. A Work Item carrying both a trigger and `agent:in-progress` (partial label mutation) is reported as `inconsistent` and is never executed. Until inspection reports `"imageReadiness":"ready"` and `"githubAgentReadiness":"ready"`, no GitHub-capable command may be acquired and no canary may be run or retried.
 
 ## Explicit operation execution
 
@@ -154,10 +158,12 @@ PRD implementation holds a mandatory cross-process issue lease for the complete 
 
 An execution, timeout, push, or publication failure adds `agent:blocked` to the Work Item with a short classified reason and a non-sensitive local job identifier. The Work Item is not terminalized. Diagnose in order:
 
-1. `npm run sandcastle -- inspect` — confirm the command is `blocked` and read its retry guidance.
+1. `npm run sandcastle -- inspect` — if `commandInspection` is `"available"`, confirm the command is `blocked` and read its retry guidance. If it is `"unavailable"`, restore GitHub readiness first; it does not mean that no commands exist. Check both readiness fields too: if `githubAgentReadiness` (or `imageReadiness`) is not `ready`, a later retry of any GitHub-capable command fails closed before acquisition no matter what the last inspected frontier reported.
 2. Read the classified failure comment on the Issue or Pull Request.
 3. Read the dispatch-round log locally: `journalctl --user -u sandcastle-dispatch.service` (or `-t sandcastle-architecture-review`). Full Agent output exists only in local logs, never in GitHub comments.
 4. Inspect the retained job artifacts under `.sandcastle/jobs/` (failed or timed-out Target Checkouts, metadata, and logs are kept for seven days).
+
+An Agent-container GitHub readiness failure is not Blocked Automation: it fails the round or explicit operation closed before Work Item acquisition, so it adds no `agent:blocked` label and writes no diagnostic comment. If a GitHub-capable operation failed without a classified comment and without label mutation, suspect readiness first — check `inspect` and the dispatch-round log, and treat the outcome exactly as classified in the Agent-container GitHub readiness section above. Never copy token values or raw readiness-command output into a GitHub diagnostic, a retained artifact, or an error message.
 
 ## Manual retry
 
@@ -166,8 +172,11 @@ Whole jobs are never retried automatically. Retry is a deliberate operator actio
 1. Diagnose the Blocked Automation as above.
 2. Remove `agent:blocked`: `gh issue edit <n> --remove-label agent:blocked` (or `gh pr edit`).
 3. Re-add the appropriate trigger label (`agent:implement`, `agent:review`, `agent:update-branch`, `agent:to-issues`, …).
+4. Verify readiness: `npm run sandcastle -- inspect` must report `"imageReadiness":"ready"` and, for any GitHub-capable command, `"githubAgentReadiness":"ready"` before retrying.
 
 The next dispatch round, or an explicit `run` command, picks the command up. Review retry reuses the existing Work Item — never create a replacement Issue, branch, or Pull Request.
+
+A readiness failure leaves the Work Item untouched with its trigger label intact and no `agent:blocked` to remove: restore the credential or image locally, re-verify through `inspect`, then simply re-run the operation or wait for the next dispatch round — do not mutate labels. Every GitHub-capable retry must create or reuse the existing `sandcastle/issue-<n>` branch and yield exactly one Draft Pull Request; a retry that would create a second Draft Pull Request or a replacement Work Item is a failure, not a workaround. A canary retry is executed exactly once, then its evidence (below) is recorded and verified before any later canary starts.
 
 A stale `agent:in-progress` (e.g. after a host crash) is reported by `inspect` but never adopted, resumed, or cleared automatically. Remove it manually only after verifying through `inspect` and `journalctl` that no matching job is active.
 
@@ -194,18 +203,18 @@ Never batch-delete `.sandcastle/worktrees/`, `.sandcastle/logs/`, `.git/worktree
 
 Use dedicated, newly created canary Work Items for every operation family. Historical failures are never test inputs: **#216 / PR #217, #166, Legacy Run State, and archive branches are excluded from canary use** — do not label, edit, close, or reference them.
 
-Run each canary with timers disabled, in this order:
+Run each canary with timers disabled and only while `inspect` reports both `"imageReadiness":"ready"` and `"githubAgentReadiness":"ready"`, in this order. A readiness failure fails the canary closed before Work Item acquisition without label mutation; recover per the Agent-container GitHub readiness section and retry the same canary — never create or label a replacement canary:
 
 1. **Issue implementation** — create a small dedicated Issue, add `agent:implement`, then `npm run sandcastle -- run implement <n>`. Verify a `sandcastle/issue-<n>` branch and Draft Pull Request appear.
 2. **Pull Request review** — add `agent:review` to that Draft Pull Request, then `npm run sandcastle -- run review <pr>`. Verify the published review identifies the exact reviewed commit.
-3. **Feedback implementation** — leave a change request on the Pull Request, add `agent:implement`, then `npm run sandcastle -- run feedback <pr>`. Verify the fix is pushed to the existing branch.
+3. **Feedback implementation** — leave a change request on the Pull Request, add `agent:implement`, then `npm run sandcastle -- run feedback <pr>`. Verify the fix is pushed to the existing branch and that the implementation reply carries the `feedback-reconcile` provenance marker.
 4. **Branch update** — add `agent:update-branch`, then `npm run sandcastle -- run update-branch <pr>`. Verify the branch is updated from `master` with an explicit force-with-lease push.
 5. **PRD split** — create a dedicated PRD Issue, add `agent:to-issues`, then `npm run sandcastle -- run split <n>`. Verify self-contained child Issues are created.
 6. **PRD continuation and final review** — add `agent:implement` to the PRD, then `npm run sandcastle -- run implement-prd <n>`. Verify exactly one eligible child is implemented and the next child is requested automatically; when the final child completes, verify Pull Request review is requested automatically.
 7. **Queued promotion** — create a dedicated Issue blocked by another dedicated Issue, add `agent:queued`, then close the blocker and run `npm run sandcastle -- dispatch`. Verify promotion from `agent:queued` to `agent:implement` based on current blocker state.
 8. **Manual architecture review** — `npm run sandcastle -- architecture-review`. Verify a proposal Issue labelled `source:architecture-review`, or a logged skip when the backlog guard or loose-duplicate filter applies.
 
-Close or clean up only the dedicated canary Work Items afterwards.
+Record each canary's evidence before moving on: classified image and Agent-container GitHub readiness, branch identity, Draft Pull Request identity and count, and confirmation that no timer was enabled. Canaries proceed in order — no later canary starts until the previous canary's evidence is recorded and verified (the issue-implementation canary must show exactly one Draft Pull Request). Close or clean up only the dedicated canary Work Items afterwards.
 
 ## Single-writer cutover guard
 
@@ -216,12 +225,20 @@ The old and new write paths must never be active at the same time. Before enabli
 3. Prepare the protected private environment file (mode `0600`), run `npm run sandcastle -- build-image`, then run `npm run sandcastle -- inspect` and require `"imageReadiness":"ready"` and `"githubAgentReadiness":"ready"`.
 4. Run `setup-labels`, then run `inspect` again and confirm a clean frontier with image and Agent-container GitHub readiness still `ready`.
 5. Run the canary sequence above with timers disabled. If repository image inputs change at any point, rebuild and re-verify before continuing.
-6. Only after canaries 1-7 pass and image readiness is still `ready`: `systemctl --user enable --now sandcastle-dispatch.timer`.
+6. Only after canaries 1-7 pass and image and Agent-container GitHub readiness are still `ready`: `systemctl --user enable --now sandcastle-dispatch.timer`.
 7. Only after canary 8 passes and image readiness is still `ready`: `systemctl --user enable --now sandcastle-architecture-review.timer`.
 
 GitHub Actions is not a fallback consumer: two consumers would reintroduce duplicate execution. If the replacement must be paused, `systemctl --user stop sandcastle-dispatch.timer sandcastle-architecture-review.timer` — do not start the retired writer instead.
 
 Verify activation with `systemctl --user list-timers` and `journalctl --user -u sandcastle-dispatch.service -f`.
+
+## Feedback publication convergence and reconciliation
+
+Feedback implementation is the single publication owner for both the branch push and the canonical implementation reply (#293). Before Agent execution it reads a complete bounded review-thread/comment view and selects exactly one unresolved root as the immutable feedback intent; it rechecks that selection before push and reply. Truncation, invalid shape, multiple roots, non-canonical replies, or an unrepresentable same-thread follow-up fails closed. The Agent receives that exact root and must return it unchanged. The orchestrator publishes the reply with a bounded machine-readable marker (`<!-- feedback-reconcile op=feedback pr=<n> pre=<PRE> post=<POST> root=<root> -->`), where the encoded root must equal the reply's linked root, then performs bounded read-only marker convergence against complete reply evidence, including resolved threads, after either a successful or uncertain write response. Zero visibility and explicitly transient read errors may retry; duplicate, structural, deterministic, or exhausted evidence produces `feedback-reply` without a second write.
+
+After a push the orchestrator polls the Pull Request head within a conservative bound (up to five reads with attempt-scaled backoff — two-second increments, ~20 seconds in total by default, injectable in tests): a temporary observation of the acquired revision is propagation, explicitly transient read errors may retry, and a different third-party SHA fails closed without a second push. A `blocked` result is typed by stage — `feedback-execution`, `feedback-publication`, `feedback-convergence`, `feedback-head-conflict`, `feedback-reply`, `feedback-reconciliation`, or `feedback-finalization` — and carries the published revision when publication already occurred. Public diagnostics stay classified and never include execution summaries, paths, credentials, or stack traces.
+
+A later `run feedback` or Dispatcher dispatch must never adopt a published state: matching current-intent evidence returns typed `feedback-reconciliation` before Agent, checkout, push, or reply. Only the explicit `reconcile feedback` command (including a no-flag invocation) may adopt uniquely proven current-intent evidence matching the observed head and direct-child parent relation. Historical markers for other roots neither satisfy nor poison the selected intent; a strict unique legacy reply remains reconcile-only when the acquired revision is supplied. Reply-only completion additionally requires the supplied reply root to equal the selected intent. An adopted completion reports the independently verified revision and reconciles managed labels; cleanup failures are reflected in the typed result rather than silently ignored.
 
 ## Automated verification
 

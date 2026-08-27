@@ -8,6 +8,7 @@ import {
 } from "./architecture-review-automation.ts";
 import type { BranchUpdateAutomationPorts } from "./branch-update-automation.ts";
 import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
+import type { FeedbackThreadReply, FeedbackReviewState } from "./feedback-reconciliation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
 import type { PrdImplementationAutomationPorts } from "./prd-implementation-automation.ts";
 import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
@@ -25,6 +26,38 @@ type Execute = (
   arguments_: readonly string[],
   environment?: Readonly<Record<string, string>>,
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+
+function missingLabel(error: unknown): boolean {
+  const details = [
+    error instanceof Error ? error.message : "",
+    typeof error === "object" && error !== null && "stderr" in error ? String(error.stderr) : "",
+  ].join("\n");
+  return /label does not exist/iu.test(details) && /\bHTTP 404\b/iu.test(details);
+}
+
+function createLabelMutations(
+  execute: Execute,
+  environment?: Readonly<Record<string, string>>,
+) {
+  return {
+    async add(workItemNumber: number, label: string): Promise<void> {
+      await execute("gh", [
+        "api", "--method", "POST", `repos/{owner}/{repo}/issues/${workItemNumber}/labels`,
+        "-f", `labels[]=${label}`,
+      ], environment);
+    },
+    async remove(workItemNumber: number, label: string): Promise<void> {
+      try {
+        await execute("gh", [
+          "api", "--method", "DELETE",
+          `repos/{owner}/{repo}/issues/${workItemNumber}/labels/${encodeURIComponent(label)}`,
+        ], environment);
+      } catch (error) {
+        if (!missingLabel(error)) throw error;
+      }
+    },
+  };
+}
 
 function reviewBody(review: PublishedReview): string {
   return review.summary;
@@ -124,6 +157,7 @@ export function createAutomationDispatchGithubPort(options: {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
+  const labels = createLabelMutations(execute, options.environment);
   const listOpenByLabel = async (kind: "pr" | "issue", label: string): Promise<readonly ListedWorkItem[]> => {
     const { stdout } = await execute(
       "gh", [kind, "list", "--state", "open", "--label", label, "--json", "number,labels", "--limit", "100"], options.environment,
@@ -134,7 +168,7 @@ export function createAutomationDispatchGithubPort(options: {
     const { stdout } = await execute("gh", [
       "api", "graphql", "-f",
       "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number} subIssues(first:1){totalCount}}}}",
-      "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`,
+      "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${issueNumber}`,
       "--jq", ".data.repository.issue",
     ], options.environment);
     const shape = JSON.parse(stdout) as IssueCommandShape | null;
@@ -167,7 +201,7 @@ export function createAutomationDispatchGithubPort(options: {
       const { stdout } = await execute("gh", [
         "api", "graphql", "-f",
         "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){labels(first:50){nodes{name} pageInfo{hasNextPage}} parent{number} blockedBy(first:100){nodes{number state} pageInfo{hasNextPage}}}}}",
-        "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`,
+        "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${issueNumber}`,
         "--jq", ".data.repository.issue",
       ], options.environment);
       const issue = JSON.parse(stdout) as {
@@ -185,10 +219,10 @@ export function createAutomationDispatchGithubPort(options: {
       };
     },
     async addIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
+      await labels.add(issueNumber, label);
     },
     async removeIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
+      await labels.remove(issueNumber, label);
     },
     async addPromotionDiagnostic(issueNumber) {
       await execute("gh", [
@@ -221,22 +255,35 @@ export function createAutomationDispatchGithubPort(options: {
       }
       const pullRequestCommands = [...pullRequests.values()].flatMap((pullRequest) => {
         const labels = pullRequest.labels.map(({ name }) => name);
-        return (["update-branch", "implement", "review"] as const)
-          .filter((operation) => labels.includes(`agent:${operation}`))
-          .map((operation) => ({
-            number: pullRequest.number,
-            operation,
-            identity: `pull-request:${pullRequest.number}`,
-            labels,
-          }));
+        const triggeredOperations = (["update-branch", "implement", "review"] as const)
+          .filter((operation) => labels.includes(`agent:${operation}`));
+        // Progress labels outlive their trigger once acquisition begins. Keep a
+        // single canonical PR command for inspection when no trigger remains;
+        // its eligibility is necessarily non-runnable.
+        const operations = triggeredOperations.length > 0
+          ? triggeredOperations
+          : labels.some((label) => label === "agent:in-progress" || label === "agent:blocked")
+            ? ["unknown" as const]
+            : [];
+        return operations.map((operation) => ({
+          number: pullRequest.number,
+          operation,
+          identity: `pull-request:${pullRequest.number}`,
+          labels,
+        }));
       });
       // Issue-side triggers are only meaningful on top-level Work Items, so
       // shape reads happen before routing: sub-issues are driven by their
-      // parent PRD and never become dispatch commands themselves.
-      const triggers = (labels: readonly string[]) =>
-        labels.includes("agent:implement") || labels.includes("agent:to-issues");
+      // parent PRD and never become dispatch commands themselves. State-only
+      // Work Items are retained for read-only inspection, but remain
+      // ineligible for dispatch.
+      const relevantLabels = (labels: readonly string[]) =>
+        labels.includes("agent:implement") ||
+        labels.includes("agent:to-issues") ||
+        labels.includes("agent:in-progress") ||
+        labels.includes("agent:blocked");
       const candidates = await Promise.all([...issues.values()]
-        .filter((issue) => triggers(issue.labels.map(({ name }) => name)))
+        .filter((issue) => relevantLabels(issue.labels.map(({ name }) => name)))
         .sort((left, right) => left.number - right.number)
         .map(async (issue) => {
           const labels = issue.labels.map(({ name }) => name);
@@ -258,7 +305,7 @@ export function createAutomationDispatchGithubPort(options: {
         if (shape.parent !== null) return [];
         const commands: {
           readonly number: number;
-          readonly operation: "implement-issue" | "implement-prd" | "split-prd";
+          readonly operation: "implement-issue" | "implement-prd" | "split-prd" | "unknown";
           readonly identity: string;
           readonly labels: readonly string[];
         }[] = [];
@@ -275,6 +322,12 @@ export function createAutomationDispatchGithubPort(options: {
         if (labels.includes("agent:to-issues") && !labels.includes("agent:implement")) {
           commands.push({ number, operation: "split-prd", identity: `prd:${number}`, labels });
         }
+        // A state-only Work Item has already consumed its trigger. Its
+        // originating operation cannot be reconstructed safely, so preserve
+        // only its Work Item identity for read-only inspection.
+        if (commands.length === 0 && (labels.includes("agent:in-progress") || labels.includes("agent:blocked"))) {
+          commands.push({ number, operation: "unknown", identity: `issue:${number}`, labels });
+        }
         return commands;
       });
       return [...pullRequestCommands, ...issueCommands];
@@ -290,11 +343,76 @@ export function createAutomationGithubPort(options: {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
   });
+  const labels = createLabelMutations(execute, options.environment);
   const readHeadSha = async () => {
     const { stdout } = await execute("gh", [
       "api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha",
     ], options.environment);
     return stdout.trim();
+  };
+  const readFeedbackThreadReplies = async (pullRequestNumber: number): Promise<{
+    readonly threads: readonly {
+      readonly isResolved: boolean;
+      readonly rootCommentId: string;
+      readonly replies: readonly FeedbackThreadReply[];
+    }[];
+  }> => {
+    const { stdout } = await execute("gh", [
+      "api", "graphql", "-f",
+      "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:100){pageInfo{hasNextPage} nodes{id replyTo{id} body createdAt}}}}}}}",
+      "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${pullRequestNumber}`,
+      "--jq", ".data.repository.pullRequest.reviewThreads",
+    ], options.environment);
+    const reviewThreads = JSON.parse(stdout) as {
+      readonly pageInfo: { readonly hasNextPage: boolean };
+      readonly nodes: readonly {
+        readonly isResolved: boolean;
+        readonly comments: {
+          readonly pageInfo: { readonly hasNextPage: boolean };
+          readonly nodes: readonly {
+            readonly id: string;
+            readonly replyTo: { readonly id: string } | null;
+            readonly body: string;
+            readonly createdAt: string;
+          }[];
+        };
+      }[];
+    };
+    if (reviewThreads.pageInfo.hasNextPage || reviewThreads.nodes.some(({ comments }) => comments.pageInfo.hasNextPage)) {
+      throw new Error(`Pull Request #${pullRequestNumber} feedback evidence is truncated`);
+    }
+    return {
+      threads: reviewThreads.nodes.map((thread) => {
+        const comments = new Map(thread.comments.nodes.map((comment) => [comment.id, comment]));
+        const roots = thread.comments.nodes.filter((comment) => comment.replyTo === null);
+        if (roots.length !== 1) throw new Error(`Pull Request #${pullRequestNumber} feedback thread root is unreadable`);
+        const root = roots[0]!;
+        const rootOf = (comment: typeof root): string => {
+          const visited = new Set<string>();
+          let current = comment;
+          while (current.replyTo !== null) {
+            if (visited.has(current.id)) throw new Error(`Pull Request #${pullRequestNumber} feedback reply chain is cyclic`);
+            visited.add(current.id);
+            const parent = comments.get(current.replyTo.id);
+            if (parent === undefined) throw new Error(`Pull Request #${pullRequestNumber} feedback reply chain is unreadable`);
+            current = parent;
+          }
+          return current.id;
+        };
+        return {
+          isResolved: thread.isResolved,
+          rootCommentId: root.id,
+          replies: thread.comments.nodes
+            .filter((comment) => comment.id !== root.id)
+            .map((comment) => {
+              if (rootOf(comment) !== root.id) throw new Error(`Pull Request #${pullRequestNumber} feedback reply belongs to another root`);
+              return { rootCommentId: root.id, replyCommentId: comment.id, body: comment.body, createdAt: comment.createdAt };
+            })
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.replyCommentId.localeCompare(right.replyCommentId))
+            .map(({ createdAt: _createdAt, ...reply }) => reply),
+        };
+      }),
+    };
   };
   return {
     async countOpenArchitectureReviewProposals() {
@@ -370,7 +488,7 @@ export function createAutomationGithubPort(options: {
         execute("gh", [
           "api", "graphql", "-f",
           "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number}}}}",
-          "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${issueNumber}`, "--jq", ".data.repository.issue.parent.number // empty",
+          "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${issueNumber}`, "--jq", ".data.repository.issue.parent.number // empty",
         ], options.environment),
       ]);
       const issue = JSON.parse(issueOutput) as {
@@ -443,10 +561,10 @@ export function createAutomationGithubPort(options: {
       return { branch: request.branch, pullRequestUrl: stdout.trim() };
     },
     async addIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--add-label", label], options.environment);
+      await labels.add(issueNumber, label);
     },
     async removeIssueLabel(issueNumber, label) {
-      await execute("gh", ["issue", "edit", String(issueNumber), "--remove-label", label], options.environment);
+      await labels.remove(issueNumber, label);
     },
     async addRefusalDiagnostic(issueNumber, reason) {
       // The issues comments endpoint carries both Issue and Pull Request
@@ -460,7 +578,7 @@ export function createAutomationGithubPort(options: {
     async addImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/implementation-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async addSplitBlockedDiagnostic(issueNumber, diagnostic) {
@@ -502,7 +620,7 @@ export function createAutomationGithubPort(options: {
     async addPrdImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Automation PRD implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}) while implementing sub-issue #${diagnostic.childNumber}. Local diagnostics are retained at .sandcastle/jobs/prd-implementation-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation PRD implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}) while implementing sub-issue #${diagnostic.childNumber}. Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async addChildFailureDiagnostic(childNumber, diagnostic) {
@@ -595,54 +713,66 @@ export function createAutomationGithubPort(options: {
     },
     async readPullRequest(pullRequestNumber) {
       const { stdout } = await execute("gh", [
-        "pr", "view", String(pullRequestNumber), "--json",
-        "number,state,isDraft,baseRepository,headRepository,baseRefName,headRefName,headRefOid,labels",
+        "api", `repos/{owner}/{repo}/pulls/${pullRequestNumber}`,
       ], options.environment);
       const pullRequest = JSON.parse(stdout) as {
         readonly number: number;
         readonly state: string;
-        readonly isDraft: boolean;
-        readonly baseRepository: { readonly nameWithOwner: string } | null;
-        readonly headRepository: { readonly nameWithOwner: string } | null;
-        readonly baseRefName: string;
-        readonly headRefName: string;
-        readonly headRefOid: string;
+        readonly draft: boolean;
+        readonly base: {
+          readonly ref: string;
+          readonly repo: { readonly full_name: string } | null;
+        };
+        readonly head: {
+          readonly ref: string;
+          readonly sha: string;
+          readonly repo: { readonly full_name: string } | null;
+        };
         readonly labels: readonly { readonly name: string }[];
       };
-      if (pullRequest.baseRepository === null || pullRequest.headRepository === null) {
+      if (pullRequest.base.repo === null || pullRequest.head.repo === null) {
         throw new Error(`Pull Request #${pullRequestNumber} repository identity is unavailable`);
       }
       return {
         number: pullRequest.number,
-        state: pullRequest.state,
-        isDraft: pullRequest.isDraft,
-        baseRepository: pullRequest.baseRepository.nameWithOwner,
-        headRepository: pullRequest.headRepository.nameWithOwner,
-        baseRefName: pullRequest.baseRefName,
-        headRefName: pullRequest.headRefName,
-        headSha: pullRequest.headRefOid,
+        state: pullRequest.state.toUpperCase(),
+        isDraft: pullRequest.draft,
+        baseRepository: pullRequest.base.repo.full_name,
+        headRepository: pullRequest.head.repo.full_name,
+        baseRefName: pullRequest.base.ref,
+        headRefName: pullRequest.head.ref,
+        headSha: pullRequest.head.sha,
         labels: pullRequest.labels.map(({ name }) => name),
       };
     },
     async readUnresolvedReviewThreads(pullRequestNumber) {
       const { stdout } = await execute("gh", [
         "api", "graphql", "-f",
-        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:50){nodes{id path line originalLine body author{login}}}}}}}}",
-        "-f", "owner={owner}", "-f", "repo={repo}", "-F", `number=${pullRequestNumber}`,
-        "--jq", ".data.repository.pullRequest.reviewThreads.nodes",
+        "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:100){pageInfo{hasNextPage} nodes{id path line originalLine body author{login}}}}}}}}",
+        "-F", "owner={owner}", "-F", "repo={repo}", "-F", `number=${pullRequestNumber}`,
+        "--jq", ".data.repository.pullRequest.reviewThreads",
       ], options.environment);
-      const threads = JSON.parse(stdout) as readonly {
-        readonly isResolved: boolean;
-        readonly comments: { readonly nodes: readonly {
-          readonly id: string;
-          readonly path: string | null;
-          readonly line: number | null;
-          readonly originalLine: number | null;
-          readonly body: string;
-          readonly author: { readonly login: string } | null;
-        }[] };
-      }[];
-      return threads.filter(({ isResolved }) => !isResolved).flatMap(({ comments }) => comments.nodes.map((comment) => ({
+      const reviewThreads = JSON.parse(stdout) as {
+        readonly pageInfo: { readonly hasNextPage: boolean };
+        readonly nodes: readonly {
+          readonly isResolved: boolean;
+          readonly comments: {
+            readonly pageInfo: { readonly hasNextPage: boolean };
+            readonly nodes: readonly {
+              readonly id: string;
+              readonly path: string | null;
+              readonly line: number | null;
+              readonly originalLine: number | null;
+              readonly body: string;
+              readonly author: { readonly login: string } | null;
+            }[];
+          };
+        }[];
+      };
+      if (reviewThreads.pageInfo.hasNextPage || reviewThreads.nodes.some(({ comments }) => comments.pageInfo.hasNextPage)) {
+        throw new Error(`Pull Request #${pullRequestNumber} review thread evidence is truncated`);
+      }
+      return reviewThreads.nodes.filter(({ isResolved }) => !isResolved).flatMap(({ comments }) => comments.nodes.map((comment) => ({
         commentId: comment.id,
         ...(comment.path === null ? {} : { path: comment.path }),
         ...(comment.line === null && comment.originalLine === null ? {} : { line: comment.line ?? comment.originalLine! }),
@@ -651,15 +781,15 @@ export function createAutomationGithubPort(options: {
       })));
     },
     async addPullRequestLabel(pullRequestNumber, label) {
-      await execute("gh", ["pr", "edit", String(pullRequestNumber), "--add-label", label], options.environment);
+      await labels.add(pullRequestNumber, label);
     },
     async removePullRequestLabel(pullRequestNumber, label) {
-      await execute("gh", ["pr", "edit", String(pullRequestNumber), "--remove-label", label], options.environment);
+      await labels.remove(pullRequestNumber, label);
     },
     async addFeedbackBlockedDiagnostic(pullRequestNumber, diagnostic) {
       await execute("gh", [
         "pr", "comment", String(pullRequestNumber), "--body",
-        `Automation feedback implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/feedback-${diagnostic.jobId}. Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation feedback implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async addBlockedDiagnostic(pullRequestNumber, diagnostic) {
@@ -676,7 +806,7 @@ export function createAutomationGithubPort(options: {
     async addBranchUpdateBlockedDiagnostic(pullRequestNumber, diagnostic) {
       await execute("gh", [
         "pr", "comment", String(pullRequestNumber), "--body",
-        `Automation branch update is blocked (${diagnostic.reason}; job ${diagnostic.jobId}; ${diagnostic.summary}). Local diagnostics are retained at .sandcastle/jobs/branch-update-${diagnostic.jobId}. Remove agent:blocked, restore agent:update-branch, then retry.`,
+        `Automation branch update is blocked (${diagnostic.reason}; job ${diagnostic.jobId}). Remove agent:blocked, restore agent:update-branch, then retry.`,
       ], options.environment);
     },
     async publishReview(request) {
@@ -720,6 +850,23 @@ export function createAutomationGithubPort(options: {
         "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/comments/${commentId}/replies`,
         "--method", "POST", "-f", `body=${request.reply.body}`,
       ], options.environment);
+    },
+    async readCurrentUnresolvedFeedback(pullRequestNumber): Promise<FeedbackReviewState> {
+      const all = await readFeedbackThreadReplies(pullRequestNumber);
+      return {
+        unresolvedRootCommentIds: all.threads.filter((thread) => !thread.isResolved).map((thread) => thread.rootCommentId),
+        replies: all.threads.filter((thread) => !thread.isResolved).flatMap((thread) => thread.replies),
+      };
+    },
+    async readFeedbackReplies(pullRequestNumber) {
+      return (await readFeedbackThreadReplies(pullRequestNumber)).threads.flatMap((thread) => thread.replies);
+    },
+    async readCommitParent(sha) {
+      const { stdout } = await execute("gh", [
+        "api", `repos/{owner}/{repo}/commits/${sha}`, "--jq", ".parents[0].sha // empty",
+      ], options.environment);
+      const parent = stdout.trim();
+      return parent.length === 0 ? undefined : parent;
     },
   };
 }

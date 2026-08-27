@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import { GithubCliPort, GithubVerificationError } from "../.sandcastle/github-cli.js";
 
+const target429Error = Object.assign(new Error("Command failed: gh issue view 429 --json number"), {
+  stderr: "HTTP 403: Resource not accessible by integration",
+});
+
+const target500Error = Object.assign(new Error("Command failed: gh pr view 500 --json headRefOid"), {
+  stderr: "HTTP 404 Not Found",
+});
+
 const encodedFile = (filename: string, previousFilename = ""): string =>
   Buffer.from(JSON.stringify([filename, previousFilename])).toString("base64");
 
@@ -224,5 +232,104 @@ describe("Sandcastle GitHub CLI adapter", () => {
       expectedHeadSha: "abc123",
       allowsAutomationChanges: false,
     })).rejects.toThrow(/spawn gh ENOENT/u);
+  });
+  it("fails fast without a rate-limit retry when a target number is 429", async () => {
+    const execute = vi.fn().mockRejectedValue(target429Error);
+    const waits: number[] = [];
+    const github = new GithubCliPort(execute, async (milliseconds) => { waits.push(milliseconds); });
+
+    await expect(github.verifyImplementation({
+      issueNumber: 103,
+      branch: "sandcastle/issue-103",
+      expectedHeadSha: "abc123",
+      allowsAutomationChanges: false,
+    })).rejects.toBe(target429Error);
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("fails fast when a deterministic 404 command names Pull Request 500", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: '{"nameWithOwner":"example/repo","defaultBranchRef":{"name":"master"}}\n', stderr: "" })
+      .mockRejectedValue(target500Error);
+    const waits: number[] = [];
+    const github = new GithubCliPort(execute, async (milliseconds) => { waits.push(milliseconds); });
+
+    await expect(github.verifyImplementation({
+      issueNumber: 103,
+      branch: "sandcastle/issue-103",
+      expectedHeadSha: "abc123",
+      allowsAutomationChanges: false,
+    })).rejects.toBe(target500Error);
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([]);
+  });
+
+  it("uses one dedicated rate-limit wait instead of transport retry delays", async () => {
+    const rateLimited = new Error("gh exited");
+    Object.assign(rateLimited, { stderr: "HTTP 403: API rate limit exceeded" });
+    const execute = vi.fn()
+      .mockRejectedValueOnce(rateLimited)
+      .mockResolvedValueOnce({ stdout: '{"nameWithOwner":"example/repo","defaultBranchRef":{"name":"master"}}\n', stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{
+        number: 103,
+        url: "https://example.test/pull/103",
+        state: "OPEN",
+        isDraft: true,
+        baseRefName: "master",
+        headRefName: "sandcastle/issue-103",
+        headRefOid: "abc123",
+        body: "Closes #103",
+      }]), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "103\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${encodedFile("packages/example/src/index.ts")}\n`, stderr: "" });
+    const waits: number[] = [];
+    const github = new GithubCliPort(execute, async (milliseconds) => { waits.push(milliseconds); });
+
+    await expect(github.verifyImplementation({
+      issueNumber: 103,
+      branch: "sandcastle/issue-103",
+      expectedHeadSha: "abc123",
+      allowsAutomationChanges: false,
+    })).resolves.toEqual({ number: 103, url: "https://example.test/pull/103", headSha: "abc123" });
+
+    expect(waits).toEqual([60_000]);
+  });
+  it("performs the dedicated rate-limit retry after transport retries exhaust", async () => {
+    const transportFailure = new Error("network reset");
+    const rateLimited = new Error("gh exited");
+    Object.assign(rateLimited, { stderr: "HTTP 429 Too Many Requests" });
+    const execute = vi.fn()
+      .mockRejectedValueOnce(transportFailure)
+      .mockRejectedValueOnce(transportFailure)
+      .mockRejectedValueOnce(rateLimited)
+      .mockResolvedValueOnce({ stdout: '{"nameWithOwner":"example/repo","defaultBranchRef":{"name":"master"}}\n', stderr: "" })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{
+        number: 103,
+        url: "https://example.test/pull/103",
+        state: "OPEN",
+        isDraft: true,
+        baseRefName: "master",
+        headRefName: "sandcastle/issue-103",
+        headRefOid: "abc123",
+        body: "Closes #103",
+      }]), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "103\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "abc123\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${encodedFile("packages/example/src/index.ts")}\n`, stderr: "" });
+    const waits: number[] = [];
+    const github = new GithubCliPort(execute, async (milliseconds) => { waits.push(milliseconds); });
+
+    await expect(github.verifyImplementation({
+      issueNumber: 103,
+      branch: "sandcastle/issue-103",
+      expectedHeadSha: "abc123",
+      allowsAutomationChanges: false,
+    })).resolves.toEqual({ number: 103, url: "https://example.test/pull/103", headSha: "abc123" });
+
+    expect(waits).toEqual([100, 250, 60_000]);
   });
 });

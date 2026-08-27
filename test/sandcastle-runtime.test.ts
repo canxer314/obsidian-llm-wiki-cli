@@ -16,6 +16,18 @@ const sandboxConfig = readFileSync(
   resolve(root, ".sandcastle/sandbox.ts"),
   "utf8",
 );
+const feedbackWorker = readFileSync(
+  resolve(root, ".sandcastle/feedback-worker.ts"),
+  "utf8",
+);
+const implementationWorker = readFileSync(
+  resolve(root, ".sandcastle/implementation-worker.ts"),
+  "utf8",
+);
+const prdImplementationWorker = readFileSync(
+  resolve(root, ".sandcastle/prd-implementation-worker.ts"),
+  "utf8",
+);
 const smokeTest = readFileSync(
   resolve(root, ".sandcastle/smoke-test.sh"),
   "utf8",
@@ -59,6 +71,9 @@ describe("Sandcastle Docker runtime", () => {
     expect(sandboxModule.sandboxHooksFor("implementer")).toBe(
       sandboxModule.sandboxHooks,
     );
+    expect(sandboxModule.sandboxHooksFor("feedback")).toBe(
+      sandboxModule.repairSandboxHooks,
+    );
     for (const role of ["reviewer", "merger"] as const) {
       expect(sandboxModule.sandboxHooksFor(role)).toBe(
         sandboxModule.repairSandboxHooks,
@@ -74,12 +89,43 @@ describe("Sandcastle Docker runtime", () => {
     expect(sandboxConfig).toMatch(/sha256sum --check --status/);
     expect(sandboxConfig).toMatch(/cmp --silent/);
     expect(sandboxConfig).toMatch(/timeout --signal=TERM --kill-after=10s 240s/);
+    const revisionCompatibleInstall = sandboxModule.sandboxHooksFor("feedback")
+      .sandbox.onSandboxReady[0];
+    expect(revisionCompatibleInstall).toEqual({
+      command: expect.stringContaining("npm ci --prefer-offline"),
+      timeoutMs: 270_000,
+    });
+    for (const argument of [
+      "cmp --silent - /home/agent/.npm/sandcastle-runtime.versions",
+      "timeout --signal=TERM --kill-after=10s 240s",
+      "--fetch-timeout=30000",
+      "--fetch-retries=1",
+      "--fetch-retry-mintimeout=1000",
+      "--fetch-retry-maxtimeout=5000",
+    ]) {
+      expect(revisionCompatibleInstall?.command).toContain(argument);
+    }
+    expect(revisionCompatibleInstall?.command).not.toContain(
+      "sha256sum --check",
+    );
     expect(sandboxModule.repairSandboxHooks.sandbox.onSandboxReady[0]?.command)
       .toContain("npm ci --prefer-offline");
     expect(sandboxModule.repairSandboxHooks.sandbox.onSandboxReady[0]?.command)
       .toContain("--fetch-timeout=30000");
     expect(sandboxConfig).not.toMatch(/command:\s*["']npm install["']/);
     expect(sandboxConfig).not.toMatch(/copyToWorktree[\s\S]*node_modules/);
+  });
+
+  it("wires feedback to the revision-compatible install profile", () => {
+    expect(feedbackWorker).toContain('sandboxHooksFor("feedback")');
+    expect(feedbackWorker).not.toContain('sandboxHooksFor("implementer")');
+  });
+
+  it("keeps current-base implementation workers on the strict install profile", () => {
+    for (const worker of [implementationWorker, prdImplementationWorker]) {
+      expect(worker).toContain('sandboxHooksFor("implementer")');
+      expect(worker).not.toContain('sandboxHooksFor("feedback")');
+    }
   });
 
   it("excludes private configuration from Docker build contexts", () => {

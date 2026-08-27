@@ -10,7 +10,7 @@
     "build": "npm run build -w @llm-wiki/vault-contracts && npm run build -w @llm-wiki/obsidian-vault-bridge",
     "sandcastle": "node --experimental-strip-types .sandcastle/main.ts",
     "typecheck": "npm run typecheck --workspaces --if-present && tsc -p .sandcastle/tsconfig.json",
-    "test": "vitest run --exclude '.claude/**'",
+    "test": "vitest run --exclude '.claude/**' --exclude '.sandcastle/jobs/**' --exclude '.sandcastle/worktrees/**' --exclude '.sandcastle/recovered/**'",
     "test:watch": "vitest",
     "test:sandbox": "bash .sandcastle/smoke-test.sh"
   },

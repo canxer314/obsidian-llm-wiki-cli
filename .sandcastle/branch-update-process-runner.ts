@@ -1,9 +1,84 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn, type ChildProcess } from "node:child_process";
 
 import type { BranchUpdateResult } from "./branch-update-automation.ts";
+import { runJobWithTimeout } from "./job-timeout.ts";
 
-const executeFile = promisify(execFile);
+const GIT_COMMAND_TIMEOUT_MILLISECONDS = 5 * 60 * 1000;
+const GIT_COMMAND_GRACE_MILLISECONDS = 10 * 1000;
+
+type Execute = (
+  file: string,
+  arguments_: readonly string[],
+) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+
+function outputOf(child: ChildProcess): Promise<{ readonly stdout: string; readonly stderr: string; readonly code: number | null }> {
+  return new Promise((resolveOutput, reject) => {
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer | string) => { stdout += String(chunk); });
+    child.stderr?.on("data", (chunk: Buffer | string) => { stderr += String(chunk); });
+    child.once("error", reject);
+    child.once("close", (code) => resolveOutput({ stdout, stderr, code }));
+  });
+}
+
+function groupExit(pid: number): Promise<void> {
+  return new Promise((resolveExit) => {
+    const check = () => {
+      try {
+        process.kill(-pid, 0);
+        setTimeout(check, 10);
+      } catch {
+        resolveExit();
+      }
+    };
+    check();
+  });
+}
+
+function createProcessGitExecutor(options: {
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly timeoutMilliseconds?: number;
+  readonly graceMilliseconds?: number;
+}): Execute {
+  return async (file, arguments_) => {
+    let output: Promise<{ readonly stdout: string; readonly stderr: string; readonly code: number | null }> | undefined;
+    const result = await runJobWithTimeout({
+      start: () => {
+        const child = spawn(file, [...arguments_], {
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+          ...(options.environment === undefined ? {} : { env: options.environment }),
+        });
+        output = outputOf(child);
+        if (child.pid === undefined) {
+          void output.catch(() => undefined);
+          throw new Error(`spawn ${file} ENOENT`);
+        }
+        return {
+          pid: child.pid,
+          exited: output.then(() => undefined),
+          groupExited: groupExit(child.pid),
+        };
+      },
+      timeoutMilliseconds: options.timeoutMilliseconds ?? GIT_COMMAND_TIMEOUT_MILLISECONDS,
+      graceMilliseconds: options.graceMilliseconds ?? GIT_COMMAND_GRACE_MILLISECONDS,
+      kill: process.kill,
+      wait: async (milliseconds) => new Promise((resolveWait) => {
+        const timer = setTimeout(resolveWait, milliseconds);
+        timer.unref();
+      }),
+    });
+    if (result.status === "timed-out") {
+      throw new Error(`${file} command timed out after ${options.timeoutMilliseconds ?? GIT_COMMAND_TIMEOUT_MILLISECONDS}ms`);
+    }
+    const completed = await output!;
+    if (completed.code !== 0) {
+      throw new Error(`${file} exited with ${completed.code ?? "signal"}: ${completed.stderr}`);
+    }
+    return completed;
+  };
+}
 
 export interface BranchUpdateResolver {
   resolve(request: {
@@ -17,17 +92,13 @@ export interface BranchUpdateResolver {
 }
 
 export function createProcessBranchUpdater(options: {
-  readonly execute?: (
-    file: string,
-    arguments_: readonly string[],
-  ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+  readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
   readonly resolver?: BranchUpdateResolver;
+  readonly timeoutMilliseconds?: number;
+  readonly graceMilliseconds?: number;
 }) {
-  const execute = options.execute ?? (async (file, arguments_) => {
-    const result = await executeFile(file, [...arguments_], options.environment === undefined ? {} : { env: options.environment });
-    return { stdout: result.stdout, stderr: result.stderr };
-  });
+  const execute = options.execute ?? createProcessGitExecutor(options);
   return {
     async update(request: {
       readonly pullRequestNumber: number;

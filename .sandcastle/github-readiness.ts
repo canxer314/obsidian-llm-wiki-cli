@@ -1,18 +1,22 @@
 import { spawn } from "node:child_process";
 
-// The GitHub-capable Agent Session container environment carries only the
-// transport and Claude/API allowlists plus GH_TOKEN (#267), and the Agent
-// image installs the GitHub CLI. The readiness probe runs `gh auth status`
-// — a read-only token validation against api.github.com — inside that exact
-// content-addressed image and environment, so a missing or invalid container
-// credential fails closed before the Dispatcher acquires any Automation Work
-// Item for an operation that can start a GitHub-capable Agent, and before any
-// trigger, `agent:in-progress`, `agent:blocked`, or diagnostic mutation.
+// The GitHub-capable Agent Session container environment carries the
+// transport and Claude/API allowlists plus GH_TOKEN and the operator git
+// identity (#267, #269), and the Agent image installs the GitHub CLI. The
+// readiness probe runs `gh auth status` — a read-only token validation
+// against api.github.com — inside that exact content-addressed image and
+// environment, so a missing or invalid container credential fails closed
+// before the Dispatcher acquires any Automation Work Item for an operation
+// that can start a GitHub-capable Agent, and before any trigger,
+// `agent:in-progress`, `agent:blocked`, or diagnostic mutation.
 
 export type GithubAgentReadiness = "ready" | "missing" | "invalid" | "unavailable";
 
 export interface GithubAgentReadinessProcess {
-  run(args: readonly string[]): Promise<{
+  run(
+    args: readonly string[],
+    environment: Readonly<Record<string, string>>,
+  ): Promise<{
     readonly stdout: string;
     readonly stderr: string;
     readonly exitCode: number | null;
@@ -22,6 +26,10 @@ export interface GithubAgentReadinessProcess {
 const MISSING_AUTHENTICATION = /not logged in|no oauth token|no token (?:found|configured)/iu;
 const PROBE_INCAPABLE = /dial tcp|connection refused|could not resolve|timed out|no such file|command not found|unable to find image/i;
 const INVALID_AUTHENTICATION = /\b401\b|bad credentials|authentication failed|unauthorized|invalid token|could not fetch scopes/iu;
+
+function probeEnvironment(environment: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+  return { ...environment, HOME: "/home/agent" };
+}
 
 function probeArguments(options: {
   readonly image: string;
@@ -40,9 +48,9 @@ function probeArguments(options: {
     "host",
     "--user",
     `${options.uid}:${options.gid}`,
-    ...Object.entries({ ...options.environment, HOME: "/home/agent" }).flatMap(([name, value]) => [
+    ...Object.keys(probeEnvironment(options.environment)).flatMap((name) => [
       "-e",
-      `${name}=${value}`,
+      name,
     ]),
     "--entrypoint",
     "sh",
@@ -53,9 +61,12 @@ function probeArguments(options: {
 }
 
 export const githubAgentReadinessProcess: GithubAgentReadinessProcess = {
-  run: (args) =>
+  run: (args, environment) =>
     new Promise((resolvePromise, reject) => {
-      const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("docker", args, {
+        env: environment,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
       let stdout = "";
       let stderr = "";
       child.stdout?.on("data", (chunk: Buffer | string) => { stdout += String(chunk); });
@@ -89,7 +100,10 @@ export async function githubAgentReadiness(options: {
   if (options.environment.GH_TOKEN === undefined) return "missing";
   let result: { readonly stdout: string; readonly stderr: string; readonly exitCode: number | null };
   try {
-    result = await (options.process ?? githubAgentReadinessProcess).run(probeArguments(options));
+    result = await (options.process ?? githubAgentReadinessProcess).run(
+      probeArguments(options),
+      probeEnvironment(options.environment),
+    );
   } catch {
     return "unavailable";
   }
@@ -112,6 +126,16 @@ export class GithubAgentReadinessError extends Error {
     this.name = "GithubAgentReadinessError";
     this.classification = classification;
   }
+}
+
+export async function inspectGithubAgentReadiness(options: {
+  readonly image: string;
+  readonly uid: number;
+  readonly gid: number;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly process?: GithubAgentReadinessProcess;
+}): Promise<{ readonly githubAgentReadiness: GithubAgentReadiness }> {
+  return { githubAgentReadiness: await githubAgentReadiness(options) };
 }
 
 export async function requireGithubAgentReadiness(options: {

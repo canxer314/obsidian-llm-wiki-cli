@@ -53,6 +53,7 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     })).rejects.toThrow("Feedback implementation execution timed out");
 
     const descendant = Number(readFileSync(marker, "utf8"));
@@ -60,7 +61,7 @@ describe("feedback implementation process runner", () => {
     await expectDescendantDead(descendant);
   });
 
-  it("runs the feedback worker to completion", async () => {
+  it("runs the feedback worker to completion and returns the reply intent", async () => {
     const process = child(530);
     const start = vi.fn().mockReturnValue(process);
     const runner = createProcessFeedbackImplementer({
@@ -73,16 +74,23 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     });
-    process.stdout?.emit("data", `${JSON.stringify({ status: "implemented" })}\n`);
+    process.stdout?.emit("data", `${JSON.stringify({
+      status: "implemented",
+      reply: { rootCommentId: "PRRC_root", body: "Fixed." },
+    })}\n`);
     process.emit("close", 0);
 
-    await expect(implemented).resolves.toBeUndefined();
+    await expect(implemented).resolves.toEqual({
+      reply: { rootCommentId: "PRRC_root", body: "Fixed." },
+    });
     expect(start).toHaveBeenCalledWith([
       "224",
       "feature/feedback",
       revision,
       "/jobs/feedback-224",
+      "PRRC_root",
       "implementer-model",
     ]);
   });
@@ -112,6 +120,7 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     })).rejects.toThrow("Feedback implementation execution timed out");
 
     expect(kill).toHaveBeenNthCalledWith(1, -531, "SIGTERM");
@@ -130,6 +139,7 @@ describe("feedback implementation process runner", () => {
       branch: "feature/feedback",
       revision,
       checkoutPath: "/jobs/feedback-224",
+      rootCommentId: "PRRC_root",
     });
     process.stderr?.emit("data", "Sandbox unavailable");
     process.emit("close", 1);

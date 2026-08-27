@@ -1,10 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createAutomationDispatchGithubPort } from "../.sandcastle/automation-github.js";
+import { inspectAutomationCommands } from "../.sandcastle/automation-inspector.js";
 
 describe("Automation Command GitHub discovery", () => {
   const emptyIssueListings = ["agent:implement", "agent:to-issues", "agent:in-progress", "agent:blocked"]
     .map(() => ({ stdout: "[]", stderr: "" }));
+
+  it("mutates queue labels through stable REST endpoints", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await port.addIssueLabel(5, "agent:implement");
+    await port.removeIssueLabel(5, "agent:queued/next");
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "--method", "POST", "repos/{owner}/{repo}/issues/5/labels",
+      "-f", "labels[]=agent:implement",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/5/labels/agent%3Aqueued%2Fnext",
+    ], undefined);
+  });
 
   it("discovers trusted Pull Request trigger and state labels with one shared identity", async () => {
     const execute = vi.fn()
@@ -20,6 +37,7 @@ describe("Automation Command GitHub discovery", () => {
       { number: 19, operation: "update-branch", identity: "pull-request:19", labels: ["agent:update-branch", "agent:blocked"] },
       { number: 20, operation: "implement", identity: "pull-request:20", labels: ["agent:implement", "agent:review"] },
       { number: 20, operation: "review", identity: "pull-request:20", labels: ["agent:implement", "agent:review"] },
+      { number: 21, operation: "unknown", identity: "pull-request:21", labels: ["agent:in-progress"] },
     ]);
     expect(execute).toHaveBeenCalledTimes(9);
     expect(execute).toHaveBeenNthCalledWith(1, "gh", ["pr", "list", "--state", "open", "--label", "agent:update-branch", "--json", "number,labels", "--limit", "100"], undefined);
@@ -44,6 +62,49 @@ describe("Automation Command GitHub discovery", () => {
       stderr: "",
     };
   }
+
+  it("surfaces standalone blocked and stale Issue and PRD states to read-only inspection", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 40, labels: [{ name: "agent:in-progress" }] }]),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 39, labels: [{ name: "agent:blocked" }] }]),
+        stderr: "",
+      });
+    execute
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 41, labels: [{ name: "agent:in-progress" }] }]),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 42, labels: [{ name: "agent:blocked" }] }]),
+        stderr: "",
+      })
+      .mockResolvedValueOnce(shapeResponse(null, 0))
+      .mockResolvedValueOnce(shapeResponse(null, 2));
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    const result = await inspectAutomationCommands({
+      github: port,
+      scheduler: { activeJobs: async () => [] },
+    });
+
+    expect(result.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ number: 39, operation: "unknown", identity: "pull-request:39", eligibility: "blocked" }),
+      expect.objectContaining({ number: 40, operation: "unknown", identity: "pull-request:40", eligibility: "stale-in-progress" }),
+      expect.objectContaining({ number: 41, operation: "unknown", identity: "issue:41", eligibility: "stale-in-progress" }),
+      expect.objectContaining({ number: 42, operation: "unknown", identity: "issue:42", eligibility: "blocked" }),
+    ]));
+    expect(execute).toHaveBeenCalledTimes(11);
+    expect(execute.mock.calls.every(([, arguments_]) => !arguments_.includes("--method"))).toBe(true);
+  });
 
   it("discovers Issue implementation, PRD implementation, and PRD split commands with per-Work-Item identities", async () => {
     const execute = vi.fn();
@@ -83,6 +144,33 @@ describe("Automation Command GitHub discovery", () => {
     // Sub-issues and Issues with an open Pull Request are not discovered.
     expect(execute).toHaveBeenNthCalledWith(15, "gh", ["pr", "list", "--head", "sandcastle/issue-31", "--state", "open", "--json", "number", "--limit", "1"], undefined);
     expect(execute).toHaveBeenNthCalledWith(16, "gh", ["pr", "list", "--head", "sandcastle/issue-34", "--state", "open", "--json", "number", "--limit", "1"], undefined);
+  });
+
+  it("passes repository template fields to the graphql shape read as -F so gh expands them", async () => {
+    // gh 2.46 expands {owner}/{repo} placeholders in -F (typed) field values
+    // but not in -f (raw) field values; dispatch discovery failed closed with
+    // "Could not resolve to a Repository with the name '{owner}/{repo}'" when
+    // the shape read passed them as -f.
+    const execute = vi.fn();
+    for (const listing of emptyPullRequestListings()) execute.mockResolvedValueOnce(listing);
+    execute
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{ number: 31, labels: [{ name: "agent:implement" }] }]), stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce(shapeResponse(null, 0))
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await expect(port.listCommands()).resolves.toEqual([
+      { number: 31, operation: "implement-issue", identity: "issue:31", labels: ["agent:implement"] },
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(10, "gh", [
+      "api", "graphql", "-f",
+      "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{number} subIssues(first:1){totalCount}}}}",
+      "-F", "owner={owner}", "-F", "repo={repo}", "-F", "number=31",
+      "--jq", ".data.repository.issue",
+    ], undefined);
   });
 
   it("discovers only the implementation command when an Issue carries both implementation and split triggers", async () => {

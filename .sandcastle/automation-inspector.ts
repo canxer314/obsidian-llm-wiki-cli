@@ -28,7 +28,9 @@ export async function inspectAutomationCommands(ports: {
         identity: command.identity,
         eligibility,
         ...(eligibility === "blocked"
-          ? { retry: `remove agent:blocked, restore ${commandTriggerLabel(command)}, then retry` }
+          ? command.operation === "unknown"
+            ? { retry: "inspect the Automation Work Item and restore the appropriate trigger manually before retrying" }
+            : { retry: `remove agent:blocked, restore ${commandTriggerLabel(command)}, then retry` }
           : eligibility === "stale-in-progress" || eligibility === "inconsistent"
             ? { retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }
             : {}),

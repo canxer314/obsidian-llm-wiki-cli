@@ -10,6 +10,11 @@ const PROXY_ENVIRONMENT_NAMES = [
   "no_proxy",
 ] as const;
 
+const TRANSPORT_ENVIRONMENT_NAMES = [
+  ...PROXY_ENVIRONMENT_NAMES,
+  "NODE_EXTRA_CA_CERTS",
+] as const;
+
 const CLAUDE_ENVIRONMENT_WHITELIST = new Set([
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_AUTH_TOKEN",
@@ -17,7 +22,7 @@ const CLAUDE_ENVIRONMENT_WHITELIST = new Set([
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-  ...PROXY_ENVIRONMENT_NAMES,
+  ...TRANSPORT_ENVIRONMENT_NAMES,
 ]);
 
 const PRIVATE_ENVIRONMENT_WHITELIST = new Set([
@@ -175,7 +180,6 @@ function requireConfiguration(environment: Readonly<Record<string, string>>): vo
   ) {
     missing.push("ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY");
   }
-  if (environment.GH_TOKEN === undefined) missing.push("GH_TOKEN");
   if (missing.length > 0) {
     throw new SandcastleConfigError(
       `Missing required Sandcastle configuration: ${missing.join(", ")}`,

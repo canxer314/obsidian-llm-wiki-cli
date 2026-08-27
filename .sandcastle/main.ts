@@ -11,8 +11,9 @@ import {
 } from "./docker-image.ts";
 import { createAutomationGithubPort, createAutomationDispatchGithubPort } from "./automation-github.ts";
 import { dispatchAutomationCommands } from "./automation-dispatch.ts";
+import { createAutomationOperationDispatch } from "./operation-dispatch.ts";
 import {
-  githubAgentReadiness,
+  inspectGithubAgentReadiness,
   githubAgentReadinessRequiredFor,
   requireGithubAgentReadiness,
 } from "./github-readiness.ts";
@@ -36,7 +37,7 @@ import {
   removeExpiredReviewArtifacts,
 } from "./review-artifacts.ts";
 import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
-import { runFeedbackImplementationAutomationCommand } from "./feedback-implementation-automation.ts";
+import { createFeedbackImplementationEntry } from "./feedback-implementation-ports.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
 import { createProcessImplementer } from "./implementation-process-runner.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
@@ -105,6 +106,28 @@ try {
     implementerModel: startup.models.implementer,
   });
   const feedbackImplementer = createProcessFeedbackImplementer({ model: startup.models.implementer });
+  const feedbackEntry = createFeedbackImplementationEntry((pullRequestNumber) => ({
+    github: automationGithub,
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    publisher: createFeedbackPublisher({
+      sourceRepositoryPath: repositoryPath,
+      gitEnvironment: startup.childEnvironments.git,
+    }),
+    implementer: feedbackImplementer,
+    lease: {
+      acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+        root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+        pullRequestNumber: currentPullRequestNumber,
+      }),
+    },
+    createJobId: () => jobId,
+  }));
   const prdSplitter = createProcessPrdSplitter({ model: startup.models.planner });
   const runIssueImplementation = (issueNumber: number) => runImplementationAutomationCommand({ issueNumber }, {
     github: {
@@ -185,6 +208,79 @@ try {
     publisher: automationGithub,
     createJobId: () => jobId,
   });
+  const runReview = (pullRequestNumber: number) => runReviewAutomationCommand({ pullRequestNumber }, {
+    github: {
+      ...automationGithub,
+      publishReview: (request) => automationGithub.publishReview(request),
+    },
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    reviewer: {
+      review: async ({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads }) => {
+        const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId });
+        return reviewer.review({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads, model: startup.models.reviewer, artifactDirectory });
+      },
+    },
+    publisher: reviewPublisher,
+    lease: {
+      acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+        root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+        pullRequestNumber: currentPullRequestNumber,
+      }),
+    },
+    createJobId: () => jobId,
+  });
+  const runBranchUpdate = (pullRequestNumber: number) => runBranchUpdateAutomationCommand({ pullRequestNumber }, {
+    github: automationGithub,
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `branch-update-${jobId}`),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    updater,
+    lease: {
+      acquire: (currentPullRequestNumber) => acquirePullRequestLease({
+        root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
+        pullRequestNumber: currentPullRequestNumber,
+      }),
+    },
+    createJobId: () => jobId,
+  });
+  const runArchitectureReview = () => runArchitectureReviewAutomationCommand({
+    github: automationGithub,
+    checkout: createTargetCheckout({
+      sourceRepositoryPath: repositoryPath,
+      checkoutRoot: resolve(import.meta.dirname, "jobs"),
+      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `architecture-review-${jobId}`),
+      gitEnvironment: startup.childEnvironments.git,
+      dependencyEnvironment: startup.childEnvironments.dependencies,
+    }),
+    reviewer: {
+      review: async ({ revision, checkoutPath, priorProposals }) => {
+        const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId });
+        return architectureReviewer.review({ revision, checkoutPath, priorProposals, model: startup.models.planner, artifactDirectory });
+      },
+    },
+    publisher: automationGithub,
+    createJobId: () => jobId,
+  });
+  const operationDispatch = createAutomationOperationDispatch({
+    updateBranch: runBranchUpdate,
+    implementFeedback: (pullRequestNumber) => feedbackEntry.runDispatcher(pullRequestNumber),
+    directFeedback: (pullRequestNumber) => feedbackEntry.runDirect(pullRequestNumber),
+    implementIssue: runIssueImplementation,
+    implementPrd: runPrdImplementation,
+    splitPrd: runPrdSplit,
+    review: runReview,
+    promoteQueue: () => runQueuePromotionScan({ github: dispatchGithub }),
+    architectureReview: runArchitectureReview,
+  });
   const result = await runAutomationCli(process.argv.slice(2), {
     preflight: async (operation) => {
       await requireSandcastleImage({ image: startup.imageName });
@@ -207,114 +303,19 @@ try {
       });
       return { status: "image-ready" } as const;
     },
-    runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runReviewAutomationCommand({ pullRequestNumber }, {
-      github: {
-        ...automationGithub,
-        publishReview: (request) => automationGithub.publishReview(request),
-      },
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      reviewer: {
-        review: async ({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads }) => {
-          const artifactDirectory = await createReviewArtifactDirectory({
-            root: artifactRoot,
-            jobId,
-          });
-          return reviewer.review({
-            pullRequestNumber: currentPullRequestNumber,
-            branch,
-            revision,
-            checkoutPath,
-            reviewThreads,
-            model: startup.models.reviewer,
-            artifactDirectory,
-          });
-        },
-      },
-      publisher: reviewPublisher,
-      lease: {
-        acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-          root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-          pullRequestNumber: currentPullRequestNumber,
-        }),
-      },
-      createJobId: () => jobId,
-    })),
+    runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => operationDispatch.review(pullRequestNumber)),
     setupLabels: async () => {
       await dispatchGithub.ensureLabels();
       return { status: "labels-ready" } as const;
     },
-    architectureReview: () => withScheduler(ARCHITECTURE_REVIEW_IDENTITY, () => runArchitectureReviewAutomationCommand({
-      github: automationGithub,
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        createJobDirectory: () => resolve(import.meta.dirname, "jobs", `architecture-review-${jobId}`),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      reviewer: {
-        review: async ({ revision, checkoutPath, priorProposals }) => {
-          const artifactDirectory = await createReviewArtifactDirectory({
-            root: artifactRoot,
-            jobId,
-          });
-          return architectureReviewer.review({
-            revision,
-            checkoutPath,
-            priorProposals,
-            model: startup.models.planner,
-            artifactDirectory,
-          });
-        },
-      },
-      publisher: automationGithub,
-      createJobId: () => jobId,
-    })),
-    runUpdate: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runBranchUpdateAutomationCommand({ pullRequestNumber }, {
-      github: automationGithub,
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        createJobDirectory: () => resolve(import.meta.dirname, "jobs", `branch-update-${jobId}`),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      updater,
-      lease: {
-        acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-          root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-          pullRequestNumber: currentPullRequestNumber,
-        }),
-      },
-      createJobId: () => jobId,
-    })),
-    runFeedback: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => runFeedbackImplementationAutomationCommand({ pullRequestNumber }, {
-      github: automationGithub,
-      checkout: createTargetCheckout({
-        sourceRepositoryPath: repositoryPath,
-        checkoutRoot: resolve(import.meta.dirname, "jobs"),
-        createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
-        gitEnvironment: startup.childEnvironments.git,
-        dependencyEnvironment: startup.childEnvironments.dependencies,
-      }),
-      publisher: createFeedbackPublisher({
-        sourceRepositoryPath: repositoryPath,
-        gitEnvironment: startup.childEnvironments.git,
-      }),
-      implementer: feedbackImplementer,
-      lease: {
-        acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-          root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-          pullRequestNumber: currentPullRequestNumber,
-        }),
-      },
-      createJobId: () => jobId,
-    })),
+    architectureReview: () => withScheduler(ARCHITECTURE_REVIEW_IDENTITY, () => operationDispatch.architectureReview()),
+    runUpdate: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => operationDispatch.updateBranch(pullRequestNumber)),
+    runFeedback: (pullRequestNumber, reconcile) => withScheduler(
+      `pull-request:${pullRequestNumber}`,
+      () => reconcile === undefined
+        ? operationDispatch.directFeedback(pullRequestNumber)
+        : feedbackEntry.runDirect(pullRequestNumber, reconcile),
+    ),
     dispatch: (concurrency) => dispatchAutomationCommands({
       concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
     }, {
@@ -329,105 +330,37 @@ try {
         }),
       },
       promotion: {
-        scan: () => runQueuePromotionScan({ github: dispatchGithub }),
+        scan: operationDispatch.promoteQueue,
       },
-      run: async (command) => {
-        if (command.operation === "update-branch") {
-          await runBranchUpdateAutomationCommand({ pullRequestNumber: command.number }, {
-            github: automationGithub,
-            checkout: createTargetCheckout({
-              sourceRepositoryPath: repositoryPath,
-              checkoutRoot: resolve(import.meta.dirname, "jobs"),
-              createJobDirectory: () => resolve(import.meta.dirname, "jobs", `branch-update-${jobId}`),
-              gitEnvironment: startup.childEnvironments.git,
-              dependencyEnvironment: startup.childEnvironments.dependencies,
-            }),
-            updater,
-            lease: {
-              acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-                root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-                pullRequestNumber: currentPullRequestNumber,
-              }),
-            },
-            createJobId: () => jobId,
-          });
-          return;
-        }
-        if (command.operation === "implement") {
-          await runFeedbackImplementationAutomationCommand({ pullRequestNumber: command.number }, {
-            github: automationGithub,
-            checkout: createTargetCheckout({
-              sourceRepositoryPath: repositoryPath,
-              checkoutRoot: resolve(import.meta.dirname, "jobs"),
-              createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
-              gitEnvironment: startup.childEnvironments.git,
-              dependencyEnvironment: startup.childEnvironments.dependencies,
-            }),
-            publisher: createFeedbackPublisher({ sourceRepositoryPath: repositoryPath, gitEnvironment: startup.childEnvironments.git }),
-            implementer: feedbackImplementer,
-            lease: {
-              acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-                root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-                pullRequestNumber: currentPullRequestNumber,
-              }),
-            },
-            createJobId: () => jobId,
-          });
-          return;
-        }
-        if (command.operation === "implement-issue") {
-          await runIssueImplementation(command.number);
-          return;
-        }
-        if (command.operation === "implement-prd") {
-          await runPrdImplementation(command.number);
-          return;
-        }
-        if (command.operation === "split-prd") {
-          await runPrdSplit(command.number);
-          return;
-        }
-        await runReviewAutomationCommand({ pullRequestNumber: command.number }, {
-          github: {
-            ...automationGithub,
-            publishReview: (request) => automationGithub.publishReview(request),
-          },
-          checkout: createTargetCheckout({
-            sourceRepositoryPath: repositoryPath,
-            checkoutRoot: resolve(import.meta.dirname, "jobs"),
-            gitEnvironment: startup.childEnvironments.git,
-            dependencyEnvironment: startup.childEnvironments.dependencies,
-          }),
-          reviewer: {
-            review: async ({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads }) => {
-              const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId });
-              return reviewer.review({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads, model: startup.models.reviewer, artifactDirectory });
-            },
-          },
-          publisher: reviewPublisher,
-          lease: {
-            acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-              root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-              pullRequestNumber: currentPullRequestNumber,
-            }),
-          },
-          createJobId: () => jobId,
-        });
-      },
+      run: operationDispatch.run,
     }),
-    inspect: async () => ({
-      imageReadiness: await sandcastleImageReadiness({ image: startup.imageName }),
-      githubAgentReadiness: await githubAgentReadiness({
+    inspect: async () => {
+      const readiness = await inspectGithubAgentReadiness({
         image: startup.imageName,
         uid: startup.uid,
         gid: startup.gid,
         environment: startup.childEnvironments.githubAgent,
-      }),
-      ...await inspectAutomationCommands({ github: dispatchGithub, scheduler }),
-    }),
-    runImplement: (issueNumber) => runIssueImplementation(issueNumber),
-    runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => runPrdImplementation(issueNumber)),
-    runSplit: (issueNumber) => runPrdSplit(issueNumber),
+      });
+      const activeJobs = await scheduler.activeJobs();
+      const imageReadiness = await sandcastleImageReadiness({ image: startup.imageName });
+      if (readiness.githubAgentReadiness !== "ready") {
+        return {
+          imageReadiness,
+          ...readiness,
+          commandInspection: "unavailable" as const,
+          activeJobs,
+        };
+      }
+      return {
+        imageReadiness,
+        ...readiness,
+        commandInspection: "available" as const,
+        ...await inspectAutomationCommands({ github: dispatchGithub, scheduler: { activeJobs: async () => activeJobs } }),
+      };
+    },
+    runImplement: (issueNumber) => withScheduler(`issue:${issueNumber}`, () => operationDispatch.implementIssue(issueNumber)),
+    runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => operationDispatch.implementPrd(issueNumber)),
+    runSplit: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => operationDispatch.splitPrd(issueNumber)),
   });
   console.log(JSON.stringify(result));
 } catch (error) {

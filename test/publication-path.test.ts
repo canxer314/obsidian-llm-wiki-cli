@@ -45,6 +45,21 @@ interface PublicationFixture {
   readonly pullRequestHead: string;
 }
 
+const FIXTURE_HTTPS_REMOTE = "https://github.com/example/publication-fixture.git";
+
+async function executeFixtureCommand(
+  remotePath: string,
+  file: string,
+  arguments_: readonly string[],
+  environment?: Readonly<Record<string, string>>,
+): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  const actualArguments = arguments_.map((argument) =>
+    argument === FIXTURE_HTTPS_REMOTE ? remotePath : argument,
+  );
+  const result = await executeFile(file, [...actualArguments], { env: environment });
+  return { stdout: result.stdout, stderr: result.stderr };
+}
+
 // Builds the production topology with plain local repositories: a bare remote
 // standing in for GitHub, a contributor clone holding the Pull Request branch,
 // and the trusted operator repository whose origin points at the remote. The
@@ -67,6 +82,9 @@ async function createFixture(): Promise<PublicationFixture> {
   await git(["-C", contributorPath, "remote", "add", "origin", remotePath]);
   await git(["-C", contributorPath, "push", "origin", "master"]);
   await git(["clone", remotePath, trustedPath]);
+  await git(["-C", trustedPath, "config", "user.name", "Trusted Publication Source"]);
+  await git(["-C", trustedPath, "config", "user.email", "trusted-publication@example.test"]);
+  await git(["-C", trustedPath, "remote", "set-url", "origin", FIXTURE_HTTPS_REMOTE]);
   await git(["-C", contributorPath, "switch", "-c", "pr-branch"]);
   await writeFile(join(contributorPath, "pr-change.txt"), "pull request head\n");
   const pullRequestHead = await commitAll(contributorPath, "pull request change");
@@ -74,9 +92,9 @@ async function createFixture(): Promise<PublicationFixture> {
   return { root, remotePath, contributorPath, trustedPath, masterRevision, pullRequestHead };
 }
 
-// Wires the checkout exactly as main.ts does: the narrow child environments
-// carry git/npm resolution, with no mock anywhere in the git layer.
-function createFixtureCheckout(trustedPath: string): {
+// Wires Target Checkout with the production HTTPS remote shape while mapping
+// only fixture-network traffic to the local bare repository.
+function createFixtureCheckout(trustedPath: string, remotePath: string): {
   readonly environments: ReturnType<typeof createChildEnvironments>;
   readonly checkout: ReturnType<typeof createTargetCheckout>;
 } {
@@ -85,6 +103,7 @@ function createFixtureCheckout(trustedPath: string): {
     environments,
     checkout: createTargetCheckout({
       sourceRepositoryPath: trustedPath,
+      execute: (file, arguments_, environment) => executeFixtureCommand(remotePath, file, arguments_, environment),
       gitEnvironment: environments.git,
       dependencyEnvironment: environments.dependencies,
     }),
@@ -104,8 +123,9 @@ describe("publication path (real git repositories)", () => {
   };
 
   it("checks out a Pull Request head that exists only on the remote", { timeout: 60_000 }, async () => {
-    const { trustedPath, pullRequestHead } = await fixture();
-    const { checkout } = createFixtureCheckout(trustedPath);
+    const fixture = await createFixture();
+    const { trustedPath, pullRequestHead, remotePath } = fixture;
+    const { checkout } = createFixtureCheckout(trustedPath, remotePath);
 
     const head = await checkout.withCheckout(
       { pullRequestNumber: 1, revision: pullRequestHead },
@@ -123,14 +143,16 @@ describe("publication path (real git repositories)", () => {
     await writeFile(join(contributorPath, "master-change.txt"), "master moved\n");
     await commitAll(contributorPath, "master advances");
     await git(["-C", contributorPath, "push", "origin", "master"]);
-    const { checkout, environments } = createFixtureCheckout(trustedPath);
+    const { checkout, environments } = createFixtureCheckout(trustedPath, remotePath);
     const updater = createProcessBranchUpdater({ environment: environments.git });
 
     const result = await checkout.withCheckout(
       { pullRequestNumber: 1, revision: pullRequestHead },
       async (checkoutPath) => {
-        await git(["-C", checkoutPath, "config", "user.name", "Fixture Updater"]);
-        await git(["-C", checkoutPath, "config", "user.email", "updater@fixture.example"]);
+        expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.name"]))
+          .toBe("Trusted Publication Source");
+        expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.email"]))
+          .toBe("trusted-publication@example.test");
         return updater.update({
           pullRequestNumber: 1,
           branch: "pr-branch",
@@ -150,8 +172,8 @@ describe("publication path (real git repositories)", () => {
   });
 
   it("installs dependencies in the checkout with the narrow child environment", { timeout: 60_000 }, async () => {
-    const { trustedPath, masterRevision } = await fixture();
-    const { environments, checkout } = createFixtureCheckout(trustedPath);
+    const { trustedPath, masterRevision, remotePath } = await fixture();
+    const { environments, checkout } = createFixtureCheckout(trustedPath, remotePath);
     expect(environments.dependencies).toMatchObject({
       HOME: process.env.HOME,
       PATH: process.env.PATH,

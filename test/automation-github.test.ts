@@ -5,6 +5,48 @@ import { createAutomationGithubPort } from "../.sandcastle/automation-github.js"
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
 describe("automation GitHub port", () => {
+  it("mutates Issue and Pull Request labels through the shared REST endpoint", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const environment = { GH_TOKEN: "test-token" };
+    const github = createAutomationGithubPort({ execute, environment });
+
+    await github.addIssueLabel(221, "agent:implement");
+    await github.removeIssueLabel(221, "agent:to-issues/next");
+    await github.addPullRequestLabel(220, "agent:in-progress");
+    await github.removePullRequestLabel(220, "agent:review/next");
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "--method", "POST", "repos/{owner}/{repo}/issues/221/labels",
+      "-f", "labels[]=agent:implement",
+    ], environment);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/221/labels/agent%3Ato-issues%2Fnext",
+    ], environment);
+    expect(execute).toHaveBeenNthCalledWith(3, "gh", [
+      "api", "--method", "POST", "repos/{owner}/{repo}/issues/220/labels",
+      "-f", "labels[]=agent:in-progress",
+    ], environment);
+    expect(execute).toHaveBeenNthCalledWith(4, "gh", [
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/220/labels/agent%3Areview%2Fnext",
+    ], environment);
+    expect(execute.mock.calls).not.toContainEqual(expect.arrayContaining(["gh", expect.arrayContaining(["edit"])]));
+  });
+
+  it("treats only an explicitly absent REST label as an idempotent removal", async () => {
+    const missing = Object.assign(new Error("request failed"), {
+      stderr: "gh: Label does not exist (HTTP 404)",
+    });
+    const execute = vi.fn()
+      .mockRejectedValueOnce(missing)
+      .mockRejectedValueOnce(Object.assign(new Error("request failed"), {
+        stderr: "gh: Not Found (HTTP 404)",
+      }));
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.removeIssueLabel(221, "agent:blocked")).resolves.toBeUndefined();
+    await expect(github.removePullRequestLabel(220, "agent:review")).rejects.toThrow("request failed");
+  });
+
   it("publishes ordered self-contained child Issues with parent and dependency relationships", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: "https://example.test/issues/301\n", stderr: "" })
@@ -191,6 +233,47 @@ describe("automation GitHub port", () => {
     })).rejects.toThrow("head changed before Pull Request publication");
   });
 
+  it("publishes only classified blocked diagnostics without worker summaries", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+    const summary = "worker stdout: token=secret; command failed";
+
+    await github.addImplementationBlockedDiagnostic(221, {
+      reason: "implementation-execution",
+      jobId: "job-221",
+      summary,
+    });
+    await github.addPrdImplementationBlockedDiagnostic(226, {
+      reason: "prd-implementation-execution",
+      jobId: "job-226",
+      summary,
+      childNumber: 301,
+    });
+    await github.addFeedbackBlockedDiagnostic(224, {
+      reason: "feedback-execution",
+      jobId: "job-224",
+      summary,
+    });
+    await github.addBranchUpdateBlockedDiagnostic(220, {
+      reason: "branch-update-execution",
+      jobId: "job-220",
+      summary,
+    });
+
+    const bodies = execute.mock.calls.map(([, arguments_]) => {
+      const bodyIndex = (arguments_ as readonly string[]).indexOf("--body");
+      return (arguments_ as readonly string[])[bodyIndex + 1];
+    });
+    expect(bodies).toEqual([
+      "Automation implementation is blocked (implementation-execution; job job-221). Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation feedback implementation is blocked (feedback-execution; job job-224). Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation branch update is blocked (branch-update-execution; job job-220). Remove agent:blocked, restore agent:update-branch, then retry.",
+    ]);
+    expect(bodies).not.toContain(expect.stringContaining(summary));
+    expect(bodies).not.toContain(expect.stringContaining(".sandcastle/jobs"));
+  });
+
   it("publishes classified PRD implementation and child failure diagnostics", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
@@ -205,7 +288,7 @@ describe("automation GitHub port", () => {
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
       "issue", "comment", "226", "--body",
-      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226; push failed) while implementing sub-issue #301. Local diagnostics are retained at .sandcastle/jobs/prd-implementation-job-226. Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "issue", "comment", "301", "--body",
@@ -218,12 +301,17 @@ describe("automation GitHub port", () => {
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
           number: 220,
-          state: "OPEN",
-          isDraft: true,
-          baseRepository: { nameWithOwner: "canxer314/obsidian-llm-wiki-cli" },
-          headRepository: { nameWithOwner: "canxer314/obsidian-llm-wiki-cli" },
-          headRefName: "feedback-branch",
-          headRefOid: revision,
+          state: "open",
+          draft: true,
+          base: {
+            ref: "master",
+            repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+          },
+          head: {
+            ref: "feedback-branch",
+            sha: revision,
+            repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+          },
           labels: [{ name: "agent:review" }],
         }),
         stderr: "",
@@ -245,6 +333,7 @@ describe("automation GitHub port", () => {
       isDraft: true,
       baseRepository: "canxer314/obsidian-llm-wiki-cli",
       headRepository: "canxer314/obsidian-llm-wiki-cli",
+      baseRefName: "master",
       headRefName: "feedback-branch",
       headSha: revision,
       labels: ["agent:review"],
@@ -261,8 +350,7 @@ describe("automation GitHub port", () => {
     await github.markPullRequestReady(220);
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
-      "pr", "view", "220", "--json",
-      "number,state,isDraft,baseRepository,headRepository,baseRefName,headRefName,headRefOid,labels",
+      "api", "repos/{owner}/{repo}/pulls/220",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "pr", "view", "220", "--json", "headRefOid", "--jq", ".headRefOid",
@@ -280,6 +368,64 @@ describe("automation GitHub port", () => {
       "-f", "comments[0][side]=RIGHT",
       "-f", "comments[0][body]=Incorrect boundary.",
     ], undefined);
+  });
+
+  it("preserves fork repository identity from the stable Pull Request REST shape", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        number: 220,
+        state: "open",
+        draft: true,
+        base: {
+          ref: "master",
+          repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+        },
+        head: {
+          ref: "contributor-branch",
+          sha: revision,
+          repo: { full_name: "contributor/obsidian-llm-wiki-cli" },
+        },
+        labels: [{ name: "agent:review" }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readPullRequest(220)).resolves.toEqual({
+      number: 220,
+      state: "OPEN",
+      isDraft: true,
+      baseRepository: "canxer314/obsidian-llm-wiki-cli",
+      headRepository: "contributor/obsidian-llm-wiki-cli",
+      baseRefName: "master",
+      headRefName: "contributor-branch",
+      headSha: revision,
+      labels: ["agent:review"],
+    });
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "api", "repos/{owner}/{repo}/pulls/220",
+    ], undefined);
+  });
+
+  it("fails closed when the Pull Request REST shape has no repository identity", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        number: 220,
+        state: "open",
+        draft: true,
+        base: {
+          ref: "master",
+          repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+        },
+        head: { ref: "deleted-fork-branch", sha: revision, repo: null },
+        labels: [{ name: "agent:review" }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readPullRequest(220))
+      .rejects.toThrow("Pull Request #220 repository identity is unavailable");
   });
 
   it("reads an ordinary Issue whose REST pull request field is null", async () => {
@@ -513,5 +659,171 @@ describe("automation GitHub port", () => {
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "api", "repos/{owner}/{repo}/pulls/220/comments/12345/replies", "--method", "POST", "-f", "body=Fixed.",
     ], undefined);
+  });
+
+  it("reads complete unresolved feedback evidence with root-bound replies", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply", replyTo: { id: "PRRC_root" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCurrentUnresolvedFeedback(224)).resolves.toEqual({
+      unresolvedRootCommentIds: ["PRRC_root"],
+      replies: [{ rootCommentId: "PRRC_root", replyCommentId: "PRRC_reply", body: "Fixed." }],
+    });
+
+    expect(execute).toHaveBeenCalledWith("gh", expect.arrayContaining([
+      "api", "graphql", "-f", expect.stringContaining("pageInfo"), "-F", "number=224",
+    ]), undefined);
+  });
+
+  it("keeps nested replies attached to their immutable root", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply", replyTo: { id: "PRRC_root" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+              { id: "PRRC_nested", replyTo: { id: "PRRC_reply" }, body: "Follow-up", createdAt: "2026-01-03T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCurrentUnresolvedFeedback(224)).resolves.toEqual({
+      unresolvedRootCommentIds: ["PRRC_root"],
+      replies: [
+        { rootCommentId: "PRRC_root", replyCommentId: "PRRC_reply", body: "Fixed." },
+        { rootCommentId: "PRRC_root", replyCommentId: "PRRC_nested", body: "Follow-up" },
+      ],
+    });
+  });
+
+  it("reads marker evidence from a resolved feedback thread", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: true,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply", replyTo: { id: "PRRC_root" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readFeedbackReplies(224)).resolves.toEqual([
+      { rootCommentId: "PRRC_root", replyCommentId: "PRRC_reply", body: "Fixed." },
+    ]);
+  });
+  it("fails closed when feedback thread or comment evidence is truncated", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: true },
+        nodes: [],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCurrentUnresolvedFeedback(224)).rejects.toThrow("truncated");
+  });
+
+  it("reads only review replies with their immutable root identities", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        pageInfo: { hasNextPage: false },
+        nodes: [{
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root1", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply1", replyTo: { id: "PRRC_root1" }, body: "Fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }, {
+          isResolved: false,
+          comments: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "PRRC_root2", replyTo: null, body: "Fix", createdAt: "2026-01-01T00:00:00Z" },
+              { id: "PRRC_reply2", replyTo: { id: "PRRC_root2" }, body: "Also fixed.", createdAt: "2026-01-02T00:00:00Z" },
+            ],
+          },
+        }],
+      }),
+      stderr: "",
+    });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readFeedbackReplies(224)).resolves.toEqual([
+      { rootCommentId: "PRRC_root1", replyCommentId: "PRRC_reply1", body: "Fixed." },
+      { rootCommentId: "PRRC_root2", replyCommentId: "PRRC_reply2", body: "Also fixed." },
+    ]);
+
+    expect(execute).toHaveBeenCalledWith("gh", expect.arrayContaining([
+      "api", "graphql", "-f",
+      expect.stringContaining("replyTo"),
+      "-F", "number=224",
+    ]), undefined);
+  });
+
+  it("reads the first parent of a commit or reports none", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "\n", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await expect(github.readCommitParent("b".repeat(40))).resolves.toBe(revision);
+    await expect(github.readCommitParent("c".repeat(40))).resolves.toBeUndefined();
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "repos/{owner}/{repo}/commits/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "--jq", ".parents[0].sha // empty",
+    ], undefined);
+  });
+
+  it("publishes classified feedback blocked diagnostics without worker summaries", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute });
+
+    await github.addFeedbackBlockedDiagnostic(224, {
+      reason: "feedback-convergence",
+      jobId: "job-224",
+      summary: "worker stdout: token=secret; push failed",
+    });
+
+    const body = execute.mock.calls[0]![1]!.find((argument, index, arguments_) => arguments_[index - 1] === "--body");
+    expect(body).toContain("feedback-convergence");
+    expect(body).toContain("job-224");
+    expect(body).not.toContain("secret");
+    expect(body).not.toContain("push failed");
   });
 });
