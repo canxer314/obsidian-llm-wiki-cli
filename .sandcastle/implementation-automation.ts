@@ -96,21 +96,6 @@ export async function runImplementationAutomationCommand(
   }
   activeIssueNumbers.add(issue.number);
   try {
-    const existing = await ports.github.findReusableImplementation?.({
-      issueNumber: issue.number,
-      branch,
-    });
-    if (existing?.status === "pull-request") {
-      return { status: "implemented", branch: existing.branch, pullRequestUrl: existing.pullRequestUrl };
-    }
-    if (existing?.status === "branch") {
-      const result = await ports.github.publishExistingImplementation?.({
-        issueNumber: issue.number,
-        branch: existing.branch,
-      });
-      if (result !== undefined) return { status: "implemented", ...result };
-      throw new Error(`Implementation branch ${existing.branch} requires publication recovery`);
-    }
     // Business preflight refusal (#219 story 17): remove the trigger and
     // explain on the Automation Work Item, without agent:blocked, so an
     // inapplicable request does not re-refuse every dispatch round.
@@ -124,8 +109,6 @@ export async function runImplementationAutomationCommand(
     const currentIssue = await ports.github.readIssue(issue.number);
     const currentReason = refusal(currentIssue);
     if (currentReason !== undefined) {
-      await ports.github.removeIssueLabel(issue.number, "agent:implement");
-      await ports.github.addRefusalDiagnostic?.(issue.number, currentReason);
       return { status: "refused", reason: currentReason };
     }
     if (currentIssue.baseRevision !== issue.baseRevision) {
@@ -154,6 +137,21 @@ export async function runImplementationAutomationCommand(
         claimedIssue.labels.includes("agent:blocked")
       ) {
         throw new Error(`Issue #${issue.number} changed while implementation was being acquired`);
+      }
+      const existing = await ports.github.findReusableImplementation?.({
+        issueNumber: issue.number,
+        branch,
+      });
+      if (existing?.status === "pull-request") {
+        return { status: "implemented", branch: existing.branch, pullRequestUrl: existing.pullRequestUrl };
+      }
+      if (existing?.status === "branch") {
+        const published = await ports.github.publishExistingImplementation?.({
+          issueNumber: issue.number,
+          branch: existing.branch,
+        });
+        if (published !== undefined) return { status: "implemented", ...published };
+        throw new Error(`Implementation branch ${existing.branch} requires publication recovery`);
       }
       const result = await ports.checkout.withCheckout({
         pullRequestNumber: issue.number,

@@ -122,11 +122,43 @@ describe("implementation automation command", () => {
     expect(implementer.implement).toHaveBeenCalledOnce();
   });
 
-  it("reuses an existing upstream-equivalent Draft Pull Request after the trigger label was removed", async () => {
+  it("preserves inconsistent trigger and progress labels when acquisition changes", async () => {
+    const github = {
+      readIssue: vi.fn()
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValueOnce({
+          number: 221,
+          state: "OPEN",
+          labels: ["agent:implement", "agent:in-progress"],
+          baseRevision: revision,
+        }),
+      addIssueLabel: vi.fn(),
+      removeIssueLabel: vi.fn(),
+      addRefusalDiagnostic: vi.fn(),
+      findReusableImplementation: vi.fn(),
+    };
+
+    await expect(runImplementationAutomationCommand({ issueNumber: 221 }, {
+      github,
+      checkout: { withCheckout: vi.fn() },
+      implementer: { implement: vi.fn() },
+      lease,
+    })).resolves.toEqual({
+      status: "refused",
+      reason: "Issue #221 is already in progress",
+    });
+
+    expect(github.removeIssueLabel).not.toHaveBeenCalled();
+    expect(github.addRefusalDiagnostic).not.toHaveBeenCalled();
+    expect(github.findReusableImplementation).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse an existing implementation without a visible trigger command", async () => {
     const github = {
       readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: [], baseRevision: revision }),
       addIssueLabel: vi.fn().mockResolvedValue(undefined),
       removeIssueLabel: vi.fn().mockResolvedValue(undefined),
+      addRefusalDiagnostic: vi.fn().mockResolvedValue(undefined),
       findReusableImplementation: vi.fn().mockResolvedValue({
         status: "pull-request",
         branch: "sandcastle/issue-221",
@@ -142,28 +174,34 @@ describe("implementation automation command", () => {
       implementer,
       lease,
     })).resolves.toEqual({
-      status: "implemented",
-      branch: "sandcastle/issue-221",
-      pullRequestUrl: "https://example.test/pr/221",
+      status: "refused",
+      reason: "Issue #221 is not queued for implementation",
     });
 
-    expect(github.findReusableImplementation).toHaveBeenCalledWith({
-      issueNumber: 221,
-      branch: "sandcastle/issue-221",
-    });
+    expect(github.findReusableImplementation).not.toHaveBeenCalled();
     expect(checkout.withCheckout).not.toHaveBeenCalled();
     expect(implementer.implement).not.toHaveBeenCalled();
   });
 
-  it("publishes an existing deterministic branch without starting another Agent", async () => {
+  it("publishes an existing deterministic branch only after acquiring its visible command", async () => {
+    const events: string[] = [];
     const github = {
-      readIssue: vi.fn().mockResolvedValue({ number: 221, state: "OPEN", labels: [], baseRevision: revision }),
-      addIssueLabel: vi.fn(),
-      removeIssueLabel: vi.fn(),
-      findReusableImplementation: vi.fn().mockResolvedValue({ status: "branch", branch: "sandcastle/issue-221" }),
-      publishExistingImplementation: vi.fn().mockResolvedValue({
-        branch: "sandcastle/issue-221",
-        pullRequestUrl: "https://example.test/pr/221",
+      readIssue: vi.fn()
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValueOnce({ number: 221, state: "OPEN", labels: ["agent:implement"], baseRevision: revision })
+        .mockResolvedValue({ number: 221, state: "OPEN", labels: ["agent:in-progress"], baseRevision: revision }),
+      addIssueLabel: vi.fn(async (_number: number, label: string) => { events.push(`add:${label}`); }),
+      removeIssueLabel: vi.fn(async (_number: number, label: string) => { events.push(`remove:${label}`); }),
+      findReusableImplementation: vi.fn(async () => {
+        events.push("find-reusable");
+        return { status: "branch" as const, branch: "sandcastle/issue-221" };
+      }),
+      publishExistingImplementation: vi.fn(async () => {
+        events.push("publish-existing");
+        return {
+          branch: "sandcastle/issue-221",
+          pullRequestUrl: "https://example.test/pr/221",
+        };
       }),
     };
     const checkout = { withCheckout: vi.fn() };
@@ -180,10 +218,13 @@ describe("implementation automation command", () => {
       pullRequestUrl: "https://example.test/pr/221",
     });
 
-    expect(github.publishExistingImplementation).toHaveBeenCalledWith({
-      issueNumber: 221,
-      branch: "sandcastle/issue-221",
-    });
+    expect(events).toEqual([
+      "add:agent:in-progress",
+      "remove:agent:implement",
+      "find-reusable",
+      "publish-existing",
+      "remove:agent:in-progress",
+    ]);
     expect(checkout.withCheckout).not.toHaveBeenCalled();
     expect(implementer.implement).not.toHaveBeenCalled();
   });
