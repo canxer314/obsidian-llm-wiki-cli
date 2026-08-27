@@ -92,6 +92,25 @@ export function createTargetCheckout(options: {
         await git([
           "clone", "--no-checkout", "--no-local", remote, checkoutPath,
         ]);
+        // Independent clones do not inherit repository-local configuration.
+        // Copy the commit identity already required by Dispatcher startup into
+        // this disposable checkout, never to the user's global config. Read it
+        // with the same any-layer semantics as sandbox startup so global-only
+        // identities work identically, and fail closed when it is absent.
+        const name = (await git([
+          "-C", options.sourceRepositoryPath, "config", "--get", "user.name",
+        ])).stdout.trim();
+        const email = (await git([
+          "-C", options.sourceRepositoryPath, "config", "--get", "user.email",
+        ])).stdout.trim();
+        if (name.length === 0 || email.length === 0) {
+          throw new Error(
+            "The trusted repository checkout has no configured git user.name/user.email; " +
+            "Target Checkout commits require a git identity",
+          );
+        }
+        await git(["-C", checkoutPath, "config", "--local", "user.name", name]);
+        await git(["-C", checkoutPath, "config", "--local", "user.email", email]);
         await git(["-C", checkoutPath, "fetch", "--no-tags", "origin", request.revision]);
         const fetched = (await git(["-C", checkoutPath, "rev-parse", "FETCH_HEAD"])).stdout.trim();
         if (fetched !== request.revision) {

@@ -82,6 +82,8 @@ async function createFixture(): Promise<PublicationFixture> {
   await git(["-C", contributorPath, "remote", "add", "origin", remotePath]);
   await git(["-C", contributorPath, "push", "origin", "master"]);
   await git(["clone", remotePath, trustedPath]);
+  await git(["-C", trustedPath, "config", "user.name", "Trusted Publication Source"]);
+  await git(["-C", trustedPath, "config", "user.email", "trusted-publication@example.test"]);
   await git(["-C", trustedPath, "remote", "set-url", "origin", FIXTURE_HTTPS_REMOTE]);
   await git(["-C", contributorPath, "switch", "-c", "pr-branch"]);
   await writeFile(join(contributorPath, "pr-change.txt"), "pull request head\n");
@@ -147,8 +149,10 @@ describe("publication path (real git repositories)", () => {
     const result = await checkout.withCheckout(
       { pullRequestNumber: 1, revision: pullRequestHead },
       async (checkoutPath) => {
-        await git(["-C", checkoutPath, "config", "user.name", "Fixture Updater"]);
-        await git(["-C", checkoutPath, "config", "user.email", "updater@fixture.example"]);
+        expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.name"]))
+          .toBe("Trusted Publication Source");
+        expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.email"]))
+          .toBe("trusted-publication@example.test");
         return updater.update({
           pullRequestNumber: 1,
           branch: "pr-branch",
