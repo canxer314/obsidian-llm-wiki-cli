@@ -74,7 +74,7 @@ describe("Target Checkout", () => {
       "-C", "/jobs/review-220-job-a", "checkout", "--detach", revision,
     ]);
     expect(execute).toHaveBeenNthCalledWith(11, "npm", [
-      "--prefix", "/jobs/review-220-job-a", "ci", "--ignore-scripts",
+      "--prefix", "/jobs/review-220-job-a", "ci",
     ]);
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree"]));
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["--shared"]));

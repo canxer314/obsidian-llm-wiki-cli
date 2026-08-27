@@ -50,6 +50,7 @@ function parseOutcome(result: { readonly output: string; readonly code: number |
 }
 
 export function createProcessArchitectureReviewRunner(options: {
+  readonly startup: string;
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
   readonly start?: (arguments_: readonly string[]) => ChildProcess;
@@ -64,7 +65,7 @@ export function createProcessArchitectureReviewRunner(options: {
     ...arguments_,
   ], {
     detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     env: {
       HOME: process.env.HOME ?? "",
       PATH: process.env.PATH ?? "",
@@ -100,6 +101,7 @@ export function createProcessArchitectureReviewRunner(options: {
         start: () => {
           child = start(arguments_);
           if (child.pid === undefined) throw new Error("Architecture review worker did not expose a process ID");
+          child.stdin?.end(options.startup);
           output = outputOf(child);
           return {
             pid: child.pid,

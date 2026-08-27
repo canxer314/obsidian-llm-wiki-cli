@@ -1,5 +1,6 @@
 import { createBranchUpdateConflictResolverSession } from "./branch-update-conflict-resolver.ts";
-import { loadSandboxStartup, sandboxHooksFor } from "./sandbox.ts";
+import { sandboxHooksFor } from "./sandbox.ts";
+import { readTargetWorkerStartup } from "./target-operation-startup.ts";
 
 const [pullRequestNumber, branch, baseBranch, revision, checkoutPath, model, conflictsJson] = process.argv.slice(2);
 if (
@@ -19,9 +20,9 @@ if (!Array.isArray(conflicts) || conflicts.some((conflict) => typeof conflict !=
   throw new Error("Expected branch update conflict paths");
 }
 
-const startup = await loadSandboxStartup();
+const startup = await readTargetWorkerStartup();
 const result = await createBranchUpdateConflictResolverSession({
-  sandbox: startup.automationSandbox,
+  sandbox: startup.sandbox,
   hooks: sandboxHooksFor("merger"),
 }).resolve({
   model,

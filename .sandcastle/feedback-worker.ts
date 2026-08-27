@@ -1,5 +1,6 @@
 import { createFeedbackImplementerSession } from "./feedback-implementer-session.ts";
-import { loadSandboxStartup, sandboxHooksFor } from "./sandbox.ts";
+import { sandboxHooksFor } from "./sandbox.ts";
+import { readTargetWorkerStartup } from "./target-operation-startup.ts";
 
 const [pullRequestNumber, branch, revision, checkoutPath, rootCommentId, model] = process.argv.slice(2);
 if (
@@ -13,9 +14,9 @@ if (
   throw new Error("Expected feedback implementation worker arguments");
 }
 
-const startup = await loadSandboxStartup();
+const startup = await readTargetWorkerStartup();
 const reply = await createFeedbackImplementerSession({
-  sandbox: startup.githubAgentSandbox,
+  sandbox: startup.sandbox,
   hooks: sandboxHooksFor("feedback"),
 }).run({
   model,

@@ -29,18 +29,12 @@ const GITHUB_INDEPENDENT_WORKERS = [
 ] as const;
 
 describe("Agent container environment routing", () => {
-  it("routes every GitHub-capable worker through the GitHub-capable sandbox", () => {
-    for (const name of GITHUB_CAPABLE_WORKERS) {
+  it("uses only the purpose-specific sandbox supplied to every worker", () => {
+    for (const name of [...GITHUB_CAPABLE_WORKERS, ...GITHUB_INDEPENDENT_WORKERS]) {
       const source = workerSource(name);
-      expect(source, name).toContain("startup.githubAgentSandbox");
-    }
-  });
-
-  it("keeps GitHub-independent workers on the narrower Claude-only sandbox", () => {
-    for (const name of GITHUB_INDEPENDENT_WORKERS) {
-      const source = workerSource(name);
-      expect(source, name).toContain("startup.automationSandbox");
+      expect(source, name).toContain("startup.sandbox");
       expect(source, name).not.toContain("githubAgentSandbox");
+      expect(source, name).not.toContain("automationSandbox");
     }
   });
 

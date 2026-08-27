@@ -4,6 +4,7 @@ import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
 import type { BranchUpdateResolver } from "./branch-update-process-runner.ts";
 
 export function createProcessBranchUpdateConflictResolver(options: {
+  readonly startup: string;
   readonly model: string;
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
@@ -15,6 +16,7 @@ export function createProcessBranchUpdateConflictResolver(options: {
   return {
     async resolve(request) {
       const result = await runAgentWorker({
+        checkoutPath: request.checkoutPath,
         workerFile: "branch-update-conflict-worker.ts",
         workerName: "Branch update conflict resolution",
         arguments_: [
@@ -26,6 +28,7 @@ export function createProcessBranchUpdateConflictResolver(options: {
           options.model,
           JSON.stringify(request.conflicts),
         ],
+        input: options.startup,
         timeoutMessage: "Branch update conflict resolution timed out",
         timeoutMilliseconds: options.timeoutMilliseconds,
         graceMilliseconds: options.graceMilliseconds,

@@ -41,9 +41,11 @@ function groupExit(pid: number): Promise<void> {
 }
 
 export interface AgentWorkerOptions {
+  readonly checkoutPath: string;
   readonly workerFile: string;
   readonly workerName: string;
   readonly arguments_: readonly string[];
+  readonly input?: string | undefined;
   readonly timeoutMessage: string;
   readonly timeoutMilliseconds?: number | undefined;
   readonly graceMilliseconds?: number | undefined;
@@ -56,11 +58,11 @@ export interface AgentWorkerOptions {
 export async function runAgentWorker(options: AgentWorkerOptions): Promise<AgentWorkerResult> {
   const start = options.start ?? ((arguments_) => spawn(process.execPath, [
     "--experimental-strip-types",
-    resolve(import.meta.dirname, options.workerFile),
+    resolve(options.checkoutPath, ".sandcastle", options.workerFile),
     ...arguments_,
   ], {
     detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     env: {
       HOME: process.env.HOME ?? "",
       PATH: process.env.PATH ?? "",
@@ -71,6 +73,7 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
     start: () => {
       const child = start(options.arguments_);
       if (child.pid === undefined) throw new Error(`${options.workerName} worker did not expose a process ID`);
+      child.stdin?.end(options.input);
       output = outputOf(child);
       return {
         pid: child.pid,
