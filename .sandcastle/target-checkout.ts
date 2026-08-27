@@ -97,12 +97,21 @@ export function createTargetCheckout(options: {
         // this disposable checkout, never to the user's global config. Read it
         // with the same any-layer semantics as sandbox startup so global-only
         // identities work identically, and fail closed when it is absent.
-        const name = (await git([
-          "-C", options.sourceRepositoryPath, "config", "--get", "user.name",
-        ])).stdout.trim();
-        const email = (await git([
-          "-C", options.sourceRepositoryPath, "config", "--get", "user.email",
-        ])).stdout.trim();
+        const readIdentityValue = async (key: string): Promise<string> => {
+          try {
+            return (await git([
+              "-C", options.sourceRepositoryPath, "config", "--get", key,
+            ])).stdout.trim();
+          } catch (error) {
+            // git exits 1 when the key is unset; treat that as an absent identity.
+            if ((error as { code?: number }).code === 1) return "";
+            throw error;
+          }
+        };
+        const [name, email] = await Promise.all([
+          readIdentityValue("user.name"),
+          readIdentityValue("user.email"),
+        ]);
         if (name.length === 0 || email.length === 0) {
           throw new Error(
             "The trusted repository checkout has no configured git user.name/user.email; " +

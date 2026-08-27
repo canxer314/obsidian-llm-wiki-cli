@@ -146,11 +146,14 @@ describe("Target Checkout", () => {
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["checkout"]));
   });
 
-  it("rejects a source checkout without a git identity before fetching", async () => {
+  it.each([
+    ["unset key", vi.fn().mockRejectedValueOnce({ code: 1 })],
+    ["empty value", vi.fn().mockResolvedValueOnce({ stdout: "", stderr: "" })],
+  ])("rejects a source checkout without a git identity before fetching (%s)", async (_name, nameRead) => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockImplementationOnce(nameRead)
       .mockResolvedValueOnce({ stdout: "source@fixture.example\n", stderr: "" });
     const action = vi.fn();
     const checkout = createTargetCheckout({
