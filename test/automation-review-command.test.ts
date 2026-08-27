@@ -133,6 +133,55 @@ describe("review automation command", () => {
     ]);
   });
 
+  it("blocks a reviewer execution failure without publishing or changing the existing Draft PR", async () => {
+    const events: string[] = [];
+    const reviewer = vi.fn().mockRejectedValue(new Error("reviewer execution failed"));
+    const dependencies = ports(events, reviewer);
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, { ...dependencies, createJobId: () => "job-220" }))
+      .resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
+
+    expect(dependencies.publisher.publish).not.toHaveBeenCalled();
+    expect(dependencies.github.publishReview).not.toHaveBeenCalled();
+    expect(dependencies.github.markPullRequestReady).not.toHaveBeenCalled();
+    expect(dependencies.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`,
+      "add:agent:blocked", "blocked", "remove:agent:in-progress",
+    ]);
+  });
+
+  it("later reviews the same Draft PR at its current full head after an execution failure", async () => {
+    const events: string[] = [];
+    const failedDependencies = ports(events, vi.fn().mockRejectedValue(new Error("reviewer execution failed")));
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, failedDependencies))
+      .resolves.toMatchObject({ status: "blocked", reason: "review-execution" });
+
+    const currentRevision = "fedcba9876543210fedcba9876543210fedcba98";
+    const laterDependencies = ports(events);
+    laterDependencies.github.readPullRequest.mockReset();
+    laterDependencies.github.readPullRequest
+      .mockResolvedValueOnce({ ...pullRequest(), headSha: currentRevision })
+      .mockResolvedValueOnce({ ...pullRequest(["agent:review", "agent:in-progress"]), headSha: currentRevision });
+    laterDependencies.publisher.publish.mockResolvedValue(currentRevision);
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, laterDependencies))
+      .resolves.toEqual({ status: "reviewed", revision: currentRevision, verdict: "clean" });
+
+    expect(laterDependencies.reviewer.review).toHaveBeenCalledWith(expect.objectContaining({
+      pullRequestNumber: 220,
+      revision: currentRevision,
+    }));
+    expect(laterDependencies.publisher.prepare).toHaveBeenCalledWith(
+      "/safe/disposable-checkout", "feature/review", currentRevision,
+    );
+    expect(laterDependencies.publisher.publish).toHaveBeenCalledWith({
+      checkoutPath: "/safe/disposable-checkout", branch: "feature/review", expectedRevision: currentRevision,
+    });
+    expect(laterDependencies.github.publishReview).toHaveBeenCalledWith(expect.objectContaining({ revision: currentRevision }));
+  });
+
   it("blocks and leaves the Draft PR open without a fabricated review when the lease rejects the push", async () => {
     const events: string[] = [];
     const dependencies = ports(events);

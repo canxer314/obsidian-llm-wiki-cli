@@ -1,3 +1,7 @@
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { createProcessBranchUpdater } from "../.sandcastle/branch-update-process-runner.js";
@@ -35,7 +39,45 @@ function gitMock(options: {
   });
 }
 
+async function expectDescendantDead(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Descendant process ${pid} survived group termination`);
+}
+
 describe("process branch updater", () => {
+  it("kills a real hung git descendant tree after graceful-then-forced group termination", async () => {
+    const root = join(tmpdir(), `branch-update-timeout-${process.pid}`);
+    const marker = join(root, "descendant.pid");
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    const git = join(bin, "git");
+    writeFileSync(git, `#!/bin/bash
+trap '' TERM
+(trap '' TERM; while :; do sleep 30; done) &
+echo $! > '${marker}'
+while :; do sleep 30; done
+`);
+    chmodSync(git, 0o755);
+    const updater = createProcessBranchUpdater({
+      environment: { PATH: bin, HOME: root },
+      timeoutMilliseconds: 100,
+      graceMilliseconds: 100,
+    });
+
+    await expect(updater.update(request)).rejects.toThrow("git command timed out after 100ms");
+
+    const descendant = Number(readFileSync(marker, "utf8"));
+    rmSync(root, { force: true, recursive: true });
+    await expectDescendantDead(descendant);
+  });
+
   it("merges the upstream base cleanly and pushes with an explicit revision lease", async () => {
     const execute = gitMock({ revisions: [revision, baseRevision, updatedRevision], mergeBase: mergeBaseRevision });
     const updater = createProcessBranchUpdater({ execute });

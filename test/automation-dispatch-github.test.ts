@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createAutomationDispatchGithubPort } from "../.sandcastle/automation-github.js";
+import { inspectAutomationCommands } from "../.sandcastle/automation-inspector.js";
 
 describe("Automation Command GitHub discovery", () => {
   const emptyIssueListings = ["agent:implement", "agent:to-issues", "agent:in-progress", "agent:blocked"]
@@ -36,6 +37,7 @@ describe("Automation Command GitHub discovery", () => {
       { number: 19, operation: "update-branch", identity: "pull-request:19", labels: ["agent:update-branch", "agent:blocked"] },
       { number: 20, operation: "implement", identity: "pull-request:20", labels: ["agent:implement", "agent:review"] },
       { number: 20, operation: "review", identity: "pull-request:20", labels: ["agent:implement", "agent:review"] },
+      { number: 21, operation: "unknown", identity: "pull-request:21", labels: ["agent:in-progress"] },
     ]);
     expect(execute).toHaveBeenCalledTimes(9);
     expect(execute).toHaveBeenNthCalledWith(1, "gh", ["pr", "list", "--state", "open", "--label", "agent:update-branch", "--json", "number,labels", "--limit", "100"], undefined);
@@ -60,6 +62,49 @@ describe("Automation Command GitHub discovery", () => {
       stderr: "",
     };
   }
+
+  it("surfaces standalone blocked and stale Issue and PRD states to read-only inspection", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 40, labels: [{ name: "agent:in-progress" }] }]),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 39, labels: [{ name: "agent:blocked" }] }]),
+        stderr: "",
+      });
+    execute
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 41, labels: [{ name: "agent:in-progress" }] }]),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ number: 42, labels: [{ name: "agent:blocked" }] }]),
+        stderr: "",
+      })
+      .mockResolvedValueOnce(shapeResponse(null, 0))
+      .mockResolvedValueOnce(shapeResponse(null, 2));
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    const result = await inspectAutomationCommands({
+      github: port,
+      scheduler: { activeJobs: async () => [] },
+    });
+
+    expect(result.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ number: 39, operation: "unknown", identity: "pull-request:39", eligibility: "blocked" }),
+      expect.objectContaining({ number: 40, operation: "unknown", identity: "pull-request:40", eligibility: "stale-in-progress" }),
+      expect.objectContaining({ number: 41, operation: "unknown", identity: "issue:41", eligibility: "stale-in-progress" }),
+      expect.objectContaining({ number: 42, operation: "unknown", identity: "issue:42", eligibility: "blocked" }),
+    ]));
+    expect(execute).toHaveBeenCalledTimes(11);
+    expect(execute.mock.calls.every(([, arguments_]) => !arguments_.includes("--method"))).toBe(true);
+  });
 
   it("discovers Issue implementation, PRD implementation, and PRD split commands with per-Work-Item identities", async () => {
     const execute = vi.fn();

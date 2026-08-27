@@ -255,22 +255,35 @@ export function createAutomationDispatchGithubPort(options: {
       }
       const pullRequestCommands = [...pullRequests.values()].flatMap((pullRequest) => {
         const labels = pullRequest.labels.map(({ name }) => name);
-        return (["update-branch", "implement", "review"] as const)
-          .filter((operation) => labels.includes(`agent:${operation}`))
-          .map((operation) => ({
-            number: pullRequest.number,
-            operation,
-            identity: `pull-request:${pullRequest.number}`,
-            labels,
-          }));
+        const triggeredOperations = (["update-branch", "implement", "review"] as const)
+          .filter((operation) => labels.includes(`agent:${operation}`));
+        // Progress labels outlive their trigger once acquisition begins. Keep a
+        // single canonical PR command for inspection when no trigger remains;
+        // its eligibility is necessarily non-runnable.
+        const operations = triggeredOperations.length > 0
+          ? triggeredOperations
+          : labels.some((label) => label === "agent:in-progress" || label === "agent:blocked")
+            ? ["unknown" as const]
+            : [];
+        return operations.map((operation) => ({
+          number: pullRequest.number,
+          operation,
+          identity: `pull-request:${pullRequest.number}`,
+          labels,
+        }));
       });
       // Issue-side triggers are only meaningful on top-level Work Items, so
       // shape reads happen before routing: sub-issues are driven by their
-      // parent PRD and never become dispatch commands themselves.
-      const triggers = (labels: readonly string[]) =>
-        labels.includes("agent:implement") || labels.includes("agent:to-issues");
+      // parent PRD and never become dispatch commands themselves. State-only
+      // Work Items are retained for read-only inspection, but remain
+      // ineligible for dispatch.
+      const relevantLabels = (labels: readonly string[]) =>
+        labels.includes("agent:implement") ||
+        labels.includes("agent:to-issues") ||
+        labels.includes("agent:in-progress") ||
+        labels.includes("agent:blocked");
       const candidates = await Promise.all([...issues.values()]
-        .filter((issue) => triggers(issue.labels.map(({ name }) => name)))
+        .filter((issue) => relevantLabels(issue.labels.map(({ name }) => name)))
         .sort((left, right) => left.number - right.number)
         .map(async (issue) => {
           const labels = issue.labels.map(({ name }) => name);
@@ -292,7 +305,7 @@ export function createAutomationDispatchGithubPort(options: {
         if (shape.parent !== null) return [];
         const commands: {
           readonly number: number;
-          readonly operation: "implement-issue" | "implement-prd" | "split-prd";
+          readonly operation: "implement-issue" | "implement-prd" | "split-prd" | "unknown";
           readonly identity: string;
           readonly labels: readonly string[];
         }[] = [];
@@ -308,6 +321,12 @@ export function createAutomationDispatchGithubPort(options: {
         // later round so one Work Item never runs two operations at once.
         if (labels.includes("agent:to-issues") && !labels.includes("agent:implement")) {
           commands.push({ number, operation: "split-prd", identity: `prd:${number}`, labels });
+        }
+        // A state-only Work Item has already consumed its trigger. Its
+        // originating operation cannot be reconstructed safely, so preserve
+        // only its Work Item identity for read-only inspection.
+        if (commands.length === 0 && (labels.includes("agent:in-progress") || labels.includes("agent:blocked"))) {
+          commands.push({ number, operation: "unknown", identity: `issue:${number}`, labels });
         }
         return commands;
       });

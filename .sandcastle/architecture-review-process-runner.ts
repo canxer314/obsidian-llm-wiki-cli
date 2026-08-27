@@ -110,7 +110,10 @@ export function createProcessArchitectureReviewRunner(options: {
         timeoutMilliseconds: options.timeoutMilliseconds ?? WORKER_TIMEOUT_MILLISECONDS + FORCE_KILL_MARGIN_MILLISECONDS,
         graceMilliseconds: options.graceMilliseconds ?? ARCHITECTURE_REVIEW_GRACE_MILLISECONDS,
         kill: options.kill ?? process.kill,
-        wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds))),
+        wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => {
+          const timer = setTimeout(resolveWait, milliseconds);
+          timer.unref();
+        })),
       });
       if (result.status === "timed-out") throw new Error("Architecture review execution timed out");
       return parseOutcome(await output!);
