@@ -21,6 +21,7 @@ const plannerSession = createSandcastlePlannerSession({
   sandbox: startup.githubAgentSandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
   checkoutPath,
+  prdContext: { parentPrd: Number(prdNumber), branch },
 });
 const plan = await planIssue({
   issueNumber: Number(childNumber),

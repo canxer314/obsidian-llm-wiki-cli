@@ -61,5 +61,41 @@ describe("Sandcastle Planner session adapter", () => {
       "Determine whether the Issue explicitly permits changes to Sandcastle or GitHub automation configuration",
     );
     expect(request.prompt).not.toContain(output.issue.body);
+    expect(request.prompt).not.toContain("shared accumulating branch");
+    expect(request.prompt).not.toContain("git fetch origin");
+  });
+
+  it("runs a fresh read-only Planner session with PRD child context", async () => {
+    const runAgent = vi.fn().mockResolvedValue({ output });
+    const createAgent = vi.fn().mockReturnValue({ name: "fake-agent" });
+    const sandbox = { kind: "fake-sandbox" };
+    const hooks = { sandbox: { onSandboxReady: [] } };
+    const session = createSandcastlePlannerSession({
+      sandbox: sandbox as never,
+      hooks,
+      runAgent: runAgent as never,
+      createAgent: createAgent as never,
+      prdContext: { parentPrd: 306, branch: "sandcastle/prd-306" },
+    });
+
+    await expect(session.run({
+      issueNumber: 309,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    })).resolves.toEqual(output);
+
+    const request = runAgent.mock.calls[0]![0];
+    expect(request.prompt).toContain(
+      "This Issue is one child of PRD #306, delivered on the shared accumulating branch sandcastle/prd-306",
+    );
+    expect(request.prompt).toContain(
+      "If sandcastle/prd-306 already exists on origin, inspect the accumulated branch state with git fetch origin sandcastle/prd-306",
+    );
+    expect(request.prompt).toContain(
+      "git show origin/sandcastle/prd-306:<path>",
+    );
+    expect(request.prompt).toContain(
+      "Plan against the accumulated branch state when it exists, not the bare base checkout",
+    );
   });
 });
