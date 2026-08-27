@@ -37,6 +37,55 @@ const acquiring = { state: "OPEN", labels: ["agent:review", "agent:in-progress"]
 const acquired = { state: "OPEN", labels: ["agent:in-progress"], revision, pullRequest };
 
 describe("trusted Target operation command acquisition", () => {
+  it("assigns unique job identities to concurrent commands in the same operation family", async () => {
+    const reads = new Map<number, number>();
+    const issueStates = [
+      { state: "OPEN", labels: ["agent:implement"], revision },
+      { state: "OPEN", labels: ["agent:implement", "agent:in-progress"], revision },
+      { state: "OPEN", labels: ["agent:in-progress"], revision },
+    ];
+    const invocations: Array<{ readonly number: number; readonly jobId: string }> = [];
+    let releaseTargets!: () => void;
+    const bothTargetsStarted = new Promise<void>((resolve) => { releaseTargets = resolve; });
+    const target = {
+      run: vi.fn(async (invocation: { readonly number: number; readonly jobId: string }) => {
+        invocations.push(invocation);
+        if (invocations.length === 2) releaseTargets();
+        await bothTargetsStarted;
+        return { status: "implemented" };
+      }),
+    };
+    const acquisition = {
+      read: vi.fn(async (_operation: string, number: number) => {
+        const next = reads.get(number) ?? 0;
+        reads.set(number, next + 1);
+        return issueStates[next] ?? issueStates.at(-1)!;
+      }),
+      addInProgress: vi.fn(async () => {}),
+      removeTrigger: vi.fn(async () => {}),
+      addBlocked: vi.fn(async () => {}),
+      addBlockedDiagnostic: vi.fn(async () => {}),
+      removeInProgress: vi.fn(async () => {}),
+    };
+    const jobIds = ["job-221", "job-222"];
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition,
+      createJobId: () => jobIds.shift()!,
+    });
+
+    await expect(Promise.all([
+      runner.run("implement-issue", 221),
+      runner.run("implement-issue", 222),
+    ])).resolves.toEqual([
+      { status: "implemented" },
+      { status: "implemented" },
+    ]);
+
+    expect(new Set(invocations.map(({ jobId }) => jobId))).toEqual(new Set(["job-221", "job-222"]));
+    expect(new Set(invocations.map(({ number }) => number))).toEqual(new Set([221, 222]));
+  });
+
   it("runs explicit feedback reconciliation without reacquiring a consumed trigger", async () => {
     const acquisition = acquisitionFor([{
       ...available,

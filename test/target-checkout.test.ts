@@ -239,7 +239,7 @@ describe("Target Checkout real Git filesystem integration", () => {
     return { root, remotePath, trustedPath, registeredWorktreePath, checkoutRoot, hiddenRevision };
   };
 
-  it("fetches an unadvertised revision into an independent checkout, runs isolated dependency setup, and confines successful cleanup", async () => {
+  it("runs concurrent jobs in independent checkouts, installs dependencies, and confines successful cleanup", async () => {
     const fixture = await createFixture();
     const cachePath = join(fixture.root, "download-cache");
     const historicalPath = join(fixture.checkoutRoot, "historical-failure");
@@ -283,8 +283,13 @@ describe("Target Checkout real Git filesystem integration", () => {
       dependencyEnvironment: { npm_config_cache: cachePath },
     });
     const checkoutPaths: string[] = [];
+    let activeCheckouts = 0;
+    let releaseConcurrentCheckouts!: () => void;
+    const bothCheckoutsActive = new Promise<void>((resolve) => {
+      releaseConcurrentCheckouts = resolve;
+    });
 
-    for (let index = 0; index < 2; index += 1) {
+    await Promise.all(Array.from({ length: 2 }, async (_, index) => {
       await checkout.withCheckout({ pullRequestNumber: 219, revision: fixture.hiddenRevision }, async (checkoutPath) => {
         checkoutPaths.push(checkoutPath);
         expect(await git(["-C", checkoutPath, "rev-parse", "HEAD"])).toBe(fixture.hiddenRevision);
@@ -295,6 +300,10 @@ describe("Target Checkout real Git filesystem integration", () => {
         expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.name"])).toBe("Trusted Source");
         expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.email"])).toBe("trusted-source@example.test");
 
+        activeCheckouts += 1;
+        if (activeCheckouts === 2) releaseConcurrentCheckouts();
+        await bothCheckoutsActive;
+
         // Simulate the Agent's ordinary publication preparation: the detached
         // checkout can create a commit and validate a push without changing source.
         await writeFile(join(checkoutPath, `agent-result-${index}.txt`), "result\n");
@@ -302,7 +311,7 @@ describe("Target Checkout real Git filesystem integration", () => {
         await git(["-C", checkoutPath, "commit", "-m", "agent result"]);
         await git(["-C", checkoutPath, "push", "--dry-run", "origin", "HEAD:refs/heads/agent-result"]);
       });
-    }
+    }));
 
     expect(new Set(checkoutPaths).size).toBe(2);
     expect(dependencyPrefixes).toEqual(checkoutPaths);
