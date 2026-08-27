@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
 
 export function createProcessImplementer(options: {
+  readonly startup: string;
   readonly plannerModel: string;
   readonly implementerModel: string;
   readonly timeoutMilliseconds?: number | undefined;
@@ -19,6 +20,7 @@ export function createProcessImplementer(options: {
       readonly checkoutPath: string;
     }): Promise<{ readonly branch: string; readonly pullRequestUrl: string }> {
       const result = await runAgentWorker({
+        checkoutPath: request.checkoutPath,
         workerFile: "implementation-worker.ts",
         workerName: "Implementation",
         arguments_: [
@@ -28,6 +30,7 @@ export function createProcessImplementer(options: {
           options.plannerModel,
           options.implementerModel,
         ],
+        input: options.startup,
         timeoutMessage: "Implementation execution timed out",
         timeoutMilliseconds: options.timeoutMilliseconds,
         graceMilliseconds: options.graceMilliseconds,

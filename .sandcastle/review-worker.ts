@@ -1,4 +1,4 @@
-import { loadSandboxStartup } from "./sandbox.ts";
+import { readTargetWorkerStartup } from "./target-operation-startup.ts";
 import { createSameSessionReviewExtractor } from "./review-extraction.ts";
 
 const [pullRequestNumber, branch, revision, checkoutPath, reviewThreadsJson, model, artifactDirectory] = process.argv.slice(2);
@@ -14,9 +14,9 @@ if (
   throw new Error("Expected reviewer worker arguments");
 }
 
-const startup = await loadSandboxStartup();
+const startup = await readTargetWorkerStartup();
 const reviewer = createSameSessionReviewExtractor({
-  sandbox: startup.githubAgentSandbox,
+  sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
 });
 const review = await reviewer.review({

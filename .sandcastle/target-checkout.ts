@@ -133,7 +133,7 @@ export function createTargetCheckout(options: {
           throw new Error("Target revision tracks a Sandcastle private environment file");
         }
         await git(["-C", checkoutPath, "checkout", "--detach", request.revision]);
-        await npm(["--prefix", checkoutPath, "ci", "--ignore-scripts"]);
+        await npm(["--prefix", checkoutPath, "ci"]);
         const result = await action(checkoutPath);
         completed = true;
         return result;

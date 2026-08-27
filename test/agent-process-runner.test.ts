@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +20,57 @@ async function expectProcessDead(pid: number): Promise<void> {
 }
 
 describe("agent process runner", () => {
+  it("loads the fixed worker from the authorized Target Checkout", async () => {
+    const checkoutPath = mkdtempSync(join(tmpdir(), "authorized-worker-"));
+    const workerDirectory = join(checkoutPath, ".sandcastle");
+    mkdirSync(workerDirectory);
+    writeFileSync(
+      join(workerDirectory, "fixture-worker.ts"),
+      'process.stdout.write(JSON.stringify({ source: "authorized-checkout" }));\n',
+    );
+
+    try {
+      await expect(runAgentWorker({
+        checkoutPath,
+        workerFile: "fixture-worker.ts",
+        workerName: "fixture",
+        arguments_: [],
+        timeoutMessage: "Fixture worker timed out",
+      })).resolves.toMatchObject({
+        code: 0,
+        output: JSON.stringify({ source: "authorized-checkout" }),
+      });
+    } finally {
+      rmSync(checkoutPath, { force: true, recursive: true });
+    }
+  });
+
+  it("passes an immutable startup snapshot through worker stdin", async () => {
+    const checkoutPath = mkdtempSync(join(tmpdir(), "snapshot-worker-"));
+    const workerDirectory = join(checkoutPath, ".sandcastle");
+    mkdirSync(workerDirectory);
+    writeFileSync(
+      join(workerDirectory, "fixture-worker.ts"),
+      'let input = ""; for await (const chunk of process.stdin) input += chunk; process.stdout.write(input);\n',
+    );
+
+    try {
+      await expect(runAgentWorker({
+        checkoutPath,
+        workerFile: "fixture-worker.ts",
+        workerName: "fixture",
+        arguments_: [],
+        input: JSON.stringify({ snapshot: "round-one" }),
+        timeoutMessage: "Fixture worker timed out",
+      })).resolves.toMatchObject({
+        code: 0,
+        output: JSON.stringify({ snapshot: "round-one" }),
+      });
+    } finally {
+      rmSync(checkoutPath, { force: true, recursive: true });
+    }
+  });
+
   it("terminates a TERM-ignoring descendant after its successful leader exits", async () => {
     const marker = join(tmpdir(), `agent-successful-leader-descendant-${process.pid}.pid`);
     const script = [
@@ -30,6 +81,7 @@ describe("agent process runner", () => {
 
     try {
       await expect(runAgentWorker({
+        checkoutPath: "unused",
         workerFile: "unused.ts",
         workerName: "test",
         arguments_: [],

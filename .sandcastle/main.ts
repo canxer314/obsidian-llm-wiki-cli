@@ -11,7 +11,6 @@ import {
 } from "./docker-image.ts";
 import { createAutomationGithubPort, createAutomationDispatchGithubPort } from "./automation-github.ts";
 import { dispatchAutomationCommands } from "./automation-dispatch.ts";
-import { createAutomationOperationDispatch } from "./operation-dispatch.ts";
 import {
   inspectGithubAgentReadiness,
   githubAgentReadinessRequiredFor,
@@ -21,34 +20,13 @@ import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { createTargetCheckout, removeExpiredFailureCheckouts } from "./target-checkout.ts";
-import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
-import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
-import { createProcessBranchUpdateConflictResolver } from "./branch-update-conflict-process-runner.ts";
 import {
-  ARCHITECTURE_REVIEW_IDENTITY,
-  runArchitectureReviewAutomationCommand,
-} from "./architecture-review-automation.ts";
-import { createProcessArchitectureReviewRunner } from "./architecture-review-process-runner.ts";
-import { runReviewAutomationCommand } from "./review-automation.ts";
-import { createProcessReviewRunner } from "./review-process-runner.ts";
-import { createReviewPublisher } from "./review-publisher.ts";
-import {
-  createReviewArtifactDirectory,
-  removeExpiredReviewArtifacts,
-} from "./review-artifacts.ts";
-import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
-import { createFeedbackImplementationEntry } from "./feedback-implementation-ports.ts";
-import { createFeedbackPublisher } from "./feedback-publisher.ts";
-import { createProcessImplementer } from "./implementation-process-runner.ts";
-import { runImplementationAutomationCommand } from "./implementation-automation.ts";
-import { createProcessPrdImplementer } from "./prd-implementation-process-runner.ts";
-import { runPrdImplementationAutomationCommand } from "./prd-implementation-automation.ts";
-import { runPrdSplitAutomationCommand } from "./prd-split-automation.ts";
-import { createProcessPrdSplitter } from "./prd-split-process-runner.ts";
-import { acquireImplementationLease, acquirePullRequestLease } from "./implementation-lease.ts";
-import {
-  loadSandboxStartup,
-} from "./sandbox.ts";
+  createTargetOperationRunner,
+  type TargetOperationIdentity,
+} from "./target-operation.ts";
+import { createTargetOperationCommandRunner } from "./target-operation-command.ts";
+import { removeExpiredReviewArtifacts } from "./review-artifacts.ts";
+import { loadSandboxStartup } from "./sandbox.ts";
 
 try {
   const repositoryPath = resolve(import.meta.dirname, "..");
@@ -62,7 +40,6 @@ try {
     });
   }
   const startup = await loadSandboxStartup();
-  const jobId = randomUUID();
   const automationGithub = createAutomationGithubPort({
     environment: startup.childEnvironments.github,
   });
@@ -87,200 +64,103 @@ try {
       await lock.release();
     }
   };
-  const reviewer = createProcessReviewRunner({});
-  const reviewPublisher = createReviewPublisher({
-    sourceRepositoryPath: repositoryPath,
-    gitEnvironment: startup.childEnvironments.git,
-  });
-  const updater = createProcessBranchUpdater({
-    environment: startup.childEnvironments.git,
-    resolver: createProcessBranchUpdateConflictResolver({ model: startup.models.implementer }),
-  });
-  const architectureReviewer = createProcessArchitectureReviewRunner({});
-  const implementer = createProcessImplementer({
-    plannerModel: startup.models.planner,
-    implementerModel: startup.models.implementer,
-  });
-  const prdImplementer = createProcessPrdImplementer({
-    plannerModel: startup.models.planner,
-    implementerModel: startup.models.implementer,
-  });
-  const feedbackImplementer = createProcessFeedbackImplementer({ model: startup.models.implementer });
-  const feedbackEntry = createFeedbackImplementationEntry((pullRequestNumber) => ({
-    github: automationGithub,
+  const targetOperations = createTargetOperationRunner({
     checkout: createTargetCheckout({
       sourceRepositoryPath: repositoryPath,
-      checkoutRoot: resolve(import.meta.dirname, "jobs"),
-      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `feedback-${jobId}`),
+      checkoutRoot: jobsRoot,
       gitEnvironment: startup.childEnvironments.git,
       dependencyEnvironment: startup.childEnvironments.dependencies,
     }),
-    publisher: createFeedbackPublisher({
-      sourceRepositoryPath: repositoryPath,
-      gitEnvironment: startup.childEnvironments.git,
-    }),
-    implementer: feedbackImplementer,
-    lease: {
-      acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-        root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-        pullRequestNumber: currentPullRequestNumber,
-      }),
+    startup: {
+      imageName: startup.imageName,
+      childEnvironments: {
+        git: startup.childEnvironments.git,
+        github: startup.childEnvironments.github,
+        claude: startup.childEnvironments.claude,
+        githubAgent: startup.childEnvironments.githubAgent,
+      },
+      models: startup.models,
     },
-    createJobId: () => jobId,
-  }));
-  const prdSplitter = createProcessPrdSplitter({ model: startup.models.planner });
-  const runIssueImplementation = (issueNumber: number) => runImplementationAutomationCommand({ issueNumber }, {
-    github: {
-      readIssue: (currentIssueNumber) => automationGithub.readIssue(currentIssueNumber),
-      findReusableImplementation: (request) => {
-        const findReusableImplementation = automationGithub.findReusableImplementation;
-        if (findReusableImplementation === undefined) {
-          throw new Error("Implementation Pull Request lookup is unavailable");
+  });
+  const issueOperation = (operation: TargetOperationIdentity): boolean =>
+    operation === "implement-issue" || operation === "implement-prd" || operation === "split-prd";
+  const targetOperationCommands = createTargetOperationCommandRunner({
+    target: targetOperations,
+    acquisition: {
+      read: async (operation, number) => {
+        if (operation === "architecture-review") {
+          return { state: "OPEN", labels: [], revision: await automationGithub.readBaseRevision() };
         }
-        return findReusableImplementation(request);
-      },
-      publishExistingImplementation: (request) => {
-        const publishExistingImplementation = automationGithub.publishExistingImplementation;
-        if (publishExistingImplementation === undefined) {
-          throw new Error("Implementation Pull Request publication is unavailable");
+        if (issueOperation(operation)) {
+          const issue = await automationGithub.readPrd(number);
+          const routeMatches = issue.parentNumber === undefined && (
+            operation === "split-prd" ||
+            (operation === "implement-prd" ? issue.subIssueCount > 0 : issue.subIssueCount === 0)
+          );
+          if (!routeMatches) {
+            throw new Error(`Issue #${number} no longer matches Target operation ${operation}`);
+          }
+          return { state: issue.state, labels: issue.labels, revision: issue.baseRevision };
         }
-        return publishExistingImplementation(request);
+        const pullRequest = await automationGithub.readPullRequest(number) as Awaited<ReturnType<typeof automationGithub.readPullRequest>> & {
+          readonly baseRefName: string;
+        };
+        if (pullRequest.baseRepository !== pullRequest.headRepository) {
+          throw new Error(`Pull Request #${number} must not originate from a fork`);
+        }
+        return {
+          state: pullRequest.state,
+          labels: pullRequest.labels,
+          revision: pullRequest.headSha,
+          pullRequest: {
+            headSha: pullRequest.headSha,
+            headRefName: pullRequest.headRefName,
+            baseRefName: pullRequest.baseRefName,
+            baseRepository: pullRequest.baseRepository,
+            headRepository: pullRequest.headRepository,
+          },
+        };
       },
-      addIssueLabel: (currentIssueNumber, label) => automationGithub.addIssueLabel(currentIssueNumber, label),
-      removeIssueLabel: (currentIssueNumber, label) => automationGithub.removeIssueLabel(currentIssueNumber, label),
-      addRefusalDiagnostic: (currentIssueNumber, reason) => {
-        const addRefusalDiagnostic = automationGithub.addRefusalDiagnostic;
-        return addRefusalDiagnostic === undefined
-          ? Promise.resolve()
-          : addRefusalDiagnostic(currentIssueNumber, reason);
+      addInProgress: (operation, number) => issueOperation(operation)
+        ? automationGithub.addIssueLabel(number, "agent:in-progress")
+        : automationGithub.addPullRequestLabel(number, "agent:in-progress"),
+      removeTrigger: (operation, number) => {
+        const trigger = operation === "split-prd"
+          ? "agent:to-issues"
+          : operation === "review"
+            ? "agent:review"
+            : operation === "update-branch"
+              ? "agent:update-branch"
+              : "agent:implement";
+        return issueOperation(operation)
+          ? automationGithub.removeIssueLabel(number, trigger)
+          : automationGithub.removePullRequestLabel(number, trigger);
       },
-      addImplementationBlockedDiagnostic: (currentIssueNumber, diagnostic) => {
-        const addImplementationBlockedDiagnostic = automationGithub.addImplementationBlockedDiagnostic;
-        return addImplementationBlockedDiagnostic === undefined
-          ? Promise.resolve()
-          : addImplementationBlockedDiagnostic(currentIssueNumber, diagnostic);
+      addBlocked: (operation, number) => issueOperation(operation)
+        ? automationGithub.addIssueLabel(number, "agent:blocked")
+        : automationGithub.addPullRequestLabel(number, "agent:blocked"),
+      addBlockedDiagnostic: async (operation, number, diagnostic) => {
+        if (operation === "architecture-review") return;
+        await automationGithub.addRefusalDiagnostic?.(
+          number,
+          `Automation ${operation} is blocked (job ${diagnostic.jobId}): ${diagnostic.summary}`,
+        );
       },
+      removeInProgress: (operation, number) => issueOperation(operation)
+        ? automationGithub.removeIssueLabel(number, "agent:in-progress")
+        : automationGithub.removePullRequestLabel(number, "agent:in-progress"),
     },
-    checkout: createTargetCheckout({
-      sourceRepositoryPath: repositoryPath,
-      checkoutRoot: resolve(import.meta.dirname, "jobs"),
-      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `implementation-${jobId}`),
-      gitEnvironment: startup.childEnvironments.git,
-      dependencyEnvironment: startup.childEnvironments.dependencies,
-    }),
-    implementer,
-    lease: {
-      acquire: (currentIssueNumber) => acquireImplementationLease({
-        root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
-        issueNumber: currentIssueNumber,
-      }),
-    },
-    createJobId: () => jobId,
+    createJobId: randomUUID,
   });
-  const runPrdImplementation = (issueNumber: number) => runPrdImplementationAutomationCommand({ issueNumber }, {
-    github: automationGithub,
-    pullRequests: automationGithub,
-    checkout: createTargetCheckout({
-      sourceRepositoryPath: repositoryPath,
-      checkoutRoot: resolve(import.meta.dirname, "jobs"),
-      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `prd-implementation-${jobId}`),
-      gitEnvironment: startup.childEnvironments.git,
-      dependencyEnvironment: startup.childEnvironments.dependencies,
-    }),
-    implementer: prdImplementer,
-    lease: {
-      acquire: (currentIssueNumber) => acquireImplementationLease({
-        root: resolve(import.meta.dirname, "jobs", "implementation-leases"),
-        issueNumber: currentIssueNumber,
-      }),
-    },
-    createJobId: () => jobId,
-  });
-  const runPrdSplit = (issueNumber: number) => runPrdSplitAutomationCommand({ issueNumber }, {
-    github: automationGithub,
-    checkout: createTargetCheckout({
-      sourceRepositoryPath: repositoryPath,
-      checkoutRoot: resolve(import.meta.dirname, "jobs"),
-      gitEnvironment: startup.childEnvironments.git,
-      dependencyEnvironment: startup.childEnvironments.dependencies,
-    }),
-    splitter: prdSplitter,
-    publisher: automationGithub,
-    createJobId: () => jobId,
-  });
-  const runReview = (pullRequestNumber: number) => runReviewAutomationCommand({ pullRequestNumber }, {
-    github: {
-      ...automationGithub,
-      publishReview: (request) => automationGithub.publishReview(request),
-    },
-    checkout: createTargetCheckout({
-      sourceRepositoryPath: repositoryPath,
-      checkoutRoot: resolve(import.meta.dirname, "jobs"),
-      gitEnvironment: startup.childEnvironments.git,
-      dependencyEnvironment: startup.childEnvironments.dependencies,
-    }),
-    reviewer: {
-      review: async ({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads }) => {
-        const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId });
-        return reviewer.review({ pullRequestNumber: currentPullRequestNumber, branch, revision, checkoutPath, reviewThreads, model: startup.models.reviewer, artifactDirectory });
-      },
-    },
-    publisher: reviewPublisher,
-    lease: {
-      acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-        root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-        pullRequestNumber: currentPullRequestNumber,
-      }),
-    },
-    createJobId: () => jobId,
-  });
-  const runBranchUpdate = (pullRequestNumber: number) => runBranchUpdateAutomationCommand({ pullRequestNumber }, {
-    github: automationGithub,
-    checkout: createTargetCheckout({
-      sourceRepositoryPath: repositoryPath,
-      checkoutRoot: resolve(import.meta.dirname, "jobs"),
-      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `branch-update-${jobId}`),
-      gitEnvironment: startup.childEnvironments.git,
-      dependencyEnvironment: startup.childEnvironments.dependencies,
-    }),
-    updater,
-    lease: {
-      acquire: (currentPullRequestNumber) => acquirePullRequestLease({
-        root: resolve(import.meta.dirname, "jobs", "pull-request-leases"),
-        pullRequestNumber: currentPullRequestNumber,
-      }),
-    },
-    createJobId: () => jobId,
-  });
-  const runArchitectureReview = () => runArchitectureReviewAutomationCommand({
-    github: automationGithub,
-    checkout: createTargetCheckout({
-      sourceRepositoryPath: repositoryPath,
-      checkoutRoot: resolve(import.meta.dirname, "jobs"),
-      createJobDirectory: () => resolve(import.meta.dirname, "jobs", `architecture-review-${jobId}`),
-      gitEnvironment: startup.childEnvironments.git,
-      dependencyEnvironment: startup.childEnvironments.dependencies,
-    }),
-    reviewer: {
-      review: async ({ revision, checkoutPath, priorProposals }) => {
-        const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId });
-        return architectureReviewer.review({ revision, checkoutPath, priorProposals, model: startup.models.planner, artifactDirectory });
-      },
-    },
-    publisher: automationGithub,
-    createJobId: () => jobId,
-  });
-  const operationDispatch = createAutomationOperationDispatch({
-    updateBranch: runBranchUpdate,
-    implementFeedback: (pullRequestNumber) => feedbackEntry.runDispatcher(pullRequestNumber),
-    directFeedback: (pullRequestNumber) => feedbackEntry.runDirect(pullRequestNumber),
-    implementIssue: runIssueImplementation,
-    implementPrd: runPrdImplementation,
-    splitPrd: runPrdSplit,
-    review: runReview,
-    promoteQueue: () => runQueuePromotionScan({ github: dispatchGithub }),
-    architectureReview: runArchitectureReview,
-  });
+  const runCommand = async (command: import("./automation-command.ts").AutomationCommand): Promise<void> => {
+    if (command.operation === "unknown") {
+      throw new Error("Inspection-only Automation Command cannot execute");
+    }
+    const operation: TargetOperationIdentity = command.operation === "implement"
+      ? "implement-feedback"
+      : command.operation;
+    await targetOperationCommands.run(operation, command.number);
+  };
   const result = await runAutomationCli(process.argv.slice(2), {
     preflight: async (operation) => {
       await requireSandcastleImage({ image: startup.imageName });
@@ -303,18 +183,25 @@ try {
       });
       return { status: "image-ready" } as const;
     },
-    runReview: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => operationDispatch.review(pullRequestNumber)),
+    runReview: (pullRequestNumber) => withScheduler(
+      `pull-request:${pullRequestNumber}`,
+      () => targetOperationCommands.run("review", pullRequestNumber),
+    ),
     setupLabels: async () => {
       await dispatchGithub.ensureLabels();
       return { status: "labels-ready" } as const;
     },
-    architectureReview: () => withScheduler(ARCHITECTURE_REVIEW_IDENTITY, () => operationDispatch.architectureReview()),
-    runUpdate: (pullRequestNumber) => withScheduler(`pull-request:${pullRequestNumber}`, () => operationDispatch.updateBranch(pullRequestNumber)),
+    architectureReview: () => withScheduler(
+      "architecture-review",
+      () => targetOperationCommands.run("architecture-review", 1),
+    ),
+    runUpdate: (pullRequestNumber) => withScheduler(
+      `pull-request:${pullRequestNumber}`,
+      () => targetOperationCommands.run("update-branch", pullRequestNumber),
+    ),
     runFeedback: (pullRequestNumber, reconcile) => withScheduler(
       `pull-request:${pullRequestNumber}`,
-      () => reconcile === undefined
-        ? operationDispatch.directFeedback(pullRequestNumber)
-        : feedbackEntry.runDirect(pullRequestNumber, reconcile),
+      () => targetOperationCommands.run("implement-feedback", pullRequestNumber, reconcile),
     ),
     dispatch: (concurrency) => dispatchAutomationCommands({
       concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
@@ -330,9 +217,9 @@ try {
         }),
       },
       promotion: {
-        scan: operationDispatch.promoteQueue,
+        scan: () => runQueuePromotionScan({ github: dispatchGithub }),
       },
-      run: operationDispatch.run,
+      run: runCommand,
     }),
     inspect: async () => {
       const readiness = await inspectGithubAgentReadiness({
@@ -358,9 +245,18 @@ try {
         ...await inspectAutomationCommands({ github: dispatchGithub, scheduler: { activeJobs: async () => activeJobs } }),
       };
     },
-    runImplement: (issueNumber) => withScheduler(`issue:${issueNumber}`, () => operationDispatch.implementIssue(issueNumber)),
-    runImplementPrd: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => operationDispatch.implementPrd(issueNumber)),
-    runSplit: (issueNumber) => withScheduler(`prd:${issueNumber}`, () => operationDispatch.splitPrd(issueNumber)),
+    runImplement: (issueNumber) => withScheduler(
+      `issue:${issueNumber}`,
+      () => targetOperationCommands.run("implement-issue", issueNumber),
+    ),
+    runImplementPrd: (issueNumber) => withScheduler(
+      `prd:${issueNumber}`,
+      () => targetOperationCommands.run("implement-prd", issueNumber),
+    ),
+    runSplit: (issueNumber) => withScheduler(
+      `prd:${issueNumber}`,
+      () => targetOperationCommands.run("split-prd", issueNumber),
+    ),
   });
   console.log(JSON.stringify(result));
 } catch (error) {

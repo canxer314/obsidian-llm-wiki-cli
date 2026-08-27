@@ -3,7 +3,8 @@ import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { implementIssue } from "./implementer.ts";
 import { planIssue } from "./planner.ts";
 import { createSandcastlePlannerSession } from "./planner-session.ts";
-import { loadSandboxStartup, sandboxHooksFor } from "./sandbox.ts";
+import { sandboxHooksFor } from "./sandbox.ts";
+import { readTargetWorkerStartup } from "./target-operation-startup.ts";
 
 const [issueNumber, baseRevision, checkoutPath, plannerModel, implementerModel] = process.argv.slice(2);
 if (
@@ -16,9 +17,9 @@ if (
   throw new Error("Expected implementation worker arguments");
 }
 
-const startup = await loadSandboxStartup();
+const startup = await readTargetWorkerStartup();
 const plannerSession = createSandcastlePlannerSession({
-  sandbox: startup.githubAgentSandbox,
+  sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
   checkoutPath,
 });
@@ -29,7 +30,7 @@ const plan = await planIssue({
 });
 if (plan.status === "blocked") throw new Error(plan.blockingReason);
 const implementerSession = createSandcastleImplementerSession({
-  sandbox: startup.githubAgentSandbox,
+  sandbox: startup.sandbox,
   hooks: sandboxHooksFor("implementer"),
 });
 const pullRequest = await implementIssue({
@@ -37,7 +38,7 @@ const pullRequest = await implementIssue({
   model: implementerModel,
   session: implementerSession,
   checkoutPath,
-  github: new GithubCliPort(undefined, undefined, startup.childEnvironments.github),
+  github: new GithubCliPort(undefined, undefined, startup.githubEnvironment),
 });
 if (pullRequest.headSha === baseRevision) {
   throw new Error("Implementer did not advance the authorized base revision");

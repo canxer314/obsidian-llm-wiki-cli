@@ -4,6 +4,7 @@ import type { FeedbackReplyIntent } from "./feedback-implementation-automation.t
 import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
 
 export function createProcessFeedbackImplementer(options: {
+  readonly startup: string;
   readonly model: string;
   readonly timeoutMilliseconds?: number | undefined;
   readonly graceMilliseconds?: number | undefined;
@@ -21,6 +22,7 @@ export function createProcessFeedbackImplementer(options: {
       readonly rootCommentId: string;
     }): Promise<{ readonly reply: FeedbackReplyIntent }> {
       const result = await runAgentWorker({
+        checkoutPath: request.checkoutPath,
         workerFile: "feedback-worker.ts",
         workerName: "Feedback implementation",
         arguments_: [
@@ -31,6 +33,7 @@ export function createProcessFeedbackImplementer(options: {
           request.rootCommentId,
           options.model,
         ],
+        input: options.startup,
         timeoutMessage: "Feedback implementation execution timed out",
         timeoutMilliseconds: options.timeoutMilliseconds,
         graceMilliseconds: options.graceMilliseconds,
