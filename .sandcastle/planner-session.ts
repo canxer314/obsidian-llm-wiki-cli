@@ -8,10 +8,15 @@ import {
 
 import type { PlannerAgentSession } from "./planner.js";
 
-const plannerPrompt = (issueNumber: number) => `
+const plannerPrompt = (
+  issueNumber: number,
+  prdContext?: { readonly parentPrd: number; readonly branch: string },
+) => `
 Plan only GitHub Issue #${issueNumber} in this repository.
 
 Use GitHub CLI to read the latest Issue directly with gh issue view ${issueNumber} --comments. Read its title, body, labels, and all comments before planning. Do not select, inspect, or plan another Issue. Determine whether dependencies or missing decisions block implementation. Determine whether the Issue explicitly permits changes to Sandcastle or GitHub automation configuration.
+${prdContext === undefined ? "" : `
+This Issue is one child of PRD #${prdContext.parentPrd}, delivered on the shared accumulating branch ${prdContext.branch}. Earlier completed children are committed on origin/${prdContext.branch}; this checkout is detached at the base revision and does not yet contain them. Before planning, inspect the accumulated branch state with git fetch origin ${prdContext.branch} and then read the relevant paths from it with git show origin/${prdContext.branch}:<path> or git diff --stat master...origin/${prdContext.branch}. Plan against the accumulated branch state, not the bare base checkout.`}
 
 Return one JSON object inside <plan> tags. It must exactly match this strict schema; include no fields other than those listed:
 - top level: status ("ready" or "blocked"), implementationSummary (a non-empty string, never an array or object), blockingReason, allowsAutomationChanges (boolean), and issue.
@@ -26,6 +31,7 @@ export function createSandcastlePlannerSession(options: {
   readonly sandbox: SandboxProvider;
   readonly hooks: SandboxHooks;
   readonly checkoutPath?: string;
+  readonly prdContext?: { readonly parentPrd: number; readonly branch: string };
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
 }): PlannerAgentSession {
@@ -41,7 +47,7 @@ export function createSandcastlePlannerSession(options: {
         branchStrategy: { type: "head" },
         maxIterations: 1,
         name: `planner-issue-${request.issueNumber}`,
-        prompt: plannerPrompt(request.issueNumber),
+        prompt: plannerPrompt(request.issueNumber, options.prdContext),
         output: Output.object({
           tag: request.output.tag,
           schema: request.output.schema,
