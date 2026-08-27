@@ -1,13 +1,22 @@
-import { mkdtemp, mkdir, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, mkdtemp, mkdir, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTargetCheckout, removeExpiredFailureCheckouts } from "../.sandcastle/target-checkout.js";
 
+const executeFile = promisify(execFile);
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const remote = "https://github.com/example/repository.git";
+
+const git = async (arguments_: readonly string[]): Promise<string> =>
+  (await executeFile("git", [...arguments_])).stdout.trim();
+
+const pathExists = async (path: string): Promise<boolean> =>
+  access(path).then(() => true, () => false);
 
 describe("Target Checkout", () => {
   it("clones the resolved GitHub remote and fetches then verifies only the acquired revision", async () => {
@@ -73,6 +82,28 @@ describe("Target Checkout", () => {
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["clone"]));
   });
 
+  it.each([
+    "git@github.com:example/repository.git",
+    "ssh://git@github.com/example/repository.git",
+    "http://github.com/example/repository.git",
+  ])("rejects a non-HTTPS source remote before cloning", async (invalidRemote) => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${invalidRemote}\n`, stderr: "" });
+    const action = vi.fn();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: "/trusted/source",
+      checkoutRoot: "/jobs",
+      execute,
+      createJobDirectory: () => "/jobs/review-220-job-a",
+    });
+
+    await expect(checkout.withCheckout({ pullRequestNumber: 220, revision }, action))
+      .rejects.toThrow("Target Checkout remote is invalid");
+
+    expect(action).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["clone"]));
+  });
+
   it("rejects a tracked Sandcastle private environment file before dependencies or Agent execution", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
@@ -93,6 +124,188 @@ describe("Target Checkout", () => {
 
     expect(action).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["checkout"]));
+  });
+});
+
+describe("Target Checkout real Git filesystem integration", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  const createFixture = async (): Promise<{
+    readonly root: string;
+    readonly remotePath: string;
+    readonly trustedPath: string;
+    readonly registeredWorktreePath: string;
+    readonly checkoutRoot: string;
+    readonly hiddenRevision: string;
+  }> => {
+    const root = await mkdtemp(join(tmpdir(), "target-checkout-integration-"));
+    roots.push(root);
+    const remotePath = join(root, "remote.git");
+    const contributorPath = join(root, "contributor");
+    const trustedPath = join(root, "trusted");
+    const registeredWorktreePath = join(root, "registered-worktree");
+    const checkoutRoot = join(root, "jobs");
+
+    await git(["init", "--bare", "-b", "master", remotePath]);
+    // This simulates GitHub's ability to serve an unadvertised Pull Request SHA.
+    await git(["-C", remotePath, "config", "uploadpack.allowAnySHA1InWant", "true"]);
+    await git(["init", "-b", "master", contributorPath]);
+    await git(["-C", contributorPath, "config", "user.name", "Fixture Contributor"]);
+    await git(["-C", contributorPath, "config", "user.email", "contributor@example.test"]);
+    await writeFile(join(contributorPath, "package.json"), JSON.stringify({
+      name: "target-checkout-fixture",
+      version: "1.0.0",
+      private: true,
+    }));
+    await writeFile(join(contributorPath, "package-lock.json"), JSON.stringify({
+      name: "target-checkout-fixture",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": { name: "target-checkout-fixture", version: "1.0.0" } },
+    }));
+    await writeFile(join(contributorPath, "base.txt"), "base\n");
+    await git(["-C", contributorPath, "add", "-A"]);
+    await git(["-C", contributorPath, "commit", "-m", "initial commit"]);
+    await git(["-C", contributorPath, "remote", "add", "origin", remotePath]);
+    await git(["-C", contributorPath, "push", "origin", "master"]);
+    await git(["clone", "--no-local", remotePath, trustedPath]);
+    // Production only accepts credential-free HTTPS remotes. Keep the bare
+    // repository local while making the trusted source resolve the production
+    // remote shape; the execution seam maps clone-only traffic to the fixture.
+    await git(["-C", trustedPath, "remote", "set-url", "origin", "https://github.com/example/repository.git"]);
+    await git(["-C", trustedPath, "worktree", "add", "--detach", registeredWorktreePath, "master"]);
+
+    await git(["-C", contributorPath, "switch", "-c", "hidden-pr"]);
+    await writeFile(join(contributorPath, "target-only.txt"), "target revision\n");
+    await git(["-C", contributorPath, "add", "target-only.txt"]);
+    await git(["-C", contributorPath, "commit", "-m", "unadvertised target"]);
+    const hiddenRevision = await git(["-C", contributorPath, "rev-parse", "HEAD"]);
+    await git(["-C", contributorPath, "push", "origin", "hidden-pr"]);
+    await git(["-C", remotePath, "update-ref", "-d", "refs/heads/hidden-pr"]);
+
+    return { root, remotePath, trustedPath, registeredWorktreePath, checkoutRoot, hiddenRevision };
+  };
+
+  it("fetches an unadvertised revision into an independent checkout, runs isolated dependency setup, and confines successful cleanup", async () => {
+    const fixture = await createFixture();
+    const cachePath = join(fixture.root, "download-cache");
+    const historicalPath = join(fixture.checkoutRoot, "historical-failure");
+    const unrelatedClaudeWorktreePath = join(fixture.root, "unrelated-claude-worktree");
+    await Promise.all([
+      mkdir(historicalPath, { recursive: true }),
+      mkdir(unrelatedClaudeWorktreePath, { recursive: true }),
+    ]);
+    await writeFile(join(unrelatedClaudeWorktreePath, "sentinel"), "preserve me\n");
+    await expect(executeFile("git", ["-C", fixture.trustedPath, "cat-file", "-e", `${fixture.hiddenRevision}^{commit}`]))
+      .rejects.toMatchObject({ code: 128 });
+
+    const dependencyPrefixes: string[] = [];
+    const dependencyEnvironments: Array<Readonly<Record<string, string>> | undefined> = [];
+    const gitCalls: string[][] = [];
+    const execute = async (
+      file: string,
+      arguments_: readonly string[],
+      environment?: Readonly<Record<string, string>>,
+    ): Promise<{ readonly stdout: string; readonly stderr: string }> => {
+      if (file === "npm") {
+        const prefix = arguments_[arguments_.indexOf("--prefix") + 1];
+        if (prefix === undefined) throw new Error("fake npm requires --prefix");
+        dependencyPrefixes.push(prefix);
+        dependencyEnvironments.push(environment);
+        await mkdir(join(prefix, "node_modules"), { recursive: true });
+        await writeFile(join(prefix, "node_modules", ".installed-by-fake-npm"), "installed\n");
+        return { stdout: "", stderr: "" };
+      }
+      gitCalls.push([...arguments_]);
+      const actualArguments = arguments_.map((argument) =>
+        argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+      );
+      const result = await executeFile(file, actualArguments, { env: environment });
+      return { stdout: result.stdout, stderr: result.stderr };
+    };
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute,
+      dependencyEnvironment: { npm_config_cache: cachePath },
+    });
+    const checkoutPaths: string[] = [];
+
+    for (let index = 0; index < 2; index += 1) {
+      await checkout.withCheckout({ pullRequestNumber: 219, revision: fixture.hiddenRevision }, async (checkoutPath) => {
+        checkoutPaths.push(checkoutPath);
+        expect(await git(["-C", checkoutPath, "rev-parse", "HEAD"])).toBe(fixture.hiddenRevision);
+        expect(await git(["-C", checkoutPath, "rev-parse", "--is-inside-work-tree"])).toBe("true");
+        expect((await stat(join(checkoutPath, ".git"))).isDirectory()).toBe(true);
+        expect(await pathExists(join(checkoutPath, ".git", "objects", "info", "alternates"))).toBe(false);
+        expect(await pathExists(join(checkoutPath, "node_modules", ".installed-by-fake-npm"))).toBe(true);
+
+        // Simulate the Agent's ordinary publication preparation: the detached
+        // checkout can create a commit and validate a push without changing source.
+        await git(["-C", checkoutPath, "config", "user.name", "Fixture Agent"]);
+        await git(["-C", checkoutPath, "config", "user.email", "agent@example.test"]);
+        await writeFile(join(checkoutPath, `agent-result-${index}.txt`), "result\n");
+        await git(["-C", checkoutPath, "add", "-A"]);
+        await git(["-C", checkoutPath, "commit", "-m", "agent result"]);
+        await git(["-C", checkoutPath, "push", "--dry-run", "origin", "HEAD:refs/heads/agent-result"]);
+      });
+    }
+
+    expect(new Set(checkoutPaths).size).toBe(2);
+    expect(dependencyPrefixes).toEqual(checkoutPaths);
+    expect(dependencyEnvironments).toEqual([
+      { npm_config_cache: cachePath },
+      { npm_config_cache: cachePath },
+    ]);
+    expect(gitCalls).toContainEqual([
+      "-C", checkoutPaths[0]!, "fetch", "--no-tags", "origin", fixture.hiddenRevision,
+    ]);
+    expect(await git(["-C", fixture.trustedPath, "worktree", "list", "--porcelain"]))
+      .not.toContain(checkoutPaths[0]!);
+    expect(await git(["-C", fixture.trustedPath, "worktree", "list", "--porcelain"]))
+      .toContain(fixture.registeredWorktreePath);
+    await expect(executeFile("git", ["-C", fixture.trustedPath, "cat-file", "-e", `${fixture.hiddenRevision}^{commit}`]))
+      .rejects.toMatchObject({ code: 128 });
+    await Promise.all(checkoutPaths.map((path) => expect(pathExists(path)).resolves.toBe(false)));
+    await expect(pathExists(fixture.trustedPath)).resolves.toBe(true);
+    await expect(pathExists(fixture.registeredWorktreePath)).resolves.toBe(true);
+    await expect(pathExists(unrelatedClaudeWorktreePath)).resolves.toBe(true);
+    await expect(pathExists(join(unrelatedClaudeWorktreePath, "sentinel"))).resolves.toBe(true);
+    await expect(pathExists(historicalPath)).resolves.toBe(true);
+  });
+
+  it("preserves a failed checkout for diagnosis without affecting source or siblings", async () => {
+    const fixture = await createFixture();
+    const historicalPath = join(fixture.checkoutRoot, "preserved-historical-failure");
+    await mkdir(historicalPath, { recursive: true });
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    let failedCheckoutPath = "";
+
+    await expect(checkout.withCheckout({ revision: fixture.hiddenRevision }, async (checkoutPath) => {
+      failedCheckoutPath = checkoutPath;
+      throw new Error("agent failed");
+    })).rejects.toThrow("agent failed");
+
+    await expect(pathExists(failedCheckoutPath)).resolves.toBe(true);
+    await expect(pathExists(fixture.trustedPath)).resolves.toBe(true);
+    await expect(pathExists(fixture.registeredWorktreePath)).resolves.toBe(true);
+    await expect(pathExists(historicalPath)).resolves.toBe(true);
   });
 });
 

@@ -276,6 +276,7 @@ describe("Sandcastle private configuration adapter", () => {
           ANTHROPIC_AUTH_TOKEN: "settings-secret",
           ANTHROPIC_DEFAULT_OPUS_MODEL: "upstream-opus",
           HTTPS_PROXY: "http://127.0.0.1:7890",
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/corporate-ca.pem",
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
           AWS_SECRET_ACCESS_KEY: "must-not-leak",
         },
@@ -291,6 +292,7 @@ describe("Sandcastle private configuration adapter", () => {
       ANTHROPIC_AUTH_TOKEN: "settings-secret",
       ANTHROPIC_DEFAULT_OPUS_MODEL: "upstream-opus",
       HTTPS_PROXY: "http://127.0.0.1:7890",
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/corporate-ca.pem",
       GH_TOKEN: "github-secret",
     });
     expect(config.proxyEnvironment).toEqual({

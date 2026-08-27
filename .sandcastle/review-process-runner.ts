@@ -95,7 +95,10 @@ export function createProcessReviewRunner(options: {
         timeoutMilliseconds: options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
         graceMilliseconds: options.graceMilliseconds ?? REVIEW_GRACE_MILLISECONDS,
         kill: options.kill ?? process.kill,
-        wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds))),
+        wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => {
+          const timer = setTimeout(resolveWait, milliseconds);
+          timer.unref();
+        })),
       });
       if (result.status === "timed-out") throw new Error("Reviewer execution timed out");
       return parseReview(await output!);

@@ -276,10 +276,7 @@ export function classifyGithubReadError(
   error: unknown,
   clock: () => number = now,
 ): GithubReadErrorClassification {
-  const message = [
-    error instanceof Error ? error.message : "",
-    errorStderr(error) ?? "",
-  ].join("\n").toLowerCase();
+  const message = githubErrorDiagnostic(error).toLowerCase();
   if (
     /\bhttp\s+429\b/.test(message)
     || /(?:api |secondary )?rate limit exceeded/.test(message)
@@ -287,11 +284,12 @@ export function classifyGithubReadError(
   ) {
     return { kind: "rate-limited", ...retryAfterHintMilliseconds(message, clock) };
   }
+  if (/\bhttp\s+4\d\d\b/.test(message)) return { kind: "deterministic" };
   if (
     /(?:unexpected )?eof/.test(message) ||
     /(?:connection|network|transport).*(?:reset|refused|closed|timeout|timed out|unavailable)/.test(message) ||
     /(?:tls handshake|i\/o) timeout|context deadline exceeded|client\.timeout exceeded/.test(message) ||
-    /(?:http )?(?:500|502|503|504)\b/.test(message) ||
+    /\bhttp\s+(?:500|502|503|504)\b/.test(message) ||
     /service unavailable|bad gateway|gateway timeout/.test(message)
   ) {
     return { kind: "transient" };
@@ -325,9 +323,20 @@ function safeRateLimitDelay(milliseconds: number): { readonly retryAfterMillisec
   return { retryAfterMilliseconds: Math.max(DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS, milliseconds) };
 }
 
+function githubErrorDiagnostic(error: unknown): string {
+  const stderr = errorStderr(error)?.trim();
+  if (stderr) return stderr;
+
+  const message = error instanceof Error ? error.message : "";
+  if (!message.startsWith("Command failed:")) return message;
+  const firstLineEnd = message.indexOf("\n");
+  return firstLineEnd === -1 ? "" : message.slice(firstLineEnd + 1);
+}
+
 function errorStderr(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("stderr" in error)) {
     return null;
   }
-  return String(error.stderr);
+  const stderr = error.stderr;
+  return stderr === undefined || stderr === null ? null : String(stderr);
 }

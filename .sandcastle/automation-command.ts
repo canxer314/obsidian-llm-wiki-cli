@@ -4,7 +4,10 @@ export type AutomationOperation =
   | "review"
   | "implement-issue"
   | "implement-prd"
-  | "split-prd";
+  | "split-prd"
+  // A state-only Work Item has consumed its trigger, so its originating
+  // operation cannot be reconstructed safely. It is inspection-only.
+  | "unknown";
 
 export interface AutomationCommand {
   readonly number: number;
@@ -29,6 +32,7 @@ const operationTriggerLabels: Readonly<Record<AutomationOperation, string>> = {
   "implement-issue": "agent:implement",
   "implement-prd": "agent:implement",
   "split-prd": "agent:to-issues",
+  unknown: "an appropriate trigger label",
 };
 
 export function commandTriggerLabel(command: AutomationCommand): string {
@@ -36,6 +40,13 @@ export function commandTriggerLabel(command: AutomationCommand): string {
 }
 
 export function commandEligibility(command: AutomationCommand): AutomationCommandEligibility {
+  if (command.operation === "unknown") {
+    return command.labels.includes("agent:blocked")
+      ? "blocked"
+      : command.labels.includes("agent:in-progress")
+        ? "stale-in-progress"
+        : "ineligible";
+  }
   const trigger = commandTriggerLabel(command);
   const hasTrigger = command.labels.includes(trigger);
   const inProgress = command.labels.includes("agent:in-progress");
@@ -57,6 +68,7 @@ const operationPriority: Readonly<Record<AutomationOperation, number>> = {
   "implement-issue": 4,
   "implement-prd": 4,
   "split-prd": 5,
+  unknown: Number.MAX_SAFE_INTEGER,
 };
 
 export function commandPriority(command: AutomationCommand): number {

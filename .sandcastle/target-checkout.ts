@@ -83,7 +83,10 @@ export function createTargetCheckout(options: {
         const remote = (await git([
           "-C", options.sourceRepositoryPath, "remote", "get-url", "origin",
         ])).stdout.trim();
-        if (remote.length === 0 || /:\/\/[^/]*@/u.test(remote)) {
+        if (
+          !/^https:\/\/[^/@\s]+(?:\/|$)/u.test(remote) ||
+          /:\/\/[^/]*@/u.test(remote)
+        ) {
           throw new Error("Target Checkout remote is invalid");
         }
         await git([

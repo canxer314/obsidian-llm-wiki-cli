@@ -81,7 +81,10 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
     timeoutMilliseconds: options.timeoutMilliseconds ?? AGENT_JOB_TIMEOUT_MILLISECONDS,
     graceMilliseconds: options.graceMilliseconds ?? AGENT_JOB_GRACE_MILLISECONDS,
     kill: options.kill ?? process.kill,
-    wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds))),
+    wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => {
+      const timer = setTimeout(resolveWait, milliseconds);
+      timer.unref();
+    })),
   });
   if (result.status === "timed-out") throw new Error(options.timeoutMessage);
   return output!;

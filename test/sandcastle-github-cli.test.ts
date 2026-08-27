@@ -6,6 +6,10 @@ const target429Error = Object.assign(new Error("Command failed: gh issue view 42
   stderr: "HTTP 403: Resource not accessible by integration",
 });
 
+const target500Error = Object.assign(new Error("Command failed: gh pr view 500 --json headRefOid"), {
+  stderr: "HTTP 404 Not Found",
+});
+
 const encodedFile = (filename: string, previousFilename = ""): string =>
   Buffer.from(JSON.stringify([filename, previousFilename])).toString("base64");
 
@@ -242,6 +246,24 @@ describe("Sandcastle GitHub CLI adapter", () => {
     })).rejects.toBe(target429Error);
 
     expect(execute).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("fails fast when a deterministic 404 command names Pull Request 500", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: '{"nameWithOwner":"example/repo","defaultBranchRef":{"name":"master"}}\n', stderr: "" })
+      .mockRejectedValue(target500Error);
+    const waits: number[] = [];
+    const github = new GithubCliPort(execute, async (milliseconds) => { waits.push(milliseconds); });
+
+    await expect(github.verifyImplementation({
+      issueNumber: 103,
+      branch: "sandcastle/issue-103",
+      expectedHeadSha: "abc123",
+      allowsAutomationChanges: false,
+    })).rejects.toBe(target500Error);
+
+    expect(execute).toHaveBeenCalledTimes(2);
     expect(waits).toEqual([]);
   });
 

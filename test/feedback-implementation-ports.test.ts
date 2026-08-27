@@ -12,6 +12,17 @@ function target429Error(stderr: string): Error {
   return Object.assign(new Error("Command failed: gh issue view 429 --json number"), { stderr });
 }
 
+function targetServerStatusNumberError(
+  target: 500 | 502 | 503 | 504,
+  stderr = "HTTP 404 Not Found",
+  arguments_ = "--json headRefOid",
+): Error {
+  return Object.assign(
+    new Error(`Command failed: gh pr view ${target} ${arguments_}`),
+    { stderr },
+  );
+}
+
 function pullRequest(headSha = PRE, labels = ["agent:implement"]) {
   return {
     number: 224,
@@ -92,6 +103,9 @@ describe("feedback implementation production ports", () => {
     new Error("transport connection reset by peer"),
     new Error("context deadline exceeded"),
     new Error("HTTP 503 Service Unavailable"),
+    Object.assign(new Error("Command failed: gh pr view 500 --json headRefOid"), {
+      stderr: "HTTP 503 Service Unavailable",
+    }),
     Object.assign(new Error("gh exited"), { stderr: "network connection refused" }),
     Object.assign(new Error("gh exited"), { stderr: "TLS handshake timeout" }),
   ])("classifies ordinary transient GitHub read failure %s", (error) => {
@@ -139,6 +153,56 @@ describe("feedback implementation production ports", () => {
     target429Error("HTTP 403: Resource not accessible by integration"),
   ])("does not mistake a target number 429 for rate limiting: %s", (error) => {
     expect(classifyGithubReadError(error)).toEqual({ kind: "deterministic" });
+  });
+
+  it.each([
+    { status: 404, text: "service unavailable" },
+    { status: 403, text: "gateway timeout" },
+  ])("keeps deterministic HTTP $status failures fail-closed despite transient-looking details", ({ status, text }) => {
+    const error = Object.assign(new Error("Command failed: gh pr view 500 --json headRefOid"), {
+      stderr: `HTTP ${status} Not Found\n${text}`,
+    });
+    expect(classifyGithubReadError(error)).toEqual({ kind: "deterministic" });
+  });
+
+  it.each(
+    ([500, 502, 503, 504] as const).flatMap((target) => [
+      { target, stderr: "HTTP 404 Not Found" },
+      { target, stderr: "HTTP 403: Resource not accessible by integration" },
+      { target, stderr: "HTTP 422 Unprocessable Entity" },
+    ]),
+  )(
+    "does not mistake target number $target with deterministic stderr for an HTTP server error",
+    ({ target, stderr }) => {
+      expect(classifyGithubReadError(targetServerStatusNumberError(target, stderr)))
+        .toEqual({ kind: "deterministic" });
+    },
+  );
+
+  it.each(["network timeout", "service unavailable"])(
+    "does not classify command argument text '$arguments_' when stderr is deterministic",
+    (arguments_) => {
+      const error = targetServerStatusNumberError(
+        500,
+        "HTTP 404 Not Found",
+        `--json headRefOid --jq '${arguments_}'`,
+      );
+      expect(classifyGithubReadError(error)).toEqual({ kind: "deterministic" });
+    },
+  );
+
+  it("prefers deterministic stderr over a conflicting plain error message", () => {
+    const error = Object.assign(new Error("HTTP 500 Internal Server Error"), {
+      stderr: "HTTP 404 Not Found",
+    });
+    expect(classifyGithubReadError(error)).toEqual({ kind: "deterministic" });
+  });
+
+  it("classifies diagnostics after a Node command wrapper with empty stderr", () => {
+    const error = Object.assign(new Error(
+      "Command failed: gh pr view 500 --json headRefOid\nHTTP 503 Service Unavailable",
+    ), { stderr: "" });
+    expect(classifyGithubReadError(error)).toEqual({ kind: "transient" });
   });
 
   it.each([
@@ -213,6 +277,68 @@ describe("feedback implementation production ports", () => {
       expectedReply,
     })).resolves.toEqual({ status: "implemented", revision: expectedPost, reconciled: true });
     expect(dependencies.publisher.publish).not.toHaveBeenCalled();
+  });
+
+  it("keeps direct reconcile reply readback fail-closed for target number 429", async () => {
+    const dependencies = createPorts();
+    const baseRevision = "c".repeat(40);
+    const expectedPost = "d".repeat(40);
+    const readError = target429Error("HTTP 404 Not Found");
+    dependencies.github.readPullRequest.mockReset().mockResolvedValue(pullRequest(expectedPost, ["agent:in-progress"]));
+    dependencies.github.readCurrentUnresolvedFeedback.mockResolvedValue({ unresolvedRootCommentIds: [ROOT], replies: [] });
+    dependencies.github.readCommitParent.mockResolvedValue(baseRevision);
+    dependencies.github.readFeedbackReplies.mockRejectedValue(readError);
+    const waits: number[] = [];
+    const entry = createFeedbackImplementationEntry(() => ({
+      github: dependencies.github,
+      checkout: dependencies.checkout,
+      publisher: dependencies.publisher,
+      implementer: { implement: dependencies.implementer },
+      lease: dependencies.lease,
+      createJobId: () => "feedback-job",
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+      convergenceAttempts: 1,
+      replyConvergenceAttempts: 3,
+    }));
+
+    await expect(entry.runDirect(224, {
+      invocation: "reconcile",
+      baseRevision,
+      expectedPost,
+      expectedReply: { rootCommentId: ROOT, body: "Reply only." },
+    })).resolves.toMatchObject({ status: "blocked", reason: "feedback-reply", revision: expectedPost });
+
+    expect(waits).toEqual([]);
+    expect(dependencies.github.readFeedbackReplies).toHaveBeenCalledTimes(1);
+    expect(dependencies.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Dispatcher feedback head convergence fail-closed for target number 429", async () => {
+    const dependencies = createPorts();
+    const readError = target429Error("HTTP 404 Not Found");
+    dependencies.github.readPullRequest.mockReset()
+      .mockResolvedValueOnce(pullRequest())
+      .mockResolvedValueOnce(pullRequest())
+      .mockResolvedValueOnce(pullRequest(PRE, ["agent:in-progress"]))
+      .mockRejectedValueOnce(readError);
+    const waits: number[] = [];
+    const entry = createFeedbackImplementationEntry(() => ({
+      github: dependencies.github,
+      checkout: dependencies.checkout,
+      publisher: dependencies.publisher,
+      implementer: { implement: dependencies.implementer },
+      lease: dependencies.lease,
+      createJobId: () => "feedback-job",
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+      convergenceAttempts: 3,
+      replyConvergenceAttempts: 1,
+    }));
+
+    await expect(entry.runDispatcher(224))
+      .resolves.toMatchObject({ status: "blocked", reason: "feedback-convergence", revision: POST });
+
+    expect(waits).toEqual([]);
+    expect(dependencies.github.readPullRequest).toHaveBeenCalledTimes(4);
   });
 
   it("runs Dispatcher feedback as ordinary through the shared production classifier entry", async () => {
@@ -327,13 +453,15 @@ describe("feedback implementation production ports", () => {
     expect(dependencies.github.readPullRequest).toHaveBeenCalledTimes(4);
   });
 
-  it("fails fast on a deterministic production-classified head read error", async () => {
+  it("fails fast when production head convergence gets a 404 for Pull Request 500", async () => {
     const dependencies = createPorts();
+    const error = targetServerStatusNumberError(500);
+    const waits: number[] = [];
     dependencies.github.readPullRequest.mockReset()
       .mockResolvedValueOnce(pullRequest())
       .mockResolvedValueOnce(pullRequest())
       .mockResolvedValueOnce(pullRequest(PRE, ["agent:in-progress"]))
-      .mockRejectedValueOnce(new Error("HTTP 422 Unprocessable Entity"));
+      .mockRejectedValueOnce(error);
 
     const result = await runFeedbackImplementation({ pullRequestNumber: 224 }, {
       github: dependencies.github,
@@ -342,12 +470,13 @@ describe("feedback implementation production ports", () => {
       implementer: { implement: dependencies.implementer },
       lease: dependencies.lease,
       createJobId: () => "feedback-job",
-      wait: async () => {},
+      wait: async (milliseconds) => { waits.push(milliseconds); },
       convergenceAttempts: 2,
       replyConvergenceAttempts: 1,
     });
 
     expect(result).toMatchObject({ status: "blocked", reason: "feedback-convergence", revision: POST });
+    expect(waits).toEqual([]);
     expect(dependencies.github.readPullRequest).toHaveBeenCalledTimes(4);
   });
 
@@ -408,10 +537,11 @@ describe("feedback implementation production ports", () => {
     expect(dependencies.github.replyToReviewThread).toHaveBeenCalledTimes(1);
   });
 
-  it("fails fast on a deterministic production-classified reply readback error", async () => {
+  it("fails fast when production reply readback gets a 404 for Pull Request 500", async () => {
     const dependencies = createPorts();
+    const waits: number[] = [];
     dependencies.github.readFeedbackReplies.mockReset()
-      .mockRejectedValueOnce(new Error("HTTP 422 Unprocessable Entity"));
+      .mockRejectedValueOnce(targetServerStatusNumberError(500));
 
     const result = await runFeedbackImplementation({ pullRequestNumber: 224 }, {
       github: dependencies.github,
@@ -420,12 +550,16 @@ describe("feedback implementation production ports", () => {
       implementer: { implement: dependencies.implementer },
       lease: dependencies.lease,
       createJobId: () => "feedback-job",
-      wait: async () => {},
+      wait: async (milliseconds) => { waits.push(milliseconds); },
       convergenceAttempts: 2,
       replyConvergenceAttempts: 2,
     });
 
     expect(result).toMatchObject({ status: "blocked", reason: "feedback-reply", revision: POST });
+    // Reply readback starts after the intentional publication-settle wait; the
+    // deterministic read itself must not add a retry wait.
+    expect(waits).toEqual([2_000]);
     expect(dependencies.github.readFeedbackReplies).toHaveBeenCalledTimes(1);
+    expect(dependencies.github.replyToReviewThread).toHaveBeenCalledTimes(1);
   });
 });
