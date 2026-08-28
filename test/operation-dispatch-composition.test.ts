@@ -146,7 +146,8 @@ function pullRequestShape(
   return {
     number: entry.number,
     state: "OPEN",
-    isDraft: scenario !== "preflight",
+    isDraft: scenario !== "preflight" ||
+      entry.family === "Pull Request feedback implementation",
     labels: [...labels],
     headSha,
     headRefName: "feature/automation",
@@ -382,6 +383,7 @@ function createOrdinaryGithub(
     readonly replyCommentId: string;
     readonly body: string;
   }[] = [];
+  let targetExecution = false;
   const addLabel = async (label: string): Promise<void> => {
     labels.add(label);
   };
@@ -390,6 +392,7 @@ function createOrdinaryGithub(
   };
   return {
     labels,
+    beginTargetExecution(): void { targetExecution = true; },
     setHead(value: string): void { head = value; },
     readBaseRevision: async () => revision,
     readIssue: async () => ({
@@ -399,7 +402,13 @@ function createOrdinaryGithub(
         : "OPEN",
     }),
     readPrd: async () => issueShape(entry, labels, scenario),
-    readPullRequest: async () => pullRequestShape(entry, labels, head, scenario),
+    readPullRequest: async () => ({
+      ...pullRequestShape(entry, labels, head, scenario),
+      state: entry.targetOperation === "implement-feedback" &&
+          scenario === "preflight" && targetExecution
+        ? "CLOSED"
+        : "OPEN",
+    }),
     addIssueLabel: async (_number: number, label: string) => addLabel(label),
     removeIssueLabel: async (_number: number, label: string) => removeLabel(label),
     addPullRequestLabel: async (_number: number, label: string) => addLabel(label),
@@ -465,6 +474,7 @@ async function runOrdinaryScenario(
   const target = {
     run: async (authorized: AuthorizedTargetOperationInvocation) => {
       invocation = authorized;
+      github.beginTargetExecution();
       outcome = await executeOrdinaryBusinessOperation({
         entry,
         scenario,

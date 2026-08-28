@@ -225,7 +225,7 @@ describe("business refusal semantics (#247)", () => {
   });
 
   describe("Pull Request feedback implementation", () => {
-    it.each(pullRequestRefusals("agent:implement"))("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
+    it.each(pullRequestRefusals("agent:implement").filter(([name]) => name !== "a non-Draft Pull Request"))("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
       const github = {
         readPullRequest: vi.fn().mockResolvedValue(pullRequest("agent:implement", overrides)),
         readFeedbackReplies: vi.fn().mockResolvedValue([]),
@@ -250,6 +250,49 @@ describe("business refusal semantics (#247)", () => {
       expect(checkout.withCheckout).not.toHaveBeenCalled();
       expect(publisher.publish).not.toHaveBeenCalled();
       expect(implementer.implement).not.toHaveBeenCalled();
+    });
+
+    it("continues feedback implementation after review marks the Pull Request ready", async () => {
+      const readyPullRequest = pullRequest("agent:implement", { isDraft: false });
+      const github = {
+        readPullRequest: vi.fn()
+          .mockResolvedValueOnce(readyPullRequest)
+          .mockResolvedValueOnce(readyPullRequest)
+          .mockResolvedValueOnce({
+            ...readyPullRequest,
+            labels: ["agent:in-progress"],
+          }),
+        readFeedbackReplies: vi.fn().mockResolvedValue([]),
+        readCurrentUnresolvedFeedback: vi.fn().mockResolvedValue({
+          unresolvedRootCommentIds: ["feedback-root"],
+          replies: [],
+        }),
+        readCommitParent: vi.fn().mockResolvedValue(undefined),
+        readUnresolvedReviewThreads: vi.fn().mockResolvedValue([]),
+        addPullRequestLabel: vi.fn(),
+        removePullRequestLabel: vi.fn(),
+        replyToReviewThread: vi.fn(),
+        addFeedbackBlockedDiagnostic: vi.fn(),
+      };
+      const checkout = {
+        withCheckout: vi.fn().mockRejectedValue(new Error("execution sentinel")),
+      };
+
+      await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 249 }, {
+        github,
+        checkout,
+        publisher: { prepare: vi.fn(), publish: vi.fn() },
+        implementer: { implement: vi.fn() },
+        lease,
+        createJobId: () => "feedback-job",
+      })).resolves.toMatchObject({
+        status: "blocked",
+        reason: "feedback-execution",
+        jobId: "feedback-job",
+      });
+
+      expect(checkout.withCheckout).toHaveBeenCalledOnce();
+      expect(github.addPullRequestLabel).toHaveBeenCalledWith(249, "agent:in-progress");
     });
   });
 

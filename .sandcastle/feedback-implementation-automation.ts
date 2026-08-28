@@ -118,7 +118,6 @@ class FeedbackStageError extends Error {
 
 function refusal(pullRequest: ReviewAutomationPullRequest): string | undefined {
   if (pullRequest.state !== "OPEN") return `Pull Request #${pullRequest.number} is not open`;
-  if (!pullRequest.isDraft) return `Pull Request #${pullRequest.number} is not a Draft`;
   if (pullRequest.baseRepository !== pullRequest.headRepository) return `Pull Request #${pullRequest.number} must not originate from a fork`;
   if (!/^[0-9a-f]{40}$/u.test(pullRequest.headSha)) return `Pull Request #${pullRequest.number} has an invalid head revision`;
   if (!pullRequest.labels.includes("agent:implement")) return `Pull Request #${pullRequest.number} is not queued for feedback implementation`;
