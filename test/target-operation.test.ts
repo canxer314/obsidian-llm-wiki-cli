@@ -25,15 +25,167 @@ const operationEntries: Readonly<Record<TargetOperationIdentity, string>> = {
 };
 
 describe("Target operation runner", () => {
+  it("records a blocked operation outcome as a failed job", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-blocked-log-"));
+    const logsPath = join(root, "logs");
+    const runner = createTargetOperationRunner({
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start: () => spawn("bash", ["-c", 'printf \'%s\\n\' \'{"status":"blocked","reason":"execution"}\''], {
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    });
+
+    try {
+      await expect(runner.run({
+        operation: "implement-issue",
+        number: 219,
+        revision,
+        jobId: "blocked-job-219",
+      })).resolves.toEqual({ status: "blocked", reason: "execution" });
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "blocked-job-219", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "failed", jobId: "blocked-job-219" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(Object.keys(operationEntries) as TargetOperationIdentity[])(
+    "retains one completed whole-job log for fixed %s execution",
+    async (operation) => {
+      const root = mkdtempSync(join(tmpdir(), "target-operation-identity-log-"));
+      const jobId = `job-${operation}`;
+      const start = vi.fn(() => spawn("bash", ["-c", 'printf \'%s\\n\' \'{"status":"completed-fixture"}\''], {
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }));
+      const runner = createTargetOperationRunner({
+        jobLogRoot: join(root, "logs"),
+        startup: {
+          imageName: "fixture-image",
+          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+        },
+        start,
+      });
+      const pullRequest = operation === "implement-feedback" || operation === "review" || operation === "update-branch"
+        ? {
+            headSha: revision,
+            headRefName: "feature-branch",
+            baseRefName: "master",
+            baseRepository: "owner/repository",
+            headRepository: "owner/repository",
+          }
+        : undefined;
+
+      try {
+        await expect(runner.run({
+          operation,
+          number: 219,
+          revision,
+          jobId,
+          ...(pullRequest === undefined ? {} : { pullRequest }),
+        })).resolves.toEqual({ status: "completed-fixture" });
+        expect(JSON.parse(readFileSync(
+          join(root, "logs", jobId, "metadata.json"),
+          "utf8",
+        ))).toMatchObject({ operation, status: "completed", jobId });
+        expect(start).toHaveBeenCalledWith([]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("preserves the target failure when failure metadata cannot be completed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-metadata-failure-"));
+    const logsPath = join(root, "logs");
+    const runner = createTargetOperationRunner({
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start: () => {
+        const metadataPath = join(logsPath, "job-219", "metadata.json");
+        rmSync(metadataPath);
+        mkdirSync(metadataPath);
+        return spawn("bash", ["-c", 'printf "original target failure" >&2; exit 9'], {
+          detached: true,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      },
+    });
+
+    try {
+      await expect(runner.run({
+        operation: "implement-issue",
+        number: 219,
+        revision,
+        jobId: "job-219",
+      })).rejects.toThrow("original target failure");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies a failed outer worker by outcome rather than diagnostic wording", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-failed-log-"));
+    const logsPath = join(root, "logs");
+    const runner = createTargetOperationRunner({
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start: () => spawn("bash", ["-c", 'printf "partial stdout\\n"; printf "setup timed out" >&2; exit 7'], {
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    });
+
+    try {
+      await expect(runner.run({
+        operation: "implement-issue",
+        number: 219,
+        revision,
+        jobId: "failed-job-219",
+      })).rejects.toThrow("setup timed out");
+      expect(readFileSync(join(logsPath, "failed-job-219", "stdout.log"), "utf8"))
+        .toBe("partial stdout\n");
+      expect(readFileSync(join(logsPath, "failed-job-219", "stderr.log"), "utf8"))
+        .toBe("setup timed out");
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "failed-job-219", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "failed", jobId: "failed-job-219" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("times out checkout setup and terminates its whole descendant process group", async () => {
+    const logRoot = mkdtempSync(join(tmpdir(), "target-operation-timeout-log-"));
     const marker = join(tmpdir(), `target-checkout-descendant-${process.pid}.pid`);
     const script = [
       'trap "" TERM',
+      'printf "checkout started\\n"',
+      'printf "checkout waiting\\n" >&2',
       `bash -c 'trap "" TERM; sleep 30' </dev/null >/dev/null 2>&1 &`,
       `echo $! > "${marker}"`,
       "wait",
     ].join("\n");
     const runner = createTargetOperationRunner({
+      jobLogRoot: logRoot,
       startup: {
         imageName: "fixture-image",
         childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
@@ -54,6 +206,14 @@ describe("Target operation runner", () => {
         revision,
         jobId: "job-219",
       })).rejects.toThrow("Target operation implement-issue timed out");
+      expect(readFileSync(join(logRoot, "job-219", "stdout.log"), "utf8"))
+        .toContain("checkout started\n");
+      expect(readFileSync(join(logRoot, "job-219", "stderr.log"), "utf8"))
+        .toContain("checkout waiting\n");
+      expect(JSON.parse(readFileSync(
+        join(logRoot, "job-219", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "timed-out", jobId: "job-219" });
       const descendantPid = Number(readFileSync(marker, "utf8"));
       expect(() => process.kill(descendantPid, 0)).toThrow();
     } finally {
@@ -63,6 +223,7 @@ describe("Target operation runner", () => {
         // The assertion path normally leaves no process to clean up.
       }
       rmSync(marker, { force: true });
+      rmSync(logRoot, { recursive: true, force: true });
     }
   });
 

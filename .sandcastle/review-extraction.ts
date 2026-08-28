@@ -9,6 +9,7 @@ import {
 } from "@ai-hero/sandcastle";
 import { z } from "zod";
 
+import { agentLogging } from "./agent-logging.ts";
 import type { PublishedReview, ReviewThreadComment } from "./review-automation.ts";
 
 export type ExtractedReview = PublishedReview;
@@ -80,11 +81,11 @@ export function createSameSessionReviewExtractor(options: {
         options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
       );
       try {
-        const logging = request.artifactDirectory === undefined ? undefined : {
-          type: "file" as const,
-          path: join(request.artifactDirectory, "review.log"),
-          verbose: true,
-        };
+        const logging = agentLogging(
+          request.artifactDirectory === undefined
+            ? undefined
+            : join(request.artifactDirectory, "review.log"),
+        );
         const produced = await runAgent({
           agent: createAgent(request.model),
           sandbox: options.sandbox,

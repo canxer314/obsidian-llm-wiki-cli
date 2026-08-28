@@ -2,6 +2,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 
 import {
+  AgentWorkerTimeoutError,
   runAgentWorker,
   workerJson,
   type AgentWorkerOptions,
@@ -10,6 +11,11 @@ import type {
   TargetCheckout,
   TargetCheckoutProcessOptions,
 } from "./target-checkout.ts";
+import {
+  completeJobLog,
+  createJobLog,
+  inheritedJobLogEnvironment,
+} from "./job-logs.ts";
 import type { TargetOperationStartupSnapshot } from "./target-operation-startup.ts";
 
 export type TargetOperationIdentity =
@@ -103,6 +109,7 @@ export async function executeTargetOperationInCheckout(options: {
 
 export function createTargetOperationRunner(options: {
   readonly checkoutOptions?: TargetCheckoutProcessOptions;
+  readonly jobLogRoot?: string;
   readonly startup: TargetOperationStartupSnapshot;
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
@@ -117,28 +124,65 @@ export function createTargetOperationRunner(options: {
       if (options.checkoutOptions === undefined && options.start === undefined) {
         throw new Error("Target operation requires whole-job checkout configuration");
       }
-      const result = await runAgentWorker({
-        checkoutPath: resolve(import.meta.dirname, ".."),
-        workerFile: "target-job-worker.ts",
-        workerName: "Target job",
-        arguments_: [],
-        input: JSON.stringify({
-          checkout: options.checkoutOptions,
-          startup: options.startup,
-          invocation,
-        }),
-        timeoutMessage: `Target operation ${invocation.operation} timed out`,
-        timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeouts[invocation.operation],
-        graceMilliseconds: options.graceMilliseconds ?? TARGET_JOB_GRACE_MILLISECONDS,
-        start: options.start,
-        kill: options.kill,
-        wait: options.wait,
-        groupExited: options.groupExited,
-        processGroupOwner: true,
-      });
-      return workerJson(result, `Target operation ${invocation.operation}`);
+      if (options.jobLogRoot === undefined && options.start === undefined) {
+        throw new Error("Target operation requires local job log configuration");
+      }
+      const log = options.jobLogRoot === undefined
+        ? undefined
+        : await createJobLog({
+            root: options.jobLogRoot,
+            jobId: invocation.jobId,
+            operation: invocation.operation,
+            number: invocation.number,
+            revision: invocation.revision,
+          });
+      let operationFailed = true;
+      try {
+        const result = await runAgentWorker({
+          checkoutPath: resolve(import.meta.dirname, ".."),
+          workerFile: "target-job-worker.ts",
+          workerName: "Target job",
+          arguments_: [],
+          input: JSON.stringify({
+            checkout: options.checkoutOptions,
+            startup: options.startup,
+            invocation,
+          }),
+          timeoutMessage: `Target operation ${invocation.operation} timed out`,
+          timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeouts[invocation.operation],
+          graceMilliseconds: options.graceMilliseconds ?? TARGET_JOB_GRACE_MILLISECONDS,
+          start: options.start,
+          kill: options.kill,
+          wait: options.wait,
+          groupExited: options.groupExited,
+          processGroupOwner: true,
+          inheritedEnvironment: log === undefined ? undefined : inheritedJobLogEnvironment(log),
+        });
+        const outcome = workerJson(result, `Target operation ${invocation.operation}`);
+        operationFailed = false;
+        if (log !== undefined) {
+          await completeJobLog(log, {
+            status: isBlockedOutcome(outcome) ? "failed" : "completed",
+          });
+        }
+        return outcome;
+      } catch (error) {
+        if (log !== undefined && operationFailed) {
+          await completeJobLog(log, {
+            status: error instanceof AgentWorkerTimeoutError
+              ? "timed-out"
+              : "failed",
+          }).catch(() => undefined);
+        }
+        throw error;
+      }
     },
   };
+}
+
+function isBlockedOutcome(value: unknown): boolean {
+  return typeof value === "object" && value !== null &&
+    "status" in value && value.status === "blocked";
 }
 
 function validateInvocation(invocation: AuthorizedTargetOperationInvocation): void {

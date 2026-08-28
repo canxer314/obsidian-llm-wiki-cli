@@ -2,6 +2,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
 import { runJobWithTimeout } from "./job-timeout.ts";
+import {
+  appendJobOutputFromEnvironment,
+} from "./job-logs.ts";
 import { workerProcessOptions } from "./worker-process.ts";
 
 // Upstream agent workflows time out after sixty minutes. These workers carry
@@ -10,20 +13,57 @@ import { workerProcessOptions } from "./worker-process.ts";
 const AGENT_JOB_TIMEOUT_MILLISECONDS = 60 * 60 * 1000;
 const AGENT_JOB_GRACE_MILLISECONDS = 10 * 1000;
 
+export class AgentWorkerTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentWorkerTimeoutError";
+  }
+}
+
 export interface AgentWorkerResult {
   readonly output: string;
   readonly code: number | null;
   readonly diagnostics: string;
 }
 
-function outputOf(child: ChildProcess): Promise<AgentWorkerResult> {
+interface CapturedAgentWorkerResult extends AgentWorkerResult {
+  readonly logError?: unknown;
+}
+
+function outputOf(
+  child: ChildProcess,
+  environment: Readonly<Record<string, string>> | undefined,
+): Promise<CapturedAgentWorkerResult> {
   return new Promise((resolveOutput, reject) => {
     let output = "";
     let diagnostics = "";
-    child.stdout?.on("data", (chunk: Buffer | string) => { output += String(chunk); });
-    child.stderr?.on("data", (chunk: Buffer | string) => { diagnostics += String(chunk); });
+    let logError: unknown;
+    const append = (
+      stream: "stdout" | "stderr",
+      chunk: Buffer | string,
+    ): void => {
+      if (environment === undefined || logError !== undefined) return;
+      try {
+        appendJobOutputFromEnvironment(environment, stream, chunk);
+      } catch (error) {
+        logError = error;
+      }
+    };
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      output += String(chunk);
+      append("stdout", chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      diagnostics += String(chunk);
+      append("stderr", chunk);
+    });
     child.once("error", reject);
-    child.once("close", (code) => resolveOutput({ output, code, diagnostics }));
+    child.once("close", (code) => resolveOutput({
+      output,
+      code,
+      diagnostics,
+      ...(logError === undefined ? {} : { logError }),
+    }));
   });
 }
 
@@ -55,10 +95,14 @@ export interface AgentWorkerOptions {
   readonly wait?: ((milliseconds: number) => Promise<void>) | undefined;
   readonly groupExited?: ((pid: number) => Promise<void>) | undefined;
   readonly processGroupOwner?: boolean | undefined;
+  readonly inheritedEnvironment?: Readonly<Record<string, string>> | undefined;
 }
 
 export async function runAgentWorker(options: AgentWorkerOptions): Promise<AgentWorkerResult> {
-  const processOptions = workerProcessOptions(options.processGroupOwner === true ? "owner" : "nested");
+  const processOptions = workerProcessOptions(
+    options.processGroupOwner === true ? "owner" : "nested",
+    options.inheritedEnvironment,
+  );
   const start = options.start ?? ((arguments_) => spawn(process.execPath, [
     "--experimental-strip-types",
     resolve(options.checkoutPath, ".sandcastle", options.workerFile),
@@ -68,18 +112,21 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
     stdio: ["pipe", "pipe", "pipe"],
     env: processOptions.environment,
   }));
+  const captureEnvironment = options.processGroupOwner === true
+    ? options.inheritedEnvironment
+    : undefined;
   if (processOptions.inherited) {
     const child = start(options.arguments_);
     child.stdin?.end(options.input);
-    return outputOf(child);
+    return outputOf(child, captureEnvironment);
   }
-  let output: Promise<AgentWorkerResult> | undefined;
+  let output: Promise<CapturedAgentWorkerResult> | undefined;
   const result = await runJobWithTimeout({
     start: () => {
       const child = start(options.arguments_);
       if (child.pid === undefined) throw new Error(`${options.workerName} worker did not expose a process ID`);
       child.stdin?.end(options.input);
-      output = outputOf(child);
+      output = outputOf(child, captureEnvironment);
       return {
         pid: child.pid,
         exited: output.then(() => undefined),
@@ -94,8 +141,12 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
       timer.unref();
     })),
   });
-  if (result.status === "timed-out") throw new Error(options.timeoutMessage);
-  return output!;
+  if (result.status === "timed-out") {
+    throw new AgentWorkerTimeoutError(options.timeoutMessage);
+  }
+  const captured = await output!;
+  if (captured.logError !== undefined) throw captured.logError;
+  return captured;
 }
 
 export function workerJson<TResult>(result: AgentWorkerResult, workerName: string): TResult {

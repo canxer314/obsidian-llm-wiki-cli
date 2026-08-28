@@ -231,6 +231,36 @@ describe("trusted Target operation command acquisition", () => {
     );
   });
 
+  it("publishes only a short redacted diagnostic and keeps the transcript local", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const token = `ghp_${"a".repeat(36)}`;
+    const transcript = "FULL_AGENT_TRANSCRIPT_MUST_STAY_LOCAL";
+    const target = {
+      run: vi.fn(async () => {
+        throw new Error(
+          `Target job worker exited with 1: authorization: Bearer ${token}; setup failed\n` +
+          `${transcript}\nlocal log: /trusted/jobs/logs/job-219/stderr.log`,
+        );
+      }),
+    };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(transcript);
+
+    const diagnostic = vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls[0]?.[2];
+    expect(diagnostic).toEqual({
+      jobId: "job-219",
+      summary: "Target job worker exited with 1: authorization: [REDACTED]; setup failed",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(transcript);
+    expect(JSON.stringify(diagnostic)).not.toContain(token);
+    expect(JSON.stringify(diagnostic)).not.toContain("/trusted/jobs/logs");
+  });
+
   it("owns blocked and finally labels when the target process fails", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
     const target = { run: vi.fn(async () => { throw new Error("worker crashed"); }) };

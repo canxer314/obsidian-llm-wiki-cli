@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, mkdir, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -177,7 +177,44 @@ describe("Target Checkout real Git filesystem integration", () => {
   const roots: string[] = [];
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  it("retains stdout and stderr from a failed setup command", async () => {
+    const root = await mkdtemp(join(tmpdir(), "target-checkout-failed-command-"));
+    roots.push(root);
+    const binPath = join(root, "bin");
+    const stdoutPath = join(root, "stdout.log");
+    const stderrPath = join(root, "stderr.log");
+    await mkdir(binPath);
+    await Promise.all([writeFile(stdoutPath, ""), writeFile(stderrPath, "")]);
+    const gitPath = join(binPath, "git");
+    await writeFile(gitPath, [
+      "#!/usr/bin/env bash",
+      'printf "setup stdout\\n"',
+      'printf "setup stderr\\n" >&2',
+      "exit 23",
+    ].join("\n"));
+    await chmod(gitPath, 0o755);
+    vi.stubEnv("SANDCASTLE_JOB_STDOUT_LOG", stdoutPath);
+    vi.stubEnv("SANDCASTLE_JOB_STDERR_LOG", stderrPath);
+    const environment = {
+      HOME: process.env.HOME ?? "",
+      PATH: `${binPath}:${process.env.PATH ?? ""}`,
+    };
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: join(root, "trusted"),
+      checkoutRoot: join(root, "jobs"),
+      gitEnvironment: environment,
+      dependencyEnvironment: environment,
+    });
+
+    await expect(checkout.withCheckout({ revision }, vi.fn()))
+      .rejects.toMatchObject({ code: 23 });
+
+    await expect(readFile(stdoutPath, "utf8")).resolves.toBe("setup stdout\n");
+    await expect(readFile(stderrPath, "utf8")).resolves.toBe("setup stderr\n");
   });
 
   const createFixture = async (): Promise<{

@@ -6,6 +6,7 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import { agentLogging } from "./agent-logging.ts";
 import type { PlannerAgentSession } from "./planner.js";
 
 const plannerPrompt = (
@@ -39,6 +40,7 @@ export function createSandcastlePlannerSession(options: {
   const createAgent = options.createAgent ?? claudeCode;
   return {
     async run(request) {
+      const logging = agentLogging();
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
@@ -47,6 +49,7 @@ export function createSandcastlePlannerSession(options: {
         branchStrategy: { type: "head" },
         maxIterations: 1,
         name: `planner-issue-${request.issueNumber}`,
+        ...(logging === undefined ? {} : { logging }),
         prompt: plannerPrompt(request.issueNumber, options.prdContext),
         output: Output.object({
           tag: request.output.tag,
