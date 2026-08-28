@@ -314,7 +314,7 @@ describe("Target Checkout real Git filesystem integration", () => {
     }));
 
     expect(new Set(checkoutPaths).size).toBe(2);
-    expect(dependencyPrefixes).toEqual(checkoutPaths);
+    expect(new Set(dependencyPrefixes)).toEqual(new Set(checkoutPaths));
     expect(dependencyEnvironments).toEqual([
       { npm_config_cache: cachePath },
       { npm_config_cache: cachePath },

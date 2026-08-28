@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import type { BranchUpdateResult } from "./branch-update-automation.ts";
 import { runJobWithTimeout } from "./job-timeout.ts";
+import { workerProcessOptions } from "./worker-process.ts";
 
 const GIT_COMMAND_TIMEOUT_MILLISECONDS = 5 * 60 * 1000;
 const GIT_COMMAND_GRACE_MILLISECONDS = 10 * 1000;
@@ -41,12 +42,25 @@ function createProcessGitExecutor(options: {
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
 }): Execute {
+  const processOptions = workerProcessOptions("nested");
   return async (file, arguments_) => {
+    if (processOptions.inherited) {
+      const child = spawn(file, [...arguments_], {
+        detached: processOptions.detached,
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(options.environment === undefined ? {} : { env: options.environment }),
+      });
+      const completed = await outputOf(child);
+      if (completed.code !== 0) {
+        throw new Error(`${file} exited with ${completed.code ?? "signal"}: ${completed.stderr}`);
+      }
+      return completed;
+    }
     let output: Promise<{ readonly stdout: string; readonly stderr: string; readonly code: number | null }> | undefined;
     const result = await runJobWithTimeout({
       start: () => {
         const child = spawn(file, [...arguments_], {
-          detached: true,
+          detached: processOptions.detached,
           stdio: ["ignore", "pipe", "pipe"],
           ...(options.environment === undefined ? {} : { env: options.environment }),
         });

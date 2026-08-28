@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { runJobWithTimeout } from "./job-timeout.ts";
+import { workerProcessOptions } from "./worker-process.ts";
 import type {
   ArchitectureReviewOutcome,
   ArchitectureReviewProposal,
@@ -59,17 +60,15 @@ export function createProcessArchitectureReviewRunner(options: {
   readonly wait?: (milliseconds: number) => Promise<void>;
   readonly groupExited?: (pid: number) => Promise<void>;
 }) {
+  const processOptions = workerProcessOptions("nested");
   const start = options.start ?? ((arguments_) => spawn(process.execPath, [
     "--experimental-strip-types",
     resolve(import.meta.dirname, "architecture-review-worker.ts"),
     ...arguments_,
   ], {
-    detached: true,
+    detached: processOptions.detached,
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      HOME: process.env.HOME ?? "",
-      PATH: process.env.PATH ?? "",
-    },
+    env: processOptions.environment,
   }));
   // The worker runs with a stripped environment, so the trusted parent hands
   // the prior proposals over through the local job artifact directory. The
@@ -95,6 +94,11 @@ export function createProcessArchitectureReviewRunner(options: {
         request.model,
         request.artifactDirectory,
       ];
+      if (processOptions.inherited) {
+        const child = start(arguments_);
+        child.stdin?.end(options.startup);
+        return parseOutcome(await outputOf(child));
+      }
       let child: ChildProcess | undefined;
       let output: Promise<{ readonly output: string; readonly code: number | null; readonly diagnostics: string }> | undefined;
       const result = await runJobWithTimeout({

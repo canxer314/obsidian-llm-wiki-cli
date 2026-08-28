@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
 import { runJobWithTimeout } from "./job-timeout.ts";
+import { workerProcessOptions } from "./worker-process.ts";
 
 // Upstream agent workflows time out after sixty minutes. These workers carry
 // no inner clock, so the outer process-group clock fires at that mark itself;
@@ -53,21 +54,25 @@ export interface AgentWorkerOptions {
   readonly kill?: ((pid: number, signal: NodeJS.Signals) => void) | undefined;
   readonly wait?: ((milliseconds: number) => Promise<void>) | undefined;
   readonly groupExited?: ((pid: number) => Promise<void>) | undefined;
+  readonly processGroupOwner?: boolean | undefined;
 }
 
 export async function runAgentWorker(options: AgentWorkerOptions): Promise<AgentWorkerResult> {
+  const processOptions = workerProcessOptions(options.processGroupOwner === true ? "owner" : "nested");
   const start = options.start ?? ((arguments_) => spawn(process.execPath, [
     "--experimental-strip-types",
     resolve(options.checkoutPath, ".sandcastle", options.workerFile),
     ...arguments_,
   ], {
-    detached: true,
+    detached: processOptions.detached,
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      HOME: process.env.HOME ?? "",
-      PATH: process.env.PATH ?? "",
-    },
+    env: processOptions.environment,
   }));
+  if (processOptions.inherited) {
+    const child = start(options.arguments_);
+    child.stdin?.end(options.input);
+    return outputOf(child);
+  }
   let output: Promise<AgentWorkerResult> | undefined;
   const result = await runJobWithTimeout({
     start: () => {

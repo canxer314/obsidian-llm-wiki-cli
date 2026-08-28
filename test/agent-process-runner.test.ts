@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { runAgentWorker } from "../.sandcastle/agent-process-runner.js";
 
@@ -67,6 +67,33 @@ describe("agent process runner", () => {
         output: JSON.stringify({ snapshot: "round-one" }),
       });
     } finally {
+      rmSync(checkoutPath, { force: true, recursive: true });
+    }
+  });
+
+  it("attaches a nested worker to its inherited whole-job process group", async () => {
+    const previous = process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
+    process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP = "1";
+    const checkoutPath = mkdtempSync(join(tmpdir(), "nested-worker-"));
+    const workerDirectory = join(checkoutPath, ".sandcastle");
+    mkdirSync(workerDirectory);
+    writeFileSync(join(workerDirectory, "fixture-worker.ts"), 'process.stdout.write("nested");\n');
+    const kill = vi.fn();
+
+    try {
+      await expect(runAgentWorker({
+        checkoutPath,
+        workerFile: "fixture-worker.ts",
+        workerName: "fixture",
+        arguments_: [],
+        timeoutMessage: "Fixture worker timed out",
+        timeoutMilliseconds: 1,
+        kill,
+      })).resolves.toMatchObject({ code: 0, output: "nested" });
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
+      else process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP = previous;
       rmSync(checkoutPath, { force: true, recursive: true });
     }
   });

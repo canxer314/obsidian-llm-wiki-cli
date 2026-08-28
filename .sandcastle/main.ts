@@ -19,7 +19,7 @@ import {
 import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
-import { createTargetCheckout, removeExpiredFailureCheckouts } from "./target-checkout.ts";
+import { removeExpiredFailureCheckouts } from "./target-checkout.ts";
 import {
   createTargetOperationRunner,
   type TargetOperationIdentity,
@@ -65,12 +65,12 @@ try {
     }
   };
   const targetOperations = createTargetOperationRunner({
-    checkout: createTargetCheckout({
+    checkoutOptions: {
       sourceRepositoryPath: repositoryPath,
       checkoutRoot: jobsRoot,
       gitEnvironment: startup.childEnvironments.git,
       dependencyEnvironment: startup.childEnvironments.dependencies,
-    }),
+    },
     startup: {
       imageName: startup.imageName,
       childEnvironments: {
