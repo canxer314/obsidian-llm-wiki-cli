@@ -192,6 +192,66 @@ describe("feedback implementation automation", () => {
     await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile" }, reconcile))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
   });
+  it("settles blocked Feedback Reconcile Authorization when Canonical Implementation Reply classification cannot read its parent", async () => {
+    let parentReads = 0;
+    const subject = ports({
+      headReads: [POST],
+      replies: [marker(ROOT)],
+      parentOf: () => {
+        parentReads += 1;
+        if (parentReads === 2) throw new Error("commit graph unavailable");
+        return PRE;
+      },
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile" }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reconciliation",
+        jobId: "feedback-job",
+        summary: "commit graph unavailable",
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.github.readCommitParent).toHaveBeenCalledTimes(2);
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.addFeedbackBlockedDiagnostic).toHaveBeenCalledWith(224, {
+      reason: "feedback-reconciliation",
+      jobId: "feedback-job",
+      summary: "commit graph unavailable",
+    });
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+  });
+
+  it("settles blocked Feedback Reconcile Authorization when legacy evidence classification cannot read its parent", async () => {
+    const subject = ports({
+      headReads: [POST],
+      replies: [markerReply(`Implemented in ${POST}`)],
+      parentOf: () => { throw new Error("commit graph unavailable"); },
+    });
+
+    await expect(runFeedbackImplementationAutomationCommand({
+      pullRequestNumber: 224,
+      invocation: "reconcile",
+      baseRevision: PRE,
+    }, subject)).resolves.toEqual({
+      status: "blocked",
+      reason: "feedback-reconciliation",
+      jobId: "feedback-job",
+      summary: "commit graph unavailable",
+      finalization: CLEAN_FINALIZATION,
+    });
+
+    expect(subject.github.readCommitParent).toHaveBeenCalledTimes(1);
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.addFeedbackBlockedDiagnostic).toHaveBeenCalledWith(224, {
+      reason: "feedback-reconciliation",
+      jobId: "feedback-job",
+      summary: "commit graph unavailable",
+    });
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+  });
+
   it("publishes only through the controlled publisher and verifies the existing PR head", async () => {
     const subject = ports();
 

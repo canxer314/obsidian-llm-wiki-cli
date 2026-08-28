@@ -5,6 +5,7 @@ import {
   feedbackReplyMarker,
   inspectFeedbackMarkerReplies,
   selectFeedbackIntent,
+  type FeedbackReconciliation,
   type FeedbackReviewState,
   type FeedbackReplyMarker,
   type FeedbackThreadReply,
@@ -338,17 +339,23 @@ export async function runFeedbackImplementationAutomationCommand(
       throw new FeedbackStageError("feedback-reconciliation", message, revision);
     }
   };
-  const reconciliation = await classifyFeedbackReconciliation({
-    pullRequestNumber: request.pullRequestNumber,
-    headSha: pullRequest.headSha,
-    baseRevision: request.baseRevision,
-    ...(request.expectedPost === undefined ? {} : { expectedPost: request.expectedPost }),
-    ...(request.expectedReply === undefined ? {} : { expectedReplyRootCommentId: request.expectedReply.rootCommentId }),
-    intentRootCommentId: selectedIntent.rootCommentId,
-    invocation,
-    replies: currentFeedback.replies,
-    parentOf: (sha) => ports.github.readCommitParent(sha),
-  });
+  let reconciliation: FeedbackReconciliation;
+  try {
+    reconciliation = await classifyFeedbackReconciliation({
+      pullRequestNumber: request.pullRequestNumber,
+      headSha: pullRequest.headSha,
+      baseRevision: request.baseRevision,
+      ...(request.expectedPost === undefined ? {} : { expectedPost: request.expectedPost }),
+      ...(request.expectedReply === undefined ? {} : { expectedReplyRootCommentId: request.expectedReply.rootCommentId }),
+      intentRootCommentId: selectedIntent.rootCommentId,
+      invocation,
+      replies: currentFeedback.replies,
+      parentOf: (sha) => ports.github.readCommitParent(sha),
+    });
+  } catch (error) {
+    const summary = redactFailureSummary(error instanceof Error ? error.message : String(error));
+    return blockAndSettle(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", summary);
+  }
   switch (reconciliation.status) {
     case "adopt":
       return finalizeAdopted(request.pullRequestNumber, reconciliation.post, jobId, ports);
