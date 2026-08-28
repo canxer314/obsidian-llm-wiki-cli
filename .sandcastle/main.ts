@@ -20,11 +20,9 @@ import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { removeExpiredFailureCheckouts } from "./target-checkout.ts";
-import {
-  createTargetOperationRunner,
-  type TargetOperationIdentity,
-} from "./target-operation.ts";
-import { createTargetOperationCommandRunner } from "./target-operation-command.ts";
+import { runSerializedAutomationCommand } from "./serialized-automation-command.ts";
+import { createTargetOperationRunner } from "./target-operation.ts";
+import { createTargetOperationCommandDispatch } from "./target-operation-dispatch.ts";
 import { removeExpiredJobLogs } from "./job-logs.ts";
 import { removeExpiredReviewArtifacts } from "./review-artifacts.ts";
 import { loadSandboxStartup } from "./sandbox.ts";
@@ -55,20 +53,8 @@ try {
     repositoryPath,
     environment: startup.childEnvironments.git,
   });
-  const withScheduler = async <T>(identity: string, action: () => Promise<T>): Promise<T> => {
-    const lock = await scheduler.acquire();
-    if (lock === undefined) throw new Error("Dispatcher is already running");
-    try {
-      await scheduler.prepare();
-      let result!: T;
-      await scheduler.track(identity, async () => {
-        result = await action();
-      });
-      return result;
-    } finally {
-      await lock.release();
-    }
-  };
+  const withScheduler = <T>(identity: string, action: () => Promise<T>): Promise<T> =>
+    runSerializedAutomationCommand(scheduler, identity, action);
   const targetOperations = createTargetOperationRunner({
     checkoutOptions: {
       sourceRepositoryPath: repositoryPath,
@@ -88,84 +74,15 @@ try {
       models: startup.models,
     },
   });
-  const issueOperation = (operation: TargetOperationIdentity): boolean =>
-    operation === "implement-issue" || operation === "implement-prd" || operation === "split-prd";
-  const targetOperationCommands = createTargetOperationCommandRunner({
+  const targetOperationCommands = createTargetOperationCommandDispatch({
+    github: automationGithub,
     target: targetOperations,
-    acquisition: {
-      read: async (operation, number) => {
-        if (operation === "architecture-review") {
-          return { state: "OPEN", labels: [], revision: await automationGithub.readBaseRevision() };
-        }
-        if (issueOperation(operation)) {
-          const issue = await automationGithub.readPrd(number);
-          const routeMatches = issue.parentNumber === undefined && (
-            operation === "split-prd" ||
-            (operation === "implement-prd" ? issue.subIssueCount > 0 : issue.subIssueCount === 0)
-          );
-          if (!routeMatches) {
-            throw new Error(`Issue #${number} no longer matches Target operation ${operation}`);
-          }
-          return { state: issue.state, labels: issue.labels, revision: issue.baseRevision };
-        }
-        const pullRequest = await automationGithub.readPullRequest(number) as Awaited<ReturnType<typeof automationGithub.readPullRequest>> & {
-          readonly baseRefName: string;
-        };
-        if (pullRequest.baseRepository !== pullRequest.headRepository) {
-          throw new Error(`Pull Request #${number} must not originate from a fork`);
-        }
-        return {
-          state: pullRequest.state,
-          labels: pullRequest.labels,
-          revision: pullRequest.headSha,
-          pullRequest: {
-            headSha: pullRequest.headSha,
-            headRefName: pullRequest.headRefName,
-            baseRefName: pullRequest.baseRefName,
-            baseRepository: pullRequest.baseRepository,
-            headRepository: pullRequest.headRepository,
-          },
-        };
-      },
-      addInProgress: (operation, number) => issueOperation(operation)
-        ? automationGithub.addIssueLabel(number, "agent:in-progress")
-        : automationGithub.addPullRequestLabel(number, "agent:in-progress"),
-      removeTrigger: (operation, number) => {
-        const trigger = operation === "split-prd"
-          ? "agent:to-issues"
-          : operation === "review"
-            ? "agent:review"
-            : operation === "update-branch"
-              ? "agent:update-branch"
-              : "agent:implement";
-        return issueOperation(operation)
-          ? automationGithub.removeIssueLabel(number, trigger)
-          : automationGithub.removePullRequestLabel(number, trigger);
-      },
-      addBlocked: (operation, number) => issueOperation(operation)
-        ? automationGithub.addIssueLabel(number, "agent:blocked")
-        : automationGithub.addPullRequestLabel(number, "agent:blocked"),
-      addBlockedDiagnostic: async (operation, number, diagnostic) => {
-        if (operation === "architecture-review") return;
-        await automationGithub.addRefusalDiagnostic?.(
-          number,
-          `Automation ${operation} is blocked (job ${diagnostic.jobId}): ${diagnostic.summary}`,
-        );
-      },
-      removeInProgress: (operation, number) => issueOperation(operation)
-        ? automationGithub.removeIssueLabel(number, "agent:in-progress")
-        : automationGithub.removePullRequestLabel(number, "agent:in-progress"),
-    },
     createJobId: randomUUID,
   });
-  const runCommand = async (command: import("./automation-command.ts").AutomationCommand): Promise<void> => {
-    if (command.operation === "unknown") {
-      throw new Error("Inspection-only Automation Command cannot execute");
-    }
-    const operation: TargetOperationIdentity = command.operation === "implement"
-      ? "implement-feedback"
-      : command.operation;
-    await targetOperationCommands.run(operation, command.number);
+  const runCommand = async (
+    command: import("./automation-command.ts").AutomationCommand,
+  ): Promise<void> => {
+    await targetOperationCommands.runCommand(command);
   };
   const result = await runAutomationCli(process.argv.slice(2), {
     preflight: async (operation) => {
@@ -191,7 +108,7 @@ try {
     },
     runReview: (pullRequestNumber) => withScheduler(
       `pull-request:${pullRequestNumber}`,
-      () => targetOperationCommands.run("review", pullRequestNumber),
+      () => targetOperationCommands.runOperation("review", pullRequestNumber),
     ),
     setupLabels: async () => {
       await dispatchGithub.ensureLabels();
@@ -199,15 +116,15 @@ try {
     },
     architectureReview: () => withScheduler(
       "architecture-review",
-      () => targetOperationCommands.run("architecture-review", 1),
+      () => targetOperationCommands.runOperation("architecture-review", 1),
     ),
     runUpdate: (pullRequestNumber) => withScheduler(
       `pull-request:${pullRequestNumber}`,
-      () => targetOperationCommands.run("update-branch", pullRequestNumber),
+      () => targetOperationCommands.runOperation("update-branch", pullRequestNumber),
     ),
     runFeedback: (pullRequestNumber, reconcile) => withScheduler(
       `pull-request:${pullRequestNumber}`,
-      () => targetOperationCommands.run("implement-feedback", pullRequestNumber, reconcile),
+      () => targetOperationCommands.runOperation("implement-feedback", pullRequestNumber, reconcile),
     ),
     dispatch: (concurrency) => dispatchAutomationCommands({
       concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
@@ -223,7 +140,10 @@ try {
         }),
       },
       promotion: {
-        scan: () => runQueuePromotionScan({ github: dispatchGithub }),
+        scan: () => runQueuePromotionScan(
+          { github: dispatchGithub },
+          { createJobId: randomUUID },
+        ),
       },
       run: runCommand,
     }),
@@ -253,15 +173,15 @@ try {
     },
     runImplement: (issueNumber) => withScheduler(
       `issue:${issueNumber}`,
-      () => targetOperationCommands.run("implement-issue", issueNumber),
+      () => targetOperationCommands.runOperation("implement-issue", issueNumber),
     ),
     runImplementPrd: (issueNumber) => withScheduler(
       `prd:${issueNumber}`,
-      () => targetOperationCommands.run("implement-prd", issueNumber),
+      () => targetOperationCommands.runOperation("implement-prd", issueNumber),
     ),
     runSplit: (issueNumber) => withScheduler(
       `prd:${issueNumber}`,
-      () => targetOperationCommands.run("split-prd", issueNumber),
+      () => targetOperationCommands.runOperation("split-prd", issueNumber),
     ),
   });
   console.log(JSON.stringify(result));

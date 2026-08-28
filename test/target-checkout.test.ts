@@ -493,6 +493,30 @@ describe("Target Checkout real Git filesystem integration", () => {
     await expect(pathExists(historicalPath)).resolves.toBe(true);
   });
 
+  it("preserves a typed blocked checkout for diagnosis", async () => {
+    const fixture = await createFixture();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    let failedCheckoutPath = "";
+
+    await expect(checkout.withCheckout({ revision: fixture.hiddenRevision }, async (checkoutPath) => {
+      failedCheckoutPath = checkoutPath;
+      return { status: "blocked", reason: "fixture-execution" };
+    })).resolves.toEqual({ status: "blocked", reason: "fixture-execution" });
+
+    await expect(pathExists(failedCheckoutPath)).resolves.toBe(true);
+  });
+
   it("preserves a failed checkout for diagnosis without affecting source or siblings", async () => {
     const fixture = await createFixture();
     const historicalPath = join(fixture.checkoutRoot, "preserved-historical-failure");

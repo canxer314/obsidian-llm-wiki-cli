@@ -97,6 +97,11 @@ export interface TargetCheckoutProcessOptions {
   readonly dependencyEnvironment?: Readonly<Record<string, string>>;
 }
 
+function isBlockedOutcome(value: unknown): boolean {
+  return typeof value === "object" && value !== null &&
+    "status" in value && value.status === "blocked";
+}
+
 export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
   readonly createJobDirectory?: () => string;
   readonly execute?: (
@@ -192,7 +197,7 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
         await git(["-C", checkoutPath, "checkout", "--detach", request.revision]);
         await npm(["--prefix", checkoutPath, "ci"]);
         const result = await action(checkoutPath);
-        completed = true;
+        completed = !isBlockedOutcome(result);
         return result;
       } finally {
         if (completed) {

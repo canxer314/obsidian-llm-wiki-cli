@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createAutomationGithubPort } from "../.sandcastle/automation-github.js";
+import {
+  createAutomationDispatchGithubPort,
+  createAutomationGithubPort,
+} from "../.sandcastle/automation-github.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
@@ -30,6 +33,22 @@ describe("automation GitHub port", () => {
       "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/220/labels/agent%3Areview%2Fnext",
     ], environment);
     expect(execute.mock.calls).not.toContainEqual(expect.arrayContaining(["gh", expect.arrayContaining(["edit"])]));
+  });
+
+  it("publishes a short queue-promotion blocked diagnostic", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const environment = { GH_TOKEN: "test-token" };
+    const github = createAutomationDispatchGithubPort({ execute, environment });
+
+    await github.addPromotionBlockedDiagnostic(201, {
+      jobId: "queue-promotion-job",
+      summary: "implement label publication failed",
+    });
+
+    expect(execute).toHaveBeenCalledWith("gh", [
+      "issue", "comment", "201", "--body",
+      "Queue promotion is blocked (job queue-promotion-job): implement label publication failed",
+    ], environment);
   });
 
   it("treats only an explicitly absent REST label as an idempotent removal", async () => {
