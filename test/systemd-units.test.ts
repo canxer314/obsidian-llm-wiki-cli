@@ -97,7 +97,7 @@ describe("systemd Dispatcher templates", () => {
   it("runs the accepted one-minute dispatch schedule through the real CLI wiring", async () => {
     const service = await readUnit("sandcastle-dispatch.service");
     const timer = await readUnit("sandcastle-dispatch.timer");
-    expect(timer.unit.Timer?.OnCalendar).toBe("minutely");
+    expect(timer.unit.Timer?.OnCalendar).toBe("*-*-* *:*:15");
     const argv = service.unit.Service?.ExecStart?.split("main.ts ")[1]?.split(/\s+/u);
     expect(argv).toEqual(["dispatch"]);
     const dispatch = vi.fn().mockResolvedValue({ status: "dispatched", selected: [] });
@@ -156,7 +156,7 @@ describe("systemd Dispatcher templates", () => {
     const dispatch = await readUnit("sandcastle-dispatch.timer");
     const review = await readUnit("sandcastle-architecture-review.timer");
     const dispatchCalendar = await executeFile("systemd-analyze", ["calendar", dispatch.unit.Timer?.OnCalendar ?? ""]);
-    expect(dispatchCalendar.stdout).toContain("*-*-* *:*:00");
+    expect(dispatchCalendar.stdout).toContain("*-*-* *:*:15");
     const reviewCalendar = await executeFile("systemd-analyze", ["calendar", review.unit.Timer?.OnCalendar ?? ""]);
     expect(reviewCalendar.stdout).toContain("Mon..Fri *-*-* 09:00:00 UTC");
   });

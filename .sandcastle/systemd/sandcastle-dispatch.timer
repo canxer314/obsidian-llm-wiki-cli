@@ -1,4 +1,5 @@
-# One-minute schedule for bounded Sandcastle dispatch rounds.
+# One-minute schedule for bounded Sandcastle dispatch rounds, offset from the
+# architecture-review schedule so the global lock does not suppress it.
 # Copy to ~/.config/systemd/user/ together with sandcastle-dispatch.service.
 # Shipped disabled: enable explicitly with
 #   systemctl --user enable --now sandcastle-dispatch.timer
@@ -8,7 +9,7 @@
 Description=Run one bounded Sandcastle dispatch round every minute
 
 [Timer]
-OnCalendar=minutely
+OnCalendar=*-*-* *:*:15
 AccuracySec=1s
 Unit=sandcastle-dispatch.service
 
