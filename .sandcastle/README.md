@@ -7,6 +7,10 @@ only durable business state. Canonical terms (Automation Command, Automation
 Work Item, Blocked Automation, Dispatcher, Target Checkout, Legacy Run State)
 are defined in `CONTEXT.md`.
 
+The contributor guide — choosing labels, following the Issue/PRD/Pull Request
+workflows, observing progress, and retrying blocked work — lives at
+`docs/operations/sandcastle-automation-guide.md`.
+
 The operator runbook — deployment, protected configuration, inspection, canary
 sequence, and the single-writer cutover guard — lives at
 `docs/operations/sandcastle-local-dispatcher-runbook.md`.
