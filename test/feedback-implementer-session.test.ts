@@ -56,8 +56,10 @@ describe("feedback Implementer session adapter", () => {
     });
 
     const request = runAgent.mock.calls[0]![0];
-    expect(request.output).toBeDefined();
+    expect(request.output).toEqual(expect.objectContaining({ maxRetries: 2 }));
     expect(request.prompt).toContain("feedback-reply");
+    expect(request.prompt).toContain("one JSON object inside <feedback-reply> tags");
+    expect(request.prompt).toContain("Do not put rootCommentId or body in XML tag attributes");
     expect(request.prompt).toContain("rootCommentId");
     expect(request.prompt).toMatch(/do not .* any github review comment or thread/i);
     expect(request.prompt).toMatch(/do not run any gh write command/i);
