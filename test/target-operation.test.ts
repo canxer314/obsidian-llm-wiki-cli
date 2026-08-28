@@ -35,7 +35,7 @@ describe("Target operation runner", () => {
         childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
         models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
       },
-      start: () => spawn("bash", ["-c", 'printf \'%s\\n\' \'{"status":"blocked","reason":"execution"}\''], {
+      start: () => spawn("bash", ["-c", 'cat >/dev/null; printf \'%s\\n\' \'{"status":"blocked","reason":"execution"}\''], {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
       }),
@@ -62,7 +62,7 @@ describe("Target operation runner", () => {
     async (operation) => {
       const root = mkdtempSync(join(tmpdir(), "target-operation-identity-log-"));
       const jobId = `job-${operation}`;
-      const start = vi.fn(() => spawn("bash", ["-c", 'printf \'%s\\n\' \'{"status":"completed-fixture"}\''], {
+      const start = vi.fn(() => spawn("bash", ["-c", 'cat >/dev/null; printf \'%s\\n\' \'{"status":"completed-fixture"}\''], {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
       }));
@@ -118,7 +118,7 @@ describe("Target operation runner", () => {
         const metadataPath = join(logsPath, "job-219", "metadata.json");
         rmSync(metadataPath);
         mkdirSync(metadataPath);
-        return spawn("bash", ["-c", 'printf "original target failure" >&2; exit 9'], {
+        return spawn("bash", ["-c", 'cat >/dev/null; printf "original target failure" >&2; exit 9'], {
           detached: true,
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -147,7 +147,7 @@ describe("Target operation runner", () => {
         childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
         models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
       },
-      start: () => spawn("bash", ["-c", 'printf "partial stdout\\n"; printf "setup timed out" >&2; exit 7'], {
+      start: () => spawn("bash", ["-c", 'cat >/dev/null; printf "partial stdout\\n"; printf "setup timed out" >&2; exit 7'], {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
       }),
