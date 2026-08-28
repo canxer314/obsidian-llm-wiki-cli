@@ -404,7 +404,8 @@ function createOrdinaryGithub(
     readPrd: async () => issueShape(entry, labels, scenario),
     readPullRequest: async () => ({
       ...pullRequestShape(entry, labels, head, scenario),
-      state: entry.targetOperation === "implement-feedback" &&
+      state: (entry.targetOperation === "implement-feedback" ||
+          entry.targetOperation === "update-branch") &&
           scenario === "preflight" && targetExecution
         ? "CLOSED"
         : "OPEN",
