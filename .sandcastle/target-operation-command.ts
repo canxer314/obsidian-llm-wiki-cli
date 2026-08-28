@@ -56,21 +56,8 @@ export function createTargetOperationCommandRunner(options: {
           acquired: true,
         });
       }
-      if (reconcile !== undefined) {
-        if (operation !== "implement-feedback") {
-          throw new Error("Only feedback implementation supports reconciliation");
-        }
-        const current = await options.acquisition.read(operation, number);
-        requireOperationSecurity(operation, current, number);
-        requireRevision(current.revision);
-        return options.target.run({
-          operation,
-          number,
-          revision: current.revision,
-          jobId: options.createJobId(),
-          ...(current.pullRequest === undefined ? {} : { pullRequest: current.pullRequest }),
-          reconcile,
-        });
+      if (reconcile !== undefined && operation !== "implement-feedback") {
+        throw new Error("Only feedback implementation supports reconciliation");
       }
 
       const trigger = commandTriggerLabel({
