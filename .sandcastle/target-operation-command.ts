@@ -69,25 +69,28 @@ export function createTargetOperationCommandRunner(options: {
       const initial = await options.acquisition.read(operation, number);
       requireAvailable(initial, trigger, number);
       requireOperationSecurity(operation, initial, number);
+      const jobId = options.createJobId();
       await options.acquisition.addInProgress(operation, number);
-      const acquired = await options.acquisition.read(operation, number);
-      requireAcquiring(acquired, trigger, number);
-      requireOperationSecurity(operation, acquired, number);
-      requireRevision(acquired.revision);
-      await options.acquisition.removeTrigger(operation, number);
-      const settled = await options.acquisition.read(operation, number);
-      requireSettled(settled, acquired, trigger, number);
-
-      const invocation: AuthorizedTargetOperationInvocation = {
-        operation,
-        number,
-        revision: acquired.revision,
-        jobId: options.createJobId(),
-        acquired: true,
-        ...(acquired.pullRequest === undefined ? {} : { pullRequest: acquired.pullRequest }),
-        ...(reconcile === undefined ? {} : { reconcile }),
-      };
+      let acquisitionSettled = false;
       try {
+        const acquired = await options.acquisition.read(operation, number);
+        requireAcquiring(acquired, trigger, number);
+        requireOperationSecurity(operation, acquired, number);
+        requireRevision(acquired.revision);
+        await options.acquisition.removeTrigger(operation, number);
+        const settled = await options.acquisition.read(operation, number);
+        requireSettled(settled, acquired, trigger, number);
+        acquisitionSettled = true;
+
+        const invocation: AuthorizedTargetOperationInvocation = {
+          operation,
+          number,
+          revision: acquired.revision,
+          jobId,
+          acquired: true,
+          ...(acquired.pullRequest === undefined ? {} : { pullRequest: acquired.pullRequest }),
+          ...(reconcile === undefined ? {} : { reconcile }),
+        };
         const result = await options.target.run(invocation);
         requireTargetOutcome(result);
         if (isBlocked(result)) {
@@ -101,13 +104,17 @@ export function createTargetOperationCommandRunner(options: {
         await Promise.allSettled([
           options.acquisition.addBlocked(operation, number),
           options.acquisition.addBlockedDiagnostic(operation, number, {
-            jobId: invocation.jobId,
+            jobId,
             summary,
           }),
         ]);
         throw error;
       } finally {
-        await options.acquisition.removeInProgress(operation, number).catch(() => undefined);
+        // An unconfirmed acquisition keeps its visible ownership evidence for
+        // inspection; only a settled command may clear in-progress (#219).
+        if (acquisitionSettled) {
+          await options.acquisition.removeInProgress(operation, number).catch(() => undefined);
+        }
       }
     },
   };
