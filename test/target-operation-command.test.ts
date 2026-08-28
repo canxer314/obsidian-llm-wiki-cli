@@ -25,6 +25,38 @@ function acquisitionFor(states: Array<{
   };
 }
 
+function failingAcquisition(failure: "acquired-read" | "remove-trigger" | "settled-read") {
+  const labels = ["agent:review"];
+  let reads = 0;
+  const remove = (label: string) => {
+    const index = labels.indexOf(label);
+    if (index !== -1) labels.splice(index, 1);
+  };
+  return {
+    labels,
+    ports: {
+      read: vi.fn(async () => {
+        reads += 1;
+        if (
+          (failure === "acquired-read" && reads === 2) ||
+          (failure === "settled-read" && reads === 3)
+        ) {
+          throw new Error(`${failure} failed`);
+        }
+        return { state: "OPEN", labels: [...labels], revision, pullRequest };
+      }),
+      addInProgress: vi.fn(async () => { labels.push("agent:in-progress"); }),
+      removeTrigger: vi.fn(async () => {
+        if (failure === "remove-trigger") throw new Error("remove-trigger failed");
+        remove("agent:review");
+      }),
+      addBlocked: vi.fn(async () => { labels.push("agent:blocked"); }),
+      addBlockedDiagnostic: vi.fn(async () => {}),
+      removeInProgress: vi.fn(async () => { remove("agent:in-progress"); }),
+    },
+  };
+}
+
 const pullRequest = {
   headSha: revision,
   headRefName: "feature-branch",
@@ -164,7 +196,30 @@ describe("trusted Target operation command acquisition", () => {
     expect(acquisition.events).toEqual([]);
   });
 
-  it("does not execute target code after partial acquisition", async () => {
+  it("does not settle when in-progress ownership was not established", async () => {
+    const target = { run: vi.fn() };
+    const acquisition = failingAcquisition("acquired-read");
+    acquisition.ports.addInProgress.mockRejectedValueOnce(
+      new Error("add-in-progress failed"),
+    );
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-acquisition",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(
+      "add-in-progress failed",
+    );
+
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.labels).toEqual(["agent:review"]);
+    expect(acquisition.ports.addBlocked).not.toHaveBeenCalled();
+    expect(acquisition.ports.addBlockedDiagnostic).not.toHaveBeenCalled();
+    expect(acquisition.ports.removeInProgress).not.toHaveBeenCalled();
+  });
+
+  it("settles visible ownership when acquired-state validation fails", async () => {
     const target = { run: vi.fn() };
     const acquisition = acquisitionFor([
       available,
@@ -180,7 +235,91 @@ describe("trusted Target operation command acquisition", () => {
       "Work Item #219 changed while acquisition was starting",
     );
     expect(target.run).not.toHaveBeenCalled();
-    expect(acquisition.events).toEqual(["add-in-progress"]);
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "add-blocked",
+      "add-blocked-diagnostic",
+    ]);
+  });
+
+  it("settles visible ownership when the acquired-state read fails", async () => {
+    const target = { run: vi.fn() };
+    const acquisition = failingAcquisition("acquired-read");
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-acquisition",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow("acquired-read failed");
+
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.labels).toEqual([
+      "agent:review",
+      "agent:in-progress",
+      "agent:blocked",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-acquisition",
+        summary: "acquired-read failed",
+      },
+    );
+  });
+
+  it("blocks uncertain ownership when trigger removal fails", async () => {
+    const target = { run: vi.fn() };
+    const acquisition = failingAcquisition("remove-trigger");
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-acquisition",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow("remove-trigger failed");
+
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.labels).toEqual([
+      "agent:review",
+      "agent:in-progress",
+      "agent:blocked",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-acquisition",
+        summary: "remove-trigger failed",
+      },
+    );
+  });
+
+  it("blocks uncertain ownership when the settled-state read fails", async () => {
+    const target = { run: vi.fn() };
+    const acquisition = failingAcquisition("settled-read");
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-acquisition",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow("settled-read failed");
+
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.labels).toEqual([
+      "agent:in-progress",
+      "agent:blocked",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-acquisition",
+        summary: "settled-read failed",
+      },
+    );
   });
 
   it("owns blocked and finally labels for a typed target failure", async () => {
