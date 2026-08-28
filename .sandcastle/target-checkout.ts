@@ -41,9 +41,14 @@ export interface TargetCheckout {
   ): Promise<TResult>;
 }
 
-export function createTargetCheckout(options: {
+export interface TargetCheckoutProcessOptions {
   readonly sourceRepositoryPath: string;
   readonly checkoutRoot?: string;
+  readonly gitEnvironment?: Readonly<Record<string, string>>;
+  readonly dependencyEnvironment?: Readonly<Record<string, string>>;
+}
+
+export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
   readonly createJobDirectory?: () => string;
   readonly execute?: (
     file: string,

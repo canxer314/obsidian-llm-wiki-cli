@@ -1,11 +1,16 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
-import { createTargetOperationRunner, type TargetOperationIdentity } from "../.sandcastle/target-operation.js";
+import {
+  createTargetOperationRunner,
+  executeTargetOperationInCheckout,
+  type TargetOperationIdentity,
+} from "../.sandcastle/target-operation.js";
 
 const revision = "a".repeat(40);
 
@@ -20,6 +25,47 @@ const operationEntries: Readonly<Record<TargetOperationIdentity, string>> = {
 };
 
 describe("Target operation runner", () => {
+  it("times out checkout setup and terminates its whole descendant process group", async () => {
+    const marker = join(tmpdir(), `target-checkout-descendant-${process.pid}.pid`);
+    const script = [
+      'trap "" TERM',
+      `bash -c 'trap "" TERM; sleep 30' </dev/null >/dev/null 2>&1 &`,
+      `echo $! > "${marker}"`,
+      "wait",
+    ].join("\n");
+    const runner = createTargetOperationRunner({
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      timeoutMilliseconds: 100,
+      graceMilliseconds: 100,
+      start: () => spawn("bash", ["-c", script], {
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    });
+
+    try {
+      await expect(runner.run({
+        operation: "implement-issue",
+        number: 219,
+        revision,
+        jobId: "job-219",
+      })).rejects.toThrow("Target operation implement-issue timed out");
+      const descendantPid = Number(readFileSync(marker, "utf8"));
+      expect(() => process.kill(descendantPid, 0)).toThrow();
+    } finally {
+      try {
+        process.kill(Number(readFileSync(marker, "utf8")), "SIGKILL");
+      } catch {
+        // The assertion path normally leaves no process to clean up.
+      }
+      rmSync(marker, { force: true });
+    }
+  });
+
   it.each(Object.entries(operationEntries) as [TargetOperationIdentity, string][])(
     "executes fixed %s from the authorized Target Checkout",
     async (operation, entry) => {
@@ -40,31 +86,30 @@ describe("Target operation runner", () => {
       });
 
       try {
-        const runner = createTargetOperationRunner({
+        await expect(executeTargetOperationInCheckout({
           checkout: { withCheckout },
           startup: {
             imageName: "fixture-image",
             childEnvironments: { git: {}, github: { GH_TOKEN: "snapshot-token" }, claude: {}, githubAgent: {} },
             models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
           },
-        });
-
-        await expect(runner.run({
-          operation,
-          number: 219,
-          revision,
-          jobId: "job-219",
-          ...(operation === "implement-feedback" || operation === "review" || operation === "update-branch"
-            ? {
-                pullRequest: {
-                  headSha: revision,
-                  headRefName: "feature-branch",
-                  baseRefName: "master",
-                  baseRepository: "owner/repository",
-                  headRepository: "owner/repository",
-                },
-              }
-            : {}),
+          invocation: {
+            operation,
+            number: 219,
+            revision,
+            jobId: "job-219",
+            ...(operation === "implement-feedback" || operation === "review" || operation === "update-branch"
+              ? {
+                  pullRequest: {
+                    headSha: revision,
+                    headRefName: "feature-branch",
+                    baseRefName: "master",
+                    baseRepository: "owner/repository",
+                    headRepository: "owner/repository",
+                  },
+                }
+              : {}),
+          },
         })).resolves.toEqual({
           source: "authorized-operation",
           number: 219,
@@ -111,20 +156,24 @@ describe("Target operation runner", () => {
     });
 
     try {
-      const target = createTargetOperationRunner({
-        checkout: {
-          withCheckout: async (request, action) => {
-            events.push(`checkout:${request.revision}`);
-            expect(request.revision).toBe(acquiredRevision);
-            return action(checkoutPath);
-          },
-        },
-        startup: {
-          imageName: "fixture-image",
-          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
-          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
-        },
-      });
+      const target = {
+        run: (invocation: Parameters<typeof executeTargetOperationInCheckout>[0]["invocation"]) =>
+          executeTargetOperationInCheckout({
+            checkout: {
+              withCheckout: async (request, action) => {
+                events.push(`checkout:${request.revision}`);
+                expect(request.revision).toBe(acquiredRevision);
+                return action(checkoutPath);
+              },
+            },
+            startup: {
+              imageName: "fixture-image",
+              childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+              models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+            },
+            invocation,
+          }),
+      };
       const runner = createTargetOperationCommandRunner({
         target,
         acquisition: {
@@ -160,20 +209,19 @@ describe("Target operation runner", () => {
     symlinkSync(outsidePath, join(operationDirectory, "implement-issue.ts"));
 
     try {
-      const runner = createTargetOperationRunner({
+      await expect(executeTargetOperationInCheckout({
         checkout: { withCheckout: async (_request, action) => action(checkoutPath) },
         startup: {
           imageName: "fixture-image",
           childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
           models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
         },
-      });
-
-      await expect(runner.run({
-        operation: "implement-issue",
-        number: 219,
-        revision,
-        jobId: "job-219",
+        invocation: {
+          operation: "implement-issue",
+          number: 219,
+          revision,
+          jobId: "job-219",
+        },
       })).rejects.toThrow(
         "Target operation entry must be a regular file inside the authorized checkout",
       );

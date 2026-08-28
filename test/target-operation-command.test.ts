@@ -198,6 +198,39 @@ describe("trusted Target operation command acquisition", () => {
     ]);
   });
 
+  it("settles a whole-job timeout as Blocked Automation with finally cleanup", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const target = {
+      run: vi.fn(async () => {
+        throw new Error("Target operation review timed out");
+      }),
+    };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-timeout",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(
+      "Target operation review timed out",
+    );
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-timeout",
+        summary: "Target operation review timed out",
+      },
+    );
+  });
+
   it("owns blocked and finally labels when the target process fails", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
     const target = { run: vi.fn(async () => { throw new Error("worker crashed"); }) };

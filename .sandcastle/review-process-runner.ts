@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
 import { runJobWithTimeout } from "./job-timeout.ts";
+import { workerProcessOptions } from "./worker-process.ts";
 import type { ExtractedReview } from "./review-extraction.ts";
 
 const REVIEW_TIMEOUT_MILLISECONDS = 30 * 60 * 1000;
@@ -49,17 +50,15 @@ export function createProcessReviewRunner(options: {
   readonly wait?: (milliseconds: number) => Promise<void>;
   readonly groupExited?: (pid: number) => Promise<void>;
 }) {
+  const processOptions = workerProcessOptions("nested");
   const start = options.start ?? ((arguments_) => spawn(process.execPath, [
     "--experimental-strip-types",
     resolve(import.meta.dirname, "review-worker.ts"),
     ...arguments_,
   ], {
-    detached: true,
+    detached: processOptions.detached,
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      HOME: process.env.HOME ?? "",
-      PATH: process.env.PATH ?? "",
-    },
+    env: processOptions.environment,
   }));
   return {
     async review(request: {
@@ -80,6 +79,11 @@ export function createProcessReviewRunner(options: {
         request.model,
         request.artifactDirectory,
       ];
+      if (processOptions.inherited) {
+        const child = start(arguments_);
+        child.stdin?.end(options.startup);
+        return parseReview(await outputOf(child));
+      }
       let child: ChildProcess | undefined;
       let output: Promise<{ readonly output: string; readonly code: number | null; readonly diagnostics: string }> | undefined;
       const result = await runJobWithTimeout({

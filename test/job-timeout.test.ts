@@ -125,6 +125,46 @@ describe("job process-group timeout", () => {
     expect(() => process.kill(descendant, 0)).toThrow();
   });
 
+  it("tolerates a process group exiting immediately before a signal", async () => {
+    let completeGroup!: () => void;
+    const groupExited = new Promise<void>((resolve) => { completeGroup = resolve; });
+
+    await expect(runJobWithTimeout({
+      start: () => ({
+        pid: 420,
+        exited: Promise.resolve(),
+        groupExited,
+      }),
+      timeoutMilliseconds: 60_000,
+      graceMilliseconds: 0,
+      kill: () => {
+        completeGroup();
+        throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+      },
+      wait: async () => {},
+    })).resolves.toEqual({ status: "completed" });
+  });
+
+  it("propagates unexpected process-group signal failures", async () => {
+    let completeGroup!: () => void;
+    const groupExited = new Promise<void>((resolve) => { completeGroup = resolve; });
+
+    await expect(runJobWithTimeout({
+      start: () => ({
+        pid: 420,
+        exited: Promise.resolve(),
+        groupExited,
+      }),
+      timeoutMilliseconds: 60_000,
+      graceMilliseconds: 0,
+      kill: () => {
+        completeGroup();
+        throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+      },
+      wait: async () => {},
+    })).rejects.toThrow("kill EPERM");
+  });
+
   it("returns a completed job without signalling its process group", async () => {
     const kill = vi.fn();
 
