@@ -140,28 +140,34 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
         ) {
           throw new Error("Target Checkout remote is invalid");
         }
-        await git([
-          "clone", "--no-checkout", "--no-local", remote, checkoutPath,
-        ]);
-        // Independent clones do not inherit repository-local configuration.
-        // Copy the commit identity already required by Dispatcher startup into
-        // this disposable checkout, never to the user's global config. Read it
-        // with the same any-layer semantics as sandbox startup so global-only
-        // identities work identically, and fail closed when it is absent.
-        const readIdentityValue = async (key: string): Promise<string> => {
+        const readTrustedConfig = async (key: string): Promise<string> => {
           try {
             return (await git([
               "-C", options.sourceRepositoryPath, "config", "--get", key,
             ])).stdout.trim();
           } catch (error) {
-            // git exits 1 when the key is unset; treat that as an absent identity.
+            // git exits 1 when the key is unset.
             if ((error as { code?: number }).code === 1) return "";
             throw error;
           }
         };
+        const partialClone = await readTrustedConfig("extensions.partialClone");
+        if (partialClone.length > 0) {
+          throw new Error("Target Checkout source must not be a partial clone");
+        }
+        await git([
+          "clone", "--local", "--no-checkout", "--no-hardlinks", "--dissociate",
+          options.sourceRepositoryPath, checkoutPath,
+        ]);
+        await git(["-C", checkoutPath, "remote", "set-url", "origin", remote]);
+        // Independent clones do not inherit repository-local configuration.
+        // Copy the commit identity already required by Dispatcher startup into
+        // this disposable checkout, never to the user's global config. Read it
+        // with the same any-layer semantics as sandbox startup so global-only
+        // identities work identically, and fail closed when it is absent.
         const [name, email] = await Promise.all([
-          readIdentityValue("user.name"),
-          readIdentityValue("user.email"),
+          readTrustedConfig("user.name"),
+          readTrustedConfig("user.email"),
         ]);
         if (name.length === 0 || email.length === 0) {
           throw new Error(

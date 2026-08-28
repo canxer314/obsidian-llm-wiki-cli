@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -22,6 +22,8 @@ describe("Target Checkout", () => {
   it("clones the resolved GitHub remote and fetches then verifies only the acquired revision", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
+      .mockRejectedValueOnce({ code: 1 })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "Fixture Source\n", stderr: "" })
       .mockResolvedValueOnce({ stdout: "source@fixture.example\n", stderr: "" })
@@ -46,38 +48,45 @@ describe("Target Checkout", () => {
       "-C", "/trusted/source", "remote", "get-url", "origin",
     ]);
     expect(execute).toHaveBeenNthCalledWith(2, "git", [
-      "clone", "--no-checkout", "--no-local", remote, "/jobs/review-220-job-a",
+      "-C", "/trusted/source", "config", "--get", "extensions.partialClone",
     ]);
     expect(execute).toHaveBeenNthCalledWith(3, "git", [
-      "-C", "/trusted/source", "config", "--get", "user.name",
+      "clone", "--local", "--no-checkout", "--no-hardlinks", "--dissociate", "/trusted/source", "/jobs/review-220-job-a",
     ]);
     expect(execute).toHaveBeenNthCalledWith(4, "git", [
-      "-C", "/trusted/source", "config", "--get", "user.email",
+      "-C", "/jobs/review-220-job-a", "remote", "set-url", "origin", remote,
     ]);
     expect(execute).toHaveBeenNthCalledWith(5, "git", [
-      "-C", "/jobs/review-220-job-a", "config", "--local", "user.name", "Fixture Source",
+      "-C", "/trusted/source", "config", "--get", "user.name",
     ]);
     expect(execute).toHaveBeenNthCalledWith(6, "git", [
-      "-C", "/jobs/review-220-job-a", "config", "--local", "user.email", "source@fixture.example",
+      "-C", "/trusted/source", "config", "--get", "user.email",
     ]);
     expect(execute).toHaveBeenNthCalledWith(7, "git", [
-      "-C", "/jobs/review-220-job-a", "fetch", "--no-tags", "origin", revision,
+      "-C", "/jobs/review-220-job-a", "config", "--local", "user.name", "Fixture Source",
     ]);
     expect(execute).toHaveBeenNthCalledWith(8, "git", [
-      "-C", "/jobs/review-220-job-a", "rev-parse", "FETCH_HEAD",
+      "-C", "/jobs/review-220-job-a", "config", "--local", "user.email", "source@fixture.example",
     ]);
     expect(execute).toHaveBeenNthCalledWith(9, "git", [
+      "-C", "/jobs/review-220-job-a", "fetch", "--no-tags", "origin", revision,
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(10, "git", [
+      "-C", "/jobs/review-220-job-a", "rev-parse", "FETCH_HEAD",
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(11, "git", [
       "-C", "/jobs/review-220-job-a", "ls-tree", "-r", "--name-only", revision,
       "--", ".sandcastle/.env",
     ]);
-    expect(execute).toHaveBeenNthCalledWith(10, "git", [
+    expect(execute).toHaveBeenNthCalledWith(12, "git", [
       "-C", "/jobs/review-220-job-a", "checkout", "--detach", revision,
     ]);
-    expect(execute).toHaveBeenNthCalledWith(11, "npm", [
+    expect(execute).toHaveBeenNthCalledWith(13, "npm", [
       "--prefix", "/jobs/review-220-job-a", "ci",
     ]);
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree"]));
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["--shared"]));
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["--reference"]));
   });
 
   it("rejects a source remote with embedded credentials before cloning", async () => {
@@ -120,9 +129,30 @@ describe("Target Checkout", () => {
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["clone"]));
   });
 
+  it("rejects a partial trusted source before local object reuse", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "origin\n", stderr: "" });
+    const action = vi.fn();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: "/trusted/source",
+      checkoutRoot: "/jobs",
+      execute,
+      createJobDirectory: () => "/jobs/review-220-job-a",
+    });
+
+    await expect(checkout.withCheckout({ revision }, action))
+      .rejects.toThrow("Target Checkout source must not be a partial clone");
+
+    expect(action).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["clone"]));
+  });
+
   it("rejects a tracked Sandcastle private environment file before dependencies or Agent execution", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
+      .mockRejectedValueOnce({ code: 1 })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "Fixture Source\n", stderr: "" })
       .mockResolvedValueOnce({ stdout: "source@fixture.example\n", stderr: "" })
@@ -152,6 +182,8 @@ describe("Target Checkout", () => {
   ])("rejects a source checkout without a git identity before fetching (%s)", async (_name, nameRead) => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${remote}\n`, stderr: "" })
+      .mockRejectedValueOnce({ code: 1 })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockImplementationOnce(nameRead)
       .mockResolvedValueOnce({ stdout: "source@fixture.example\n", stderr: "" });
@@ -223,6 +255,9 @@ describe("Target Checkout real Git filesystem integration", () => {
     readonly trustedPath: string;
     readonly registeredWorktreePath: string;
     readonly checkoutRoot: string;
+    readonly sourceOnlyObject: string;
+    readonly alternateObjectsPath: string;
+    readonly alternateOnlyObject: string;
     readonly hiddenRevision: string;
   }> => {
     const root = await mkdtemp(join(tmpdir(), "target-checkout-integration-"));
@@ -230,6 +265,7 @@ describe("Target Checkout real Git filesystem integration", () => {
     const remotePath = join(root, "remote.git");
     const contributorPath = join(root, "contributor");
     const trustedPath = join(root, "trusted");
+    const alternatePath = join(root, "alternate-source");
     const registeredWorktreePath = join(root, "registered-worktree");
     const checkoutRoot = join(root, "jobs");
 
@@ -257,6 +293,32 @@ describe("Target Checkout real Git filesystem integration", () => {
     await git(["-C", contributorPath, "remote", "add", "origin", remotePath]);
     await git(["-C", contributorPath, "push", "origin", "master"]);
     await git(["clone", "--no-local", remotePath, trustedPath]);
+    const sourceOnlyPath = join(root, "source-only-object.txt");
+    await writeFile(sourceOnlyPath, "trusted local object\n");
+    const sourceOnlyObject = await git([
+      "-C", trustedPath, "hash-object", "-w", sourceOnlyPath,
+    ]);
+    await rm(sourceOnlyPath);
+    await git(["init", "-b", "alternate", alternatePath]);
+    await git(["-C", alternatePath, "config", "user.name", "Alternate Source"]);
+    await git(["-C", alternatePath, "config", "user.email", "alternate@example.test"]);
+    await writeFile(join(alternatePath, "alternate-only.txt"), "alternate local object\n");
+    await git(["-C", alternatePath, "add", "alternate-only.txt"]);
+    await git(["-C", alternatePath, "commit", "-m", "alternate fixture"]);
+    const alternateCommit = await git(["-C", alternatePath, "rev-parse", "HEAD"]);
+    const alternateOnlyObject = await git([
+      "-C", alternatePath, "rev-parse", "HEAD:alternate-only.txt",
+    ]);
+    const alternateObjectsPath = join(alternatePath, ".git", "objects");
+    await writeFile(
+      join(trustedPath, ".git", "objects", "info", "alternates"),
+      `${alternateObjectsPath}\n`,
+    );
+    await git([
+      "-C", trustedPath, "update-ref", "refs/heads/alternate-fixture", alternateCommit,
+    ]);
+    expect(await git(["-C", trustedPath, "cat-file", "blob", alternateOnlyObject]))
+      .toBe("alternate local object");
     await git(["-C", trustedPath, "config", "user.name", "Trusted Source"]);
     await git(["-C", trustedPath, "config", "user.email", "trusted-source@example.test"]);
     // Production only accepts credential-free HTTPS remotes. Keep the bare
@@ -273,8 +335,66 @@ describe("Target Checkout real Git filesystem integration", () => {
     await git(["-C", contributorPath, "push", "origin", "hidden-pr"]);
     await git(["-C", remotePath, "update-ref", "-d", "refs/heads/hidden-pr"]);
 
-    return { root, remotePath, trustedPath, registeredWorktreePath, checkoutRoot, hiddenRevision };
+    return {
+      root,
+      remotePath,
+      trustedPath,
+      registeredWorktreePath,
+      checkoutRoot,
+      sourceOnlyObject,
+      alternateObjectsPath,
+      alternateOnlyObject,
+      hiddenRevision,
+    };
   };
+
+  it("reuses trusted local objects without leaving shared object state", async () => {
+    const fixture = await createFixture();
+    const execute = async (
+      file: string,
+      arguments_: readonly string[],
+      environment?: Readonly<Record<string, string>>,
+    ): Promise<{ readonly stdout: string; readonly stderr: string }> => {
+      if (file === "npm") return { stdout: "", stderr: "" };
+      const actualArguments = arguments_.map((argument) =>
+        argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+      );
+      const result = await executeFile(file, actualArguments, { env: environment });
+      return { stdout: result.stdout, stderr: result.stderr };
+    };
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute,
+    });
+
+    await checkout.withCheckout({ revision: fixture.hiddenRevision }, async (checkoutPath) => {
+      expect(await git(["-C", checkoutPath, "cat-file", "blob", fixture.sourceOnlyObject]))
+        .toBe("trusted local object");
+      const sourceObjectPath = join(
+        fixture.trustedPath,
+        ".git", "objects",
+        fixture.sourceOnlyObject.slice(0, 2),
+        fixture.sourceOnlyObject.slice(2),
+      );
+      const checkoutObjectPath = join(
+        checkoutPath,
+        ".git", "objects",
+        fixture.sourceOnlyObject.slice(0, 2),
+        fixture.sourceOnlyObject.slice(2),
+      );
+      expect((await stat(checkoutObjectPath)).ino).not.toBe((await stat(sourceObjectPath)).ino);
+      await rename(
+        fixture.alternateObjectsPath,
+        `${fixture.alternateObjectsPath}-offline`,
+      );
+      expect(await git([
+        "-C", checkoutPath, "cat-file", "blob", fixture.alternateOnlyObject,
+      ])).toBe("alternate local object");
+      expect(await pathExists(join(checkoutPath, ".git", "objects", "info", "alternates")))
+        .toBe(false);
+    });
+  });
 
   it("runs concurrent jobs in independent checkouts, installs dependencies, and confines successful cleanup", async () => {
     const fixture = await createFixture();
