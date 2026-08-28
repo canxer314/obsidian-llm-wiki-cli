@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -19,6 +19,73 @@ describe("whole Target job process", () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
+  it("retains partial setup output when the whole-job deadline kills a hung command", async () => {
+    const root = await mkdtemp(join(tmpdir(), "target-job-hung-setup-"));
+    roots.push(root);
+    const trustedPath = join(root, "trusted");
+    const jobsPath = join(root, "jobs");
+    const logsPath = join(jobsPath, "logs");
+    const binPath = join(root, "bin");
+    const remoteUrl = "https://github.com/example/hung-setup-fixture.git";
+    await git(["init", "-b", "master", trustedPath]);
+    await git(["-C", trustedPath, "config", "user.name", "Trusted Source"]);
+    await git(["-C", trustedPath, "config", "user.email", "trusted@example.test"]);
+    await git(["-C", trustedPath, "commit", "--allow-empty", "-m", "trusted fixture"]);
+    const revision = await git(["-C", trustedPath, "rev-parse", "HEAD"]);
+    await git(["-C", trustedPath, "remote", "add", "origin", remoteUrl]);
+    await mkdir(binPath);
+    const gitWrapper = join(binPath, "git");
+    await writeFile(gitWrapper, [
+      "#!/usr/bin/env bash",
+      'if [[ "$1" == "clone" ]]; then',
+      '  trap "" TERM',
+      '  printf "partial clone stdout\\n"',
+      '  printf "partial clone stderr\\n" >&2',
+      "  sleep 30",
+      "fi",
+      'exec /usr/bin/git "$@"',
+    ].join("\n"));
+    await chmod(gitWrapper, 0o755);
+    const transport = {
+      HOME: process.env.HOME ?? "",
+      PATH: `${binPath}:${process.env.PATH ?? ""}`,
+    };
+    const runner = createTargetOperationRunner({
+      checkoutOptions: {
+        sourceRepositoryPath: trustedPath,
+        checkoutRoot: jobsPath,
+        gitEnvironment: transport,
+        dependencyEnvironment: transport,
+      },
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: transport, github: {}, claude: {}, githubAgent: {} },
+        models: {
+          default: "default-model",
+          planner: "planner-model",
+          implementer: "implementer-model",
+          reviewer: "reviewer-model",
+        },
+      },
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 100,
+    });
+
+    await expect(runner.run({
+      operation: "implement-issue",
+      number: 219,
+      revision,
+      jobId: "hung-setup-job",
+    })).rejects.toThrow("Target operation implement-issue timed out");
+    await expect(readFile(join(logsPath, "hung-setup-job", "stdout.log"), "utf8"))
+      .resolves.toContain("partial clone stdout\n");
+    await expect(readFile(join(logsPath, "hung-setup-job", "stderr.log"), "utf8"))
+      .resolves.toContain("partial clone stderr\n");
+    await expect(readFile(join(logsPath, "hung-setup-job", "metadata.json"), "utf8").then(JSON.parse))
+      .resolves.toMatchObject({ status: "timed-out" });
+  }, 10_000);
+
   it("runs checkout setup and the fixed target operation in one outer worker", async () => {
     const root = await mkdtemp(join(tmpdir(), "target-job-worker-"));
     roots.push(root);
@@ -26,6 +93,7 @@ describe("whole Target job process", () => {
     const contributorPath = join(root, "contributor");
     const trustedPath = join(root, "trusted");
     const jobsPath = join(root, "jobs");
+    const logsPath = join(jobsPath, "logs");
     const binPath = join(root, "bin");
     const remoteUrl = "https://github.com/example/whole-job-fixture.git";
 
@@ -87,6 +155,7 @@ describe("whole Target job process", () => {
           PATH: process.env.PATH ?? "",
         },
       },
+      jobLogRoot: logsPath,
       startup: {
         imageName: "fixture-image",
         childEnvironments: { git: transport, github: {}, claude: {}, githubAgent: {} },
@@ -107,6 +176,10 @@ describe("whole Target job process", () => {
       revision,
       jobId: "job-219",
     })).resolves.toEqual({ status: "implemented", source: "target-revision" });
-    await expect(readdir(jobsPath)).resolves.toEqual([]);
+    await expect(readdir(jobsPath)).resolves.toEqual(["logs"]);
+    await expect(readFile(join(logsPath, "job-219", "stdout.log"), "utf8"))
+      .resolves.toContain('"source":"target-revision"');
+    await expect(readFile(join(logsPath, "job-219", "metadata.json"), "utf8").then(JSON.parse))
+      .resolves.toMatchObject({ status: "completed", jobId: "job-219" });
   }, 40_000);
 });

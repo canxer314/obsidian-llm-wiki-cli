@@ -9,6 +9,7 @@ import {
 } from "@ai-hero/sandcastle";
 import { z } from "zod";
 
+import { agentLogging } from "./agent-logging.ts";
 import type {
   ArchitectureReviewOutcome,
   ArchitectureReviewProposal,
@@ -77,14 +78,17 @@ export function createSameSessionArchitectureReviewExtractor(options: {
         options.timeoutMilliseconds ?? ARCHITECTURE_REVIEW_TIMEOUT_MILLISECONDS,
       );
       try {
+        const logging = agentLogging(
+          request.artifactDirectory === undefined
+            ? undefined
+            : join(request.artifactDirectory, "architecture-review.log"),
+        );
         const produced = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         hooks: options.hooks,
         cwd: request.checkoutPath,
-        ...(request.artifactDirectory === undefined ? {} : {
-          logging: { type: "file" as const, path: join(request.artifactDirectory, "architecture-review.log"), verbose: true },
-        }),
+        ...(logging === undefined ? {} : { logging }),
         signal: controller.signal,
         branchStrategy: { type: "head" },
         maxIterations: 1,
@@ -97,9 +101,7 @@ export function createSameSessionArchitectureReviewExtractor(options: {
         throw new Error("Architecture review session identity is unavailable");
       }
       const extracted = await produced.resume(extractionPrompt, {
-        ...(request.artifactDirectory === undefined ? {} : {
-          logging: { type: "file" as const, path: join(request.artifactDirectory, "architecture-review.log"), verbose: true },
-        }),
+        ...(logging === undefined ? {} : { logging }),
         signal: controller.signal,
         output: Output.object({ tag: "output", schema: architectureReviewSchema, maxRetries: 2 }),
       }) as unknown as { readonly commits: readonly unknown[]; readonly output: ArchitectureReviewOutcome };

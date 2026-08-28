@@ -7,6 +7,8 @@ import {
 } from "@ai-hero/sandcastle";
 import { z } from "zod";
 
+import { agentLogging } from "./agent-logging.ts";
+
 const resolutionSchema = z.strictObject({
   comment: z.string().min(1),
 });
@@ -52,6 +54,7 @@ export function createBranchUpdateConflictResolverSession(options: {
   const createAgent = options.createAgent ?? claudeCode;
   return {
     async resolve(request) {
+      const logging = agentLogging();
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
@@ -60,6 +63,7 @@ export function createBranchUpdateConflictResolverSession(options: {
         branchStrategy: { type: "branch", branch: request.branch },
         maxIterations: 1,
         name: `branch-update-pr-${request.pullRequestNumber}`,
+        ...(logging === undefined ? {} : { logging }),
         prompt: resolutionPrompt(request),
         output: Output.object({ tag: "output", schema: resolutionSchema, maxRetries: 2 }),
       });

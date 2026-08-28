@@ -1,10 +1,59 @@
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
-const executeFile = promisify(execFile);
+import { appendInheritedJobOutput } from "./job-logs.ts";
+
+interface CommandExecutionError extends Error {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+async function executeStreamingFile(
+  file: string,
+  arguments_: readonly string[],
+  environment?: Readonly<Record<string, string>>,
+): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  return new Promise((resolveExecution, reject) => {
+    const child = spawn(file, [...arguments_], { env: environment });
+    let stdout = "";
+    let stderr = "";
+    let logError: unknown;
+    const capture = (
+      stream: "stdout" | "stderr",
+      chunk: Buffer | string,
+    ): void => {
+      if (stream === "stdout") stdout += String(chunk);
+      else stderr += String(chunk);
+      if (logError !== undefined) return;
+      try {
+        appendInheritedJobOutput(stream, chunk);
+      } catch (error) {
+        logError = error;
+      }
+    };
+    child.stdout?.on("data", (chunk: Buffer | string) => capture("stdout", chunk));
+    child.stderr?.on("data", (chunk: Buffer | string) => capture("stderr", chunk));
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0 && logError === undefined) {
+        resolveExecution({ stdout, stderr });
+        return;
+      }
+      if (code === 0) {
+        reject(logError);
+        return;
+      }
+      reject(Object.assign(
+        new Error(`${file} exited with ${code ?? signal ?? "unknown status"}: ${stderr}`),
+        { code, signal, stdout, stderr },
+      ) as CommandExecutionError);
+    });
+  });
+}
 
 // Failed or timed-out Target Checkouts stay on disk for diagnosis and follow
 // the same seven-day retention policy as review artifacts.
@@ -58,10 +107,7 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
   readonly gitEnvironment?: Readonly<Record<string, string>>;
   readonly dependencyEnvironment?: Readonly<Record<string, string>>;
 }): TargetCheckout {
-  const execute = options.execute ?? (async (file, arguments_, environment) => {
-    const result = await executeFile(file, arguments_, { env: environment });
-    return { stdout: result.stdout, stderr: result.stderr };
-  });
+  const execute = options.execute ?? executeStreamingFile;
   const git = (arguments_: readonly string[]) => options.gitEnvironment === undefined
     ? execute("git", arguments_)
     : execute("git", arguments_, options.gitEnvironment);

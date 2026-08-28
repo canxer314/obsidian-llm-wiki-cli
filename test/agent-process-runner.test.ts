@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,17 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { runAgentWorker } from "../.sandcastle/agent-process-runner.js";
+
+function child(pid: number): ChildProcess & EventEmitter {
+  const process = new EventEmitter() as ChildProcess & EventEmitter;
+  Object.defineProperties(process, {
+    pid: { value: pid },
+    stdin: { value: { end: vi.fn() } },
+    stdout: { value: new EventEmitter() },
+    stderr: { value: new EventEmitter() },
+  });
+  return process;
+}
 
 async function expectProcessDead(pid: number): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -20,6 +32,34 @@ async function expectProcessDead(pid: number): Promise<void> {
 }
 
 describe("agent process runner", () => {
+  it("rejects a whole job through the normal lifecycle when log appending fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-log-append-failure-"));
+    const logDirectory = join(root, "stdout.log");
+    mkdirSync(logDirectory);
+    const process = child(601);
+    const running = runAgentWorker({
+      checkoutPath: "unused",
+      workerFile: "unused.ts",
+      workerName: "fixture",
+      arguments_: [],
+      timeoutMessage: "Fixture worker timed out",
+      start: () => process,
+      processGroupOwner: true,
+      inheritedEnvironment: {
+        SANDCASTLE_JOB_STDOUT_LOG: logDirectory,
+      },
+      groupExited: async () => {},
+    });
+
+    try {
+      expect(() => process.stdout?.emit("data", "worker output\n")).not.toThrow();
+      process.emit("close", 1);
+      await expect(running).rejects.toMatchObject({ code: "EISDIR" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("loads the fixed worker from the authorized Target Checkout", async () => {
     const checkoutPath = mkdtempSync(join(tmpdir(), "authorized-worker-"));
     const workerDirectory = join(checkoutPath, ".sandcastle");

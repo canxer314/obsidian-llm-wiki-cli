@@ -25,6 +25,7 @@ import {
   type TargetOperationIdentity,
 } from "./target-operation.ts";
 import { createTargetOperationCommandRunner } from "./target-operation-command.ts";
+import { removeExpiredJobLogs } from "./job-logs.ts";
 import { removeExpiredReviewArtifacts } from "./review-artifacts.ts";
 import { loadSandboxStartup } from "./sandbox.ts";
 
@@ -32,11 +33,15 @@ try {
   const repositoryPath = resolve(import.meta.dirname, "..");
   const jobsRoot = resolve(import.meta.dirname, "jobs");
   const artifactRoot = resolve(jobsRoot, "review-artifacts");
+  const jobLogRoot = resolve(jobsRoot, "logs");
   if (process.argv[2] !== "inspect") {
-    await removeExpiredReviewArtifacts({ root: artifactRoot });
+    await Promise.all([
+      removeExpiredReviewArtifacts({ root: artifactRoot }),
+      removeExpiredJobLogs({ root: jobLogRoot }),
+    ]);
     await removeExpiredFailureCheckouts({
       root: jobsRoot,
-      preserve: ["review-artifacts", "pull-request-leases", "implementation-leases"],
+      preserve: ["logs", "review-artifacts", "pull-request-leases", "implementation-leases"],
     });
   }
   const startup = await loadSandboxStartup();
@@ -71,6 +76,7 @@ try {
       gitEnvironment: startup.childEnvironments.git,
       dependencyEnvironment: startup.childEnvironments.dependencies,
     },
+    jobLogRoot,
     startup: {
       imageName: startup.imageName,
       childEnvironments: {

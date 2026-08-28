@@ -1,5 +1,5 @@
 import { commandTriggerLabel, type AutomationCommand } from "./automation-command.ts";
-import { redact } from "./redaction.ts";
+import { diagnosticSummary } from "./redaction.ts";
 import type {
   AuthorizedTargetOperationInvocation,
   TargetOperationIdentity,
@@ -108,7 +108,9 @@ export function createTargetOperationCommandRunner(options: {
         }
         return result;
       } catch (error) {
-        const summary = redact(error instanceof Error ? error.message : String(error));
+        const summary = diagnosticSummary(
+          error instanceof Error ? error.message : String(error),
+        );
         await Promise.allSettled([
           options.acquisition.addBlocked(operation, number),
           options.acquisition.addBlockedDiagnostic(operation, number, {

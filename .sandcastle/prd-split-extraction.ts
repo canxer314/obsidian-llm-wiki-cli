@@ -1,6 +1,8 @@
 import { Output, claudeCode, run, type SandboxHooks, type SandboxProvider } from "@ai-hero/sandcastle";
 import { z } from "zod";
 
+import { agentLogging } from "./agent-logging.ts";
+
 export interface PrdSlice {
   readonly title: string;
   readonly whatToBuild: string;
@@ -40,6 +42,7 @@ export function createSameSessionPrdSplitExtractor(options: {
       readonly checkoutPath: string;
       readonly model: string;
     }): Promise<readonly PrdSlice[]> {
+      const logging = agentLogging();
       const produced = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
@@ -47,11 +50,13 @@ export function createSameSessionPrdSplitExtractor(options: {
         cwd: request.checkoutPath,
         branchStrategy: { type: "head" },
         maxIterations: 1,
+        ...(logging === undefined ? {} : { logging }),
         prompt: producePrompt(request.prdNumber, request.title),
       });
       if (produced.commits.length > 0) throw new Error("PRD splitter session must not create commits");
       if (produced.resume === undefined) throw new Error("PRD splitter session identity is unavailable");
       const extracted = await produced.resume(extractionPrompt, {
+        ...(logging === undefined ? {} : { logging }),
         output: Output.object({ tag: "output", schema: prdSplitSchema, maxRetries: 2 }),
       }) as unknown as { readonly commits: readonly unknown[]; readonly output: { readonly slices: readonly PrdSlice[] } };
       if (extracted.commits.length > 0) throw new Error("PRD splitter session must not create commits");

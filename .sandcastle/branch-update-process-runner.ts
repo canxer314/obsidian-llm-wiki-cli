@@ -16,8 +16,12 @@ function outputOf(child: ChildProcess): Promise<{ readonly stdout: string; reado
   return new Promise((resolveOutput, reject) => {
     let stdout = "";
     let stderr = "";
-    child.stdout?.on("data", (chunk: Buffer | string) => { stdout += String(chunk); });
-    child.stderr?.on("data", (chunk: Buffer | string) => { stderr += String(chunk); });
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      stdout += String(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderr += String(chunk);
+    });
     child.once("error", reject);
     child.once("close", (code) => resolveOutput({ stdout, stderr, code }));
   });

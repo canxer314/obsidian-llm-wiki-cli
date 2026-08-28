@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createSandcastlePlannerSession,
@@ -20,6 +20,35 @@ const output = {
 };
 
 describe("Sandcastle Planner session adapter", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("retains the complete raw Agent stream in the inherited whole-job log", async () => {
+    vi.stubEnv("SANDCASTLE_JOB_STDOUT_LOG", "/trusted/jobs/logs/job-101/stdout.log");
+    const runAgent = vi.fn().mockResolvedValue({ output });
+    const session = createSandcastlePlannerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: {},
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    await session.run({
+      issueNumber: 101,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    });
+
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({
+      logging: {
+        type: "file",
+        path: "/trusted/jobs/logs/job-101/stdout.log",
+        verbose: true,
+      },
+    }));
+  });
+
   it("runs a fresh read-only Planner session with structured output", async () => {
     const runAgent = vi.fn().mockResolvedValue({ output });
     const createAgent = vi.fn().mockReturnValue({ name: "fake-agent" });

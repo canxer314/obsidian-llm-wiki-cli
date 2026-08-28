@@ -5,6 +5,7 @@ import {
   type SandboxProvider,
 } from "@ai-hero/sandcastle";
 
+import { agentLogging } from "./agent-logging.ts";
 import type { PlannerOutput } from "./planner.js";
 
 export interface ImplementerAgentSessionRequest {
@@ -56,6 +57,7 @@ export function createSandcastleImplementerSession(options: {
   const createAgent = options.createAgent ?? claudeCode;
   return {
     async run(request) {
+      const logging = agentLogging();
       const result = await runAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
@@ -67,6 +69,7 @@ export function createSandcastleImplementerSession(options: {
         },
         maxIterations: 1,
         name: `implementer-issue-${request.plan.issue.number}`,
+        ...(logging === undefined ? {} : { logging }),
         prompt: initialImplementerPrompt(request.branch, request.plan, request.parentPrd),
       });
       return { branch: result.branch, commits: result.commits };
