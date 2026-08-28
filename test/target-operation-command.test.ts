@@ -86,11 +86,12 @@ describe("trusted Target operation command acquisition", () => {
     expect(new Set(invocations.map(({ number }) => number))).toEqual(new Set([221, 222]));
   });
 
-  it("runs explicit feedback reconciliation without reacquiring a consumed trigger", async () => {
-    const acquisition = acquisitionFor([{
-      ...available,
-      labels: ["agent:blocked"],
-    }]);
+  it("acquires a visible feedback command before explicit reconciliation", async () => {
+    const acquisition = acquisitionFor([
+      { ...available, labels: ["agent:implement"] },
+      { ...acquiring, labels: ["agent:implement", "agent:in-progress"] },
+      acquired,
+    ]);
     const target = {
       run: vi.fn(async () => ({ status: "implemented", revision, reconciled: true })),
     };
@@ -113,9 +114,34 @@ describe("trusted Target operation command acquisition", () => {
       number: 219,
       revision,
       jobId: "job-219",
+      acquired: true,
       pullRequest,
       reconcile,
     });
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "remove-in-progress",
+    ]);
+  });
+
+  it("refuses explicit feedback reconciliation without a visible command", async () => {
+    const acquisition = acquisitionFor([{
+      ...available,
+      labels: ["agent:blocked"],
+    }]);
+    const target = { run: vi.fn() };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("implement-feedback", 219, {
+      invocation: "reconcile",
+      expectedPost: revision,
+    })).rejects.toThrow("Work Item #219 is not available for acquisition");
+    expect(target.run).not.toHaveBeenCalled();
     expect(acquisition.events).toEqual([]);
   });
 
