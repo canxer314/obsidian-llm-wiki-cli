@@ -93,7 +93,7 @@ Templates live under `.sandcastle/systemd/`:
 
 ```text
 sandcastle-dispatch.service              one bounded dispatch round
-sandcastle-dispatch.timer                every minute
+sandcastle-dispatch.timer                every minute at second 15
 sandcastle-architecture-review.service   one architecture review
 sandcastle-architecture-review.timer     09:00 UTC, Monday-Friday (upstream schedule)
 ```
