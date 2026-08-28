@@ -261,7 +261,7 @@ describe("Automation Command dispatch", () => {
   });
 
   it("fails the round after the frozen frontier without executing promoted commands when promotion cannot read dependency state", async () => {
-    const existing = command({ number: 217 });
+    const existing = command({ number: 218 });
     const listCommands = vi.fn(async () => [existing]);
     const run = vi.fn();
     await expect(dispatchAutomationCommands({}, {
