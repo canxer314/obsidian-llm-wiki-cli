@@ -2,6 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import { runQueuePromotionScan } from "../.sandcastle/queue-promotion-automation.js";
 
+const queuedIssue = { number: 5, labels: ["agent:queued"] } as const;
+
+function queuedState(overrides: Partial<{
+  readonly labels: readonly string[];
+  readonly parentNumber: number;
+  readonly blockers: readonly { readonly number: number; readonly state: string }[];
+}> = {}) {
+  return { labels: ["agent:queued"], blockers: [], ...overrides };
+}
+
 function ports(overrides: Partial<{
   queuedIssues: readonly { readonly number: number; readonly labels: readonly string[] }[];
   state: {
@@ -17,6 +27,7 @@ function ports(overrides: Partial<{
       addIssueLabel: vi.fn(async () => {}),
       removeIssueLabel: vi.fn(async () => {}),
       addPromotionDiagnostic: vi.fn(async () => {}),
+      addPromotionBlockedDiagnostic: vi.fn(async () => {}),
       addSubIssueRefusalDiagnostic: vi.fn(async () => {}),
     },
   };
@@ -31,6 +42,7 @@ function statefulPorts(blockers: readonly { readonly number: number; state: stri
       addIssueLabel: vi.fn(async (_issue: number, label: string) => { labels.add(label); }),
       removeIssueLabel: vi.fn(async (_issue: number, label: string) => { labels.delete(label); }),
       addPromotionDiagnostic: vi.fn(async () => {}),
+      addPromotionBlockedDiagnostic: vi.fn(async () => {}),
       addSubIssueRefusalDiagnostic: vi.fn(async () => {}),
     },
   };
@@ -40,7 +52,7 @@ function statefulPorts(blockers: readonly { readonly number: number; state: stri
 describe("queued Issue promotion", () => {
   it("keeps a queued Issue unchanged while any blocker remains open", async () => {
     const scanned = ports({
-      queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
+      queuedIssues: [queuedIssue],
       state: { labels: ["agent:queued"], blockers: [{ number: 7, state: "OPEN" }, { number: 8, state: "CLOSED" }] },
     });
 
@@ -58,8 +70,8 @@ describe("queued Issue promotion", () => {
     ["no blockers", []],
   ])("promotes a queued Issue with %s through the upstream label transition", async (_case, blockers) => {
     const scanned = ports({
-      queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
-      state: { labels: ["agent:queued"], blockers },
+      queuedIssues: [queuedIssue],
+      state: queuedState({ blockers }),
     });
 
     await expect(runQueuePromotionScan(scanned)).resolves.toEqual({
@@ -76,8 +88,8 @@ describe("queued Issue promotion", () => {
   it("adds the implement trigger before clearing the queued label so an interrupted promotion stays recoverable", async () => {
     const order: string[] = [];
     const scanned = ports({
-      queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
-      state: { labels: ["agent:queued"], blockers: [] },
+      queuedIssues: [queuedIssue],
+      state: queuedState(),
     });
     scanned.github.addIssueLabel.mockImplementation(async () => { order.push("add-implement"); });
     scanned.github.removeIssueLabel.mockImplementation(async () => { order.push("remove-queued"); });
@@ -114,8 +126,8 @@ describe("queued Issue promotion", () => {
 
   it("refuses to promote a queued sub-Issue by clearing the queue and explaining, without blocking it", async () => {
     const scanned = ports({
-      queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
-      state: { labels: ["agent:queued"], parentNumber: 12, blockers: [] },
+      queuedIssues: [queuedIssue],
+      state: queuedState({ parentNumber: 12 }),
     });
 
     await expect(runQueuePromotionScan(scanned)).resolves.toEqual({ status: "scanned", promoted: [], refused: [5] });
@@ -127,8 +139,8 @@ describe("queued Issue promotion", () => {
   it("comments a sub-Issue refusal before clearing the queue so an interrupted refusal stays visible", async () => {
     const order: string[] = [];
     const scanned = ports({
-      queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
-      state: { labels: ["agent:queued"], parentNumber: 12, blockers: [] },
+      queuedIssues: [queuedIssue],
+      state: queuedState({ parentNumber: 12 }),
     });
     scanned.github.addSubIssueRefusalDiagnostic.mockImplementation(async () => { order.push("comment"); });
     scanned.github.removeIssueLabel.mockImplementation(async () => { order.push("remove-queued"); });
@@ -148,7 +160,7 @@ describe("queued Issue promotion", () => {
 
   it("abandons a promotion when the queued label is lost before the mutation lands", async () => {
     const scanned = ports({
-      queuedIssues: [{ number: 5, labels: ["agent:queued"] }],
+      queuedIssues: [queuedIssue],
     });
     scanned.github.readPromotionState
       .mockResolvedValueOnce({ labels: ["agent:queued"], blockers: [] })
@@ -172,6 +184,27 @@ describe("queued Issue promotion", () => {
     await runQueuePromotionScan(scanned);
     const readOrder = scanned.github.readPromotionState.mock.calls.map(([issueNumber]) => issueNumber);
     expect(readOrder).toEqual([3, 7, 9]);
+  });
+
+  it("blocks a queued Issue when promotion publication fails", async () => {
+    const scanned = ports({
+      queuedIssues: [queuedIssue],
+      state: queuedState(),
+    });
+    const failure = new Error("implement label publication failed");
+    scanned.github.addIssueLabel.mockRejectedValueOnce(failure);
+
+    await expect(runQueuePromotionScan(scanned, {
+      createJobId: () => "queue-promotion-job",
+    })).rejects.toBe(failure);
+
+    expect(scanned.github.addIssueLabel).toHaveBeenNthCalledWith(1, 5, "agent:implement");
+    expect(scanned.github.addIssueLabel).toHaveBeenNthCalledWith(2, 5, "agent:blocked");
+    expect(scanned.github.addPromotionBlockedDiagnostic).toHaveBeenCalledWith(5, {
+      jobId: "queue-promotion-job",
+      summary: "implement label publication failed",
+    });
+    expect(scanned.github.removeIssueLabel).not.toHaveBeenCalledWith(5, "agent:queued");
   });
 
   it("fails closed without promoting when dependency state is unreadable", async () => {

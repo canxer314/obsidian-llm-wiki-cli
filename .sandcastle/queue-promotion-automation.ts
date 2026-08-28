@@ -1,3 +1,5 @@
+import { diagnosticSummary } from "./redaction.ts";
+
 export interface QueuedIssue {
   readonly number: number;
   readonly labels: readonly string[];
@@ -16,6 +18,10 @@ export interface QueuePromotionPorts {
     addIssueLabel(issueNumber: number, label: string): Promise<void>;
     removeIssueLabel(issueNumber: number, label: string): Promise<void>;
     addPromotionDiagnostic(issueNumber: number): Promise<void>;
+    addPromotionBlockedDiagnostic(
+      issueNumber: number,
+      diagnostic: { readonly jobId: string; readonly summary: string },
+    ): Promise<void>;
     addSubIssueRefusalDiagnostic(issueNumber: number, parentNumber: number): Promise<void>;
   };
 }
@@ -34,12 +40,34 @@ function promotable(state: QueuePromotionState): boolean {
 
 export async function runQueuePromotionScan(
   ports: QueuePromotionPorts,
+  options: { readonly createJobId?: () => string } = {},
 ): Promise<QueuePromotionResult> {
   const queued = (await ports.github.listQueuedIssues())
     .slice()
     .sort((left, right) => left.number - right.number);
   const promoted: number[] = [];
   const refused: number[] = [];
+  const publish = async (
+    issueNumber: number,
+    action: () => Promise<void>,
+  ): Promise<void> => {
+    try {
+      await action();
+    } catch (error) {
+      const jobId = options.createJobId?.() ?? "local-queue-promotion-job";
+      const summary = diagnosticSummary(
+        error instanceof Error ? error.message : String(error),
+      );
+      await Promise.allSettled([
+        ports.github.addIssueLabel(issueNumber, "agent:blocked"),
+        ports.github.addPromotionBlockedDiagnostic(issueNumber, {
+          jobId,
+          summary,
+        }),
+      ]);
+      throw error;
+    }
+  };
   for (const issue of queued) {
     const state = await ports.github.readPromotionState(issue.number);
     if (!state.labels.includes("agent:queued")) continue;
@@ -50,8 +78,13 @@ export async function runQueuePromotionScan(
       // clear the queue trigger, without agent:blocked. Comment before
       // clearing so an interrupted refusal stays visible and is picked up
       // again by the next scan.
-      await ports.github.addSubIssueRefusalDiagnostic(issue.number, state.parentNumber);
-      await ports.github.removeIssueLabel(issue.number, "agent:queued");
+      await publish(issue.number, async () => {
+        await ports.github.addSubIssueRefusalDiagnostic(
+          issue.number,
+          state.parentNumber!,
+        );
+        await ports.github.removeIssueLabel(issue.number, "agent:queued");
+      });
       refused.push(issue.number);
       continue;
     }
@@ -61,9 +94,11 @@ export async function runQueuePromotionScan(
     if (!promotable(await ports.github.readPromotionState(issue.number))) continue;
     // Add the implement trigger before clearing the queue so an interrupted
     // promotion leaves the Issue visible to the next scan instead of lost.
-    await ports.github.addIssueLabel(issue.number, "agent:implement");
-    await ports.github.removeIssueLabel(issue.number, "agent:queued");
-    await ports.github.addPromotionDiagnostic(issue.number);
+    await publish(issue.number, async () => {
+      await ports.github.addIssueLabel(issue.number, "agent:implement");
+      await ports.github.removeIssueLabel(issue.number, "agent:queued");
+      await ports.github.addPromotionDiagnostic(issue.number);
+    });
     promoted.push(issue.number);
   }
   return { status: "scanned", promoted, refused };

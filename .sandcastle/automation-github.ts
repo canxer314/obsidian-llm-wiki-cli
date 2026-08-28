@@ -230,6 +230,12 @@ export function createAutomationDispatchGithubPort(options: {
         "All blockers are closed — promoting from `agent:queued` to `agent:implement`.",
       ], options.environment);
     },
+    async addPromotionBlockedDiagnostic(issueNumber, diagnostic) {
+      await execute("gh", [
+        "issue", "comment", String(issueNumber), "--body",
+        `Queue promotion is blocked (job ${diagnostic.jobId}): ${diagnostic.summary}`,
+      ], options.environment);
+    },
     async addSubIssueRefusalDiagnostic(issueNumber, parentNumber) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
