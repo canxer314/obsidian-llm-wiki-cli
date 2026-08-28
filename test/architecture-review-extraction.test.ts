@@ -29,7 +29,7 @@ function createExtractor(runAgent: unknown, options: { readonly timeoutMilliseco
 }
 
 describe("same-session architecture review extraction", () => {
-  it("runs one unconstrained produce pass with the prior proposals, then extracts by resuming that session", async () => {
+  it("runs one bounded read-only produce pass with the prior proposals, then extracts by resuming that session", async () => {
     const extraction = vi.fn().mockResolvedValue({ commits: [], output: proposedOutcome });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
     const extractor = createExtractor(runAgent);
@@ -48,6 +48,15 @@ describe("same-session architecture review extraction", () => {
     const produceRequest = runAgent.mock.calls[0]![0];
     expect(produceRequest.prompt).toContain(revision);
     expect(produceRequest.prompt).toContain("Deepen the vault index");
+    expect(produceRequest.prompt).toContain(
+      "Do not delegate exploration to subagents or launch Agent tasks",
+    );
+    expect(produceRequest.prompt).toContain(
+      "Inspect at most twelve focused files after reading CONTEXT.md and the relevant ADRs",
+    );
+    expect(produceRequest.prompt).toContain(
+      "Stop exploring as soon as you can rank three credible candidates, or skip when the available evidence does not support a fresh proposal",
+    );
     expect(produceRequest.prompt).not.toContain("<output>");
     expect(produceRequest.output).toBeUndefined();
     expect(extraction).toHaveBeenCalledWith(expect.stringContaining("<output>"), {
