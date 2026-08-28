@@ -216,6 +216,8 @@ Run each canary with timers disabled and only while `inspect` reports both `"ima
 
 Record each canary's evidence before moving on: classified image and Agent-container GitHub readiness, branch identity, Draft Pull Request identity and count, and confirmation that no timer was enabled. Canaries proceed in order — no later canary starts until the previous canary's evidence is recorded and verified (the issue-implementation canary must show exactly one Draft Pull Request). Close or clean up only the dedicated canary Work Items afterwards.
 
+A successful review marks that Pull Request ready for review. Feedback implementation and branch update must continue on the same open, same-repository Pull Request after it is ready; do not convert it back to Draft or create a replacement branch or Pull Request. The Draft requirement applies to the Issue-implementation and review preconditions, not to these later mutation commands.
+
 ## Single-writer cutover guard
 
 The old and new write paths must never be active at the same time. Before enabling any replacement timer:
