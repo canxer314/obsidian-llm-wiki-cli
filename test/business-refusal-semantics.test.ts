@@ -297,7 +297,7 @@ describe("business refusal semantics (#247)", () => {
   });
 
   describe("Pull Request branch update", () => {
-    it.each(pullRequestRefusals("agent:update-branch"))("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
+    it.each(pullRequestRefusals("agent:update-branch").filter(([name]) => name !== "a non-Draft Pull Request"))("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
       const github = {
         readPullRequest: vi.fn().mockResolvedValue(pullRequest("agent:update-branch", overrides)),
         addPullRequestLabel: vi.fn(),
@@ -315,6 +315,46 @@ describe("business refusal semantics (#247)", () => {
       expect(github.addPullRequestLabel).not.toHaveBeenCalled();
       expect(checkout.withCheckout).not.toHaveBeenCalled();
       expect(updater.update).not.toHaveBeenCalled();
+    });
+
+    it("continues branch update after review and feedback leave the Pull Request ready", async () => {
+      const readyPullRequest = pullRequest("agent:update-branch", { isDraft: false });
+      const github = {
+        readPullRequest: vi.fn()
+          .mockResolvedValueOnce(readyPullRequest)
+          .mockResolvedValueOnce({
+            ...readyPullRequest,
+            labels: ["agent:in-progress"],
+          }),
+        addPullRequestLabel: vi.fn().mockResolvedValue(undefined),
+        removePullRequestLabel: vi.fn().mockResolvedValue(undefined),
+        addBranchUpdateComment: vi.fn().mockResolvedValue(undefined),
+      };
+      const checkout = {
+        withCheckout: vi.fn(async (_request, action) => action("/checkout")),
+      };
+      const updater = {
+        update: vi.fn().mockResolvedValue({ status: "up-to-date" }),
+      };
+
+      await expect(runBranchUpdateAutomationCommand({ pullRequestNumber: 249 }, {
+        github,
+        checkout,
+        updater,
+        lease,
+      })).resolves.toEqual({ status: "up-to-date" });
+
+      expect(checkout.withCheckout).toHaveBeenCalledWith({
+        pullRequestNumber: 249,
+        revision: REVISION,
+      }, expect.any(Function));
+      expect(updater.update).toHaveBeenCalledWith({
+        pullRequestNumber: 249,
+        branch: "sandcastle/issue-247",
+        baseBranch: "master",
+        revision: REVISION,
+        checkoutPath: "/checkout",
+      });
     });
   });
 

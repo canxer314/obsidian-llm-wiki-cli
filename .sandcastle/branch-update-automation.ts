@@ -63,7 +63,6 @@ const activePullRequestNumbers = new Set<number>();
 
 function refusal(pullRequest: BranchUpdatePullRequest): string | undefined {
   if (pullRequest.state !== "OPEN") return `Pull Request #${pullRequest.number} is not open`;
-  if (!pullRequest.isDraft) return `Pull Request #${pullRequest.number} is not a Draft`;
   if (pullRequest.baseRepository !== pullRequest.headRepository) {
     return `Pull Request #${pullRequest.number} must not originate from a fork`;
   }
@@ -114,7 +113,6 @@ export async function runBranchUpdateAutomationCommand(
       const current = await ports.github.readPullRequest(pullRequest.number);
       if (
         current.state !== "OPEN" ||
-        !current.isDraft ||
         current.baseRepository !== current.headRepository ||
         current.headSha !== pullRequest.headSha ||
         !current.labels.includes("agent:in-progress") ||
