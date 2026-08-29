@@ -5,6 +5,19 @@ import { createManagedOperationGithub } from "../.sandcastle/target-operation-gi
 const revision = "a".repeat(40);
 
 describe("managed Target operation GitHub view", () => {
+  it("pins scheduled architecture review to its authorized outer revision", async () => {
+    const readBaseRevision = vi.fn(async () => "b".repeat(40));
+    const github = createManagedOperationGithub(
+      { readBaseRevision },
+      "architecture-review",
+      undefined,
+      { operation: "architecture-review", revision, jobId: "scheduled-architecture-review" },
+    );
+
+    await expect(github.readBaseRevision()).resolves.toBe(revision);
+    expect(readBaseRevision).not.toHaveBeenCalled();
+  });
+
   it("virtualizes acquisition labels without repeating their GitHub mutations", async () => {
     const addIssueLabel = vi.fn(async () => {});
     const removeIssueLabel = vi.fn(async () => {});

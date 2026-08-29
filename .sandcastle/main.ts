@@ -22,7 +22,10 @@ import { createAutomationScheduler } from "./automation-scheduler.ts";
 import { removeExpiredFailureCheckouts } from "./target-checkout.ts";
 import { runSerializedAutomationCommand } from "./serialized-automation-command.ts";
 import { createTargetOperationRunner } from "./target-operation.ts";
-import { createTargetOperationCommandDispatch } from "./target-operation-dispatch.ts";
+import {
+  createScheduledArchitectureReview,
+  createTargetOperationCommandDispatch,
+} from "./target-operation-dispatch.ts";
 import { createAutomationCliDependencies } from "./automation-target-composition.ts";
 import { removeExpiredJobLogs } from "./job-logs.ts";
 import { removeExpiredReviewArtifacts } from "./review-artifacts.ts";
@@ -80,6 +83,11 @@ try {
     target: targetOperations,
     createJobId: randomUUID,
   });
+  const scheduledArchitectureReview = createScheduledArchitectureReview({
+    github: automationGithub,
+    target: targetOperations,
+    createJobId: randomUUID,
+  });
   const runCommand = async (
     command: import("./automation-command.ts").AutomationCommand,
   ): Promise<void> => {
@@ -116,7 +124,7 @@ try {
       },
       architectureReview: () => withScheduler(
         "architecture-review",
-        () => targetOperationCommands.runOperation("architecture-review", 1),
+        () => scheduledArchitectureReview.run(),
       ),
       dispatch: (concurrency: number | undefined) => dispatchAutomationCommands({
         concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),

@@ -69,6 +69,22 @@ const acquiring = { state: "OPEN", labels: ["agent:review", "agent:in-progress"]
 const acquired = { state: "OPEN", labels: ["agent:in-progress"], revision, pullRequest };
 
 describe("trusted Target operation command acquisition", () => {
+  it("rejects scheduled architecture review before label-triggered acquisition", async () => {
+    const target = { run: vi.fn() };
+    const acquisition = acquisitionFor([{ state: "OPEN", labels: [], revision }]);
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "scheduled-job",
+    });
+
+    await expect(runner.run("architecture-review", 1)).rejects.toThrow(
+      "Scheduled Target operation cannot be acquired",
+    );
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.ports.read).not.toHaveBeenCalled();
+  });
+
   it("assigns unique job identities to concurrent commands in the same operation family", async () => {
     const reads = new Map<number, number>();
     const issueStates = [

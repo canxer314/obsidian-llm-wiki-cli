@@ -14,7 +14,7 @@ export interface JobLog {
   readonly metadata: {
     readonly jobId: string;
     readonly operation: string;
-    readonly number: number;
+    readonly number?: number;
     readonly revision: string;
     readonly startedAt: number;
   };
@@ -51,7 +51,7 @@ export async function createJobLog(options: {
   readonly root: string;
   readonly jobId: string;
   readonly operation: string;
-  readonly number: number;
+  readonly number?: number;
   readonly revision: string;
   readonly now?: number;
 }): Promise<JobLog> {
@@ -72,7 +72,7 @@ export async function createJobLog(options: {
   const metadata = {
     jobId: options.jobId,
     operation: options.operation,
-    number: options.number,
+    ...(options.number === undefined ? {} : { number: options.number }),
     revision: options.revision,
     startedAt: options.now ?? Date.now(),
   };

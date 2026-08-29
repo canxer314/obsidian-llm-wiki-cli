@@ -29,8 +29,8 @@ import {
 } from "./target-operation-startup.ts";
 import type { TargetOperationIdentity } from "./target-operation.ts";
 
-interface TargetOperationInvocation {
-  readonly operation: TargetOperationIdentity;
+interface LabelTriggeredTargetOperationInvocation {
+  readonly operation: Exclude<TargetOperationIdentity, "architecture-review">;
   readonly revision: string;
   readonly jobId: string;
   readonly acquired?: true;
@@ -44,16 +44,34 @@ interface TargetOperationInvocation {
   readonly reconcile?: FeedbackReconcileAuthorization;
 }
 
+interface ScheduledArchitectureReviewInvocation {
+  readonly operation: "architecture-review";
+  readonly revision: string;
+  readonly jobId: string;
+}
+
+type TargetOperationInvocation =
+  | LabelTriggeredTargetOperationInvocation
+  | ScheduledArchitectureReviewInvocation;
+
 function parseInvocation(value: string | undefined): TargetOperationInvocation {
   if (value === undefined) throw new Error("Target operation invocation is missing");
   const invocation = JSON.parse(value) as TargetOperationInvocation;
   if (
     !/^[0-9a-f]{40}$/u.test(invocation.revision) ||
-    invocation.jobId.length === 0
+    typeof invocation.operation !== "string" ||
+    typeof invocation.jobId !== "string" || invocation.jobId.length === 0
   ) {
     throw new Error("Target operation invocation is invalid");
   }
   return invocation;
+}
+
+function isAuthorizedScheduledInvocation(invocation: TargetOperationInvocation): boolean {
+  return !Object.hasOwn(invocation, "number") &&
+    !Object.hasOwn(invocation, "acquired") &&
+    !Object.hasOwn(invocation, "pullRequest") &&
+    !Object.hasOwn(invocation, "reconcile");
 }
 
 function requirePullRequestSecurity(
@@ -63,6 +81,7 @@ function requirePullRequestSecurity(
   const pullRequestOperation = operation === "implement-feedback" || operation === "review" || operation === "update-branch";
   if (
     pullRequestOperation && (
+      !("pullRequest" in invocation) ||
       invocation.pullRequest === undefined ||
       invocation.pullRequest.headSha !== invocation.revision ||
       invocation.pullRequest.baseRepository !== invocation.pullRequest.headRepository
@@ -72,24 +91,96 @@ function requirePullRequestSecurity(
   }
 }
 
+export interface TargetOperationRuntimeDependencies {
+  readonly readStartup: typeof readTargetOperationStartup;
+  readonly createGithub: typeof createAutomationGithubPort;
+  readonly createManagedGithub: typeof createManagedOperationGithub;
+  readonly targetWorkerStartup: typeof targetWorkerStartup;
+  readonly runImplementation: typeof runImplementationAutomationCommand;
+  readonly createImplementer: typeof createProcessImplementer;
+  readonly runPrdImplementation: typeof runPrdImplementationAutomationCommand;
+  readonly createPrdImplementer: typeof createProcessPrdImplementer;
+  readonly runFeedback: typeof runFeedbackImplementation;
+  readonly createFeedbackImplementer: typeof createProcessFeedbackImplementer;
+  readonly createFeedbackPublisher: typeof createFeedbackPublisher;
+  readonly runSplit: typeof runPrdSplitAutomationCommand;
+  readonly createSplitter: typeof createProcessPrdSplitter;
+  readonly runReview: typeof runReviewAutomationCommand;
+  readonly createReviewRunner: typeof createProcessReviewRunner;
+  readonly createReviewPublisher: typeof createReviewPublisher;
+  readonly runBranchUpdate: typeof runBranchUpdateAutomationCommand;
+  readonly createBranchUpdater: typeof createProcessBranchUpdater;
+  readonly createBranchConflictResolver: typeof createProcessBranchUpdateConflictResolver;
+  readonly runArchitectureReview: typeof runArchitectureReviewAutomationCommand;
+  readonly createArchitectureReviewer: typeof createProcessArchitectureReviewRunner;
+  readonly createArtifactDirectory: typeof createReviewArtifactDirectory;
+}
+
+const productionDependencies: TargetOperationRuntimeDependencies = {
+  readStartup: readTargetOperationStartup,
+  createGithub: createAutomationGithubPort,
+  createManagedGithub: createManagedOperationGithub,
+  targetWorkerStartup,
+  runImplementation: runImplementationAutomationCommand,
+  createImplementer: createProcessImplementer,
+  runPrdImplementation: runPrdImplementationAutomationCommand,
+  createPrdImplementer: createProcessPrdImplementer,
+  runFeedback: runFeedbackImplementation,
+  createFeedbackImplementer: createProcessFeedbackImplementer,
+  createFeedbackPublisher,
+  runSplit: runPrdSplitAutomationCommand,
+  createSplitter: createProcessPrdSplitter,
+  runReview: runReviewAutomationCommand,
+  createReviewRunner: createProcessReviewRunner,
+  createReviewPublisher,
+  runBranchUpdate: runBranchUpdateAutomationCommand,
+  createBranchUpdater: createProcessBranchUpdater,
+  createBranchConflictResolver: createProcessBranchUpdateConflictResolver,
+  runArchitectureReview: runArchitectureReviewAutomationCommand,
+  createArchitectureReviewer: createProcessArchitectureReviewRunner,
+  createArtifactDirectory: createReviewArtifactDirectory,
+};
+
+export function targetOperationRuntimeDependencies(
+  overrides: Partial<TargetOperationRuntimeDependencies> = {},
+): TargetOperationRuntimeDependencies {
+  return { ...productionDependencies, ...overrides };
+}
+
 export async function runTargetOperation(
   operation: TargetOperationIdentity,
   argv: readonly string[] = process.argv.slice(2),
 ): Promise<unknown> {
-  const number = Number(argv[0]);
-  if ((!Number.isSafeInteger(number) || number < 1) && operation !== "architecture-review") {
-    throw new Error("Target operation Work Item number is invalid");
+  return runTargetOperationWithDependencies(operation, argv, productionDependencies);
+}
+
+export async function runTargetOperationWithDependencies(
+  operation: TargetOperationIdentity,
+  argv: readonly string[],
+  dependencies: TargetOperationRuntimeDependencies,
+): Promise<unknown> {
+  const [numberArgument, invocationArgument] = operation === "architecture-review"
+    ? [undefined, argv[0]]
+    : [argv[0], argv[1]];
+  const number = Number(numberArgument);
+  if (!Number.isSafeInteger(number) || number < 1) {
+    if (operation !== "architecture-review") {
+      throw new Error("Target operation Work Item number is invalid");
+    }
   }
-  const invocation = parseInvocation(argv[1]);
+  const invocation = parseInvocation(invocationArgument);
   if (invocation.operation !== operation) {
     throw new Error("Target operation wrapper does not match the authorized invocation");
   }
+  if (operation === "architecture-review" && !isAuthorizedScheduledInvocation(invocation)) {
+    throw new Error("Target operation invocation is invalid");
+  }
   requirePullRequestSecurity(operation, invocation);
   const checkoutPath = resolve(import.meta.dirname, "..");
-  const startupInput = await readTargetOperationStartup();
+  const startupInput = await dependencies.readStartup();
   const startup = startupInput.snapshot;
-  const rawGithub = createAutomationGithubPort({ environment: startup.childEnvironments.github });
-  const github = createManagedOperationGithub(
+  const rawGithub = dependencies.createGithub({ environment: startup.childEnvironments.github });
+  const github = dependencies.createManagedGithub(
     rawGithub as unknown as Record<string, unknown>,
     operation,
     number,
@@ -110,11 +201,11 @@ export async function runTargetOperation(
   const createJobId = () => invocation.jobId;
 
   if (operation === "implement-issue") {
-    return runImplementationAutomationCommand({ issueNumber: number }, {
+    return dependencies.runImplementation({ issueNumber: number }, {
       github,
       checkout,
-      implementer: createProcessImplementer({
-        startup: targetWorkerStartup(startup, "github-agent-with-cli"),
+      implementer: dependencies.createImplementer({
+        startup: dependencies.targetWorkerStartup(startup, "github-agent-with-cli"),
         plannerModel: startup.models.planner,
         implementerModel: startup.models.implementer,
       }),
@@ -123,12 +214,12 @@ export async function runTargetOperation(
     });
   }
   if (operation === "implement-prd") {
-    return runPrdImplementationAutomationCommand({ issueNumber: number }, {
+    return dependencies.runPrdImplementation({ issueNumber: number }, {
       github,
       pullRequests: github,
       checkout,
-      implementer: createProcessPrdImplementer({
-        startup: targetWorkerStartup(startup, "github-agent"),
+      implementer: dependencies.createPrdImplementer({
+        startup: dependencies.targetWorkerStartup(startup, "github-agent"),
         plannerModel: startup.models.planner,
         implementerModel: startup.models.implementer,
       }),
@@ -137,15 +228,17 @@ export async function runTargetOperation(
     });
   }
   if (operation === "implement-feedback") {
-    return runFeedbackImplementation({
+    return dependencies.runFeedback({
       pullRequestNumber: number,
-      ...(invocation.reconcile === undefined ? {} : { authorization: invocation.reconcile }),
+      ...(invocation.operation === "architecture-review" || invocation.reconcile === undefined
+        ? {}
+        : { authorization: invocation.reconcile }),
     }, {
       github,
       checkout,
-      publisher: createFeedbackPublisher({ gitEnvironment: startup.childEnvironments.git }),
-      implementer: createProcessFeedbackImplementer({
-        startup: targetWorkerStartup(startup, "github-agent"),
+      publisher: dependencies.createFeedbackPublisher({ gitEnvironment: startup.childEnvironments.git }),
+      implementer: dependencies.createFeedbackImplementer({
+        startup: dependencies.targetWorkerStartup(startup, "github-agent"),
         model: startup.models.implementer,
       }),
       lease,
@@ -153,11 +246,11 @@ export async function runTargetOperation(
     });
   }
   if (operation === "split-prd") {
-    return runPrdSplitAutomationCommand({ issueNumber: number }, {
+    return dependencies.runSplit({ issueNumber: number }, {
       github,
       checkout,
-      splitter: createProcessPrdSplitter({
-        startup: targetWorkerStartup(startup, "github-agent"),
+      splitter: dependencies.createSplitter({
+        startup: dependencies.targetWorkerStartup(startup, "github-agent"),
         model: startup.models.planner,
       }),
       publisher: github,
@@ -165,16 +258,16 @@ export async function runTargetOperation(
     });
   }
   if (operation === "review") {
-    const reviewer = createProcessReviewRunner({
-      startup: targetWorkerStartup(startup, "github-agent"),
+    const reviewer = dependencies.createReviewRunner({
+      startup: dependencies.targetWorkerStartup(startup, "github-agent"),
     });
     const artifactRoot = resolve(checkoutPath, ".sandcastle", "jobs", "review-artifacts");
-    return runReviewAutomationCommand({ pullRequestNumber: number }, {
+    return dependencies.runReview({ pullRequestNumber: number }, {
       github,
       checkout,
       reviewer: {
         review: async ({ pullRequestNumber, branch, revision, checkoutPath: path, reviewThreads }) => {
-          const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId: invocation.jobId });
+          const artifactDirectory = await dependencies.createArtifactDirectory({ root: artifactRoot, jobId: invocation.jobId });
           return reviewer.review({
             pullRequestNumber,
             branch,
@@ -186,19 +279,19 @@ export async function runTargetOperation(
           });
         },
       },
-      publisher: createReviewPublisher({ gitEnvironment: startup.childEnvironments.git }),
+      publisher: dependencies.createReviewPublisher({ gitEnvironment: startup.childEnvironments.git }),
       lease,
       createJobId,
     });
   }
   if (operation === "update-branch") {
-    return runBranchUpdateAutomationCommand({ pullRequestNumber: number }, {
+    return dependencies.runBranchUpdate({ pullRequestNumber: number }, {
       github,
       checkout,
-      updater: createProcessBranchUpdater({
+      updater: dependencies.createBranchUpdater({
         environment: startup.childEnvironments.git,
-        resolver: createProcessBranchUpdateConflictResolver({
-          startup: targetWorkerStartup(startup, "claude-only"),
+        resolver: dependencies.createBranchConflictResolver({
+          startup: dependencies.targetWorkerStartup(startup, "claude-only"),
           model: startup.models.implementer,
         }),
       }),
@@ -207,16 +300,16 @@ export async function runTargetOperation(
     });
   }
 
-  const reviewer = createProcessArchitectureReviewRunner({
-    startup: targetWorkerStartup(startup, "claude-only"),
+  const reviewer = dependencies.createArchitectureReviewer({
+    startup: dependencies.targetWorkerStartup(startup, "claude-only"),
   });
   const artifactRoot = resolve(checkoutPath, ".sandcastle", "jobs", "review-artifacts");
-  return runArchitectureReviewAutomationCommand({
+  return dependencies.runArchitectureReview({
     github,
     checkout,
     reviewer: {
       review: async ({ revision, checkoutPath: path, priorProposals }) => {
-        const artifactDirectory = await createReviewArtifactDirectory({ root: artifactRoot, jobId: invocation.jobId });
+        const artifactDirectory = await dependencies.createArtifactDirectory({ root: artifactRoot, jobId: invocation.jobId });
         return reviewer.review({
           revision,
           checkoutPath: path,

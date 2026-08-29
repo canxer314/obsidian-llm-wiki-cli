@@ -15,7 +15,10 @@ import type {
   AuthorizedTargetOperationInvocation,
   TargetOperationIdentity,
 } from "../.sandcastle/target-operation.js";
-import { createTargetOperationCommandDispatch } from "../.sandcastle/target-operation-dispatch.js";
+import {
+  createScheduledArchitectureReview,
+  createTargetOperationCommandDispatch,
+} from "../.sandcastle/target-operation-dispatch.js";
 import { createManagedOperationGithub } from "../.sandcastle/target-operation-github.js";
 
 const revision = "a".repeat(40);
@@ -653,6 +656,11 @@ async function verifyArchitectureReviewBehavior(): Promise<void> {
     let outcome: unknown;
     const target = {
       run: async (invocation: AuthorizedTargetOperationInvocation) => {
+        expect(invocation).toEqual({
+          operation: "architecture-review",
+          revision,
+          jobId: "architecture-review-job",
+        });
         outcome = await runArchitectureReviewAutomationCommand({
           github: {
             countOpenArchitectureReviewProposals: async () => scenario === "preflight" ? 10 : 3,
@@ -708,10 +716,15 @@ async function verifyArchitectureReviewBehavior(): Promise<void> {
       target,
       createJobId: () => "architecture-review-job",
     });
+    const scheduled = createScheduledArchitectureReview({
+      github,
+      target,
+      createJobId: () => "architecture-review-job",
+    });
     await runSerializedAutomationCommand(
       commandScheduler,
       "architecture-review",
-      () => operation.runOperation("architecture-review", 1),
+      () => scheduled.run(),
     );
     return { events, outcome, scheduler: commandScheduler };
   };

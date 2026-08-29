@@ -1,7 +1,9 @@
-import type { TargetOperationIdentity } from "./target-operation.ts";
+import type { AuthorizedTargetOperationInvocation } from "./target-operation.ts";
 
 export interface ManagedOperationInvocation {
+  readonly operation?: AuthorizedTargetOperationInvocation["operation"];
   readonly revision: string;
+  readonly jobId?: string;
   readonly acquired?: true;
   readonly pullRequest?: {
     readonly headSha: string;
@@ -14,14 +16,22 @@ export interface ManagedOperationInvocation {
 
 export function createManagedOperationGithub<TResult extends Record<string, unknown>>(
   github: TResult,
-  operation: TargetOperationIdentity,
-  number: number,
+  operation: AuthorizedTargetOperationInvocation["operation"],
+  number: number | undefined,
   invocation: ManagedOperationInvocation,
 ): TResult {
-  if (invocation.acquired !== true) return github;
   if (operation === "architecture-review") {
+    if (
+      number !== undefined ||
+      invocation.operation !== "architecture-review" ||
+      invocation.acquired !== undefined ||
+      invocation.pullRequest !== undefined
+    ) {
+      throw new Error("Scheduled architecture review invocation is invalid");
+    }
     return { ...github, readBaseRevision: async () => invocation.revision } as TResult;
   }
+  if (invocation.acquired !== true) return github;
   const trigger = operation === "split-prd"
     ? "agent:to-issues"
     : operation === "review"

@@ -5,6 +5,7 @@ import {
 } from "./target-operation-command.ts";
 import type {
   AuthorizedTargetOperationInvocation,
+  LabelTriggeredTargetOperationIdentity,
   TargetOperationIdentity,
 } from "./target-operation.ts";
 
@@ -36,10 +37,32 @@ interface TargetOperationDispatchGithub {
   ): Promise<void>;
 }
 
-function issueOperation(operation: TargetOperationIdentity): boolean {
+function issueOperation(operation: LabelTriggeredTargetOperationIdentity): boolean {
   return operation === "implement-issue" ||
     operation === "implement-prd" ||
     operation === "split-prd";
+}
+
+export function createScheduledArchitectureReview(options: {
+  readonly github: Pick<TargetOperationDispatchGithub, "readBaseRevision">;
+  readonly target: {
+    run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown>;
+  };
+  readonly createJobId: () => string;
+}) {
+  return {
+    async run(): Promise<unknown> {
+      const revision = await options.github.readBaseRevision();
+      if (!/^[0-9a-f]{40}$/u.test(revision)) {
+        throw new Error("Target operation requires a full authorized revision");
+      }
+      return options.target.run({
+        operation: "architecture-review",
+        revision,
+        jobId: options.createJobId(),
+      });
+    },
+  };
 }
 
 export function createTargetOperationCommandDispatch(options: {
@@ -52,14 +75,7 @@ export function createTargetOperationCommandDispatch(options: {
   const commands = createTargetOperationCommandRunner({
     target: options.target,
     acquisition: {
-      read: async (operation, number): Promise<TargetOperationAcquisitionState> => {
-        if (operation === "architecture-review") {
-          return {
-            state: "OPEN",
-            labels: [],
-            revision: await options.github.readBaseRevision(),
-          };
-        }
+      read: async (operation: LabelTriggeredTargetOperationIdentity, number): Promise<TargetOperationAcquisitionState> => {
         if (issueOperation(operation)) {
           const issue = await options.github.readPrd(number);
           const routeMatches = issue.parentNumber === undefined && (
@@ -117,7 +133,6 @@ export function createTargetOperationCommandDispatch(options: {
         ? options.github.addIssueLabel(number, "agent:blocked")
         : options.github.addPullRequestLabel(number, "agent:blocked"),
       addBlockedDiagnostic: async (operation, number, diagnostic) => {
-        if (operation === "architecture-review") return;
         await options.github.addRefusalDiagnostic?.(
           number,
           `Automation ${operation} is blocked (job ${diagnostic.jobId}): ${diagnostic.summary}`,
@@ -135,7 +150,7 @@ export function createTargetOperationCommandDispatch(options: {
       if (command.operation === "unknown") {
         throw new Error("Inspection-only Automation Command cannot execute");
       }
-      const operation: TargetOperationIdentity = command.operation === "implement"
+      const operation: LabelTriggeredTargetOperationIdentity = command.operation === "implement"
         ? "implement-feedback"
         : command.operation;
       return commands.run(operation, command.number);
