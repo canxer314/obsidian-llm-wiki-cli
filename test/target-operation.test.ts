@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 import {
   createTargetOperationRunner,
+  createTargetOperationRunnerWithWorker,
   executeTargetOperationInCheckout,
   type TargetOperationIdentity,
 } from "../.sandcastle/target-operation.js";
@@ -25,6 +26,50 @@ const operationEntries: Readonly<Record<TargetOperationIdentity, string>> = {
 };
 
 describe("Target operation runner", () => {
+  it.each([
+    ["implement-issue", 60 * 60 * 1000],
+    ["implement-prd", 60 * 60 * 1000],
+    ["implement-feedback", 60 * 60 * 1000],
+    ["review", 30 * 60 * 1000],
+    ["update-branch", 60 * 60 * 1000],
+    ["split-prd", 60 * 60 * 1000],
+    ["architecture-review", 21 * 60 * 1000],
+  ] as const)("applies the %i-millisecond whole-job timeout for %s", async (operation, timeoutMilliseconds) => {
+    const runWorker = vi.fn(async () => ({ output: JSON.stringify({ status: "completed-fixture" }), code: 0, diagnostics: "" }));
+    const runner = createTargetOperationRunnerWithWorker({
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start: () => {
+        throw new Error("Target operation timeout test start should not run");
+      },
+    }, runWorker);
+    const invocation = operation === "architecture-review"
+      ? { operation, revision, jobId: `timeout-${operation}` }
+      : {
+          operation,
+          number: 219,
+          revision,
+          jobId: `timeout-${operation}`,
+          ...(operation === "implement-feedback" || operation === "review" || operation === "update-branch"
+            ? {
+                pullRequest: {
+                  headSha: revision,
+                  headRefName: "feature-branch",
+                  baseRefName: "master",
+                  baseRepository: "owner/repository",
+                  headRepository: "owner/repository",
+                },
+              }
+            : {}),
+        };
+
+    await expect(runner.run(invocation)).resolves.toEqual({ status: "completed-fixture" });
+    expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ timeoutMilliseconds }));
+  });
+
   it("records a blocked operation outcome as a failed job", async () => {
     const root = mkdtempSync(join(tmpdir(), "target-operation-blocked-log-"));
     const logsPath = join(root, "logs");
@@ -52,6 +97,105 @@ describe("Target operation runner", () => {
         join(logsPath, "blocked-job-219", "metadata.json"),
         "utf8",
       ))).toMatchObject({ status: "failed", jobId: "blocked-job-219" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects label-triggered Target operations with invalid Work Item number %s before starting a Target job",
+    async (number) => {
+      const start = vi.fn();
+      const runner = createTargetOperationRunner({
+        startup: {
+          imageName: "fixture-image",
+          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+        },
+        start,
+      });
+
+      await expect(runner.run({
+        operation: "implement-issue",
+        number,
+        revision,
+        jobId: "invalid-work-item-number",
+      })).rejects.toThrow("Target operation Work Item number is invalid");
+      expect(start).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["a Work Item number", { number: 1 }],
+    ["an acquisition marker", { acquired: true }],
+    ["Pull Request metadata", {
+      pullRequest: {
+        headSha: revision,
+        headRefName: "feature-branch",
+        baseRefName: "master",
+        baseRepository: "owner/repository",
+        headRepository: "owner/repository",
+      },
+    }],
+    ["a label receiver", { receiver: "issue" }],
+    ["a trigger label", { trigger: "agent:review" }],
+    ["feedback reconciliation authorization", {
+      reconcile: { invocation: "reconcile", expectedPost: revision },
+    }],
+    ["an unrecognized field", { unexpected: true }],
+  ])("rejects scheduled architecture review with %s before starting a Target job", async (_caseName, forbidden) => {
+    const start = vi.fn();
+    const runner = createTargetOperationRunner({
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start,
+    });
+
+    await expect(runner.run({
+      operation: "architecture-review",
+      revision,
+      jobId: "invalid-scheduled-review",
+      ...forbidden,
+    } as Parameters<typeof runner.run>[0])).rejects.toThrow("Scheduled architecture review invocation is invalid");
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("records scheduled architecture review without a Work Item number", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-scheduled-log-"));
+    const logsPath = join(root, "logs");
+    const runner = createTargetOperationRunner({
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start: () => spawn("bash", ["-c", 'cat >/dev/null; printf \'%s\\n\' \'{"status":"completed-fixture"}\''], {
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    });
+
+    try {
+      await expect(runner.run({
+        operation: "architecture-review",
+        revision,
+        jobId: "scheduled-architecture-review",
+      })).resolves.toEqual({ status: "completed-fixture" });
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "scheduled-architecture-review", "metadata.json"),
+        "utf8",
+      ))).toEqual(expect.objectContaining({
+        operation: "architecture-review",
+        revision,
+        status: "completed",
+      }));
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "scheduled-architecture-review", "metadata.json"), "utf8",
+      ))).not.toHaveProperty("number");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -85,14 +229,18 @@ describe("Target operation runner", () => {
           }
         : undefined;
 
+      const invocation = operation === "architecture-review"
+        ? { operation, revision, jobId }
+        : {
+            operation,
+            number: 219,
+            revision,
+            jobId,
+            ...(pullRequest === undefined ? {} : { pullRequest }),
+          };
+
       try {
-        await expect(runner.run({
-          operation,
-          number: 219,
-          revision,
-          jobId,
-          ...(pullRequest === undefined ? {} : { pullRequest }),
-        })).resolves.toEqual({ status: "completed-fixture" });
+        await expect(runner.run(invocation)).resolves.toEqual({ status: "completed-fixture" });
         expect(JSON.parse(readFileSync(
           join(root, "logs", jobId, "metadata.json"),
           "utf8",
@@ -227,6 +375,161 @@ describe("Target operation runner", () => {
     }
   });
 
+  it.each([
+    ["missing Pull Request metadata", undefined],
+    ["a mismatched head SHA", {
+      headSha: "b".repeat(40),
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "owner/repository",
+    }],
+    ["a forked Pull Request", {
+      headSha: revision,
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "fork/repository",
+    }],
+  ])("rejects a Target runtime invocation with %s before reading startup", async (_caseName, pullRequest) => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/operations/review-pr.ts"),
+      "219",
+      JSON.stringify({
+        operation: "review",
+        revision,
+        jobId: "runtime-pr-validation",
+        ...(pullRequest === undefined ? {} : { pullRequest }),
+      }),
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+    child.stdin.end();
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    await new Promise<void>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", () => resolveExit());
+    });
+
+    expect(stderr).toContain("Target Pull Request operation requires an acquired same-repository revision");
+    expect(stderr).not.toContain("Target operation startup snapshot is missing");
+  });
+
+  it.each([
+    ["missing Pull Request metadata", undefined],
+    ["a mismatched head SHA", {
+      headSha: "b".repeat(40),
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "owner/repository",
+    }],
+    ["a forked Pull Request", {
+      headSha: revision,
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "fork/repository",
+    }],
+  ])("rejects %s before starting the Target job worker", async (_caseName, pullRequest) => {
+    const start = vi.fn();
+    const runner = createTargetOperationRunner({
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start,
+    });
+
+    await expect(runner.run({
+      operation: "review",
+      number: 219,
+      revision,
+      jobId: "invalid-pr-invocation",
+      ...(pullRequest === undefined ? {} : { pullRequest }),
+    })).rejects.toThrow("Target Pull Request operation requires an acquired same-repository revision");
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a Work Item number", { number: 1 }],
+    ["an acquisition marker", { acquired: true }],
+    ["Pull Request metadata", {
+      pullRequest: {
+        headSha: revision,
+        headRefName: "feature-branch",
+        baseRefName: "master",
+        baseRepository: "owner/repository",
+        headRepository: "owner/repository",
+      },
+    }],
+    ["a label receiver", { receiver: "issue" }],
+    ["a trigger label", { trigger: "agent:review" }],
+    ["feedback reconciliation authorization", {
+      reconcile: { invocation: "reconcile", expectedPost: revision },
+    }],
+    ["an unrecognized field", { unexpected: true }],
+  ])("rejects a non-canonical scheduled envelope before reading startup", async (_caseName, forbidden) => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/operations/architecture-review.ts"),
+      JSON.stringify({
+        operation: "architecture-review",
+        revision,
+        jobId: "runtime-scheduled-envelope-validation",
+        ...forbidden,
+      }),
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+    child.stdin.end();
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    await new Promise<void>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", () => resolveExit());
+    });
+
+    expect(stderr).toContain("Target operation invocation is invalid");
+    expect(stderr).not.toContain("Target operation startup snapshot is missing");
+  });
+
+  it("executes scheduled architecture review without a fake checkout number or wrapper argument", async () => {
+    const checkoutPath = mkdtempSync(join(tmpdir(), "scheduled-architecture-review-"));
+    const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+    mkdirSync(operationDirectory, { recursive: true });
+    writeFileSync(
+      join(operationDirectory, "architecture-review.ts"),
+      'let input = ""; for await (const chunk of process.stdin) input += chunk; console.log(JSON.stringify({ arguments: process.argv.slice(2), checkout: JSON.parse(input).imageName }));\n',
+    );
+    const withCheckout = vi.fn(async (request, action: (path: string) => Promise<unknown>) => {
+      expect(request).toEqual({ revision });
+      return action(checkoutPath);
+    });
+
+    try {
+      await expect(executeTargetOperationInCheckout({
+        checkout: { withCheckout },
+        startup: {
+          imageName: "fixture-image",
+          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+        },
+        invocation: {
+          operation: "architecture-review",
+          revision,
+          jobId: "scheduled-architecture-review",
+        },
+      })).resolves.toEqual({
+        arguments: [JSON.stringify({ operation: "architecture-review", revision, jobId: "scheduled-architecture-review" })],
+        checkout: "fixture-image",
+      });
+    } finally {
+      rmSync(checkoutPath, { force: true, recursive: true });
+    }
+  });
+
   it.each(Object.entries(operationEntries) as [TargetOperationIdentity, string][])(
     "executes fixed %s from the authorized Target Checkout",
     async (operation, entry) => {
@@ -356,6 +659,64 @@ describe("Target operation runner", () => {
         "remove-in-progress",
       ]);
       expect(read).toHaveBeenCalledTimes(3);
+    } finally {
+      rmSync(checkoutPath, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a fixed operation wrapper whose literal disagrees with the outer selected operation before startup", async () => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/operations/implement-issue.ts"),
+      "219",
+      JSON.stringify({
+        operation: "review",
+        revision,
+        jobId: "wrapper-identity-mismatch",
+      }),
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+    child.stdin.end();
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveExit);
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Target operation wrapper does not match the authorized invocation");
+  });
+
+  it.each([
+    ["is missing", (operationDirectory: string) => operationDirectory],
+    ["is a directory", (operationDirectory: string) => {
+      mkdirSync(join(operationDirectory, "implement-issue.ts"));
+      return operationDirectory;
+    }],
+  ])("rejects a fixed operation entry that %s before a worker starts", async (_caseName, prepare) => {
+    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-invalid-entry-"));
+    const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+    mkdirSync(operationDirectory, { recursive: true });
+    prepare(operationDirectory);
+    const withCheckout = vi.fn(async (_request, action: (path: string) => Promise<unknown>) => action(checkoutPath));
+
+    try {
+      await expect(executeTargetOperationInCheckout({
+        checkout: { withCheckout },
+        startup: {
+          imageName: "fixture-image",
+          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+        },
+        invocation: {
+          operation: "implement-issue",
+          number: 219,
+          revision,
+          jobId: "invalid-entry-job",
+        },
+      })).rejects.toThrow("Target operation entry must be a regular file inside the authorized checkout");
+      expect(withCheckout).toHaveBeenCalledOnce();
     } finally {
       rmSync(checkoutPath, { force: true, recursive: true });
     }

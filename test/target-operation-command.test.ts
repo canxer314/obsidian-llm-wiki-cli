@@ -69,6 +69,22 @@ const acquiring = { state: "OPEN", labels: ["agent:review", "agent:in-progress"]
 const acquired = { state: "OPEN", labels: ["agent:in-progress"], revision, pullRequest };
 
 describe("trusted Target operation command acquisition", () => {
+  it("does not expose scheduled architecture review to label-triggered acquisition", async () => {
+    const target = { run: vi.fn() };
+    const acquisition = acquisitionFor([{ state: "OPEN", labels: [], revision }]);
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "scheduled-job",
+    });
+
+    await expect((runner.run as (operation: string, number: number) => Promise<unknown>)("architecture-review", 1)).rejects.toThrow(
+      "Automation Command route is unknown",
+    );
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.ports.read).not.toHaveBeenCalled();
+  });
+
   it("assigns unique job identities to concurrent commands in the same operation family", async () => {
     const reads = new Map<number, number>();
     const issueStates = [
@@ -194,6 +210,83 @@ describe("trusted Target operation command acquisition", () => {
     );
     expect(target.run).not.toHaveBeenCalled();
     expect(acquisition.events).toEqual([]);
+  });
+
+  it.each([
+    ["missing Pull Request metadata", { ...available, pullRequest: undefined }],
+    ["a mismatched Pull Request head SHA", {
+      ...available,
+      pullRequest: { ...pullRequest, headSha: "b".repeat(40) },
+    }],
+  ])("rejects initial acquisition with %s before mutating labels", async (_caseName, initial) => {
+    const target = { run: vi.fn() };
+    const acquisition = acquisitionFor([initial]);
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(
+      "Pull Request #219 is not an authorized same-repository revision",
+    );
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.events).toEqual([]);
+  });
+
+  it.each([
+    ["missing Pull Request metadata", undefined],
+    ["a mismatched Pull Request head SHA", { ...pullRequest, headSha: "b".repeat(40) }],
+    ["a forked Pull Request", { ...pullRequest, headRepository: "fork/repository" }],
+  ])("rejects acquired acquisition with %s and settles Blocked Automation", async (_caseName, pullRequest) => {
+    const target = { run: vi.fn() };
+    const acquisition = acquisitionFor([
+      available,
+      { ...acquiring, pullRequest },
+    ]);
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(
+      "Pull Request #219 is not an authorized same-repository revision",
+    );
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "add-blocked",
+      "add-blocked-diagnostic",
+    ]);
+  });
+
+  it.each([
+    ["revision", { ...acquired, revision: "b".repeat(40), pullRequest }],
+    ["head SHA", { ...acquired, pullRequest: { ...pullRequest, headSha: "b".repeat(40) } }],
+    ["head ref", { ...acquired, pullRequest: { ...pullRequest, headRefName: "other-head" } }],
+    ["base ref", { ...acquired, pullRequest: { ...pullRequest, baseRefName: "other-base" } }],
+    ["base repository", { ...acquired, pullRequest: { ...pullRequest, baseRepository: "other/base" } }],
+    ["head repository", { ...acquired, pullRequest: { ...pullRequest, headRepository: "other/head" } }],
+  ])("rejects settled acquisition drift in %s before Target execution", async (_field, settled) => {
+    const target = { run: vi.fn() };
+    const acquisition = acquisitionFor([available, acquiring, settled]);
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(
+      "Work Item #219 changed while acquisition was settling",
+    );
+    expect(target.run).not.toHaveBeenCalled();
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+    ]);
   });
 
   it("does not settle when in-progress ownership was not established", async () => {

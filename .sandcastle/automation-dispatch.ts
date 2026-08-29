@@ -1,4 +1,7 @@
 import {
+  validateAutomationCommand,
+} from "./automation-command-route.ts";
+import {
   commandEligibility,
   compareCommands,
   type AutomationCommand,
@@ -44,6 +47,10 @@ export async function dispatchAutomationCommands(
     const commands = await ports.github.listCommands();
     const identities = new Set<string>();
     const frontier = commands
+      .map((command) => {
+        if (command.operation !== "unknown") validateAutomationCommand(command);
+        return command;
+      })
       .filter((command) => commandEligibility(command) === "eligible")
       .sort(compareCommands)
       .filter((command) => !identities.has(command.identity) && (identities.add(command.identity), true));

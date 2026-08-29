@@ -28,8 +28,13 @@ export type TargetOperationIdentity =
   | "split-prd"
   | "architecture-review";
 
-export interface AuthorizedTargetOperationInvocation {
-  readonly operation: TargetOperationIdentity;
+export type LabelTriggeredTargetOperationIdentity = Exclude<
+  TargetOperationIdentity,
+  "architecture-review"
+>;
+
+export interface LabelTriggeredTargetOperationInvocation {
+  readonly operation: LabelTriggeredTargetOperationIdentity;
   readonly number: number;
   readonly revision: string;
   readonly jobId: string;
@@ -44,6 +49,16 @@ export interface AuthorizedTargetOperationInvocation {
   readonly reconcile?: FeedbackReconcileAuthorization;
 }
 
+export interface ScheduledArchitectureReviewInvocation {
+  readonly operation: "architecture-review";
+  readonly revision: string;
+  readonly jobId: string;
+}
+
+export type AuthorizedTargetOperationInvocation =
+  | LabelTriggeredTargetOperationInvocation
+  | ScheduledArchitectureReviewInvocation;
+
 const TARGET_JOB_GRACE_MILLISECONDS = 10 * 1000;
 const targetOperationTimeouts: Readonly<Record<TargetOperationIdentity, number>> = {
   "implement-issue": 60 * 60 * 1000,
@@ -54,6 +69,10 @@ const targetOperationTimeouts: Readonly<Record<TargetOperationIdentity, number>>
   "split-prd": 60 * 60 * 1000,
   "architecture-review": 21 * 60 * 1000,
 };
+
+export function targetOperationTimeout(operation: TargetOperationIdentity): number {
+  return targetOperationTimeouts[operation];
+}
 
 const targetOperationEntries: Readonly<Record<TargetOperationIdentity, string>> = {
   "implement-issue": "operations/implement-issue.ts",
@@ -70,16 +89,29 @@ export async function executeTargetOperationInCheckout(options: {
   readonly startup: TargetOperationStartupSnapshot;
   readonly invocation: AuthorizedTargetOperationInvocation;
 }): Promise<unknown> {
-  const { operation, number, revision, jobId, reconcile } = options.invocation;
-  return options.checkout.withCheckout({ pullRequestNumber: number, revision }, async (checkoutPath) => {
-    const operationRoot = await realpath(resolve(checkoutPath, ".sandcastle"));
-    const operationEntry = resolve(operationRoot, targetOperationEntries[operation]);
-    const entryRelativePath = relative(operationRoot, await realpath(operationEntry));
-    if (
-      !(await lstat(operationEntry)).isFile() ||
-      entryRelativePath.startsWith("..") ||
-      entryRelativePath === ""
-    ) {
+  const { operation, revision, jobId } = options.invocation;
+  const number = "number" in options.invocation ? options.invocation.number : undefined;
+  const acquired = "acquired" in options.invocation ? options.invocation.acquired : undefined;
+  const pullRequest = "pullRequest" in options.invocation ? options.invocation.pullRequest : undefined;
+  const reconcile = "reconcile" in options.invocation ? options.invocation.reconcile : undefined;
+  return options.checkout.withCheckout({
+    revision,
+    ...(number === undefined ? {} : { pullRequestNumber: number }),
+  }, async (checkoutPath) => {
+    let operationRoot: string;
+    let operationEntry: string;
+    try {
+      operationRoot = await realpath(resolve(checkoutPath, ".sandcastle"));
+      operationEntry = resolve(operationRoot, targetOperationEntries[operation]);
+      const entryRelativePath = relative(operationRoot, await realpath(operationEntry));
+      if (
+        !(await lstat(operationEntry)).isFile() ||
+        entryRelativePath.startsWith("..") ||
+        entryRelativePath === ""
+      ) {
+        throw new Error("Target operation entry must be a regular file inside the authorized checkout");
+      }
+    } catch {
       throw new Error("Target operation entry must be a regular file inside the authorized checkout");
     }
     const result = await runAgentWorker({
@@ -87,12 +119,13 @@ export async function executeTargetOperationInCheckout(options: {
       workerFile: targetOperationEntries[operation],
       workerName: `Target operation ${operation}`,
       arguments_: [
-        String(number),
+        ...(number === undefined ? [] : [String(number)]),
         JSON.stringify({
+          operation,
           revision,
           jobId,
-          ...(options.invocation.acquired === true ? { acquired: true } : {}),
-          ...(options.invocation.pullRequest === undefined ? {} : { pullRequest: options.invocation.pullRequest }),
+          ...(acquired === true ? { acquired: true } : {}),
+          ...(pullRequest === undefined ? {} : { pullRequest }),
           ...(reconcile === undefined ? {} : { reconcile }),
         }),
       ],
@@ -103,7 +136,7 @@ export async function executeTargetOperationInCheckout(options: {
   });
 }
 
-export function createTargetOperationRunner(options: {
+interface TargetOperationRunnerOptions {
   readonly checkoutOptions?: TargetCheckoutProcessOptions;
   readonly jobLogRoot?: string;
   readonly startup: TargetOperationStartupSnapshot;
@@ -113,7 +146,16 @@ export function createTargetOperationRunner(options: {
   readonly kill?: AgentWorkerOptions["kill"];
   readonly wait?: AgentWorkerOptions["wait"];
   readonly groupExited?: AgentWorkerOptions["groupExited"];
-}) {
+}
+
+export function createTargetOperationRunner(options: TargetOperationRunnerOptions) {
+  return createTargetOperationRunnerWithWorker(options, runAgentWorker);
+}
+
+export function createTargetOperationRunnerWithWorker(
+  options: TargetOperationRunnerOptions,
+  runWorker: typeof runAgentWorker,
+) {
   return {
     async run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown> {
       validateInvocation(invocation);
@@ -129,12 +171,12 @@ export function createTargetOperationRunner(options: {
             root: options.jobLogRoot,
             jobId: invocation.jobId,
             operation: invocation.operation,
-            number: invocation.number,
+            ...("number" in invocation ? { number: invocation.number } : {}),
             revision: invocation.revision,
           });
       let operationFailed = true;
       try {
-        const result = await runAgentWorker({
+        const result = await runWorker({
           checkoutPath: resolve(import.meta.dirname, ".."),
           workerFile: "target-job-worker.ts",
           workerName: "Target job",
@@ -145,7 +187,7 @@ export function createTargetOperationRunner(options: {
             invocation,
           }),
           timeoutMessage: `Target operation ${invocation.operation} timed out`,
-          timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeouts[invocation.operation],
+          timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeout(invocation.operation),
           graceMilliseconds: options.graceMilliseconds ?? TARGET_JOB_GRACE_MILLISECONDS,
           start: options.start,
           kill: options.kill,
@@ -181,9 +223,20 @@ function isBlockedOutcome(value: unknown): boolean {
     "status" in value && value.status === "blocked";
 }
 
+function isAuthorizedScheduledInvocation(
+  invocation: ScheduledArchitectureReviewInvocation,
+): boolean {
+  const authorizedKeys = new Set(["operation", "revision", "jobId"]);
+  return Reflect.ownKeys(invocation).length === authorizedKeys.size &&
+    Reflect.ownKeys(invocation).every((key) => typeof key === "string" && authorizedKeys.has(key));
+}
+
 function validateInvocation(invocation: AuthorizedTargetOperationInvocation): void {
-  const { operation, number, revision, jobId } = invocation;
-  if (!Number.isSafeInteger(number) || number < 1) {
+  const { operation, revision, jobId } = invocation;
+  if (operation === "architecture-review" && !isAuthorizedScheduledInvocation(invocation)) {
+    throw new Error("Scheduled architecture review invocation is invalid");
+  }
+  if (operation !== "architecture-review" && (!Number.isSafeInteger(invocation.number) || invocation.number < 1)) {
     throw new Error("Target operation Work Item number is invalid");
   }
   if (!/^[0-9a-f]{40}$/u.test(revision) || jobId.length === 0) {

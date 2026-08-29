@@ -1,3 +1,5 @@
+import { resolveAutomationCommandRoute } from "./automation-command-route.ts";
+
 export type AutomationOperation =
   | "update-branch"
   | "implement"
@@ -23,20 +25,10 @@ export type AutomationCommandEligibility =
   | "inconsistent"
   | "ineligible";
 
-// Issue and PRD implementation share the agent:implement trigger; PRD split
-// uses agent:to-issues (#219). Pull Request operations use their own label.
-const operationTriggerLabels: Readonly<Record<AutomationOperation, string>> = {
-  "update-branch": "agent:update-branch",
-  implement: "agent:implement",
-  review: "agent:review",
-  "implement-issue": "agent:implement",
-  "implement-prd": "agent:implement",
-  "split-prd": "agent:to-issues",
-  unknown: "an appropriate trigger label",
-};
-
 export function commandTriggerLabel(command: AutomationCommand): string {
-  return operationTriggerLabels[command.operation];
+  return command.operation === "unknown"
+    ? "an appropriate trigger label"
+    : resolveAutomationCommandRoute(command.operation, command.number).trigger;
 }
 
 export function commandEligibility(command: AutomationCommand): AutomationCommandEligibility {

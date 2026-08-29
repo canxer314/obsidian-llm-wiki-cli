@@ -1,3 +1,8 @@
+import {
+  resolveAutomationCommandRoute,
+  resolveTargetOperationRoute,
+  type VerifiedAutomationCommandRoute,
+} from "./automation-command-route.ts";
 import type { AutomationCommand } from "./automation-command.ts";
 import {
   createTargetOperationCommandRunner,
@@ -5,7 +10,7 @@ import {
 } from "./target-operation-command.ts";
 import type {
   AuthorizedTargetOperationInvocation,
-  TargetOperationIdentity,
+  LabelTriggeredTargetOperationIdentity,
 } from "./target-operation.ts";
 
 interface TargetOperationDispatchGithub {
@@ -36,10 +41,30 @@ interface TargetOperationDispatchGithub {
   ): Promise<void>;
 }
 
-function issueOperation(operation: TargetOperationIdentity): boolean {
-  return operation === "implement-issue" ||
-    operation === "implement-prd" ||
-    operation === "split-prd";
+function issueOperation(route: VerifiedAutomationCommandRoute): boolean {
+  return route.receiver === "issue";
+}
+
+export function createScheduledArchitectureReview(options: {
+  readonly github: Pick<TargetOperationDispatchGithub, "readBaseRevision">;
+  readonly target: {
+    run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown>;
+  };
+  readonly createJobId: () => string;
+}) {
+  return {
+    async run(): Promise<unknown> {
+      const revision = await options.github.readBaseRevision();
+      if (!/^[0-9a-f]{40}$/u.test(revision)) {
+        throw new Error("Target operation requires a full authorized revision");
+      }
+      return options.target.run({
+        operation: "architecture-review",
+        revision,
+        jobId: options.createJobId(),
+      });
+    },
+  };
 }
 
 export function createTargetOperationCommandDispatch(options: {
@@ -53,14 +78,8 @@ export function createTargetOperationCommandDispatch(options: {
     target: options.target,
     acquisition: {
       read: async (operation, number): Promise<TargetOperationAcquisitionState> => {
-        if (operation === "architecture-review") {
-          return {
-            state: "OPEN",
-            labels: [],
-            revision: await options.github.readBaseRevision(),
-          };
-        }
-        if (issueOperation(operation)) {
+        const route = resolveTargetOperationRoute(operation, number);
+        if (issueOperation(route)) {
           const issue = await options.github.readPrd(number);
           const routeMatches = issue.parentNumber === undefined && (
             operation === "split-prd" ||
@@ -98,34 +117,37 @@ export function createTargetOperationCommandDispatch(options: {
           },
         };
       },
-      addInProgress: (operation, number) => issueOperation(operation)
-        ? options.github.addIssueLabel(number, "agent:in-progress")
-        : options.github.addPullRequestLabel(number, "agent:in-progress"),
-      removeTrigger: (operation, number) => {
-        const trigger = operation === "split-prd"
-          ? "agent:to-issues"
-          : operation === "review"
-            ? "agent:review"
-            : operation === "update-branch"
-              ? "agent:update-branch"
-              : "agent:implement";
-        return issueOperation(operation)
-          ? options.github.removeIssueLabel(number, trigger)
-          : options.github.removePullRequestLabel(number, trigger);
+      addInProgress: (operation, number) => {
+        const route = resolveTargetOperationRoute(operation, number);
+        return issueOperation(route)
+          ? options.github.addIssueLabel(route.number, "agent:in-progress")
+          : options.github.addPullRequestLabel(route.number, "agent:in-progress");
       },
-      addBlocked: (operation, number) => issueOperation(operation)
-        ? options.github.addIssueLabel(number, "agent:blocked")
-        : options.github.addPullRequestLabel(number, "agent:blocked"),
+      removeTrigger: (operation, number) => {
+        const route = resolveTargetOperationRoute(operation, number);
+        return issueOperation(route)
+          ? options.github.removeIssueLabel(route.number, route.trigger)
+          : options.github.removePullRequestLabel(route.number, route.trigger);
+      },
+      addBlocked: (operation, number) => {
+        const route = resolveTargetOperationRoute(operation, number);
+        return issueOperation(route)
+          ? options.github.addIssueLabel(route.number, "agent:blocked")
+          : options.github.addPullRequestLabel(route.number, "agent:blocked");
+      },
       addBlockedDiagnostic: async (operation, number, diagnostic) => {
-        if (operation === "architecture-review") return;
+        const route = resolveTargetOperationRoute(operation, number);
         await options.github.addRefusalDiagnostic?.(
-          number,
-          `Automation ${operation} is blocked (job ${diagnostic.jobId}): ${diagnostic.summary}`,
+          route.number,
+          `Automation ${route.targetOperation} is blocked (job ${diagnostic.jobId}): ${diagnostic.summary}`,
         );
       },
-      removeInProgress: (operation, number) => issueOperation(operation)
-        ? options.github.removeIssueLabel(number, "agent:in-progress")
-        : options.github.removePullRequestLabel(number, "agent:in-progress"),
+      removeInProgress: (operation, number) => {
+        const route = resolveTargetOperationRoute(operation, number);
+        return issueOperation(route)
+          ? options.github.removeIssueLabel(route.number, "agent:in-progress")
+          : options.github.removePullRequestLabel(route.number, "agent:in-progress");
+      },
     },
     createJobId: options.createJobId,
   });
@@ -135,10 +157,11 @@ export function createTargetOperationCommandDispatch(options: {
       if (command.operation === "unknown") {
         throw new Error("Inspection-only Automation Command cannot execute");
       }
-      const operation: TargetOperationIdentity = command.operation === "implement"
-        ? "implement-feedback"
-        : command.operation;
-      return commands.run(operation, command.number);
+      const route = resolveAutomationCommandRoute(command.operation, command.number);
+      if (command.identity !== route.identity) {
+        throw new Error("Automation Command identity is not canonical");
+      }
+      return commands.run(route.targetOperation, route.number);
     },
     runOperation: commands.run,
   };

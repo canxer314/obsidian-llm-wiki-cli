@@ -1,8 +1,11 @@
-import { commandTriggerLabel, type AutomationCommand } from "./automation-command.ts";
+import {
+  resolveTargetOperationRoute,
+} from "./automation-command-route.ts";
 import { diagnosticSummary } from "./redaction.ts";
 import type {
   AuthorizedTargetOperationInvocation,
-  TargetOperationIdentity,
+  LabelTriggeredTargetOperationInvocation,
+  LabelTriggeredTargetOperationIdentity,
 } from "./target-operation.ts";
 
 export interface TargetOperationAcquisitionState {
@@ -23,63 +26,44 @@ export function createTargetOperationCommandRunner(options: {
     run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown>;
   };
   readonly acquisition: {
-    read(operation: TargetOperationIdentity, number: number): Promise<TargetOperationAcquisitionState>;
-    addInProgress(operation: TargetOperationIdentity, number: number): Promise<void>;
-    removeTrigger(operation: TargetOperationIdentity, number: number): Promise<void>;
-    addBlocked(operation: TargetOperationIdentity, number: number): Promise<void>;
+    read(operation: LabelTriggeredTargetOperationIdentity, number: number): Promise<TargetOperationAcquisitionState>;
+    addInProgress(operation: LabelTriggeredTargetOperationIdentity, number: number): Promise<void>;
+    removeTrigger(operation: LabelTriggeredTargetOperationIdentity, number: number): Promise<void>;
+    addBlocked(operation: LabelTriggeredTargetOperationIdentity, number: number): Promise<void>;
     addBlockedDiagnostic(
-      operation: TargetOperationIdentity,
+      operation: LabelTriggeredTargetOperationIdentity,
       number: number,
       diagnostic: { readonly jobId: string; readonly summary: string },
     ): Promise<void>;
-    removeInProgress(operation: TargetOperationIdentity, number: number): Promise<void>;
+    removeInProgress(operation: LabelTriggeredTargetOperationIdentity, number: number): Promise<void>;
   };
   readonly createJobId: () => string;
 }) {
   return {
     async run(
-      operation: TargetOperationIdentity,
+      operation: LabelTriggeredTargetOperationIdentity,
       number: number,
-      reconcile?: AuthorizedTargetOperationInvocation["reconcile"],
+      reconcile?: LabelTriggeredTargetOperationInvocation["reconcile"],
     ): Promise<unknown> {
-      if (!Number.isSafeInteger(number) || number < 1) {
-        throw new Error("Target operation Work Item number is invalid");
-      }
-      if (operation === "architecture-review") {
-        const current = await options.acquisition.read(operation, number);
-        requireRevision(current.revision);
-        return options.target.run({
-          operation,
-          number,
-          revision: current.revision,
-          jobId: options.createJobId(),
-          acquired: true,
-        });
-      }
+      const route = resolveTargetOperationRoute(operation, number);
       if (reconcile !== undefined && operation !== "implement-feedback") {
         throw new Error("Only feedback implementation supports reconciliation");
       }
 
-      const trigger = commandTriggerLabel({
-        number,
-        operation: operation === "implement-feedback" ? "implement" : operation,
-        identity: "acquisition",
-        labels: [],
-      } as AutomationCommand);
-      const initial = await options.acquisition.read(operation, number);
-      requireAvailable(initial, trigger, number);
+      const initial = await options.acquisition.read(route.targetOperation, number);
+      requireAvailable(initial, route.trigger, number);
       requireOperationSecurity(operation, initial, number);
       const jobId = options.createJobId();
-      await options.acquisition.addInProgress(operation, number);
+      await options.acquisition.addInProgress(route.targetOperation, number);
       let acquisitionSettled = false;
       try {
-        const acquired = await options.acquisition.read(operation, number);
-        requireAcquiring(acquired, trigger, number);
+        const acquired = await options.acquisition.read(route.targetOperation, number);
+        requireAcquiring(acquired, route.trigger, number);
         requireOperationSecurity(operation, acquired, number);
         requireRevision(acquired.revision);
-        await options.acquisition.removeTrigger(operation, number);
-        const settled = await options.acquisition.read(operation, number);
-        requireSettled(settled, acquired, trigger, number);
+        await options.acquisition.removeTrigger(route.targetOperation, number);
+        const settled = await options.acquisition.read(route.targetOperation, number);
+        requireSettled(settled, acquired, route.trigger, number);
         acquisitionSettled = true;
 
         const invocation: AuthorizedTargetOperationInvocation = {
@@ -94,7 +78,7 @@ export function createTargetOperationCommandRunner(options: {
         const result = await options.target.run(invocation);
         requireTargetOutcome(result);
         if (isBlocked(result)) {
-          await options.acquisition.addBlocked(operation, number);
+          await options.acquisition.addBlocked(route.targetOperation, number);
         }
         return result;
       } catch (error) {
@@ -102,8 +86,8 @@ export function createTargetOperationCommandRunner(options: {
           error instanceof Error ? error.message : String(error),
         );
         await Promise.allSettled([
-          options.acquisition.addBlocked(operation, number),
-          options.acquisition.addBlockedDiagnostic(operation, number, {
+          options.acquisition.addBlocked(route.targetOperation, number),
+          options.acquisition.addBlockedDiagnostic(route.targetOperation, number, {
             jobId,
             summary,
           }),
@@ -113,7 +97,7 @@ export function createTargetOperationCommandRunner(options: {
         // An unconfirmed acquisition keeps its visible ownership evidence for
         // inspection; only a settled command may clear in-progress (#219).
         if (acquisitionSettled) {
-          await options.acquisition.removeInProgress(operation, number).catch(() => undefined);
+          await options.acquisition.removeInProgress(route.targetOperation, number).catch(() => undefined);
         }
       }
     },
@@ -121,7 +105,7 @@ export function createTargetOperationCommandRunner(options: {
 }
 
 function requireOperationSecurity(
-  operation: TargetOperationIdentity,
+  operation: LabelTriggeredTargetOperationIdentity,
   state: TargetOperationAcquisitionState,
   number: number,
 ): void {

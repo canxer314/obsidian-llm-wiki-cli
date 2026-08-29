@@ -41,7 +41,7 @@ describe("Automation Command dispatch", () => {
   it("selects one bounded deterministic compatible frontier and waits for it", async () => {
     const first = command({ number: 20, identity: "pull-request:20" });
     const second = command({ number: 10, operation: "review", identity: "pull-request:10" });
-    const conflicting = command({ number: 11, operation: "review", identity: "pull-request:10" });
+    const conflicting = command({ number: 10, operation: "review", identity: "pull-request:10" });
     const executed: number[] = [];
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
@@ -64,6 +64,24 @@ describe("Automation Command dispatch", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 
+  it("fails malformed known identity before scheduler tracking or command execution", async () => {
+    const track = vi.fn(async (_identity: string, action: () => Promise<void>) => action());
+    const run = vi.fn(async () => {});
+
+    await expect(dispatchAutomationCommands({}, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track },
+      promotion,
+      readiness,
+      github: {
+        verifyLabels: async () => {},
+        listCommands: async () => [command({ number: 220, operation: "review", identity: "issue:220" })],
+      },
+      run,
+    })).rejects.toThrow("Automation Command identity is not canonical");
+
+    expect(track).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
   it("bounds execution concurrency without truncating the selected frontier", async () => {
     const commands = [
       command({ number: 1, identity: "pull-request:1" }),
