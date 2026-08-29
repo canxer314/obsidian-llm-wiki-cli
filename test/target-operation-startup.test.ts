@@ -46,7 +46,6 @@ describe("Target operation startup", () => {
     const runtime = targetOperationRuntimeDependencies({
       readStartup: async () => ({ snapshot, serialized: "", githubAgentSandbox: {} as never, automationSandbox: {} as never }),
       createGithub: () => ({} as never),
-      createManagedGithub: (github) => github,
       targetWorkerStartup: (_snapshot, selectedProfile) => {
         events.push(`profile:${selectedProfile}`);
         return "worker-startup";

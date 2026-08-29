@@ -162,12 +162,13 @@ export async function runTargetOperationWithDependencies(
   const [numberArgument, invocationArgument] = operation === "architecture-review"
     ? [undefined, argv[0]]
     : [argv[0], argv[1]];
-  const number = Number(numberArgument);
-  if (!Number.isSafeInteger(number) || number < 1) {
-    if (operation !== "architecture-review") {
+  const number = numberArgument === undefined ? undefined : Number(numberArgument);
+  if (operation !== "architecture-review") {
+    if (!Number.isSafeInteger(number) || number === undefined || number < 1) {
       throw new Error("Target operation Work Item number is invalid");
     }
   }
+  const workItemNumber = number as number;
   const invocation = parseInvocation(invocationArgument);
   if (invocation.operation !== operation) {
     throw new Error("Target operation wrapper does not match the authorized invocation");
@@ -183,7 +184,7 @@ export async function runTargetOperationWithDependencies(
   const github = dependencies.createManagedGithub(
     rawGithub as unknown as Record<string, unknown>,
     operation,
-    number,
+    workItemNumber,
     invocation,
   ) as typeof rawGithub;
   const checkout = {
@@ -201,7 +202,7 @@ export async function runTargetOperationWithDependencies(
   const createJobId = () => invocation.jobId;
 
   if (operation === "implement-issue") {
-    return dependencies.runImplementation({ issueNumber: number }, {
+    return dependencies.runImplementation({ issueNumber: workItemNumber }, {
       github,
       checkout,
       implementer: dependencies.createImplementer({
@@ -214,7 +215,7 @@ export async function runTargetOperationWithDependencies(
     });
   }
   if (operation === "implement-prd") {
-    return dependencies.runPrdImplementation({ issueNumber: number }, {
+    return dependencies.runPrdImplementation({ issueNumber: workItemNumber }, {
       github,
       pullRequests: github,
       checkout,
@@ -229,7 +230,7 @@ export async function runTargetOperationWithDependencies(
   }
   if (operation === "implement-feedback") {
     return dependencies.runFeedback({
-      pullRequestNumber: number,
+      pullRequestNumber: workItemNumber,
       ...(invocation.operation === "architecture-review" || invocation.reconcile === undefined
         ? {}
         : { authorization: invocation.reconcile }),
@@ -246,7 +247,7 @@ export async function runTargetOperationWithDependencies(
     });
   }
   if (operation === "split-prd") {
-    return dependencies.runSplit({ issueNumber: number }, {
+    return dependencies.runSplit({ issueNumber: workItemNumber }, {
       github,
       checkout,
       splitter: dependencies.createSplitter({
@@ -262,7 +263,7 @@ export async function runTargetOperationWithDependencies(
       startup: dependencies.targetWorkerStartup(startup, "github-agent"),
     });
     const artifactRoot = resolve(checkoutPath, ".sandcastle", "jobs", "review-artifacts");
-    return dependencies.runReview({ pullRequestNumber: number }, {
+    return dependencies.runReview({ pullRequestNumber: workItemNumber }, {
       github,
       checkout,
       reviewer: {
@@ -285,7 +286,7 @@ export async function runTargetOperationWithDependencies(
     });
   }
   if (operation === "update-branch") {
-    return dependencies.runBranchUpdate({ pullRequestNumber: number }, {
+    return dependencies.runBranchUpdate({ pullRequestNumber: workItemNumber }, {
       github,
       checkout,
       updater: dependencies.createBranchUpdater({
