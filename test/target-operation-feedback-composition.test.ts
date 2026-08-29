@@ -6,7 +6,7 @@ import { delimiter, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createTargetOperationCommandDispatch } from "../.sandcastle/target-operation-dispatch.js";
-import { createTargetOperationCliHandlers } from "../.sandcastle/automation-target-composition.js";
+import { createAutomationCliDependencies } from "../.sandcastle/automation-target-composition.js";
 import { runAutomationCli } from "../.sandcastle/automation-cli.js";
 import type { AuthorizedTargetOperationInvocation } from "../.sandcastle/target-operation.js";
 
@@ -41,7 +41,7 @@ const reviewState = (withReply) => ({
         ...(withReply ? [{
           id: "PRRC_reply",
           replyTo: { id: process.env.ROOT },
-          body: "Fixed.\\n\\n" + marker,
+          body: process.env.SCENARIO === "legacy" ? "Fixed in " + process.env.POST : "Fixed.\\n\\n" + marker,
           createdAt: "2026-01-01T00:00:01Z",
         }] : []),
       ],
@@ -61,7 +61,7 @@ if (args[0] === "api" && args[1] === "repos/{owner}/{repo}/pulls/347") {
     process.stderr.write("HTTP 503 Service Unavailable\\n");
     process.exit(1);
   }
-  process.stdout.write(JSON.stringify(reviewState(process.env.SCENARIO === "ordinary" || next >= 4)));
+  process.stdout.write(JSON.stringify(reviewState(process.env.SCENARIO === "ordinary" || process.env.SCENARIO === "legacy" || next >= 4)));
 } else if (args[0] === "api" && args[1] === "graphql" && args.some((value) => value.includes("node(id:$id)"))) {
   process.stdout.write("123\\n");
 } else if (args[0] === "api" && args[1].includes("/comments/123/replies")) {
@@ -199,7 +199,7 @@ async function runFeedbackTarget(options: {
   return { result, calls };
 }
 
-async function createCliFeedbackComposition(scenario: "ordinary" | "reply-only") {
+async function createCliFeedbackComposition(scenario: "ordinary" | "reply-only" | "legacy") {
   const directory = await mkdtemp(join(tmpdir(), "feedback-cli-composition-"));
   temporaryDirectories.push(directory);
   const gh = join(directory, "gh");
@@ -239,7 +239,7 @@ async function createCliFeedbackComposition(scenario: "ordinary" | "reply-only")
   });
   return {
     callsFile,
-    handlers: createTargetOperationCliHandlers({
+    dependencies: createAutomationCliDependencies({
       targetOperationCommands,
       withScheduler: async (_identity, action) => action(),
     }),
@@ -284,14 +284,25 @@ describe("Target feedback implementation production composition", () => {
   it("runs ordinary CLI feedback without Feedback Reconcile Authorization", async () => {
     const composition = await createCliFeedbackComposition("ordinary");
 
-    await expect(runAutomationCli(["run", "feedback", "347"], {
-      runReview: composition.handlers.runReview,
-      runFeedback: composition.handlers.runFeedback,
-      runImplement: composition.handlers.runImplement,
-      runImplementPrd: composition.handlers.runImplementPrd,
-      runSplit: composition.handlers.runSplit,
-      runUpdate: composition.handlers.runUpdate,
-    })).resolves.toMatchObject({ status: "blocked", reason: "feedback-reconciliation" });
+    await expect(runAutomationCli(["run", "feedback", "347"], composition.dependencies))
+      .resolves.toMatchObject({ status: "blocked", reason: "feedback-reconciliation" });
+
+    expect((await readFile(composition.callsFile, "utf8")).split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as string[])
+      .filter((args) => args.some((value) => value.includes("/comments/123/replies"))))
+      .toHaveLength(0);
+  });
+
+  it("preserves the acquired base revision through the production CLI dependencies", async () => {
+    const composition = await createCliFeedbackComposition("legacy");
+
+    await expect(runAutomationCli([
+      "reconcile", "feedback", "347",
+      "--base-revision", PRE,
+      "--expected-post", POST,
+      "--reply-root", ROOT,
+      "--reply-body", "Fixed.",
+    ], composition.dependencies)).resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect((await readFile(composition.callsFile, "utf8")).split("\n").filter(Boolean)
       .map((line) => JSON.parse(line) as string[])
@@ -308,18 +319,14 @@ describe("Target feedback implementation production composition", () => {
       "--expected-post", POST,
       "--reply-root", ROOT,
       "--reply-body", "Fixed.",
-    ], {
-      runReview: composition.handlers.runReview,
-      runFeedback: composition.handlers.runFeedback,
-      runImplement: composition.handlers.runImplement,
-      runImplementPrd: composition.handlers.runImplementPrd,
-      runSplit: composition.handlers.runSplit,
-      runUpdate: composition.handlers.runUpdate,
-    })).resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
+    ], composition.dependencies)).resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
-    expect((await readFile(composition.callsFile, "utf8")).split("\n").filter(Boolean)
-      .map((line) => JSON.parse(line) as string[])
-      .filter((args) => args.some((value) => value.includes("/comments/123/replies"))))
-      .toHaveLength(1);
+    const calls = (await readFile(composition.callsFile, "utf8")).split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as string[]);
+    const replyCalls = calls.filter((args) => args.some((value) => value.includes("/comments/123/replies")));
+    expect(replyCalls).toHaveLength(1);
+    expect(replyCalls[0]).toContain(
+      `body=Fixed.\n\n<!-- feedback-reconcile op=feedback pr=347 pre=${PRE} post=${POST} root=${ROOT} -->`,
+    );
   });
 });

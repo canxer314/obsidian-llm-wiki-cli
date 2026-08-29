@@ -23,7 +23,7 @@ import { removeExpiredFailureCheckouts } from "./target-checkout.ts";
 import { runSerializedAutomationCommand } from "./serialized-automation-command.ts";
 import { createTargetOperationRunner } from "./target-operation.ts";
 import { createTargetOperationCommandDispatch } from "./target-operation-dispatch.ts";
-import { createTargetOperationCliHandlers } from "./automation-target-composition.ts";
+import { createAutomationCliDependencies } from "./automation-target-composition.ts";
 import { removeExpiredJobLogs } from "./job-logs.ts";
 import { removeExpiredReviewArtifacts } from "./review-artifacts.ts";
 import { loadSandboxStartup } from "./sandbox.ts";
@@ -80,97 +80,92 @@ try {
     target: targetOperations,
     createJobId: randomUUID,
   });
-  const targetOperationHandlers = createTargetOperationCliHandlers({
-    targetOperationCommands,
-    withScheduler,
-  });
   const runCommand = async (
     command: import("./automation-command.ts").AutomationCommand,
   ): Promise<void> => {
     await targetOperationCommands.runCommand(command);
   };
-  const result = await runAutomationCli(process.argv.slice(2), {
-    preflight: async (operation) => {
-      await requireSandcastleImage({ image: startup.imageName });
-      if (githubAgentReadinessRequiredFor(operation)) {
-        await requireGithubAgentReadiness({
+  const cliDependencies = createAutomationCliDependencies({
+    targetOperationCommands,
+    withScheduler,
+    additionalDependencies: {
+      preflight: async (operation: string) => {
+        await requireSandcastleImage({ image: startup.imageName });
+        if (githubAgentReadinessRequiredFor(operation)) {
+          await requireGithubAgentReadiness({
+            image: startup.imageName,
+            uid: startup.uid,
+            gid: startup.gid,
+            environment: startup.childEnvironments.githubAgent,
+          });
+        }
+      },
+      buildImage: async () => {
+        await buildSandcastleImage({
+          repositoryPath: startup.repositoryPath,
+          uid: startup.uid,
+          gid: startup.gid,
+          environment: startup.proxyEnvironment,
+          image: startup.imageName,
+        });
+        return { status: "image-ready" } as const;
+      },
+      setupLabels: async () => {
+        await dispatchGithub.ensureLabels();
+        return { status: "labels-ready" } as const;
+      },
+      architectureReview: () => withScheduler(
+        "architecture-review",
+        () => targetOperationCommands.runOperation("architecture-review", 1),
+      ),
+      dispatch: (concurrency: number | undefined) => dispatchAutomationCommands({
+        concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
+      }, {
+        scheduler,
+        github: dispatchGithub,
+        readiness: {
+          verifyGithubAgentAuthentication: () => requireGithubAgentReadiness({
+            image: startup.imageName,
+            uid: startup.uid,
+            gid: startup.gid,
+            environment: startup.childEnvironments.githubAgent,
+          }),
+        },
+        promotion: {
+          scan: () => runQueuePromotionScan(
+            { github: dispatchGithub },
+            { createJobId: randomUUID },
+          ),
+        },
+        run: runCommand,
+      }),
+      inspect: async () => {
+        const readiness = await inspectGithubAgentReadiness({
           image: startup.imageName,
           uid: startup.uid,
           gid: startup.gid,
           environment: startup.childEnvironments.githubAgent,
         });
-      }
-    },
-    buildImage: async () => {
-      await buildSandcastleImage({
-        repositoryPath: startup.repositoryPath,
-        uid: startup.uid,
-        gid: startup.gid,
-        environment: startup.proxyEnvironment,
-        image: startup.imageName,
-      });
-      return { status: "image-ready" } as const;
-    },
-    runReview: targetOperationHandlers.runReview,
-    setupLabels: async () => {
-      await dispatchGithub.ensureLabels();
-      return { status: "labels-ready" } as const;
-    },
-    architectureReview: () => withScheduler(
-      "architecture-review",
-      () => targetOperationCommands.runOperation("architecture-review", 1),
-    ),
-    runUpdate: targetOperationHandlers.runUpdate,
-    runFeedback: targetOperationHandlers.runFeedback,
-    dispatch: (concurrency) => dispatchAutomationCommands({
-      concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
-    }, {
-      scheduler,
-      github: dispatchGithub,
-      readiness: {
-        verifyGithubAgentAuthentication: () => requireGithubAgentReadiness({
-          image: startup.imageName,
-          uid: startup.uid,
-          gid: startup.gid,
-          environment: startup.childEnvironments.githubAgent,
-        }),
-      },
-      promotion: {
-        scan: () => runQueuePromotionScan(
-          { github: dispatchGithub },
-          { createJobId: randomUUID },
-        ),
-      },
-      run: runCommand,
-    }),
-    inspect: async () => {
-      const readiness = await inspectGithubAgentReadiness({
-        image: startup.imageName,
-        uid: startup.uid,
-        gid: startup.gid,
-        environment: startup.childEnvironments.githubAgent,
-      });
-      const activeJobs = await scheduler.activeJobs();
-      const imageReadiness = await sandcastleImageReadiness({ image: startup.imageName });
-      if (readiness.githubAgentReadiness !== "ready") {
+        const activeJobs = await scheduler.activeJobs();
+        const imageReadiness = await sandcastleImageReadiness({ image: startup.imageName });
+        if (readiness.githubAgentReadiness !== "ready") {
+          return {
+            imageReadiness,
+            ...readiness,
+            commandInspection: "unavailable" as const,
+            activeJobs,
+          };
+        }
         return {
           imageReadiness,
           ...readiness,
-          commandInspection: "unavailable" as const,
-          activeJobs,
+          commandInspection: "available" as const,
+          ...await inspectAutomationCommands({ github: dispatchGithub, scheduler: { activeJobs: async () => activeJobs } }),
         };
-      }
-      return {
-        imageReadiness,
-        ...readiness,
-        commandInspection: "available" as const,
-        ...await inspectAutomationCommands({ github: dispatchGithub, scheduler: { activeJobs: async () => activeJobs } }),
-      };
+      },
     },
-    runImplement: targetOperationHandlers.runImplement,
-    runImplementPrd: targetOperationHandlers.runImplementPrd,
-    runSplit: targetOperationHandlers.runSplit,
   });
+  const result = await runAutomationCli(process.argv.slice(2), cliDependencies);
   console.log(JSON.stringify(result));
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
