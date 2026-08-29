@@ -15,6 +15,16 @@ import {
 
 const revision = "a".repeat(40);
 
+const operationStatuses: Readonly<Record<TargetOperationIdentity, string>> = {
+  "implement-issue": "implemented",
+  "implement-prd": "implemented",
+  "implement-feedback": "implemented",
+  review: "reviewed",
+  "update-branch": "updated",
+  "split-prd": "split",
+  "architecture-review": "proposed",
+};
+
 const operationEntries: Readonly<Record<TargetOperationIdentity, string>> = {
   "implement-issue": "implement-issue.ts",
   "implement-prd": "implement-prd.ts",
@@ -35,7 +45,7 @@ describe("Target operation runner", () => {
     ["split-prd", 60 * 60 * 1000],
     ["architecture-review", 21 * 60 * 1000],
   ] as const)("applies the %i-millisecond whole-job timeout for %s", async (operation, timeoutMilliseconds) => {
-    const runWorker = vi.fn(async () => ({ output: JSON.stringify({ status: "completed-fixture" }), code: 0, diagnostics: "" }));
+    const runWorker = vi.fn(async () => ({ output: JSON.stringify({ status: operationStatuses[operation] }), code: 0, diagnostics: "" }));
     const runner = createTargetOperationRunnerWithWorker({
       startup: {
         imageName: "fixture-image",
@@ -66,8 +76,40 @@ describe("Target operation runner", () => {
             : {}),
         };
 
-    await expect(runner.run(invocation)).resolves.toEqual({ status: "completed-fixture" });
+    await expect(runner.run(invocation)).resolves.toEqual({ status: operationStatuses[operation] });
     expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ timeoutMilliseconds }));
+  });
+
+  it("records an accepted refusal as a completed job", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-refused-log-"));
+    const logsPath = join(root, "logs");
+    const runner = createTargetOperationRunner({
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start: () => spawn("bash", ["-c", 'cat >/dev/null; printf \'%s\\n\' \'{"status":"refused","reason":"already handled"}\''], {
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    });
+
+    try {
+      await expect(runner.run({
+        operation: "implement-issue",
+        number: 219,
+        revision,
+        jobId: "refused-job-219",
+      })).resolves.toEqual({ status: "refused", reason: "already handled" });
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "refused-job-219", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "completed", jobId: "refused-job-219" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("records a blocked operation outcome as a failed job", async () => {
@@ -173,7 +215,7 @@ describe("Target operation runner", () => {
         childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
         models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
       },
-      start: () => spawn("bash", ["-c", 'cat >/dev/null; printf \'%s\\n\' \'{"status":"completed-fixture"}\''], {
+      start: () => spawn("bash", ["-c", 'cat >/dev/null; printf \'%s\\n\' \'{"status":"proposed"}\''], {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
       }),
@@ -184,7 +226,7 @@ describe("Target operation runner", () => {
         operation: "architecture-review",
         revision,
         jobId: "scheduled-architecture-review",
-      })).resolves.toEqual({ status: "completed-fixture" });
+      })).resolves.toEqual({ status: "proposed" });
       expect(JSON.parse(readFileSync(
         join(logsPath, "scheduled-architecture-review", "metadata.json"),
         "utf8",
@@ -206,7 +248,7 @@ describe("Target operation runner", () => {
     async (operation) => {
       const root = mkdtempSync(join(tmpdir(), "target-operation-identity-log-"));
       const jobId = `job-${operation}`;
-      const start = vi.fn(() => spawn("bash", ["-c", 'cat >/dev/null; printf \'%s\\n\' \'{"status":"completed-fixture"}\''], {
+      const start = vi.fn(() => spawn("bash", ["-c", `cat >/dev/null; printf '%s\\n' '{"status":"${operationStatuses[operation]}"}'`], {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
       }));
@@ -240,7 +282,7 @@ describe("Target operation runner", () => {
           };
 
       try {
-        await expect(runner.run(invocation)).resolves.toEqual({ status: "completed-fixture" });
+        await expect(runner.run(invocation)).resolves.toEqual({ status: operationStatuses[operation] });
         expect(JSON.parse(readFileSync(
           join(root, "logs", jobId, "metadata.json"),
           "utf8",
@@ -501,7 +543,7 @@ describe("Target operation runner", () => {
     mkdirSync(operationDirectory, { recursive: true });
     writeFileSync(
       join(operationDirectory, "architecture-review.ts"),
-      'let input = ""; for await (const chunk of process.stdin) input += chunk; console.log(JSON.stringify({ arguments: process.argv.slice(2), checkout: JSON.parse(input).imageName }));\n',
+      'let input = ""; for await (const chunk of process.stdin) input += chunk; console.log(JSON.stringify({ status: "proposed", arguments: process.argv.slice(2), checkout: JSON.parse(input).imageName }));\n',
     );
     const withCheckout = vi.fn(async (request, action: (path: string) => Promise<unknown>) => {
       expect(request).toEqual({ revision });
@@ -522,6 +564,7 @@ describe("Target operation runner", () => {
           jobId: "scheduled-architecture-review",
         },
       })).resolves.toEqual({
+        status: "proposed",
         arguments: [JSON.stringify({ operation: "architecture-review", revision, jobId: "scheduled-architecture-review" })],
         checkout: "fixture-image",
       });
@@ -541,7 +584,7 @@ describe("Target operation runner", () => {
         [
           'let input = ""; for await (const chunk of process.stdin) input += chunk;',
           'const startup = JSON.parse(input);',
-          'console.log(JSON.stringify({ source: "authorized-operation", number: Number(process.argv[2]), token: startup.childEnvironments.github.GH_TOKEN, tokenInArguments: process.argv.includes(startup.childEnvironments.github.GH_TOKEN) }));',
+          'const invocation = JSON.parse(process.argv[3]); console.log(JSON.stringify({ status: ({ "implement-issue": "implemented", "implement-prd": "implemented", "implement-feedback": "implemented", review: "reviewed", "update-branch": "updated", "split-prd": "split", "architecture-review": "proposed" })[invocation.operation], source: "authorized-operation", number: Number(process.argv[2]), token: startup.childEnvironments.github.GH_TOKEN, tokenInArguments: process.argv.includes(startup.childEnvironments.github.GH_TOKEN) }));',
         ].join("\n"),
       );
       const withCheckout = vi.fn(async (request, action: (path: string) => Promise<unknown>) => {
@@ -575,6 +618,7 @@ describe("Target operation runner", () => {
               : {}),
           },
         })).resolves.toEqual({
+          status: operationStatuses[operation],
           source: "authorized-operation",
           number: 219,
           token: "snapshot-token",

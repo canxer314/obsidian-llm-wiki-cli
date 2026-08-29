@@ -41,7 +41,7 @@ describe("Target Checkout", () => {
       createJobDirectory: () => "/jobs/review-220-job-a",
     });
 
-    await expect(checkout.withCheckout({ pullRequestNumber: 220, revision }, async (path) => path))
+    await expect(checkout.withCheckout({ pullRequestNumber: 220, revision }, async (path) => path, () => "cleanup"))
       .resolves.toBe("/jobs/review-220-job-a");
 
     expect(execute).toHaveBeenNthCalledWith(1, "git", [
@@ -393,7 +393,7 @@ describe("Target Checkout real Git filesystem integration", () => {
       ])).toBe("alternate local object");
       expect(await pathExists(join(checkoutPath, ".git", "objects", "info", "alternates")))
         .toBe(false);
-    });
+    }, () => "retain");
   });
 
   it("runs concurrent jobs in independent checkouts, installs dependencies, and confines successful cleanup", async () => {
@@ -467,7 +467,7 @@ describe("Target Checkout real Git filesystem integration", () => {
         await git(["-C", checkoutPath, "add", "-A"]);
         await git(["-C", checkoutPath, "commit", "-m", "agent result"]);
         await git(["-C", checkoutPath, "push", "--dry-run", "origin", "HEAD:refs/heads/agent-result"]);
-      });
+      }, () => "cleanup");
     }));
 
     expect(new Set(checkoutPaths).size).toBe(2);
@@ -493,6 +493,78 @@ describe("Target Checkout real Git filesystem integration", () => {
     await expect(pathExists(historicalPath)).resolves.toBe(true);
   });
 
+  it("cleans up only an explicitly disposable checkout", async () => {
+    const fixture = await createFixture();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    let checkoutPath = "";
+
+    await expect(checkout.withCheckout({ revision: fixture.hiddenRevision }, async (path) => {
+      checkoutPath = path;
+      return { status: "refused" };
+    }, () => "cleanup")).resolves.toEqual({ status: "refused" });
+
+    await expect(pathExists(checkoutPath)).resolves.toBe(false);
+  });
+
+  it("retains a created checkout when explicit retention is supplied", async () => {
+    const fixture = await createFixture();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    let checkoutPath = "";
+
+    await checkout.withCheckout({ revision: fixture.hiddenRevision }, async (path) => {
+      checkoutPath = path;
+      return { status: "refused" };
+    }, () => "retain");
+
+    await expect(pathExists(checkoutPath)).resolves.toBe(true);
+  });
+
+  it("retains a created checkout when a disposition is invalid", async () => {
+    const fixture = await createFixture();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    let checkoutPath = "";
+
+    await expect(checkout.withCheckout({ revision: fixture.hiddenRevision }, async (path) => {
+      checkoutPath = path;
+      return { status: "refused" };
+    }, () => "invalid" as "cleanup")).resolves.toEqual({ status: "refused" });
+
+    await expect(pathExists(checkoutPath)).resolves.toBe(true);
+  });
+
   it("preserves a typed blocked checkout for diagnosis", async () => {
     const fixture = await createFixture();
     const checkout = createTargetCheckout({
@@ -512,7 +584,7 @@ describe("Target Checkout real Git filesystem integration", () => {
     await expect(checkout.withCheckout({ revision: fixture.hiddenRevision }, async (checkoutPath) => {
       failedCheckoutPath = checkoutPath;
       return { status: "blocked", reason: "fixture-execution" };
-    })).resolves.toEqual({ status: "blocked", reason: "fixture-execution" });
+    }, () => "retain")).resolves.toEqual({ status: "blocked", reason: "fixture-execution" });
 
     await expect(pathExists(failedCheckoutPath)).resolves.toBe(true);
   });
