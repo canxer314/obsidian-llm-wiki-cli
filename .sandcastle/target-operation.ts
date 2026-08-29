@@ -17,6 +17,7 @@ import {
   inheritedJobLogEnvironment,
 } from "./job-logs.ts";
 import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
+import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
 import type { TargetOperationStartupSnapshot } from "./target-operation-startup.ts";
 
 export type TargetOperationIdentity =
@@ -132,8 +133,9 @@ export async function executeTargetOperationInCheckout(options: {
       input: JSON.stringify(options.startup),
       timeoutMessage: `Target operation ${operation} timed out`,
     });
-    return workerJson(result, `Target operation ${operation}`);
-  });
+    const outcome = classifyTargetOperationOutcome(operation, workerJson(result, `Target operation ${operation}`));
+    return outcome.outcome;
+  }, (result) => classifyTargetOperationOutcome(operation, result).checkout);
 }
 
 interface TargetOperationRunnerOptions {
@@ -196,14 +198,15 @@ export function createTargetOperationRunnerWithWorker(
           processGroupOwner: true,
           inheritedEnvironment: log === undefined ? undefined : inheritedJobLogEnvironment(log),
         });
-        const outcome = workerJson(result, `Target operation ${invocation.operation}`);
+        const outcome = classifyTargetOperationOutcome(
+          invocation.operation,
+          workerJson(result, `Target operation ${invocation.operation}`),
+        );
         operationFailed = false;
         if (log !== undefined) {
-          await completeJobLog(log, {
-            status: isBlockedOutcome(outcome) ? "failed" : "completed",
-          });
+          await completeJobLog(log, { status: outcome.jobLog });
         }
-        return outcome;
+        return outcome.outcome;
       } catch (error) {
         if (log !== undefined && operationFailed) {
           await completeJobLog(log, {
@@ -216,11 +219,6 @@ export function createTargetOperationRunnerWithWorker(
       }
     },
   };
-}
-
-function isBlockedOutcome(value: unknown): boolean {
-  return typeof value === "object" && value !== null &&
-    "status" in value && value.status === "blocked";
 }
 
 function isAuthorizedScheduledInvocation(

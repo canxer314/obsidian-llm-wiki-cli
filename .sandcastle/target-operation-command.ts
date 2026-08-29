@@ -2,6 +2,7 @@ import {
   resolveTargetOperationRoute,
 } from "./automation-command-route.ts";
 import { diagnosticSummary } from "./redaction.ts";
+import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
 import type {
   AuthorizedTargetOperationInvocation,
   LabelTriggeredTargetOperationInvocation,
@@ -76,11 +77,11 @@ export function createTargetOperationCommandRunner(options: {
           ...(reconcile === undefined ? {} : { reconcile }),
         };
         const result = await options.target.run(invocation);
-        requireTargetOutcome(result);
-        if (isBlocked(result)) {
+        const outcome = classifyTargetOperationOutcome(operation, result);
+        if (outcome.automation === "blocked") {
           await options.acquisition.addBlocked(route.targetOperation, number);
         }
-        return result;
+        return outcome.outcome;
       } catch (error) {
         const summary = diagnosticSummary(
           error instanceof Error ? error.message : String(error),
@@ -184,31 +185,4 @@ function samePullRequest(
     left.baseRefName === right.baseRefName &&
     left.baseRepository === right.baseRepository &&
     left.headRepository === right.headRepository;
-}
-
-const targetOutcomeStatuses = new Set([
-  "implemented",
-  "reviewed",
-  "updated",
-  "up-to-date",
-  "split",
-  "proposed",
-  "skipped",
-  "refused",
-  "blocked",
-]);
-
-function requireTargetOutcome(value: unknown): void {
-  if (
-    typeof value !== "object" || value === null ||
-    !("status" in value) || typeof value.status !== "string" ||
-    !targetOutcomeStatuses.has(value.status)
-  ) {
-    throw new Error("Target operation returned an invalid outcome");
-  }
-}
-
-function isBlocked(value: unknown): boolean {
-  return typeof value === "object" && value !== null &&
-    "status" in value && value.status === "blocked";
 }

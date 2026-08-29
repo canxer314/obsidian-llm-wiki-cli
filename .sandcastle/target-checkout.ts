@@ -83,10 +83,13 @@ export async function removeExpiredFailureCheckouts(options: {
     }));
 }
 
+export type TargetCheckoutDisposition = "cleanup" | "retain";
+
 export interface TargetCheckout {
   withCheckout<TResult>(
     request: { readonly pullRequestNumber?: number; readonly revision: string },
     action: (checkoutPath: string) => Promise<TResult>,
+    disposition: (result: TResult) => TargetCheckoutDisposition,
   ): Promise<TResult>;
 }
 
@@ -95,11 +98,6 @@ export interface TargetCheckoutProcessOptions {
   readonly checkoutRoot?: string;
   readonly gitEnvironment?: Readonly<Record<string, string>>;
   readonly dependencyEnvironment?: Readonly<Record<string, string>>;
-}
-
-function isBlockedOutcome(value: unknown): boolean {
-  return typeof value === "object" && value !== null &&
-    "status" in value && value.status === "blocked";
 }
 
 export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
@@ -120,7 +118,7 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
     ? execute("npm", arguments_)
     : execute("npm", arguments_, options.dependencyEnvironment);
   return {
-    async withCheckout(request, action) {
+    async withCheckout(request, action, disposition) {
       if (!/^[0-9a-f]{40}$/u.test(request.revision)) {
         throw new Error("Target Checkout requires a full Git revision");
       }
@@ -197,7 +195,7 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
         await git(["-C", checkoutPath, "checkout", "--detach", request.revision]);
         await npm(["--prefix", checkoutPath, "ci"]);
         const result = await action(checkoutPath);
-        completed = !isBlockedOutcome(result);
+        completed = disposition(result) === "cleanup";
         return result;
       } finally {
         if (completed) {

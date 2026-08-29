@@ -415,6 +415,26 @@ describe("trusted Target operation command acquisition", () => {
     );
   });
 
+  it("does not block or diagnose an accepted refusal", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const target = { run: vi.fn(async () => ({ status: "refused", reason: "already handled" })) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("review", 219)).resolves.toEqual({
+      status: "refused",
+      reason: "already handled",
+    });
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "remove-in-progress",
+    ]);
+  });
+
   it("owns blocked and finally labels for a typed target failure", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
     const target = {
@@ -433,6 +453,31 @@ describe("trusted Target operation command acquisition", () => {
       "add-blocked",
       "remove-in-progress",
     ]);
+  });
+
+  it("rejects an operation-mismatched result with bounded exception settlement", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const target = { run: vi.fn(async () => ({ status: "implemented", secret: "untrusted payload" })) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(
+      "Target operation returned an invalid outcome",
+    );
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith("review", 219, {
+      jobId: "job-219",
+      summary: "Target operation returned an invalid outcome",
+    });
   });
 
   it("blocks a malformed target outcome before cleanup", async () => {

@@ -130,6 +130,7 @@ describe("publication path (real git repositories)", () => {
     const head = await checkout.withCheckout(
       { pullRequestNumber: 1, revision: pullRequestHead },
       (checkoutPath) => git(["-C", checkoutPath, "rev-parse", "HEAD"]),
+      () => "cleanup",
     );
 
     expect(head).toBe(pullRequestHead);
@@ -161,6 +162,7 @@ describe("publication path (real git repositories)", () => {
           checkoutPath,
         });
       },
+      () => "cleanup",
     );
 
     expect(result.revision).not.toBe(pullRequestHead);
@@ -188,6 +190,7 @@ describe("publication path (real git repositories)", () => {
     const installed = await checkout.withCheckout(
       { revision: masterRevision },
       (checkoutPath) => git(["-C", checkoutPath, "rev-parse", "HEAD"]),
+      () => "cleanup",
     );
 
     expect(installed).toBe(masterRevision);
