@@ -2,6 +2,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
+  canonicalAutomationTriggerLabels,
+  commandRoutesForReceiver,
+  resolveAutomationCommandRoute,
+} from "./automation-command-route.ts";
+import {
   ARCHITECTURE_REVIEW_BACKLOG_LIMIT,
   type ArchitectureReviewAutomationPorts,
   type ArchitectureReviewProposal,
@@ -130,10 +135,13 @@ function splitBody(prdNumber: number, slice: PrdSlice): string {
   return `## Parent PRD\n\n#${prdNumber}\n\n## What to build\n\n${slice.whatToBuild}\n\n## Acceptance criteria\n\n${slice.acceptanceCriteria.map((criterion) => `- [ ] ${criterion}`).join("\n")}\n`;
 }
 
-const automationLabels = ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked", "agent:queued", "agent:to-issues"] as const;
-
-const pullRequestCommandLabels = ["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked"] as const;
-const issueCommandLabels = ["agent:implement", "agent:to-issues", "agent:in-progress", "agent:blocked"] as const;
+const lifecycleLabels = ["agent:in-progress", "agent:blocked"] as const;
+const queueOnlyLabels = ["agent:queued"] as const;
+const automationLabels = [
+  ...canonicalAutomationTriggerLabels(),
+  ...lifecycleLabels,
+  ...queueOnlyLabels,
+] as const;
 
 interface ListedWorkItem {
   readonly number: number;
@@ -243,6 +251,18 @@ export function createAutomationDispatchGithubPort(options: {
       ], options.environment);
     },
     async listCommands() {
+      const pullRequestCommandLabels = [
+        ...new Set([
+          ...commandRoutesForReceiver("pull-request", 1).map((route) => route.trigger),
+          ...lifecycleLabels,
+        ]),
+      ];
+      const issueCommandLabels = [
+        ...new Set([
+          ...commandRoutesForReceiver("issue", 1).map((route) => route.trigger),
+          ...lifecycleLabels,
+        ]),
+      ];
       const responses = await Promise.all([
         ...pullRequestCommandLabels.map((label) => listOpenByLabel("pr", label)),
         ...issueCommandLabels.map((label) => listOpenByLabel("issue", label)),
@@ -261,22 +281,29 @@ export function createAutomationDispatchGithubPort(options: {
       }
       const pullRequestCommands = [...pullRequests.values()].flatMap((pullRequest) => {
         const labels = pullRequest.labels.map(({ name }) => name);
-        const triggeredOperations = (["update-branch", "implement", "review"] as const)
-          .filter((operation) => labels.includes(`agent:${operation}`));
+        const routes = commandRoutesForReceiver("pull-request", pullRequest.number)
+          .filter((route) => labels.includes(route.trigger));
         // Progress labels outlive their trigger once acquisition begins. Keep a
         // single canonical PR command for inspection when no trigger remains;
         // its eligibility is necessarily non-runnable.
-        const operations = triggeredOperations.length > 0
-          ? triggeredOperations
+        const commands = routes.length > 0
+          ? routes
           : labels.some((label) => label === "agent:in-progress" || label === "agent:blocked")
-            ? ["unknown" as const]
+            ? [undefined]
             : [];
-        return operations.map((operation) => ({
-          number: pullRequest.number,
-          operation,
-          identity: `pull-request:${pullRequest.number}`,
-          labels,
-        }));
+        return commands.map((route) => route === undefined
+          ? {
+              number: pullRequest.number,
+              operation: "unknown" as const,
+              identity: commandRoutesForReceiver("pull-request", pullRequest.number)[0]!.identity,
+              labels,
+            }
+          : {
+              number: route.number,
+              operation: route.operation,
+              identity: route.identity,
+              labels,
+            });
       });
       // Issue-side triggers are only meaningful on top-level Work Items, so
       // shape reads happen before routing: sub-issues are driven by their
@@ -284,10 +311,9 @@ export function createAutomationDispatchGithubPort(options: {
       // Work Items are retained for read-only inspection, but remain
       // ineligible for dispatch.
       const relevantLabels = (labels: readonly string[]) =>
-        labels.includes("agent:implement") ||
-        labels.includes("agent:to-issues") ||
         labels.includes("agent:in-progress") ||
-        labels.includes("agent:blocked");
+        labels.includes("agent:blocked") ||
+        commandRoutesForReceiver("issue", 1).some((route) => labels.includes(route.trigger));
       const candidates = await Promise.all([...issues.values()]
         .filter((issue) => relevantLabels(issue.labels.map(({ name }) => name)))
         .sort((left, right) => left.number - right.number)
@@ -309,30 +335,34 @@ export function createAutomationDispatchGithubPort(options: {
       const issueCommands = candidates.flatMap((candidate) => {
         const { number, labels, shape } = candidate;
         if (shape.parent !== null) return [];
-        const commands: {
-          readonly number: number;
-          readonly operation: "implement-issue" | "implement-prd" | "split-prd" | "unknown";
-          readonly identity: string;
-          readonly labels: readonly string[];
-        }[] = [];
+        const commands: import("./automation-command.ts").AutomationCommand[] = [];
         if (labels.includes("agent:implement")) {
           if (shape.subIssues.totalCount > 0) {
-            commands.push({ number, operation: "implement-prd", identity: `prd:${number}`, labels });
+            const route = resolveAutomationCommandRoute("implement-prd", number);
+            commands.push({ number, operation: route.operation, identity: route.identity, labels });
           } else if (!candidate.hasOpenImplementationPullRequest) {
-            commands.push({ number, operation: "implement-issue", identity: `issue:${number}`, labels });
+            const route = resolveAutomationCommandRoute("implement-issue", number);
+            commands.push({ number, operation: route.operation, identity: route.identity, labels });
           }
         }
         // When both triggers are present, only the higher-priority
         // implementation command runs (#219); the split trigger stays for a
         // later round so one Work Item never runs two operations at once.
-        if (labels.includes("agent:to-issues") && !labels.includes("agent:implement")) {
-          commands.push({ number, operation: "split-prd", identity: `prd:${number}`, labels });
+        const splitRoute = resolveAutomationCommandRoute("split-prd", number);
+        if (labels.includes(splitRoute.trigger) && !labels.includes("agent:implement")) {
+          commands.push({ number, operation: splitRoute.operation, identity: splitRoute.identity, labels });
         }
         // A state-only Work Item has already consumed its trigger. Its
         // originating operation cannot be reconstructed safely, so preserve
         // only its Work Item identity for read-only inspection.
         if (commands.length === 0 && (labels.includes("agent:in-progress") || labels.includes("agent:blocked"))) {
-          commands.push({ number, operation: "unknown", identity: `issue:${number}`, labels });
+          commands.push({
+            number,
+            operation: "unknown",
+            identity: commandRoutesForReceiver("issue", number)
+              .find((route) => route.operation === "implement-issue")!.identity,
+            labels,
+          });
         }
         return commands;
       });

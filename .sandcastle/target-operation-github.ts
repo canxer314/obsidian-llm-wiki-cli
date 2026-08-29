@@ -1,3 +1,4 @@
+import { resolveTargetOperationRoute } from "./automation-command-route.ts";
 import type { AuthorizedTargetOperationInvocation } from "./target-operation.ts";
 
 export interface ManagedOperationInvocation {
@@ -32,13 +33,7 @@ export function createManagedOperationGithub<TResult extends Record<string, unkn
     return { ...github, readBaseRevision: async () => invocation.revision } as TResult;
   }
   if (invocation.acquired !== true) return github;
-  const trigger = operation === "split-prd"
-    ? "agent:to-issues"
-    : operation === "review"
-      ? "agent:review"
-      : operation === "update-branch"
-        ? "agent:update-branch"
-        : "agent:implement";
+  const trigger = resolveTargetOperationRoute(operation, number).trigger;
   let lifecycle: "before" | "acquiring" | "acquired" = "before";
   let blocked = false;
   const labelsFor = (labels: readonly string[]): readonly string[] => {
