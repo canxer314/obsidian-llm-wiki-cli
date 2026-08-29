@@ -11,11 +11,21 @@ import {
   type FeedbackThreadReply,
 } from "./feedback-reconciliation.ts";
 import { convergeFeedbackHead, type FeedbackConvergence } from "./feedback-convergence.ts";
-import type { GithubReadErrorClassification } from "./github-cli.ts";
+import {
+  classifyGithubReadError,
+  type GithubReadErrorClassification,
+} from "./github-cli.ts";
 
 export interface FeedbackReplyIntent {
   readonly rootCommentId: string;
   readonly body: string;
+}
+
+export interface FeedbackReconcileAuthorization {
+  readonly invocation: "reconcile";
+  readonly baseRevision?: string;
+  readonly expectedPost?: string;
+  readonly expectedReply?: FeedbackReplyIntent;
 }
 
 export type FeedbackBlockedReason =
@@ -33,7 +43,7 @@ export interface FeedbackFinalization {
   readonly inProgressCleanupFailed: boolean;
 }
 
-export interface FeedbackImplementationPorts {
+export interface FeedbackImplementationResources {
   readonly github: {
     readPullRequest(pullRequestNumber: number): Promise<ReviewAutomationPullRequest & { readonly headRefName: string }>;
     readFeedbackReplies(pullRequestNumber: number): Promise<readonly FeedbackThreadReply[]>;
@@ -82,7 +92,6 @@ export interface FeedbackImplementationPorts {
   readonly wait?: (milliseconds: number) => Promise<void>;
   readonly convergenceAttempts?: number;
   readonly replyConvergenceAttempts?: number;
-  readonly classifyReadError?: (error: unknown) => GithubReadErrorClassification;
 }
 
 export type FeedbackImplementationResult =
@@ -143,7 +152,7 @@ function blocked(
   };
 }
 
-async function waitFor(ports: FeedbackImplementationPorts, milliseconds: number): Promise<void> {
+async function waitFor(ports: FeedbackImplementationResources, milliseconds: number): Promise<void> {
   const wait = ports.wait ?? ((delay) => new Promise((resolveWait) => setTimeout(resolveWait, delay)));
   await wait(milliseconds);
 }
@@ -157,7 +166,7 @@ async function publishCanonicalReply(request: {
   readonly post: string;
   readonly rootCommentId: string;
   readonly body: string;
-  readonly github: FeedbackImplementationPorts["github"];
+  readonly github: FeedbackImplementationResources["github"];
   readonly attempts: number;
   readonly wait: (milliseconds: number) => Promise<void>;
   readonly classifyReadError: (error: unknown) => GithubReadErrorClassification;
@@ -226,7 +235,7 @@ async function publishCanonicalReply(request: {
 }
 
 async function settleBlockedState(
-  ports: FeedbackImplementationPorts,
+  ports: FeedbackImplementationResources,
   pullRequestNumber: number,
   jobId: string,
   reason: FeedbackBlockedReason,
@@ -247,7 +256,7 @@ async function settleBlockedState(
 // Every blocked path shares one shape: settle the managed labels and return
 // the typed outcome with the settle failures attached (#293).
 async function blockAndSettle(
-  ports: FeedbackImplementationPorts,
+  ports: FeedbackImplementationResources,
   pullRequestNumber: number,
   jobId: string,
   reason: FeedbackBlockedReason,
@@ -267,7 +276,7 @@ async function finalizeAdopted(
   pullRequestNumber: number,
   post: string,
   jobId: string,
-  ports: FeedbackImplementationPorts,
+  ports: FeedbackImplementationResources,
 ): Promise<FeedbackImplementationResult> {
   const results = await Promise.allSettled([
     ports.github.removePullRequestLabel(pullRequestNumber, "agent:blocked"),
@@ -280,23 +289,22 @@ async function finalizeAdopted(
   return { status: "implemented", revision: post, reconciled: true };
 }
 
-export async function runFeedbackImplementationAutomationCommand(
+export async function runFeedbackImplementation(
   request: {
     readonly pullRequestNumber: number;
-    readonly invocation?: "ordinary" | "reconcile";
-    readonly baseRevision?: string;
-    readonly expectedPost?: string;
-    readonly expectedReply?: FeedbackReplyIntent;
+    readonly authorization?: FeedbackReconcileAuthorization;
   },
-  ports: FeedbackImplementationPorts,
+  resources: FeedbackImplementationResources,
 ): Promise<FeedbackImplementationResult> {
-  const jobId = ports.createJobId?.() ?? "local-feedback-job";
+  const ports = resources;
+  const authorization = request.authorization;
+  const invocation = authorization === undefined ? "ordinary" : "reconcile";
+  const jobId = resources.createJobId?.() ?? "local-feedback-job";
   if (activePullRequestNumbers.has(request.pullRequestNumber)) {
     return { status: "refused", reason: `Pull Request #${request.pullRequestNumber} is already being processed` };
   }
   const pullRequest = await ports.github.readPullRequest(request.pullRequestNumber);
 
-  const invocation = request.invocation ?? "ordinary";
   if (invocation === "ordinary") {
     const reason = refusal(pullRequest);
     if (reason !== undefined) {
@@ -344,9 +352,9 @@ export async function runFeedbackImplementationAutomationCommand(
     reconciliation = await classifyFeedbackReconciliation({
       pullRequestNumber: request.pullRequestNumber,
       headSha: pullRequest.headSha,
-      baseRevision: request.baseRevision,
-      ...(request.expectedPost === undefined ? {} : { expectedPost: request.expectedPost }),
-      ...(request.expectedReply === undefined ? {} : { expectedReplyRootCommentId: request.expectedReply.rootCommentId }),
+      baseRevision: authorization?.baseRevision,
+      ...(authorization?.expectedPost === undefined ? {} : { expectedPost: authorization.expectedPost }),
+      ...(authorization?.expectedReply === undefined ? {} : { expectedReplyRootCommentId: authorization.expectedReply.rootCommentId }),
       intentRootCommentId: selectedIntent.rootCommentId,
       invocation,
       replies: currentFeedback.replies,
@@ -360,7 +368,7 @@ export async function runFeedbackImplementationAutomationCommand(
     case "adopt":
       return finalizeAdopted(request.pullRequestNumber, reconciliation.post, jobId, ports);
     case "reply-only": {
-      if (request.expectedReply === undefined) {
+      if (authorization?.expectedReply === undefined) {
         return blockAndSettle(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", "Reply-only completion requires the reply intent");
       }
       const parent = await ports.github.readCommitParent(reconciliation.post);
@@ -378,12 +386,12 @@ export async function runFeedbackImplementationAutomationCommand(
           pullRequestNumber: request.pullRequestNumber,
           pre: parent,
           post: reconciliation.post,
-          rootCommentId: request.expectedReply.rootCommentId,
-          body: request.expectedReply.body,
+          rootCommentId: authorization.expectedReply.rootCommentId,
+          body: authorization.expectedReply.body,
           github: ports.github,
           attempts: ports.replyConvergenceAttempts ?? CONVERGENCE_ATTEMPTS,
           wait: (milliseconds) => waitFor(ports, milliseconds),
-          classifyReadError: ports.classifyReadError ?? (() => ({ kind: "deterministic" })),
+          classifyReadError: classifyGithubReadError,
         });
       } catch (error) {
         const summary = redactFailureSummary(error instanceof Error ? error.message : String(error));
@@ -493,7 +501,7 @@ export async function runFeedbackImplementationAutomationCommand(
             expectedPost: publishedRevision,
             acquiredPre: pullRequest.headSha,
             readHead: async () => (await ports.github.readPullRequest(pullRequest.number)).headSha,
-            classifyReadError: ports.classifyReadError ?? (() => ({ kind: "deterministic" })),
+            classifyReadError: classifyGithubReadError,
             attempts: ports.convergenceAttempts ?? CONVERGENCE_ATTEMPTS,
             wait: async (classification, attempt) => {
               await waitFor(ports, classification.kind === "rate-limited"
@@ -544,7 +552,7 @@ export async function runFeedbackImplementationAutomationCommand(
           github: ports.github,
           attempts: ports.replyConvergenceAttempts ?? CONVERGENCE_ATTEMPTS,
           wait: (milliseconds) => waitFor(ports, milliseconds),
-          classifyReadError: ports.classifyReadError ?? (() => ({ kind: "deterministic" })),
+          classifyReadError: classifyGithubReadError,
         });
         return publishedRevision;
       });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runFeedbackImplementationAutomationCommand } from "../.sandcastle/feedback-implementation-automation.js";
+import { runFeedbackImplementation } from "../.sandcastle/feedback-implementation-automation.js";
 import { feedbackReplyMarker } from "../.sandcastle/feedback-reconciliation.js";
 
 const PRE = "a".repeat(40);
@@ -43,7 +43,6 @@ function ports(overrides: {
   readonly publishError?: Error;
   readonly replyError?: Error;
   readonly writeAddsMarker?: boolean;
-  readonly classifyReadError?: (error: unknown) => { readonly kind: "transient" | "rate-limited" | "deterministic"; readonly retryAfterMilliseconds?: number };
   readonly convergenceAttempts?: number;
   readonly replyConvergenceAttempts?: number;
   readonly finalizationFailures?: readonly string[];
@@ -112,13 +111,21 @@ function ports(overrides: {
     wait: async () => {},
     convergenceAttempts: overrides.convergenceAttempts,
     replyConvergenceAttempts: overrides.replyConvergenceAttempts,
-    classifyReadError: overrides.classifyReadError,
   };
 }
 
 const CLEAN_FINALIZATION = { blockedStateFailed: false, diagnosticFailed: false, inProgressCleanupFailed: false };
 
-describe("feedback implementation automation", () => {
+describe("feedback implementation", () => {
+  it("runs ordinary feedback through its production interface without reconciliation authorization", async () => {
+    const subject = ports({ writeAddsMarker: true });
+
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+
+    expect(subject.implementer.implement).toHaveBeenCalledWith(expect.objectContaining({ rootCommentId: ROOT }));
+  });
+
   it("does not adopt an old marker when a distinct unresolved root is the current intent", async () => {
     const oldRoot = "PRRC_old";
     const subject = ports({
@@ -128,7 +135,7 @@ describe("feedback implementation automation", () => {
       readbackReplies: [marker(ROOT)],
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.implementer.implement).toHaveBeenCalledWith(expect.objectContaining({ rootCommentId: ROOT }));
@@ -143,7 +150,7 @@ describe("feedback implementation automation", () => {
       writeAddsMarker: true,
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.implementer.implement).toHaveBeenCalledWith(expect.objectContaining({ rootCommentId: ROOT }));
@@ -152,7 +159,7 @@ describe("feedback implementation automation", () => {
   it("fails closed before Agent execution when review state has multiple current roots", async () => {
     const subject = ports({ feedbackRoots: [ROOT, "PRRC_other"] });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reconciliation",
@@ -168,7 +175,7 @@ describe("feedback implementation automation", () => {
   it("fails closed before Agent execution when a thread already contains a non-canonical reply", async () => {
     const subject = ports({ replies: [markerReply("A third-party reply")] });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reconciliation",
@@ -185,11 +192,11 @@ describe("feedback implementation automation", () => {
     const state = [marker(ROOT)];
     const ordinary = ports({ headReads: [POST], replies: state, parentOf: () => PRE });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, ordinary))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, ordinary))
       .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation" }));
 
     const reconcile = ports({ headReads: [POST], replies: state, parentOf: () => PRE });
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile" }, reconcile))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224, authorization: { invocation: "reconcile" } }, reconcile))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
   });
   it("settles blocked Feedback Reconcile Authorization when Canonical Implementation Reply classification cannot read its parent", async () => {
@@ -204,7 +211,7 @@ describe("feedback implementation automation", () => {
       },
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile" }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224, authorization: { invocation: "reconcile" } }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reconciliation",
@@ -230,10 +237,9 @@ describe("feedback implementation automation", () => {
       parentOf: () => { throw new Error("commit graph unavailable"); },
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({
+    await expect(runFeedbackImplementation({
       pullRequestNumber: 224,
-      invocation: "reconcile",
-      baseRevision: PRE,
+      authorization: { invocation: "reconcile", baseRevision: PRE },
     }, subject)).resolves.toEqual({
       status: "blocked",
       reason: "feedback-reconciliation",
@@ -255,7 +261,7 @@ describe("feedback implementation automation", () => {
   it("publishes only through the controlled publisher and verifies the existing PR head", async () => {
     const subject = ports();
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.publisher.prepare).toHaveBeenCalledWith("/checkout", "feature/feedback", PRE);
@@ -281,7 +287,7 @@ describe("feedback implementation automation", () => {
       ],
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation" }));
 
     expect(subject.publisher.publish).not.toHaveBeenCalled();
@@ -297,7 +303,7 @@ describe("feedback implementation automation", () => {
       parentOf: (sha) => sha === POST ? PRE : undefined,
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation" }));
 
     expect(subject.publisher.publish).not.toHaveBeenCalled();
@@ -312,7 +318,7 @@ describe("feedback implementation automation", () => {
       ],
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reconciliation", revision: POST }));
 
     expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
@@ -321,7 +327,7 @@ describe("feedback implementation automation", () => {
   it("converges when the first post-push read still sees the acquired PRE", async () => {
     const subject = ports({ headReads: [PRE, PRE, PRE, PRE, POST] });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
@@ -332,9 +338,6 @@ describe("feedback implementation automation", () => {
     const transient = Object.assign(new Error("network reset"), { transient: true });
     const subject = ports({
       headReads: [PRE, PRE, PRE, POST],
-      classifyReadError: (error: unknown) => (error as Error).message === "network reset"
-        ? { kind: "transient" }
-        : { kind: "deterministic" },
     });
     subject.github.readPullRequest.mockReset()
       .mockResolvedValueOnce(pullRequest(PRE))
@@ -343,7 +346,7 @@ describe("feedback implementation automation", () => {
       .mockRejectedValueOnce(transient)
       .mockResolvedValue(pullRequest(POST, ["agent:in-progress"]));
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.github.readPullRequest).toHaveBeenCalledTimes(5);
@@ -352,7 +355,7 @@ describe("feedback implementation automation", () => {
   it("returns a typed indeterminate outcome when the head stays at PRE without a second push", async () => {
     const subject = ports({ headReads: [PRE, PRE, PRE, PRE, PRE, PRE], convergenceAttempts: 3 });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-convergence",
@@ -371,7 +374,7 @@ describe("feedback implementation automation", () => {
   it("fails closed on a third-party head without overwriting it", async () => {
     const subject = ports({ headReads: [PRE, PRE, PRE, OTHER] });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-head-conflict",
@@ -390,7 +393,7 @@ describe("feedback implementation automation", () => {
     const first = ports({ replyError: new Error("reply lost") });
     first.github.readFeedbackReplies.mockReset().mockResolvedValue([]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, first))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, first))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reply",
@@ -408,7 +411,7 @@ describe("feedback implementation automation", () => {
       parentOf: () => PRE,
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile", baseRevision: PRE }, second))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224, authorization: { invocation: "reconcile", baseRevision: PRE } }, second))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect(second.implementer.implement).not.toHaveBeenCalled();
@@ -425,7 +428,7 @@ describe("feedback implementation automation", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([marker(ROOT)]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
@@ -438,7 +441,7 @@ describe("feedback implementation automation", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValue([marker(ROOT)]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
@@ -455,11 +458,13 @@ describe("feedback implementation automation", () => {
       ],
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({
+    await expect(runFeedbackImplementation({
       pullRequestNumber: 224,
-      invocation: "reconcile",
-      expectedPost: POST,
-      expectedReply: { rootCommentId: ROOT, body: "Fixed." },
+      authorization: {
+        invocation: "reconcile",
+        expectedPost: POST,
+        expectedReply: { rootCommentId: ROOT, body: "Fixed." },
+      },
     }, subject)).resolves.toEqual(expect.objectContaining({
       status: "blocked",
       reason: "feedback-reconciliation",
@@ -474,7 +479,7 @@ describe("feedback implementation automation", () => {
       .mockResolvedValueOnce([marker(ROOT)])
       .mockResolvedValueOnce([]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
@@ -488,7 +493,7 @@ describe("feedback implementation automation", () => {
       markerReply(feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: "PRRC_other" })),
     ]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual(expect.objectContaining({ status: "blocked", reason: "feedback-reply", revision: POST }));
   });
   it("does not duplicate a reply whose POST landed even when the response was lost", async () => {
@@ -496,7 +501,7 @@ describe("feedback implementation automation", () => {
     subject.github.readFeedbackReplies.mockReset()
       .mockImplementation(async () => [marker(ROOT)]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
 
     expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
@@ -505,11 +510,13 @@ describe("feedback implementation automation", () => {
   it("performs a controlled reply-only completion without running the Agent or pushing", async () => {
     const subject = ports({ headReads: [POST, POST, POST, POST], parentOf: () => PRE });
 
-    await expect(runFeedbackImplementationAutomationCommand({
+    await expect(runFeedbackImplementation({
       pullRequestNumber: 224,
-      invocation: "reconcile",
-      expectedPost: POST,
-      expectedReply: { rootCommentId: ROOT, body: "Fixed." },
+      authorization: {
+        invocation: "reconcile",
+        expectedPost: POST,
+        expectedReply: { rootCommentId: ROOT, body: "Fixed." },
+      },
     }, subject)).resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect(subject.implementer.implement).not.toHaveBeenCalled();
@@ -528,7 +535,7 @@ describe("feedback implementation automation", () => {
     ];
     const subject = ports({ headReads: [POST, POST, POST, POST], replies });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reconciliation",
@@ -546,7 +553,7 @@ describe("feedback implementation automation", () => {
   it("rejects a rejected force-with-lease publication as blocked without a retry", async () => {
     const subject = ports({ publishError: new Error("stale info") });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-publication",
@@ -563,7 +570,7 @@ describe("feedback implementation automation", () => {
   it("reflects an in-progress cleanup failure in a typed finalization outcome", async () => {
     const subject = ports({ finalizationFailures: ["agent:in-progress"] });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-finalization",
@@ -578,7 +585,7 @@ describe("feedback implementation automation", () => {
     const subject = ports({ replyError: new Error("reply lost"), blockedLabelFailure: true });
     subject.github.readFeedbackReplies.mockReset().mockResolvedValue([]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reply",
@@ -593,7 +600,7 @@ describe("feedback implementation automation", () => {
     const subject = ports({ diagnosticFailure: true });
     subject.implementer.implement.mockRejectedValue(new Error("execution failed"));
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-execution",
@@ -615,7 +622,7 @@ describe("feedback implementation automation", () => {
     subject.github.readPullRequest.mockReset()
       .mockResolvedValue(pullRequest(POST, ["agent:blocked"]));
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile", baseRevision: PRE }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224, authorization: { invocation: "reconcile", baseRevision: PRE } }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect(subject.implementer.implement).not.toHaveBeenCalled();
@@ -628,7 +635,7 @@ describe("feedback implementation automation", () => {
   it("rejects a mismatching Agent reply root before publication or post-publication work", async () => {
     const subject = ports({ implementReply: { rootCommentId: "PRRC_nope", body: "Fixed." } });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reply",
@@ -648,7 +655,7 @@ describe("feedback implementation automation", () => {
   it("blocks the work item when the PR head differs after publication", async () => {
     const subject = ports({ headReads: [PRE, PRE, PRE, OTHER] });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-head-conflict",
@@ -671,7 +678,7 @@ describe("feedback implementation automation", () => {
       .mockRejectedValueOnce(new Error("unexpected read failure"))
       .mockResolvedValue(pullRequest(POST, ["agent:in-progress"]));
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-convergence",
@@ -692,7 +699,7 @@ describe("feedback implementation automation", () => {
       .mockRejectedValueOnce(new Error("readback read failed"))
       .mockResolvedValue([marker()]);
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reply",
@@ -710,7 +717,7 @@ describe("feedback implementation automation", () => {
     const subject = ports({ headReads: [PRE, PRE, PRE, POST] });
     subject.github.readUnresolvedReviewThreads.mockRejectedValue(new Error("threads unavailable"));
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reply",
@@ -728,7 +735,7 @@ describe("feedback implementation automation", () => {
       parentOf: () => PRE,
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224, invocation: "reconcile", baseRevision: PRE }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224, authorization: { invocation: "reconcile", baseRevision: PRE } }, subject))
       .resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
 
     expect(subject.implementer.implement).not.toHaveBeenCalled();
@@ -743,7 +750,7 @@ describe("feedback implementation automation", () => {
       replies: [markerReply(`Implemented in ${POST}.`)],
     });
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-reconciliation",
@@ -761,7 +768,7 @@ describe("feedback implementation automation", () => {
     const subject = ports();
     subject.implementer.implement.mockRejectedValue(new Error("Feedback implementation execution timed out"));
 
-    await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 224 }, subject))
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
       .resolves.toEqual({
         status: "blocked",
         reason: "feedback-execution",

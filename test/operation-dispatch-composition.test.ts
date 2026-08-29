@@ -4,7 +4,7 @@ import { runArchitectureReviewAutomationCommand } from "../.sandcastle/architect
 import type { AutomationCommand, AutomationOperation } from "../.sandcastle/automation-command.js";
 import { dispatchAutomationCommands } from "../.sandcastle/automation-dispatch.js";
 import { runBranchUpdateAutomationCommand } from "../.sandcastle/branch-update-automation.js";
-import { runFeedbackImplementationAutomationCommand } from "../.sandcastle/feedback-implementation-automation.js";
+import { runFeedbackImplementation } from "../.sandcastle/feedback-implementation-automation.js";
 import { runImplementationAutomationCommand } from "../.sandcastle/implementation-automation.js";
 import { runPrdImplementationAutomationCommand } from "../.sandcastle/prd-implementation-automation.js";
 import { runPrdSplitAutomationCommand } from "../.sandcastle/prd-split-automation.js";
@@ -343,7 +343,7 @@ async function executeOrdinaryBusinessOperation(options: {
         createJobId: () => `${entry.targetOperation}-job`,
       });
     case "implement-feedback":
-      return runFeedbackImplementationAutomationCommand({
+      return runFeedbackImplementation({
         pullRequestNumber: entry.number,
       }, {
         github,

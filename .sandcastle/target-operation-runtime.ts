@@ -6,7 +6,7 @@ import { createProcessArchitectureReviewRunner } from "./architecture-review-pro
 import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
 import { createProcessBranchUpdateConflictResolver } from "./branch-update-conflict-process-runner.ts";
 import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
-import { createFeedbackImplementationEntry } from "./feedback-implementation-ports.ts";
+import { runFeedbackImplementation } from "./feedback-implementation-automation.ts";
 import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
@@ -115,7 +115,10 @@ export async function runTargetOperation(
     });
   }
   if (operation === "implement-feedback") {
-    const entry = createFeedbackImplementationEntry(() => ({
+    return runFeedbackImplementation({
+      pullRequestNumber: number,
+      ...(invocation.reconcile === undefined ? {} : { authorization: invocation.reconcile }),
+    }, {
       github,
       checkout,
       publisher: createFeedbackPublisher({ gitEnvironment: startup.childEnvironments.git }),
@@ -125,10 +128,7 @@ export async function runTargetOperation(
       }),
       lease,
       createJobId,
-    }));
-    return invocation.reconcile === undefined
-      ? entry.runDispatcher(number)
-      : entry.runDirect(number, invocation.reconcile);
+    });
   }
   if (operation === "split-prd") {
     return runPrdSplitAutomationCommand({ issueNumber: number }, {

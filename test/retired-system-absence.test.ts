@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -32,6 +32,15 @@ describe("retired Sandcastle system absence", () => {
     const violations = sources.flatMap(({ name, content }) =>
       FORBIDDEN_PATTERNS.filter(({ pattern }) => pattern.test(content))
         .map(({ behavior }) => `${name}: ${behavior}`));
+    expect(violations).toEqual([]);
+  });
+
+  it("the retired feedback entry seam is absent from the repository", () => {
+    expect(existsSync(resolve(sandcastleDir, "feedback-implementation-ports.ts"))).toBe(false);
+    const violations = automationSources().flatMap(({ name, content }) =>
+      /feedback-implementation-ports|createFeedbackImplementationEntry|runDirect|runDispatcher/u.test(content)
+        ? [name]
+        : []);
     expect(violations).toEqual([]);
   });
 
