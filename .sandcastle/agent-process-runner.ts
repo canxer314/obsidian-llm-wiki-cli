@@ -156,5 +156,9 @@ export function workerJson<TResult>(result: AgentWorkerResult, workerName: strin
   const output = result.output.trim();
   if (output.length === 0) throw new Error(`${workerName} worker did not return a result`);
   const line = output.split("\n").at(-1)!;
-  return JSON.parse(line) as TResult;
+  try {
+    return JSON.parse(line) as TResult;
+  } catch {
+    throw new Error(`${workerName} worker returned invalid JSON`);
+  }
 }
