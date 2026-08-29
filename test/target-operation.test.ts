@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -324,7 +324,7 @@ describe("Target operation runner", () => {
         revision,
         jobId: "completed-log-failure",
       })).rejects.toMatchObject({ code: "EACCES" });
-      expect(() => readFileSync(checkoutPath)).toThrow();
+      expect(existsSync(checkoutPath)).toBe(false);
       expect(JSON.parse(readFileSync(
         join(logsPath, "completed-log-failure", "metadata.json"),
         "utf8",

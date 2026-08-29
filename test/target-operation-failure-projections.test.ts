@@ -11,6 +11,7 @@ import { createTargetOperationRunner } from "../.sandcastle/target-operation.js"
 
 const executeFile = promisify(execFile);
 const remoteUrl = "https://github.com/example/target-failure-projection.git";
+const diagnosticToken = `ghp_${"s".repeat(36)}`;
 
 const git = async (arguments_: readonly string[], environment?: NodeJS.ProcessEnv): Promise<string> =>
   (await executeFile("git", [...arguments_], { env: environment })).stdout.trim();
@@ -133,8 +134,8 @@ const representativeScenarios: readonly Scenario[] = [
   },
   {
     name: "operation-exception",
-    operationSource: 'throw new Error("operation exception secret");\n',
-    errorContains: "operation exception secret",
+    operationSource: `throw new Error("operation exception authorization: Bearer ${diagnosticToken}");\n`,
+    errorContains: diagnosticToken,
     expected: {
       result: "rejected",
       checkout: "retained",
@@ -147,7 +148,7 @@ const representativeScenarios: readonly Scenario[] = [
     name: "checkout-setup-failure",
     operationSource: 'console.log(JSON.stringify({ status: "implemented" }));\n',
     setupFailure: true,
-    errorContains: "setup failure secret",
+    errorContains: diagnosticToken,
     expected: {
       result: "rejected",
       checkout: "retained",
@@ -282,13 +283,19 @@ describe("Target operation failure projections", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  const resetProjectionFixture = async (): Promise<void> => {
+    await chmod(checkoutRoot, 0o700).catch(() => undefined);
+    await rm(checkoutRoot, { recursive: true, force: true });
+    await rm(logsPath, { recursive: true, force: true });
+  };
+
   const commitScenario = async (scenario: Scenario): Promise<string> => {
     await writeFile(join(contributorPath, "package.json"), JSON.stringify({
       name: "target-failure-projection-fixture",
       version: "1.0.0",
       private: true,
       ...(scenario.setupFailure === true
-        ? { scripts: { preinstall: 'node -e "throw new Error(\\\"setup failure secret\\\")"' } }
+        ? { scripts: { preinstall: `node -e "throw new Error('setup failure token=${diagnosticToken}')"` } }
         : {}),
     }));
     await writeFile(
@@ -305,9 +312,7 @@ describe("Target operation failure projections", () => {
   it.each(representativeScenarios)(
     "$name preserves hand-authored checkout, log, and trusted settlement projections",
     async (scenario) => {
-      await chmod(checkoutRoot, 0o700).catch(() => undefined);
-      await rm(checkoutRoot, { recursive: true, force: true });
-      await rm(logsPath, { recursive: true, force: true });
+      await resetProjectionFixture();
       const revision = await commitScenario(scenario);
       const labels = new Set(["agent:implement"]);
       const diagnostics: Array<{ readonly jobId: string; readonly summary: string }> = [];
@@ -380,15 +385,14 @@ describe("Target operation failure projections", () => {
         expect(diagnostic.jobId).toBe(`job-${scenario.name}`);
         expect(diagnostic.summary.length).toBeLessThanOrEqual(240);
         expect(diagnostic.summary).not.toContain("must-not-publish");
+        expect(diagnostic.summary).not.toContain(diagnosticToken);
       }
     },
     40_000,
   );
 
   it("projects scheduled architecture review failure without Automation Work Item settlement", async () => {
-    await chmod(checkoutRoot, 0o700).catch(() => undefined);
-    await rm(checkoutRoot, { recursive: true, force: true });
-    await rm(logsPath, { recursive: true, force: true });
+    await resetProjectionFixture();
     await writeFile(join(contributorPath, "package.json"), JSON.stringify({
       name: "target-failure-projection-fixture",
       version: "1.0.0",
