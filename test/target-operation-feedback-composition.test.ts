@@ -6,6 +6,8 @@ import { delimiter, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createTargetOperationCommandDispatch } from "../.sandcastle/target-operation-dispatch.js";
+import { createTargetOperationCliHandlers } from "../.sandcastle/automation-target-composition.js";
+import { runAutomationCli } from "../.sandcastle/automation-cli.js";
 import type { AuthorizedTargetOperationInvocation } from "../.sandcastle/target-operation.js";
 
 const PRE = "a".repeat(40);
@@ -197,6 +199,53 @@ async function runFeedbackTarget(options: {
   return { result, calls };
 }
 
+async function createCliFeedbackComposition(scenario: "ordinary" | "reply-only") {
+  const directory = await mkdtemp(join(tmpdir(), "feedback-cli-composition-"));
+  temporaryDirectories.push(directory);
+  const gh = join(directory, "gh");
+  const callsFile = join(directory, "calls.jsonl");
+  await writeFile(gh, GH_FIXTURE);
+  await chmod(gh, 0o755);
+  const githubEnvironment = {
+    PATH: `${directory}${delimiter}${process.env.PATH ?? ""}`,
+    CALLS_FILE: callsFile,
+    COUNT_FILE: join(directory, "count"),
+    SCENARIO: scenario,
+    PRE,
+    POST,
+    ROOT,
+  };
+  let labels = ["agent:implement"];
+  const targetOperationCommands = createTargetOperationCommandDispatch({
+    github: {
+      readBaseRevision: async () => POST,
+      readPrd: async () => { throw new Error("Feedback composition has no PRD"); },
+      readPullRequest: async () => ({
+        state: "OPEN",
+        labels,
+        headSha: POST,
+        headRefName: "feature/feedback",
+        baseRefName: "master",
+        baseRepository: "owner/repository",
+        headRepository: "owner/repository",
+      }),
+      addIssueLabel: async () => { throw new Error("Feedback composition has no Issue labels"); },
+      removeIssueLabel: async () => { throw new Error("Feedback composition has no Issue labels"); },
+      addPullRequestLabel: async (_number, label) => { labels = [...new Set([...labels, label])]; },
+      removePullRequestLabel: async (_number, label) => { labels = labels.filter((value) => value !== label); },
+    },
+    target: { run: (invocation) => executeFeedbackTarget(githubEnvironment, invocation) },
+    createJobId: () => "feedback-job",
+  });
+  return {
+    callsFile,
+    handlers: createTargetOperationCliHandlers({
+      targetOperationCommands,
+      withScheduler: async (_identity, action) => action(),
+    }),
+  };
+}
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -229,6 +278,48 @@ describe("Target feedback implementation production composition", () => {
     expect(execution.calls.filter((args) => args.some((value) => value.includes("reviewThreads(first:100)"))))
       .toHaveLength(4);
     expect(execution.calls.filter((args) => args.some((value) => value.includes("/comments/123/replies"))))
+      .toHaveLength(1);
+  });
+
+  it("runs ordinary CLI feedback without Feedback Reconcile Authorization", async () => {
+    const composition = await createCliFeedbackComposition("ordinary");
+
+    await expect(runAutomationCli(["run", "feedback", "347"], {
+      runReview: composition.handlers.runReview,
+      runFeedback: composition.handlers.runFeedback,
+      runImplement: composition.handlers.runImplement,
+      runImplementPrd: composition.handlers.runImplementPrd,
+      runSplit: composition.handlers.runSplit,
+      runUpdate: composition.handlers.runUpdate,
+    })).resolves.toMatchObject({ status: "blocked", reason: "feedback-reconciliation" });
+
+    expect((await readFile(composition.callsFile, "utf8")).split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as string[])
+      .filter((args) => args.some((value) => value.includes("/comments/123/replies"))))
+      .toHaveLength(0);
+  });
+
+  it("runs the real reconcile CLI adapter through common Target acquisition", async () => {
+    const composition = await createCliFeedbackComposition("reply-only");
+
+    await expect(runAutomationCli([
+      "reconcile", "feedback", "347",
+      "--base-revision", PRE,
+      "--expected-post", POST,
+      "--reply-root", ROOT,
+      "--reply-body", "Fixed.",
+    ], {
+      runReview: composition.handlers.runReview,
+      runFeedback: composition.handlers.runFeedback,
+      runImplement: composition.handlers.runImplement,
+      runImplementPrd: composition.handlers.runImplementPrd,
+      runSplit: composition.handlers.runSplit,
+      runUpdate: composition.handlers.runUpdate,
+    })).resolves.toEqual({ status: "implemented", revision: POST, reconciled: true });
+
+    expect((await readFile(composition.callsFile, "utf8")).split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as string[])
+      .filter((args) => args.some((value) => value.includes("/comments/123/replies"))))
       .toHaveLength(1);
   });
 });
