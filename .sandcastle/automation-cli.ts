@@ -1,3 +1,5 @@
+import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
+
 export class AutomationCliError extends Error {
   constructor(message: string) {
     super(message);
@@ -8,12 +10,7 @@ export class AutomationCliError extends Error {
 // A controlled feedback reconcile authorization (#293): the operator supplies
 // the durable facts — acquired revision, expected POST, reply intent — that
 // plain observe-first dispatch deliberately never assumes.
-export interface FeedbackReconcileRequest {
-  readonly invocation: "reconcile";
-  readonly baseRevision?: string;
-  readonly expectedPost?: string;
-  readonly expectedReply?: { readonly rootCommentId: string; readonly body: string };
-}
+export type FeedbackReconcileRequest = FeedbackReconcileAuthorization;
 
 const RECONCILE_USAGE =
   "Expected: reconcile feedback <pull-request-number> [--base-revision <revision>] [--expected-post <revision>] [--reply-root <id>] [--reply-body <text>]";

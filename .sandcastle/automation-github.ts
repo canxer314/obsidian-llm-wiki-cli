@@ -7,7 +7,7 @@ import {
   type ArchitectureReviewProposal,
 } from "./architecture-review-automation.ts";
 import type { BranchUpdateAutomationPorts } from "./branch-update-automation.ts";
-import type { FeedbackImplementationPorts } from "./feedback-implementation-automation.ts";
+import type { FeedbackImplementationResources } from "./feedback-implementation-automation.ts";
 import type { FeedbackThreadReply, FeedbackReviewState } from "./feedback-reconciliation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
 import type { PrdImplementationAutomationPorts } from "./prd-implementation-automation.ts";
@@ -344,7 +344,7 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ImplementationAutomationPorts["github"] & FeedbackImplementationPorts["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
+}): ReviewAutomationPorts["github"] & ImplementationAutomationPorts["github"] & FeedbackImplementationResources["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };

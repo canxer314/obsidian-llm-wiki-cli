@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { runArchitectureReviewAutomationCommand } from "../.sandcastle/architecture-review-automation.js";
 import { runBranchUpdateAutomationCommand } from "../.sandcastle/branch-update-automation.js";
-import { runFeedbackImplementationAutomationCommand } from "../.sandcastle/feedback-implementation-automation.js";
+import { runFeedbackImplementation } from "../.sandcastle/feedback-implementation-automation.js";
 import { runImplementationAutomationCommand } from "../.sandcastle/implementation-automation.js";
 import { runPrdImplementationAutomationCommand } from "../.sandcastle/prd-implementation-automation.js";
 import { runPrdSplitAutomationCommand } from "../.sandcastle/prd-split-automation.js";
@@ -240,7 +240,7 @@ describe("business refusal semantics (#247)", () => {
       const publisher = { prepare: vi.fn(), publish: vi.fn() };
       const implementer = { implement: vi.fn() };
 
-      await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 249 }, {
+      await expect(runFeedbackImplementation({ pullRequestNumber: 249 }, {
         github, checkout, publisher, implementer, lease,
       })).resolves.toEqual({ status: "refused", reason });
 
@@ -278,7 +278,7 @@ describe("business refusal semantics (#247)", () => {
         withCheckout: vi.fn().mockRejectedValue(new Error("execution sentinel")),
       };
 
-      await expect(runFeedbackImplementationAutomationCommand({ pullRequestNumber: 249 }, {
+      await expect(runFeedbackImplementation({ pullRequestNumber: 249 }, {
         github,
         checkout,
         publisher: { prepare: vi.fn(), publish: vi.fn() },

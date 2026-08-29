@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createFeedbackImplementationEntry, runFeedbackImplementation } from "../.sandcastle/feedback-implementation-ports.js";
+import { runFeedbackImplementation } from "../.sandcastle/feedback-implementation-automation.js";
 import { feedbackReplyMarker } from "../.sandcastle/feedback-reconciliation.js";
 import { classifyGithubReadError } from "../.sandcastle/github-cli.js";
 
@@ -36,7 +36,7 @@ function pullRequest(headSha = PRE, labels = ["agent:implement"]) {
   };
 }
 
-function createPorts(options: {
+function createResources(options: {
   readonly headRateLimit?: boolean;
   readonly replyRateLimit?: boolean;
   readonly authorizationFailure?: boolean;
@@ -97,7 +97,7 @@ function createPorts(options: {
   };
 }
 
-describe("feedback implementation production ports", () => {
+describe("feedback implementation production interface", () => {
   it.each([
     new Error("unexpected EOF"),
     new Error("transport connection reset by peer"),
@@ -224,10 +224,10 @@ describe("feedback implementation production ports", () => {
     expect(classifyGithubReadError(error)).toEqual({ kind: "deterministic" });
   });
 
-  it("runs direct ordinary feedback through the shared production classifier entry", async () => {
-    const dependencies = createPorts({ headRateLimit: true });
+  it("runs ordinary feedback through the production interface", async () => {
+    const dependencies = createResources({ headRateLimit: true });
     const waits: number[] = [];
-    const entry = createFeedbackImplementationEntry(() => ({
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, {
       github: dependencies.github,
       checkout: dependencies.checkout,
       publisher: dependencies.publisher,
@@ -237,14 +237,12 @@ describe("feedback implementation production ports", () => {
       wait: async (milliseconds) => { waits.push(milliseconds); },
       convergenceAttempts: 2,
       replyConvergenceAttempts: 1,
-    }));
-
-    await expect(entry.runDirect(224)).resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+    })).resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
     expect(waits).toEqual([60_000]);
   });
 
-  it("preserves direct reconcile authorization through the shared production classifier entry", async () => {
-    const dependencies = createPorts();
+  it("preserves explicit reconcile authorization through the production interface", async () => {
+    const dependencies = createResources();
     const baseRevision = "c".repeat(40);
     const expectedPost = "d".repeat(40);
     const expectedReply = { rootCommentId: ROOT, body: "Reply only." };
@@ -258,7 +256,10 @@ describe("feedback implementation production ports", () => {
         body: `Reply only.\n\n${feedbackReplyMarker({ pullRequestNumber: 224, pre: baseRevision, post: expectedPost, rootCommentId: ROOT })}`,
       },
     ]);
-    const entry = createFeedbackImplementationEntry(() => ({
+    await expect(runFeedbackImplementation({
+      pullRequestNumber: 224,
+      authorization: { invocation: "reconcile", baseRevision, expectedPost, expectedReply },
+    }, {
       github: dependencies.github,
       checkout: dependencies.checkout,
       publisher: dependencies.publisher,
@@ -268,19 +269,12 @@ describe("feedback implementation production ports", () => {
       wait: async () => {},
       convergenceAttempts: 1,
       replyConvergenceAttempts: 1,
-    }));
-
-    await expect(entry.runDirect(224, {
-      invocation: "reconcile",
-      baseRevision,
-      expectedPost,
-      expectedReply,
     })).resolves.toEqual({ status: "implemented", revision: expectedPost, reconciled: true });
     expect(dependencies.publisher.publish).not.toHaveBeenCalled();
   });
 
-  it("keeps direct reconcile reply readback fail-closed for target number 429", async () => {
-    const dependencies = createPorts();
+  it("keeps explicit reconcile reply readback fail-closed for target number 429", async () => {
+    const dependencies = createResources();
     const baseRevision = "c".repeat(40);
     const expectedPost = "d".repeat(40);
     const readError = target429Error("HTTP 404 Not Found");
@@ -289,7 +283,15 @@ describe("feedback implementation production ports", () => {
     dependencies.github.readCommitParent.mockResolvedValue(baseRevision);
     dependencies.github.readFeedbackReplies.mockRejectedValue(readError);
     const waits: number[] = [];
-    const entry = createFeedbackImplementationEntry(() => ({
+    await expect(runFeedbackImplementation({
+      pullRequestNumber: 224,
+      authorization: {
+        invocation: "reconcile",
+        baseRevision,
+        expectedPost,
+        expectedReply: { rootCommentId: ROOT, body: "Reply only." },
+      },
+    }, {
       github: dependencies.github,
       checkout: dependencies.checkout,
       publisher: dependencies.publisher,
@@ -299,13 +301,6 @@ describe("feedback implementation production ports", () => {
       wait: async (milliseconds) => { waits.push(milliseconds); },
       convergenceAttempts: 1,
       replyConvergenceAttempts: 3,
-    }));
-
-    await expect(entry.runDirect(224, {
-      invocation: "reconcile",
-      baseRevision,
-      expectedPost,
-      expectedReply: { rootCommentId: ROOT, body: "Reply only." },
     })).resolves.toMatchObject({ status: "blocked", reason: "feedback-reply", revision: expectedPost });
 
     expect(waits).toEqual([]);
@@ -313,8 +308,8 @@ describe("feedback implementation production ports", () => {
     expect(dependencies.github.replyToReviewThread).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps Dispatcher feedback head convergence fail-closed for target number 429", async () => {
-    const dependencies = createPorts();
+  it("keeps ordinary feedback head convergence fail-closed for target number 429", async () => {
+    const dependencies = createResources();
     const readError = target429Error("HTTP 404 Not Found");
     dependencies.github.readPullRequest.mockReset()
       .mockResolvedValueOnce(pullRequest())
@@ -322,7 +317,7 @@ describe("feedback implementation production ports", () => {
       .mockResolvedValueOnce(pullRequest(PRE, ["agent:in-progress"]))
       .mockRejectedValueOnce(readError);
     const waits: number[] = [];
-    const entry = createFeedbackImplementationEntry(() => ({
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, {
       github: dependencies.github,
       checkout: dependencies.checkout,
       publisher: dependencies.publisher,
@@ -332,19 +327,17 @@ describe("feedback implementation production ports", () => {
       wait: async (milliseconds) => { waits.push(milliseconds); },
       convergenceAttempts: 3,
       replyConvergenceAttempts: 1,
-    }));
-
-    await expect(entry.runDispatcher(224))
+    }))
       .resolves.toMatchObject({ status: "blocked", reason: "feedback-convergence", revision: POST });
 
     expect(waits).toEqual([]);
     expect(dependencies.github.readPullRequest).toHaveBeenCalledTimes(4);
   });
 
-  it("runs Dispatcher feedback as ordinary through the shared production classifier entry", async () => {
-    const dependencies = createPorts({ headRateLimit: true });
+  it("runs ordinary feedback without reconcile authorization", async () => {
+    const dependencies = createResources({ headRateLimit: true });
     const waits: number[] = [];
-    const entry = createFeedbackImplementationEntry(() => ({
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, {
       github: dependencies.github,
       checkout: dependencies.checkout,
       publisher: dependencies.publisher,
@@ -354,15 +347,13 @@ describe("feedback implementation production ports", () => {
       wait: async (milliseconds) => { waits.push(milliseconds); },
       convergenceAttempts: 2,
       replyConvergenceAttempts: 1,
-    }));
-
-    await expect(entry.runDispatcher(224)).resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
+    })).resolves.toEqual({ status: "implemented", revision: POST, reconciled: false });
     expect(waits).toEqual([60_000]);
     expect(dependencies.publisher.publish).toHaveBeenCalledTimes(1);
   });
 
   it("uses one dedicated 60-second retry for a production-classified head rate limit", async () => {
-    const dependencies = createPorts({ headRateLimit: true });
+    const dependencies = createResources({ headRateLimit: true });
     const waits: number[] = [];
 
     await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, {
@@ -382,7 +373,7 @@ describe("feedback implementation production ports", () => {
   });
 
   it("uses one dedicated 60-second retry for a production-classified reply readback rate limit without a second write", async () => {
-    const dependencies = createPorts({ replyRateLimit: true });
+    const dependencies = createResources({ replyRateLimit: true });
     const waits: number[] = [];
 
     await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, {
@@ -403,7 +394,7 @@ describe("feedback implementation production ports", () => {
   });
 
   it("fails fast without a rate-limit wait or second write when canonical readback names target 429", async () => {
-    const dependencies = createPorts();
+    const dependencies = createResources();
     const error = target429Error("GraphQL: Could not resolve to an issue or pull request with the number of 429. (repository.issue)");
     dependencies.github.readPullRequest.mockReset()
       .mockResolvedValueOnce(pullRequest())
@@ -421,7 +412,6 @@ describe("feedback implementation production ports", () => {
       lease: dependencies.lease,
       createJobId: () => "feedback-job",
       wait: async (milliseconds) => { waits.push(milliseconds); },
-      classifyReadError: classifyGithubReadError,
       convergenceAttempts: 1,
       replyConvergenceAttempts: 3,
     });
@@ -433,7 +423,7 @@ describe("feedback implementation production ports", () => {
   });
 
   it("fails fast on an ordinary authorization 403 in production head convergence", async () => {
-    const dependencies = createPorts({ authorizationFailure: true });
+    const dependencies = createResources({ authorizationFailure: true });
     const waits: number[] = [];
 
     const result = await runFeedbackImplementation({ pullRequestNumber: 224 }, {
@@ -454,7 +444,7 @@ describe("feedback implementation production ports", () => {
   });
 
   it("fails fast when production head convergence gets a 404 for Pull Request 500", async () => {
-    const dependencies = createPorts();
+    const dependencies = createResources();
     const error = targetServerStatusNumberError(500);
     const waits: number[] = [];
     dependencies.github.readPullRequest.mockReset()
@@ -481,7 +471,7 @@ describe("feedback implementation production ports", () => {
   });
 
   it("retries a transient production-classified reply readback error", async () => {
-    const dependencies = createPorts();
+    const dependencies = createResources();
     dependencies.github.readFeedbackReplies.mockReset()
       .mockRejectedValueOnce(new Error("HTTP 503 Service Unavailable"))
       .mockResolvedValueOnce([
@@ -509,7 +499,7 @@ describe("feedback implementation production ports", () => {
   });
 
   it("fails fast on an ordinary authorization 403 in production reply readback", async () => {
-    const dependencies = createPorts();
+    const dependencies = createResources();
     const waits: number[] = [];
     dependencies.github.readPullRequest.mockReset()
       .mockResolvedValueOnce(pullRequest())
@@ -538,7 +528,7 @@ describe("feedback implementation production ports", () => {
   });
 
   it("fails fast when production reply readback gets a 404 for Pull Request 500", async () => {
-    const dependencies = createPorts();
+    const dependencies = createResources();
     const waits: number[] = [];
     dependencies.github.readFeedbackReplies.mockReset()
       .mockRejectedValueOnce(targetServerStatusNumberError(500));
