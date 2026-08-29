@@ -23,6 +23,7 @@ import { removeExpiredFailureCheckouts } from "./target-checkout.ts";
 import { runSerializedAutomationCommand } from "./serialized-automation-command.ts";
 import { createTargetOperationRunner } from "./target-operation.ts";
 import { createTargetOperationCommandDispatch } from "./target-operation-dispatch.ts";
+import { createTargetOperationCliHandlers } from "./automation-target-composition.ts";
 import { removeExpiredJobLogs } from "./job-logs.ts";
 import { removeExpiredReviewArtifacts } from "./review-artifacts.ts";
 import { loadSandboxStartup } from "./sandbox.ts";
@@ -79,6 +80,10 @@ try {
     target: targetOperations,
     createJobId: randomUUID,
   });
+  const targetOperationHandlers = createTargetOperationCliHandlers({
+    targetOperationCommands,
+    withScheduler,
+  });
   const runCommand = async (
     command: import("./automation-command.ts").AutomationCommand,
   ): Promise<void> => {
@@ -106,10 +111,7 @@ try {
       });
       return { status: "image-ready" } as const;
     },
-    runReview: (pullRequestNumber) => withScheduler(
-      `pull-request:${pullRequestNumber}`,
-      () => targetOperationCommands.runOperation("review", pullRequestNumber),
-    ),
+    runReview: targetOperationHandlers.runReview,
     setupLabels: async () => {
       await dispatchGithub.ensureLabels();
       return { status: "labels-ready" } as const;
@@ -118,14 +120,8 @@ try {
       "architecture-review",
       () => targetOperationCommands.runOperation("architecture-review", 1),
     ),
-    runUpdate: (pullRequestNumber) => withScheduler(
-      `pull-request:${pullRequestNumber}`,
-      () => targetOperationCommands.runOperation("update-branch", pullRequestNumber),
-    ),
-    runFeedback: (pullRequestNumber, reconcile) => withScheduler(
-      `pull-request:${pullRequestNumber}`,
-      () => targetOperationCommands.runOperation("implement-feedback", pullRequestNumber, reconcile),
-    ),
+    runUpdate: targetOperationHandlers.runUpdate,
+    runFeedback: targetOperationHandlers.runFeedback,
     dispatch: (concurrency) => dispatchAutomationCommands({
       concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
     }, {
@@ -171,18 +167,9 @@ try {
         ...await inspectAutomationCommands({ github: dispatchGithub, scheduler: { activeJobs: async () => activeJobs } }),
       };
     },
-    runImplement: (issueNumber) => withScheduler(
-      `issue:${issueNumber}`,
-      () => targetOperationCommands.runOperation("implement-issue", issueNumber),
-    ),
-    runImplementPrd: (issueNumber) => withScheduler(
-      `prd:${issueNumber}`,
-      () => targetOperationCommands.runOperation("implement-prd", issueNumber),
-    ),
-    runSplit: (issueNumber) => withScheduler(
-      `prd:${issueNumber}`,
-      () => targetOperationCommands.runOperation("split-prd", issueNumber),
-    ),
+    runImplement: targetOperationHandlers.runImplement,
+    runImplementPrd: targetOperationHandlers.runImplementPrd,
+    runSplit: targetOperationHandlers.runSplit,
   });
   console.log(JSON.stringify(result));
 } catch (error) {

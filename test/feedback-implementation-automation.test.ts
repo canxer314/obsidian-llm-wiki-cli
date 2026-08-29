@@ -188,6 +188,28 @@ describe("feedback implementation", () => {
     expect(subject.publisher.publish).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["malformed marker", markerReply("Fixed.\n\n<!-- feedback-reconcile op=feedback bad -->")],
+    ["multiple marker-shaped evidence", markerReply(`${feedbackReplyMarker({ pullRequestNumber: 224, pre: PRE, post: POST, rootCommentId: ROOT })}\n<!-- feedback-reconcile op=feedback bad -->`)],
+  ])("fails closed through the module on %s before Agent execution or publication", async (_name, evidence) => {
+    const subject = ports({ replies: [evidence] });
+
+    await expect(runFeedbackImplementation({ pullRequestNumber: 224 }, subject))
+      .resolves.toEqual({
+        status: "blocked",
+        reason: "feedback-reconciliation",
+        jobId: "feedback-job",
+        summary: expect.any(String),
+        finalization: CLEAN_FINALIZATION,
+      });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+  });
+
   it("adopts matching evidence only for an explicit reconcile invocation", async () => {
     const state = [marker(ROOT)];
     const ordinary = ports({ headReads: [POST], replies: state, parentOf: () => PRE });
@@ -579,6 +601,63 @@ describe("feedback implementation", () => {
         revision: POST,
         finalization: { blockedStateFailed: false, diagnosticFailed: false, inProgressCleanupFailed: true },
       });
+  });
+
+  it.each(["agent:blocked", "agent:in-progress", "agent:implement"])("keeps the proven revision and attempts every adopted-label cleanup when removing %s fails", async (failedLabel) => {
+    const subject = ports({
+      headReads: [POST],
+      replies: [marker(ROOT)],
+      parentOf: () => PRE,
+      finalizationFailures: [failedLabel],
+    });
+
+    await expect(runFeedbackImplementation({
+      pullRequestNumber: 224,
+      authorization: { invocation: "reconcile" },
+    }, subject)).resolves.toEqual({
+      status: "blocked",
+      reason: "feedback-finalization",
+      jobId: "feedback-job",
+      summary: "Adopted feedback state could not be finalized",
+      revision: POST,
+    });
+
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:implement");
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
+  });
+
+  it("keeps reply-only finalization failure typed and does not duplicate the canonical reply", async () => {
+    const subject = ports({
+      headReads: [POST],
+      parentOf: () => PRE,
+      finalizationFailures: ["agent:implement"],
+    });
+
+    await expect(runFeedbackImplementation({
+      pullRequestNumber: 224,
+      authorization: {
+        invocation: "reconcile",
+        expectedPost: POST,
+        expectedReply: { rootCommentId: ROOT, body: "Fixed." },
+      },
+    }, subject)).resolves.toEqual({
+      status: "blocked",
+      reason: "feedback-finalization",
+      jobId: "feedback-job",
+      summary: "Adopted feedback state could not be finalized",
+      revision: POST,
+    });
+
+    expect(subject.implementer.implement).not.toHaveBeenCalled();
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
+    expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:implement");
   });
 
   it("distinguishes a blocked-state mutation failure from the original execution failure", async () => {
