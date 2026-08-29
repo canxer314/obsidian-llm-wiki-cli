@@ -119,6 +119,12 @@ describe("Automation Command routes", () => {
     expect(() => resolveAutomationCommandRoute("review", number)).toThrow();
   });
 
+  it("rejects an unknown receiver at runtime", () => {
+    expect(() => commandRoutesForReceiver("issue", 101)).not.toThrow();
+    expect(() => commandRoutesForReceiver("pull-request", 101)).not.toThrow();
+    expect(() => commandRoutesForReceiver("not-a-receiver" as "issue", 101)).toThrow();
+  });
+
   it.each(["unknown", "architecture-review", "not-an-operation"])
   ("rejects %s outside the label-triggered route", (operation) => {
     expect(() => resolveAutomationCommandRoute(operation, 101)).toThrow();

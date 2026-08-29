@@ -118,10 +118,17 @@ export function validateAutomationCommand(command: AutomationCommand): VerifiedA
   return route;
 }
 
+function requireReceiver(value: unknown): asserts value is AutomationCommandReceiver {
+  if (value !== "issue" && value !== "pull-request") {
+    throw new Error("Automation Command receiver is unknown");
+  }
+}
+
 export function commandRoutesForReceiver(
   receiver: AutomationCommandReceiver,
   number: number,
 ): readonly VerifiedAutomationCommandRoute[] {
+  requireReceiver(receiver);
   requireNumber(number);
   return Object.freeze(routePolicies
     .filter((route) => route.receiver === receiver)
