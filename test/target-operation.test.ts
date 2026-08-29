@@ -227,6 +227,84 @@ describe("Target operation runner", () => {
     }
   });
 
+  it.each([
+    ["missing Pull Request metadata", undefined],
+    ["a mismatched head SHA", {
+      headSha: "b".repeat(40),
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "owner/repository",
+    }],
+    ["a forked Pull Request", {
+      headSha: revision,
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "fork/repository",
+    }],
+  ])("rejects a Target runtime invocation with %s before reading startup", async (_caseName, pullRequest) => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/operations/review-pr.ts"),
+      "219",
+      JSON.stringify({
+        operation: "review",
+        revision,
+        jobId: "runtime-pr-validation",
+        ...(pullRequest === undefined ? {} : { pullRequest }),
+      }),
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+    child.stdin.end();
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    await new Promise<void>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", () => resolveExit());
+    });
+
+    expect(stderr).toContain("Target Pull Request operation requires an acquired same-repository revision");
+    expect(stderr).not.toContain("Target operation startup snapshot is missing");
+  });
+
+  it.each([
+    ["missing Pull Request metadata", undefined],
+    ["a mismatched head SHA", {
+      headSha: "b".repeat(40),
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "owner/repository",
+    }],
+    ["a forked Pull Request", {
+      headSha: revision,
+      headRefName: "feature-branch",
+      baseRefName: "master",
+      baseRepository: "owner/repository",
+      headRepository: "fork/repository",
+    }],
+  ])("rejects %s before starting the Target job worker", async (_caseName, pullRequest) => {
+    const start = vi.fn();
+    const runner = createTargetOperationRunner({
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start,
+    });
+
+    await expect(runner.run({
+      operation: "review",
+      number: 219,
+      revision,
+      jobId: "invalid-pr-invocation",
+      ...(pullRequest === undefined ? {} : { pullRequest }),
+    })).rejects.toThrow("Target Pull Request operation requires an acquired same-repository revision");
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it.each(Object.entries(operationEntries) as [TargetOperationIdentity, string][])(
     "executes fixed %s from the authorized Target Checkout",
     async (operation, entry) => {
@@ -356,6 +434,64 @@ describe("Target operation runner", () => {
         "remove-in-progress",
       ]);
       expect(read).toHaveBeenCalledTimes(3);
+    } finally {
+      rmSync(checkoutPath, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a fixed operation wrapper whose literal disagrees with the outer selected operation before startup", async () => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/operations/implement-issue.ts"),
+      "219",
+      JSON.stringify({
+        operation: "review",
+        revision,
+        jobId: "wrapper-identity-mismatch",
+      }),
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+    child.stdin.end();
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveExit);
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Target operation wrapper does not match the authorized invocation");
+  });
+
+  it.each([
+    ["is missing", (operationDirectory: string) => operationDirectory],
+    ["is a directory", (operationDirectory: string) => {
+      mkdirSync(join(operationDirectory, "implement-issue.ts"));
+      return operationDirectory;
+    }],
+  ])("rejects a fixed operation entry that %s before a worker starts", async (_caseName, prepare) => {
+    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-invalid-entry-"));
+    const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+    mkdirSync(operationDirectory, { recursive: true });
+    prepare(operationDirectory);
+    const withCheckout = vi.fn(async (_request, action: (path: string) => Promise<unknown>) => action(checkoutPath));
+
+    try {
+      await expect(executeTargetOperationInCheckout({
+        checkout: { withCheckout },
+        startup: {
+          imageName: "fixture-image",
+          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+        },
+        invocation: {
+          operation: "implement-issue",
+          number: 219,
+          revision,
+          jobId: "invalid-entry-job",
+        },
+      })).rejects.toThrow("Target operation entry must be a regular file inside the authorized checkout");
+      expect(withCheckout).toHaveBeenCalledOnce();
     } finally {
       rmSync(checkoutPath, { force: true, recursive: true });
     }

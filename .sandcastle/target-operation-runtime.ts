@@ -30,6 +30,7 @@ import {
 import type { TargetOperationIdentity } from "./target-operation.ts";
 
 interface TargetOperationInvocation {
+  readonly operation: TargetOperationIdentity;
   readonly revision: string;
   readonly jobId: string;
   readonly acquired?: true;
@@ -46,10 +47,29 @@ interface TargetOperationInvocation {
 function parseInvocation(value: string | undefined): TargetOperationInvocation {
   if (value === undefined) throw new Error("Target operation invocation is missing");
   const invocation = JSON.parse(value) as TargetOperationInvocation;
-  if (!/^[0-9a-f]{40}$/u.test(invocation.revision) || invocation.jobId.length === 0) {
+  if (
+    !/^[0-9a-f]{40}$/u.test(invocation.revision) ||
+    invocation.jobId.length === 0
+  ) {
     throw new Error("Target operation invocation is invalid");
   }
   return invocation;
+}
+
+function requirePullRequestSecurity(
+  operation: TargetOperationIdentity,
+  invocation: TargetOperationInvocation,
+): void {
+  const pullRequestOperation = operation === "implement-feedback" || operation === "review" || operation === "update-branch";
+  if (
+    pullRequestOperation && (
+      invocation.pullRequest === undefined ||
+      invocation.pullRequest.headSha !== invocation.revision ||
+      invocation.pullRequest.baseRepository !== invocation.pullRequest.headRepository
+    )
+  ) {
+    throw new Error("Target Pull Request operation requires an acquired same-repository revision");
+  }
 }
 
 export async function runTargetOperation(
@@ -61,6 +81,10 @@ export async function runTargetOperation(
     throw new Error("Target operation Work Item number is invalid");
   }
   const invocation = parseInvocation(argv[1]);
+  if (invocation.operation !== operation) {
+    throw new Error("Target operation wrapper does not match the authorized invocation");
+  }
+  requirePullRequestSecurity(operation, invocation);
   const checkoutPath = resolve(import.meta.dirname, "..");
   const startupInput = await readTargetOperationStartup();
   const startup = startupInput.snapshot;
