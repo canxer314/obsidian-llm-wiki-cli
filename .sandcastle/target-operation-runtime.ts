@@ -6,7 +6,10 @@ import { createProcessArchitectureReviewRunner } from "./architecture-review-pro
 import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
 import { createProcessBranchUpdateConflictResolver } from "./branch-update-conflict-process-runner.ts";
 import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
-import { runFeedbackImplementation } from "./feedback-implementation-automation.ts";
+import {
+  runFeedbackImplementation,
+  type FeedbackReconcileAuthorization,
+} from "./feedback-implementation-automation.ts";
 import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
@@ -37,12 +40,7 @@ interface TargetOperationInvocation {
     readonly baseRepository: string;
     readonly headRepository: string;
   };
-  readonly reconcile?: {
-    readonly invocation: "reconcile";
-    readonly baseRevision?: string;
-    readonly expectedPost?: string;
-    readonly expectedReply?: { readonly rootCommentId: string; readonly body: string };
-  };
+  readonly reconcile?: FeedbackReconcileAuthorization;
 }
 
 function parseInvocation(value: string | undefined): TargetOperationInvocation {

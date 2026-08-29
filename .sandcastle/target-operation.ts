@@ -16,6 +16,7 @@ import {
   createJobLog,
   inheritedJobLogEnvironment,
 } from "./job-logs.ts";
+import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
 import type { TargetOperationStartupSnapshot } from "./target-operation-startup.ts";
 
 export type TargetOperationIdentity =
@@ -40,12 +41,7 @@ export interface AuthorizedTargetOperationInvocation {
     readonly baseRepository: string;
     readonly headRepository: string;
   };
-  readonly reconcile?: {
-    readonly invocation: "reconcile";
-    readonly baseRevision?: string;
-    readonly expectedPost?: string;
-    readonly expectedReply?: { readonly rootCommentId: string; readonly body: string };
-  };
+  readonly reconcile?: FeedbackReconcileAuthorization;
 }
 
 const TARGET_JOB_GRACE_MILLISECONDS = 10 * 1000;

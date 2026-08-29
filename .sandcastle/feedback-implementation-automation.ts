@@ -336,13 +336,12 @@ export async function runFeedbackImplementation(
     const summary = error instanceof FeedbackStageError ? error.message : redactFailureSummary(error instanceof Error ? error.message : String(error));
     return blockAndSettle(ports, request.pullRequestNumber, jobId, "feedback-reconciliation", summary);
   }
-  const selectedIntent = { status: "selected" as const, rootCommentId: initialIntent.rootCommentId };
-  const currentFeedback = initialIntent.state;
+  const { rootCommentId: selectedRootCommentId, state: currentFeedback } = initialIntent;
   const assertIntentRemainsPending = async (message: string, revision?: string): Promise<void> => {
     const currentIntent = await selectCurrentIntent();
     if (
-      currentIntent.rootCommentId !== selectedIntent.rootCommentId
-      || currentIntent.state.replies.some((reply) => reply.rootCommentId === selectedIntent.rootCommentId)
+      currentIntent.rootCommentId !== selectedRootCommentId
+      || currentIntent.state.replies.some((reply) => reply.rootCommentId === selectedRootCommentId)
     ) {
       throw new FeedbackStageError("feedback-reconciliation", message, revision);
     }
@@ -355,7 +354,7 @@ export async function runFeedbackImplementation(
       baseRevision: authorization?.baseRevision,
       ...(authorization?.expectedPost === undefined ? {} : { expectedPost: authorization.expectedPost }),
       ...(authorization?.expectedReply === undefined ? {} : { expectedReplyRootCommentId: authorization.expectedReply.rootCommentId }),
-      intentRootCommentId: selectedIntent.rootCommentId,
+      intentRootCommentId: selectedRootCommentId,
       invocation,
       replies: currentFeedback.replies,
       parentOf: (sha) => ports.github.readCommitParent(sha),
@@ -452,12 +451,12 @@ export async function runFeedbackImplementation(
             branch: pullRequest.headRefName,
             revision: pullRequest.headSha,
             checkoutPath,
-            rootCommentId: selectedIntent.rootCommentId,
+            rootCommentId: selectedRootCommentId,
           });
         } catch (error) {
           throw new FeedbackStageError("feedback-execution", error instanceof Error ? error.message : String(error));
         }
-        if (outcome.reply.rootCommentId !== selectedIntent.rootCommentId) {
+        if (outcome.reply.rootCommentId !== selectedRootCommentId) {
           throw new FeedbackStageError(
             "feedback-reply",
             `Reply target ${outcome.reply.rootCommentId} does not match the selected feedback intent`,
