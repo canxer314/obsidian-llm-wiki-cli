@@ -517,6 +517,35 @@ describe("Target Checkout real Git filesystem integration", () => {
     await expect(pathExists(checkoutPath)).resolves.toBe(false);
   });
 
+  it("rejects an accepted outcome when mandatory checkout cleanup fails", async () => {
+    const fixture = await createFixture();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    let checkoutPath = "";
+
+    try {
+      await expect(checkout.withCheckout({ revision: fixture.hiddenRevision }, async (path) => {
+        checkoutPath = path;
+        await chmod(fixture.checkoutRoot, 0o500);
+        return { status: "refused" };
+      }, () => "cleanup")).rejects.toMatchObject({ code: "EACCES" });
+
+      await expect(pathExists(checkoutPath)).resolves.toBe(true);
+    } finally {
+      await chmod(fixture.checkoutRoot, 0o700);
+    }
+  });
+
   it("retains a created checkout when explicit retention is supplied", async () => {
     const fixture = await createFixture();
     const checkout = createTargetCheckout({
@@ -560,7 +589,7 @@ describe("Target Checkout real Git filesystem integration", () => {
     await expect(checkout.withCheckout({ revision: fixture.hiddenRevision }, async (path) => {
       checkoutPath = path;
       return { status: "refused" };
-    }, () => "invalid" as "cleanup")).resolves.toEqual({ status: "refused" });
+    }, () => "invalid" as "cleanup")).rejects.toThrow("Target Checkout disposition is invalid");
 
     await expect(pathExists(checkoutPath)).resolves.toBe(true);
   });

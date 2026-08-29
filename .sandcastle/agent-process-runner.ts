@@ -153,7 +153,8 @@ export function workerJson<TResult>(result: AgentWorkerResult, workerName: strin
   if (result.code !== 0) {
     throw new Error(`${workerName} worker exited with ${result.code ?? "signal"}: ${result.diagnostics}`);
   }
-  const line = result.output.trim().split("\n").at(-1);
-  if (line === undefined) throw new Error(`${workerName} worker did not return a result`);
+  const output = result.output.trim();
+  if (output.length === 0) throw new Error(`${workerName} worker did not return a result`);
+  const line = output.split("\n").at(-1)!;
   return JSON.parse(line) as TResult;
 }

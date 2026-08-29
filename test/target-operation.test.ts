@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -293,6 +293,46 @@ describe("Target operation runner", () => {
       }
     },
   );
+
+  it("rejects after successful execution when completed metadata cannot be finalized", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-completed-metadata-failure-"));
+    const logsPath = join(root, "logs");
+    const checkoutPath = join(root, "checkout");
+    mkdirSync(checkoutPath);
+    const runWorker = vi.fn(async () => {
+      rmSync(checkoutPath, { recursive: true });
+      const metadataPath = join(logsPath, "completed-log-failure", "metadata.json");
+      chmodSync(metadataPath, 0o400);
+      return { output: JSON.stringify({ status: "refused" }), code: 0, diagnostics: "" };
+    });
+    const runner = createTargetOperationRunnerWithWorker({
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      start: () => {
+        throw new Error("completed metadata failure test start should not run");
+      },
+    }, runWorker);
+
+    try {
+      await expect(runner.run({
+        operation: "implement-issue",
+        number: 219,
+        revision,
+        jobId: "completed-log-failure",
+      })).rejects.toMatchObject({ code: "EACCES" });
+      expect(() => readFileSync(checkoutPath)).toThrow();
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "completed-log-failure", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "running", jobId: "completed-log-failure" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it("preserves the target failure when failure metadata cannot be completed", async () => {
     const root = mkdtempSync(join(tmpdir(), "target-operation-metadata-failure-"));

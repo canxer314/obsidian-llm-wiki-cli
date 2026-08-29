@@ -195,7 +195,11 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
         await git(["-C", checkoutPath, "checkout", "--detach", request.revision]);
         await npm(["--prefix", checkoutPath, "ci"]);
         const result = await action(checkoutPath);
-        completed = disposition(result) === "cleanup";
+        const requestedDisposition = disposition(result);
+        if (requestedDisposition !== "cleanup" && requestedDisposition !== "retain") {
+          throw new Error("Target Checkout disposition is invalid");
+        }
+        completed = requestedDisposition === "cleanup";
         return result;
       } finally {
         if (completed) {
