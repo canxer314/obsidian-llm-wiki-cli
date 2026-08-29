@@ -69,7 +69,7 @@ const acquiring = { state: "OPEN", labels: ["agent:review", "agent:in-progress"]
 const acquired = { state: "OPEN", labels: ["agent:in-progress"], revision, pullRequest };
 
 describe("trusted Target operation command acquisition", () => {
-  it("rejects scheduled architecture review before label-triggered acquisition", async () => {
+  it("does not expose scheduled architecture review to label-triggered acquisition", async () => {
     const target = { run: vi.fn() };
     const acquisition = acquisitionFor([{ state: "OPEN", labels: [], revision }]);
     const runner = createTargetOperationCommandRunner({
@@ -78,8 +78,8 @@ describe("trusted Target operation command acquisition", () => {
       createJobId: () => "scheduled-job",
     });
 
-    await expect(runner.run("architecture-review", 1)).rejects.toThrow(
-      "Scheduled Target operation cannot be acquired",
+    await expect((runner.run as (operation: string, number: number) => Promise<unknown>)("architecture-review", 1)).rejects.toThrow(
+      "Automation Command route is unknown",
     );
     expect(target.run).not.toHaveBeenCalled();
     expect(acquisition.ports.read).not.toHaveBeenCalled();

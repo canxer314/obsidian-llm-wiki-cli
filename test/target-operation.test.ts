@@ -137,6 +137,12 @@ describe("Target operation runner", () => {
         headRepository: "owner/repository",
       },
     }],
+    ["a label receiver", { receiver: "issue" }],
+    ["a trigger label", { trigger: "agent:review" }],
+    ["feedback reconciliation authorization", {
+      reconcile: { invocation: "reconcile", expectedPost: revision },
+    }],
+    ["an unrecognized field", { unexpected: true }],
   ])("rejects scheduled architecture review with %s before starting a Target job", async (_caseName, forbidden) => {
     const start = vi.fn();
     const runner = createTargetOperationRunner({
@@ -445,6 +451,48 @@ describe("Target operation runner", () => {
       ...(pullRequest === undefined ? {} : { pullRequest }),
     })).rejects.toThrow("Target Pull Request operation requires an acquired same-repository revision");
     expect(start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a Work Item number", { number: 1 }],
+    ["an acquisition marker", { acquired: true }],
+    ["Pull Request metadata", {
+      pullRequest: {
+        headSha: revision,
+        headRefName: "feature-branch",
+        baseRefName: "master",
+        baseRepository: "owner/repository",
+        headRepository: "owner/repository",
+      },
+    }],
+    ["a label receiver", { receiver: "issue" }],
+    ["a trigger label", { trigger: "agent:review" }],
+    ["feedback reconciliation authorization", {
+      reconcile: { invocation: "reconcile", expectedPost: revision },
+    }],
+    ["an unrecognized field", { unexpected: true }],
+  ])("rejects a non-canonical scheduled envelope before reading startup", async (_caseName, forbidden) => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/operations/architecture-review.ts"),
+      JSON.stringify({
+        operation: "architecture-review",
+        revision,
+        jobId: "runtime-scheduled-envelope-validation",
+        ...forbidden,
+      }),
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+    child.stdin.end();
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    await new Promise<void>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", () => resolveExit());
+    });
+
+    expect(stderr).toContain("Target operation invocation is invalid");
+    expect(stderr).not.toContain("Target operation startup snapshot is missing");
   });
 
   it("executes scheduled architecture review without a fake checkout number or wrapper argument", async () => {

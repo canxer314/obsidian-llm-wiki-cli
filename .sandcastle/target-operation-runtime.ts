@@ -68,10 +68,9 @@ function parseInvocation(value: string | undefined): TargetOperationInvocation {
 }
 
 function isAuthorizedScheduledInvocation(invocation: TargetOperationInvocation): boolean {
-  return !Object.hasOwn(invocation, "number") &&
-    !Object.hasOwn(invocation, "acquired") &&
-    !Object.hasOwn(invocation, "pullRequest") &&
-    !Object.hasOwn(invocation, "reconcile");
+  const authorizedKeys = new Set(["operation", "revision", "jobId"]);
+  return Reflect.ownKeys(invocation).length === authorizedKeys.size &&
+    Reflect.ownKeys(invocation).every((key) => typeof key === "string" && authorizedKeys.has(key));
 }
 
 function requirePullRequestSecurity(

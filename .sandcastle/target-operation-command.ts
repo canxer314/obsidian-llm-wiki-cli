@@ -41,13 +41,10 @@ export function createTargetOperationCommandRunner(options: {
 }) {
   return {
     async run(
-      operation: LabelTriggeredTargetOperationIdentity | "architecture-review",
+      operation: LabelTriggeredTargetOperationIdentity,
       number: number,
       reconcile?: LabelTriggeredTargetOperationInvocation["reconcile"],
     ): Promise<unknown> {
-      if (operation === "architecture-review") {
-        throw new Error("Scheduled Target operation cannot be acquired");
-      }
       const route = resolveTargetOperationRoute(operation, number);
       if (reconcile !== undefined && operation !== "implement-feedback") {
         throw new Error("Only feedback implementation supports reconciliation");

@@ -223,14 +223,17 @@ function isBlockedOutcome(value: unknown): boolean {
     "status" in value && value.status === "blocked";
 }
 
+function isAuthorizedScheduledInvocation(
+  invocation: ScheduledArchitectureReviewInvocation,
+): boolean {
+  const authorizedKeys = new Set(["operation", "revision", "jobId"]);
+  return Reflect.ownKeys(invocation).length === authorizedKeys.size &&
+    Reflect.ownKeys(invocation).every((key) => typeof key === "string" && authorizedKeys.has(key));
+}
+
 function validateInvocation(invocation: AuthorizedTargetOperationInvocation): void {
   const { operation, revision, jobId } = invocation;
-  if (operation === "architecture-review" && (
-    "number" in invocation ||
-    "acquired" in invocation ||
-    "pullRequest" in invocation ||
-    "reconcile" in invocation
-  )) {
+  if (operation === "architecture-review" && !isAuthorizedScheduledInvocation(invocation)) {
     throw new Error("Scheduled architecture review invocation is invalid");
   }
   if (operation !== "architecture-review" && (!Number.isSafeInteger(invocation.number) || invocation.number < 1)) {
