@@ -585,9 +585,14 @@ describe("Target operation runner", () => {
       join(operationDirectory, "architecture-review.ts"),
       'let input = ""; for await (const chunk of process.stdin) input += chunk; console.log(JSON.stringify({ status: "proposed", arguments: process.argv.slice(2), checkout: JSON.parse(input).imageName }));\n',
     );
-    const withCheckout = vi.fn(async (request, action: (path: string) => Promise<unknown>) => {
+    const withCheckout = vi.fn(async (request, action: (path: string) => Promise<{
+      readonly value: unknown;
+      readonly disposition: "cleanup" | "retain";
+    }>) => {
       expect(request).toEqual({ revision });
-      return action(checkoutPath);
+      const completion = await action(checkoutPath);
+      expect(completion.disposition).toBe("cleanup");
+      return completion.value;
     });
 
     try {
@@ -627,9 +632,14 @@ describe("Target operation runner", () => {
           'const invocation = JSON.parse(process.argv[3]); console.log(JSON.stringify({ status: ({ "implement-issue": "implemented", "implement-prd": "implemented", "implement-feedback": "implemented", review: "reviewed", "update-branch": "updated", "split-prd": "split", "architecture-review": "proposed" })[invocation.operation], source: "authorized-operation", number: Number(process.argv[2]), token: startup.childEnvironments.github.GH_TOKEN, tokenInArguments: process.argv.includes(startup.childEnvironments.github.GH_TOKEN) }));',
         ].join("\n"),
       );
-      const withCheckout = vi.fn(async (request, action: (path: string) => Promise<unknown>) => {
+      const withCheckout = vi.fn(async (request, action: (path: string) => Promise<{
+        readonly value: unknown;
+        readonly disposition: "cleanup" | "retain";
+      }>) => {
         expect(request).toEqual({ pullRequestNumber: 219, revision });
-        return action(checkoutPath);
+        const completion = await action(checkoutPath);
+        expect(completion.disposition).toBe("cleanup");
+        return completion.value;
       });
 
       try {
@@ -711,7 +721,9 @@ describe("Target operation runner", () => {
               withCheckout: async (request, action) => {
                 events.push(`checkout:${request.revision}`);
                 expect(request.revision).toBe(acquiredRevision);
-                return action(checkoutPath);
+                const completion = await action(checkoutPath);
+                expect(completion.disposition).toBe("cleanup");
+                return completion.value;
               },
             },
             startup: {
@@ -783,7 +795,10 @@ describe("Target operation runner", () => {
     const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
     mkdirSync(operationDirectory, { recursive: true });
     prepare(operationDirectory);
-    const withCheckout = vi.fn(async (_request, action: (path: string) => Promise<unknown>) => action(checkoutPath));
+    const withCheckout = vi.fn(async (_request, action: (path: string) => Promise<{
+      readonly value: unknown;
+      readonly disposition: "cleanup" | "retain";
+    }>) => (await action(checkoutPath)).value);
 
     try {
       await expect(executeTargetOperationInCheckout({
@@ -816,7 +831,9 @@ describe("Target operation runner", () => {
 
     try {
       await expect(executeTargetOperationInCheckout({
-        checkout: { withCheckout: async (_request, action) => action(checkoutPath) },
+        checkout: {
+          withCheckout: async (_request, action) => (await action(checkoutPath)).value,
+        },
         startup: {
           imageName: "fixture-image",
           childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },

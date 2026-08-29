@@ -134,8 +134,8 @@ export async function executeTargetOperationInCheckout(options: {
       timeoutMessage: `Target operation ${operation} timed out`,
     });
     const outcome = classifyTargetOperationOutcome(operation, workerJson(result, `Target operation ${operation}`));
-    return outcome.outcome;
-  }, (result) => classifyTargetOperationOutcome(operation, result).checkout);
+    return { value: outcome.outcome, disposition: outcome.checkout };
+  });
 }
 
 interface TargetOperationRunnerOptions {
