@@ -207,6 +207,11 @@ describe("feedback implementation", () => {
     expect(subject.publisher.publish).not.toHaveBeenCalled();
     expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
     expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
+    expect(subject.github.addFeedbackBlockedDiagnostic).toHaveBeenCalledWith(224, {
+      reason: "feedback-reconciliation",
+      jobId: "feedback-job",
+      summary: expect.any(String),
+    });
     expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
   });
 
