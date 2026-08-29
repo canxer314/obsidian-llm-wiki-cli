@@ -391,6 +391,146 @@ describe("Target operation failure projections", () => {
     40_000,
   );
 
+  it("rejects an inherited outcome status and projects its settled command as blocked", async () => {
+    await resetProjectionFixture();
+    const revision = await commitScenario({
+      name: "inherited-outcome-status",
+      operationSource: 'console.log(JSON.stringify({ status: "implemented" }));\n',
+      expected: {
+        result: "resolved",
+        checkout: "cleaned",
+        log: "completed",
+        blocked: false,
+        diagnostic: false,
+      },
+    });
+    const labels = new Set(["agent:implement"]);
+    const diagnostics: Array<{ readonly jobId: string; readonly summary: string }> = [];
+    const acquisition = {
+      read: vi.fn(async () => ({ state: "OPEN", labels: [...labels], revision })),
+      addInProgress: vi.fn(async () => { labels.add("agent:in-progress"); }),
+      removeTrigger: vi.fn(async () => { labels.delete("agent:implement"); }),
+      addBlocked: vi.fn(async () => { labels.add("agent:blocked"); }),
+      addBlockedDiagnostic: vi.fn(async (_operation, _number, diagnostic) => {
+        diagnostics.push(diagnostic);
+      }),
+      removeInProgress: vi.fn(async () => { labels.delete("agent:in-progress"); }),
+    };
+    const target = createTargetOperationRunner({
+      checkoutOptions: {
+        sourceRepositoryPath: trustedPath,
+        checkoutRoot,
+        gitEnvironment: transport,
+        dependencyEnvironment: transport,
+      },
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: transport, github: {}, claude: {}, githubAgent: {} },
+        models: {
+          default: "default-model",
+          planner: "planner-model",
+          implementer: "implementer-model",
+          reviewer: "reviewer-model",
+        },
+      },
+      timeoutMilliseconds: 30_000,
+      graceMilliseconds: 100,
+    });
+    const command = createTargetOperationCommandRunner({
+      target,
+      acquisition,
+      createJobId: () => "job-inherited-outcome-status",
+    });
+
+    await expect(command.run("implement-issue", 359)).rejects
+      .toThrow("Target operation returned an invalid outcome");
+
+    const checkoutEntries = await readdir(checkoutRoot);
+    expect(checkoutEntries).toHaveLength(1);
+    await expect(readFile(
+      join(logsPath, "job-inherited-outcome-status", "metadata.json"),
+      "utf8",
+    ).then(JSON.parse)).resolves.toMatchObject({ status: "failed" });
+    expect(labels).toEqual(new Set(["agent:blocked"]));
+    expect(acquisition.addBlocked).toHaveBeenCalledTimes(1);
+    expect(acquisition.removeInProgress).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual([{
+      jobId: "job-inherited-outcome-status",
+      summary: "Target operation returned an invalid outcome",
+    }]);
+  });
+
+  it("projects malformed worker JSON without publishing its arbitrary payload", async () => {
+    await resetProjectionFixture();
+    const malformedPayloadMarker = "ARBITRARY-MALFORMED-WORKER-PAYLOAD-359";
+    const scenario: Scenario = {
+      name: "malformed-worker-json-secrecy",
+      operationSource: `console.log('{"status":"implemented","marker": ${malformedPayloadMarker}}');\n`,
+      expected: {
+        result: "rejected",
+        checkout: "retained",
+        log: "failed",
+        blocked: true,
+        diagnostic: true,
+      },
+    };
+    const revision = await commitScenario(scenario);
+    const labels = new Set(["agent:implement"]);
+    const diagnostics: Array<{ readonly jobId: string; readonly summary: string }> = [];
+    const acquisition = {
+      read: vi.fn(async () => ({ state: "OPEN", labels: [...labels], revision })),
+      addInProgress: vi.fn(async () => { labels.add("agent:in-progress"); }),
+      removeTrigger: vi.fn(async () => { labels.delete("agent:implement"); }),
+      addBlocked: vi.fn(async () => { labels.add("agent:blocked"); }),
+      addBlockedDiagnostic: vi.fn(async (_operation, _number, diagnostic) => {
+        diagnostics.push(diagnostic);
+      }),
+      removeInProgress: vi.fn(async () => { labels.delete("agent:in-progress"); }),
+    };
+    const target = createTargetOperationRunner({
+      checkoutOptions: {
+        sourceRepositoryPath: trustedPath,
+        checkoutRoot,
+        gitEnvironment: transport,
+        dependencyEnvironment: transport,
+      },
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: transport, github: {}, claude: {}, githubAgent: {} },
+        models: {
+          default: "default-model",
+          planner: "planner-model",
+          implementer: "implementer-model",
+          reviewer: "reviewer-model",
+        },
+      },
+      timeoutMilliseconds: 30_000,
+      graceMilliseconds: 100,
+    });
+    const command = createTargetOperationCommandRunner({
+      target,
+      acquisition,
+      createJobId: () => "job-malformed-worker-json-secrecy",
+    });
+
+    const execution = command.run("implement-issue", 359);
+    await expect(execution).rejects.toThrow("Target operation returned invalid worker JSON");
+    await expect(execution).rejects.not.toThrow(malformedPayloadMarker);
+
+    await expect(readFile(
+      join(logsPath, "job-malformed-worker-json-secrecy", "metadata.json"),
+      "utf8",
+    ).then(JSON.parse)).resolves.toMatchObject({ status: "failed" });
+    expect(labels).toEqual(new Set(["agent:blocked"]));
+    expect(diagnostics).toEqual([{
+      jobId: "job-malformed-worker-json-secrecy",
+      summary: "Target operation returned invalid worker JSON",
+    }]);
+    expect(diagnostics[0]!.summary).not.toContain(malformedPayloadMarker);
+  });
+
   it("projects scheduled architecture review failure without Automation Work Item settlement", async () => {
     await resetProjectionFixture();
     await writeFile(join(contributorPath, "package.json"), JSON.stringify({
