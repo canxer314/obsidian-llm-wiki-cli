@@ -1,11 +1,13 @@
 import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
 import type { createTargetOperationCommandDispatch } from "./target-operation-dispatch.ts";
 
-export function createTargetOperationCliHandlers(options: {
+export function createAutomationCliDependencies<TDependencies extends object>(options: {
   readonly targetOperationCommands: ReturnType<typeof createTargetOperationCommandDispatch>;
   readonly withScheduler: <T>(identity: string, action: () => Promise<T>) => Promise<T>;
+  readonly additionalDependencies?: TDependencies;
 }) {
   return {
+    ...options.additionalDependencies,
     runReview: (pullRequestNumber: number) => options.withScheduler(
       `pull-request:${pullRequestNumber}`,
       () => options.targetOperationCommands.runOperation("review", pullRequestNumber),
