@@ -72,9 +72,11 @@ export async function executeTargetOperationInCheckout(options: {
 }): Promise<unknown> {
   const { operation, number, revision, jobId, reconcile } = options.invocation;
   return options.checkout.withCheckout({ pullRequestNumber: number, revision }, async (checkoutPath) => {
+    let operationRoot: string;
+    let operationEntry: string;
     try {
-      const operationRoot = await realpath(resolve(checkoutPath, ".sandcastle"));
-      const operationEntry = resolve(operationRoot, targetOperationEntries[operation]);
+      operationRoot = await realpath(resolve(checkoutPath, ".sandcastle"));
+      operationEntry = resolve(operationRoot, targetOperationEntries[operation]);
       const entryRelativePath = relative(operationRoot, await realpath(operationEntry));
       if (
         !(await lstat(operationEntry)).isFile() ||
@@ -83,31 +85,28 @@ export async function executeTargetOperationInCheckout(options: {
       ) {
         throw new Error("Target operation entry must be a regular file inside the authorized checkout");
       }
-      const result = await runAgentWorker({
-        checkoutPath,
-        workerFile: targetOperationEntries[operation],
-        workerName: `Target operation ${operation}`,
-        arguments_: [
-          String(number),
-          JSON.stringify({
-            operation,
-            revision,
-            jobId,
-            ...(options.invocation.acquired === true ? { acquired: true } : {}),
-            ...(options.invocation.pullRequest === undefined ? {} : { pullRequest: options.invocation.pullRequest }),
-            ...(reconcile === undefined ? {} : { reconcile }),
-          }),
-        ],
-        input: JSON.stringify(options.startup),
-        timeoutMessage: `Target operation ${operation} timed out`,
-      });
-      return workerJson(result, `Target operation ${operation}`);
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith("ENOENT:")) {
-        throw new Error("Target operation entry must be a regular file inside the authorized checkout");
-      }
-      throw error;
+    } catch {
+      throw new Error("Target operation entry must be a regular file inside the authorized checkout");
     }
+    const result = await runAgentWorker({
+      checkoutPath,
+      workerFile: targetOperationEntries[operation],
+      workerName: `Target operation ${operation}`,
+      arguments_: [
+        String(number),
+        JSON.stringify({
+          operation,
+          revision,
+          jobId,
+          ...(options.invocation.acquired === true ? { acquired: true } : {}),
+          ...(options.invocation.pullRequest === undefined ? {} : { pullRequest: options.invocation.pullRequest }),
+          ...(reconcile === undefined ? {} : { reconcile }),
+        }),
+      ],
+      input: JSON.stringify(options.startup),
+      timeoutMessage: `Target operation ${operation} timed out`,
+    });
+    return workerJson(result, `Target operation ${operation}`);
   });
 }
 
