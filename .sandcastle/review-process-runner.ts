@@ -1,46 +1,18 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
-import { runJobWithTimeout } from "./job-timeout.ts";
 import { workerProcessOptions } from "./worker-process.ts";
+import { createWorkerProcessLifecycle } from "./worker-process-lifecycle.ts";
 import type { ExtractedReview } from "./review-extraction.ts";
 
 const REVIEW_TIMEOUT_MILLISECONDS = 30 * 60 * 1000;
 const REVIEW_GRACE_MILLISECONDS = 10 * 1000;
 
-function outputOf(child: ChildProcess): Promise<{ readonly output: string; readonly code: number | null; readonly diagnostics: string }> {
-  return new Promise((resolveOutput, reject) => {
-    let output = "";
-    let diagnostics = "";
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      output += String(chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      diagnostics += String(chunk);
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolveOutput({ output, code, diagnostics }));
-  });
-}
-
-function groupExit(pid: number): Promise<void> {
-  return new Promise((resolveExit) => {
-    const check = () => {
-      try {
-        process.kill(-pid, 0);
-        setTimeout(check, 10);
-      } catch {
-        resolveExit();
-      }
-    };
-    check();
-  });
-}
-function parseReview(result: { readonly output: string; readonly code: number | null; readonly diagnostics: string }): ExtractedReview {
+function parseReview(result: { readonly stdout: string; readonly stderr: string; readonly code: number | null }): ExtractedReview {
   if (result.code !== 0) {
-    throw new Error(`Reviewer worker exited with ${result.code ?? "signal"}: ${result.diagnostics}`);
+    throw new Error(`Reviewer worker exited with ${result.code ?? "signal"}: ${result.stderr}`);
   }
-  const line = result.output.trim().split("\n").at(-1);
+  const line = result.stdout.trim().split("\n").at(-1);
   if (line === undefined) throw new Error("Reviewer worker did not return a review");
   return JSON.parse(line) as ExtractedReview;
 }
@@ -49,21 +21,22 @@ export function createProcessReviewRunner(options: {
   readonly startup: string;
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
-  readonly start?: (arguments_: readonly string[]) => ChildProcess;
-  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
-  readonly wait?: (milliseconds: number) => Promise<void>;
-  readonly groupExited?: (pid: number) => Promise<void>;
+  readonly start?: (arguments_: readonly string[], disposition: { readonly detached: boolean; readonly inherited: boolean }) => ChildProcess;
+  readonly lifecycle?: ReturnType<typeof createWorkerProcessLifecycle>;
 }) {
-  const processOptions = workerProcessOptions("nested");
-  const start = options.start ?? ((arguments_) => spawn(process.execPath, [
-    "--experimental-strip-types",
-    resolve(import.meta.dirname, "review-worker.ts"),
-    ...arguments_,
-  ], {
-    detached: processOptions.detached,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: processOptions.environment,
-  }));
+  const lifecycle = options.lifecycle ?? createWorkerProcessLifecycle();
+  const start = options.start ?? ((arguments_, disposition) => {
+    const processOptions = workerProcessOptions("nested");
+    return spawn(process.execPath, [
+      "--experimental-strip-types",
+      resolve(import.meta.dirname, "review-worker.ts"),
+      ...arguments_,
+    ], {
+      detached: disposition.detached,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: processOptions.environment,
+    });
+  });
   return {
     async review(request: {
       readonly pullRequestNumber: number;
@@ -83,35 +56,15 @@ export function createProcessReviewRunner(options: {
         request.model,
         request.artifactDirectory,
       ];
-      if (processOptions.inherited) {
-        const child = start(arguments_);
-        child.stdin?.end(options.startup);
-        return parseReview(await outputOf(child));
-      }
-      let child: ChildProcess | undefined;
-      let output: Promise<{ readonly output: string; readonly code: number | null; readonly diagnostics: string }> | undefined;
-      const result = await runJobWithTimeout({
-        start: () => {
-          child = start(arguments_);
-          if (child.pid === undefined) throw new Error("Reviewer worker did not expose a process ID");
-          child.stdin?.end(options.startup);
-          output = outputOf(child);
-          return {
-            pid: child.pid,
-            exited: output.then(() => undefined),
-            groupExited: (options.groupExited ?? groupExit)(child.pid),
-          };
-        },
+      const result = await lifecycle.run({
+        role: "nested",
         timeoutMilliseconds: options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
         graceMilliseconds: options.graceMilliseconds ?? REVIEW_GRACE_MILLISECONDS,
-        kill: options.kill ?? process.kill,
-        wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => {
-          const timer = setTimeout(resolveWait, milliseconds);
-          timer.unref();
-        })),
+        startup: options.startup,
+        launch: (admit, disposition) => admit(start(arguments_, disposition)),
       });
       if (result.status === "timed-out") throw new Error("Reviewer execution timed out");
-      return parseReview(await output!);
+      return parseReview(result);
     },
   };
 }
