@@ -129,8 +129,10 @@ describe("publication path (real git repositories)", () => {
 
     const head = await checkout.withCheckout(
       { pullRequestNumber: 1, revision: pullRequestHead },
-      (checkoutPath) => git(["-C", checkoutPath, "rev-parse", "HEAD"]),
-      () => "cleanup",
+      async (checkoutPath) => ({
+        value: await git(["-C", checkoutPath, "rev-parse", "HEAD"]),
+        disposition: "cleanup" as const,
+      }),
     );
 
     expect(head).toBe(pullRequestHead);
@@ -154,15 +156,15 @@ describe("publication path (real git repositories)", () => {
           .toBe("Trusted Publication Source");
         expect(await git(["-C", checkoutPath, "config", "--local", "--get", "user.email"]))
           .toBe("trusted-publication@example.test");
-        return updater.update({
+        const value = await updater.update({
           pullRequestNumber: 1,
           branch: "pr-branch",
           baseBranch: "master",
           revision: pullRequestHead,
           checkoutPath,
         });
+        return { value, disposition: "cleanup" as const };
       },
-      () => "cleanup",
     );
 
     expect(result.revision).not.toBe(pullRequestHead);
@@ -189,8 +191,10 @@ describe("publication path (real git repositories)", () => {
     // resolved HEAD proves the install step succeeded in the child environment.
     const installed = await checkout.withCheckout(
       { revision: masterRevision },
-      (checkoutPath) => git(["-C", checkoutPath, "rev-parse", "HEAD"]),
-      () => "cleanup",
+      async (checkoutPath) => ({
+        value: await git(["-C", checkoutPath, "rev-parse", "HEAD"]),
+        disposition: "cleanup" as const,
+      }),
     );
 
     expect(installed).toBe(masterRevision);

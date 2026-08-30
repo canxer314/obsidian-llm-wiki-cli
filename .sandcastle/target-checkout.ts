@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { types } from "node:util";
 
 import { appendInheritedJobOutput } from "./job-logs.ts";
 
@@ -85,11 +86,15 @@ export async function removeExpiredFailureCheckouts(options: {
 
 export type TargetCheckoutDisposition = "cleanup" | "retain";
 
+export interface TargetCheckoutResult<TResult> {
+  readonly value: TResult;
+  readonly disposition: TargetCheckoutDisposition;
+}
+
 export interface TargetCheckout {
   withCheckout<TResult>(
     request: { readonly pullRequestNumber?: number; readonly revision: string },
-    action: (checkoutPath: string) => Promise<TResult>,
-    disposition: (result: TResult) => TargetCheckoutDisposition,
+    action: (checkoutPath: string) => Promise<TargetCheckoutResult<TResult>>,
   ): Promise<TResult>;
 }
 
@@ -118,7 +123,7 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
     ? execute("npm", arguments_)
     : execute("npm", arguments_, options.dependencyEnvironment);
   return {
-    async withCheckout(request, action, disposition) {
+    async withCheckout(request, action) {
       if (!/^[0-9a-f]{40}$/u.test(request.revision)) {
         throw new Error("Target Checkout requires a full Git revision");
       }
@@ -194,13 +199,21 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
         }
         await git(["-C", checkoutPath, "checkout", "--detach", request.revision]);
         await npm(["--prefix", checkoutPath, "ci"]);
-        const result = await action(checkoutPath);
-        const requestedDisposition = disposition(result);
-        if (requestedDisposition !== "cleanup" && requestedDisposition !== "retain") {
+        const result: unknown = await action(checkoutPath);
+        if (typeof result !== "object" || result === null || Array.isArray(result) || types.isProxy(result)) {
           throw new Error("Target Checkout disposition is invalid");
         }
-        completed = requestedDisposition === "cleanup";
-        return result;
+        const value = Object.getOwnPropertyDescriptor(result, "value");
+        const disposition = Object.getOwnPropertyDescriptor(result, "disposition");
+        if (
+          value === undefined || !("value" in value) ||
+          disposition === undefined || !("value" in disposition) ||
+          (disposition.value !== "cleanup" && disposition.value !== "retain")
+        ) {
+          throw new Error("Target Checkout disposition is invalid");
+        }
+        completed = disposition.value === "cleanup";
+        return value.value as never;
       } finally {
         if (completed) {
           await rm(checkoutPath, { force: true, recursive: true });

@@ -78,7 +78,7 @@ export function createTargetOperationCommandRunner(options: {
         };
         const result = await options.target.run(invocation);
         const outcome = classifyTargetOperationOutcome(operation, result);
-        if (outcome.automation === "blocked") {
+        if (outcome.kind === "blocked") {
           await options.acquisition.addBlocked(route.targetOperation, number);
         }
         return outcome.outcome;

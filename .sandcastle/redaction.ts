@@ -4,7 +4,7 @@ const MAX_DIAGNOSTIC_SUMMARY_LENGTH = 500;
 export function diagnosticSummary(text: string): string {
   const firstLine = text.split(/\r?\n/u, 1)[0] ?? "";
   return redact(firstLine)
-    .replace(/(^|[\s(=])\/(?:[^\s/]+\/)*[^\s,;)]*/gu, "$1[LOCAL_PATH]")
+    .replace(/(?:file:\/\/[^\s,;)]*|(^|[\s(=])\/)(?:[^\s/]+\/)*[^\s,;)]*/gu, "$1[LOCAL_PATH]")
     .replace(/(?:\[REDACTED\]\s*){2,}/gu, "[REDACTED] ")
     .replace(/\s+(?=[,;])/gu, "")
     .trim()

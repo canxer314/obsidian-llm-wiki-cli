@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { runAgentWorker } from "../.sandcastle/agent-process-runner.js";
+import { runAgentWorker, workerJson } from "../.sandcastle/agent-process-runner.js";
 
 function child(pid: number): ChildProcess & EventEmitter {
   const process = new EventEmitter() as ChildProcess & EventEmitter;
@@ -32,6 +32,50 @@ async function expectProcessDead(pid: number): Promise<void> {
 }
 
 describe("agent process runner", () => {
+  describe("worker JSON protocol", () => {
+    it("rejects malformed trailing worker output without exposing it", () => {
+      const secret = "issue-359-secret-marker";
+
+      try {
+        workerJson<{ readonly accepted: boolean }>({
+          code: 0,
+          output: `${JSON.stringify({ accepted: true })}\n{\"token\":\"${secret}`,
+          diagnostics: "",
+        }, "fixture");
+        throw new Error("Expected malformed worker output to be rejected");
+      } catch (error) {
+        expect(error).toHaveProperty("message", "fixture worker returned invalid JSON");
+        expect(String(error)).not.toContain(secret);
+      }
+    });
+
+    it("parses only the last stdout line for valid worker output", () => {
+      expect(workerJson<{ readonly accepted: boolean }>({
+        code: 0,
+        output: "worker progress\n" + JSON.stringify({ accepted: true }),
+        diagnostics: "",
+      }, "fixture")).toEqual({ accepted: true });
+    });
+
+    it("keeps established missing-result and worker-exit failures", () => {
+      expect(() => workerJson({
+        code: 0,
+        output: " \n ",
+        diagnostics: "",
+      }, "fixture")).toThrow("fixture worker did not return a result");
+      expect(() => workerJson({
+        code: 3,
+        output: "ignored",
+        diagnostics: "worker failure",
+      }, "fixture")).toThrow("fixture worker exited with 3: worker failure");
+      expect(() => workerJson({
+        code: null,
+        output: "ignored",
+        diagnostics: "terminated",
+      }, "fixture")).toThrow("fixture worker exited with signal: terminated");
+    });
+  });
+
   it("rejects a whole job through the normal lifecycle when log appending fails", async () => {
     const root = mkdtempSync(join(tmpdir(), "agent-log-append-failure-"));
     const logDirectory = join(root, "stdout.log");

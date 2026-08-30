@@ -1,14 +1,12 @@
-import type { TargetOperationIdentity } from "./target-operation.ts";
+import { types } from "node:util";
 
-export type TargetCheckoutDisposition = "cleanup" | "retain";
+import type { TargetOperationIdentity } from "./target-operation.ts";
 
 type TargetOperationOutcome = Readonly<Record<string, unknown>> & { readonly status: string };
 
 export interface TargetOperationOutcomeClassification {
+  readonly kind: "completed" | "blocked";
   readonly outcome: TargetOperationOutcome;
-  readonly checkout: TargetCheckoutDisposition;
-  readonly jobLog: "completed" | "failed";
-  readonly automation: "completed" | "blocked";
 }
 
 const acceptedStatuses: Readonly<Record<TargetOperationIdentity, ReadonlySet<string>>> = {
@@ -21,20 +19,49 @@ const acceptedStatuses: Readonly<Record<TargetOperationIdentity, ReadonlySet<str
   "architecture-review": new Set(["proposed", "skipped", "refused", "blocked"]),
 };
 
+export class InvalidTargetOperationOutcomeError extends Error {
+  constructor() {
+    super("Target operation returned an invalid outcome");
+    this.name = "InvalidTargetOperationOutcomeError";
+  }
+}
+
+function invalidTargetOperationOutcome(): never {
+  throw new InvalidTargetOperationOutcomeError();
+}
+
+function statusFor(
+  operation: TargetOperationIdentity,
+  value: unknown,
+): string {
+  try {
+    if (
+      typeof value !== "object" || value === null || Array.isArray(value) ||
+      types.isProxy(value)
+    ) {
+      return invalidTargetOperationOutcome();
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, "status");
+    if (
+      descriptor === undefined || !("value" in descriptor) ||
+      typeof descriptor.value !== "string" || !acceptedStatuses[operation].has(descriptor.value)
+    ) {
+      return invalidTargetOperationOutcome();
+    }
+    return descriptor.value;
+  } catch {
+    return invalidTargetOperationOutcome();
+  }
+}
+
 export function classifyTargetOperationOutcome(
   operation: TargetOperationIdentity,
   value: unknown,
 ): TargetOperationOutcomeClassification {
-  if (
-    typeof value !== "object" || value === null || Array.isArray(value) ||
-    !("status" in value) || typeof value.status !== "string" ||
-    !acceptedStatuses[operation].has(value.status)
-  ) {
-    throw new Error("Target operation returned an invalid outcome");
-  }
+  const status = statusFor(operation, value);
   const outcome = value as TargetOperationOutcome;
-  if (outcome.status === "blocked") {
-    return { outcome, checkout: "retain", jobLog: "failed", automation: "blocked" };
+  if (status === "blocked") {
+    return { kind: "blocked", outcome };
   }
-  return { outcome, checkout: "cleanup", jobLog: "completed", automation: "completed" };
+  return { kind: "completed", outcome };
 }
