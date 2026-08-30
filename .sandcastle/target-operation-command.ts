@@ -3,6 +3,7 @@ import {
 } from "./automation-command-route.ts";
 import { diagnosticSummary } from "./redaction.ts";
 import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
+import { trustedFailureSummary } from "./trusted-failure.ts";
 import type {
   AuthorizedTargetOperationInvocation,
   LabelTriggeredTargetOperationInvocation,
@@ -105,20 +106,29 @@ export function createTargetOperationCommandRunner(options: {
 
 // Errors that embed child-process stderr — worker exits and checkout command
 // failures — may carry operation-transformed secrets that pattern redaction
-// cannot recognize. Those errors carry a trusted classification alongside
-// their full local message; publication to the Automation Work Item uses only
-// that classification. Free-text redaction remains as a defense-in-depth
-// fallback for failures raised entirely by trusted code.
-interface TrustedFailureClassification {
-  readonly publicSummary?: unknown;
-}
-
+// cannot recognize. Trusted runtime producers authenticate a coarse
+// classification without exposing a property that arbitrary thrown values can
+// forge. Free-text redaction remains a defense-in-depth fallback for failures
+// raised entirely by trusted code.
 function failureDiagnosticSummary(error: unknown): string {
-  const publicSummary = (error as TrustedFailureClassification | null | undefined)?.publicSummary;
-  if (typeof publicSummary === "string" && publicSummary.length > 0) {
-    return diagnosticSummary(publicSummary);
+  const publicSummary = trustedFailureSummary(error);
+  if (publicSummary !== undefined) return diagnosticSummary(publicSummary);
+  try {
+    if (typeof error === "object" && error !== null) {
+      const message = Object.getOwnPropertyDescriptor(error, "message");
+      if (
+        message !== undefined && Object.hasOwn(message, "value") &&
+        typeof message.value === "string"
+      ) {
+        return diagnosticSummary(message.value);
+      }
+      return "Unknown Target operation failure";
+    }
+    if (typeof error === "function") return "Unknown Target operation failure";
+    return diagnosticSummary(String(error));
+  } catch {
+    return "Unknown Target operation failure";
   }
-  return diagnosticSummary(error instanceof Error ? error.message : String(error));
 }
 
 function requireOperationSecurity(
