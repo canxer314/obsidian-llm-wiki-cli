@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 
 import { describe, expect, it, vi } from "vitest";
@@ -29,7 +32,6 @@ describe("architecture review process runner", () => {
     const runner = createProcessArchitectureReviewRunner({
       start,
       writeInput,
-      groupExited: async () => {},
     });
     const review = runner.review({
       revision,
@@ -54,12 +56,55 @@ describe("architecture review process runner", () => {
     ]);
   });
 
+  it("writes serialized prior proposals to a private artifact before launch", async () => {
+    const artifactDirectory = mkdtempSync(join(tmpdir(), "architecture-review-"));
+    const process = child(418);
+    const start = vi.fn().mockReturnValue(process);
+    const runner = createProcessArchitectureReviewRunner({ start });
+    try {
+      const review = runner.review({
+        revision,
+        checkoutPath: "/jobs/architecture-review-228",
+        priorProposals,
+        model: "planner-model",
+        artifactDirectory,
+      });
+      process.stdout?.emit("data", `${JSON.stringify({ status: "skipped", reason: "covered" })}\n`);
+      process.emit("close", 0);
+
+      await expect(review).resolves.toEqual({ status: "skipped", reason: "covered" });
+      const input = join(artifactDirectory, "architecture-review-input.json");
+      expect(readFileSync(input, "utf8")).toBe(JSON.stringify(priorProposals));
+      expect(statSync(input).mode & 0o777).toBe(0o600);
+      expect(start).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(artifactDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not launch the worker when writing prior proposals fails", async () => {
+    const start = vi.fn();
+    const runner = createProcessArchitectureReviewRunner({
+      start,
+      writeInput: () => { throw new Error("artifact unavailable"); },
+    });
+
+    await expect(runner.review({
+      revision,
+      checkoutPath: "/jobs/architecture-review-228",
+      priorProposals,
+      model: "planner-model",
+      artifactDirectory: "/jobs/review-artifacts/job-228",
+    })).rejects.toThrow("artifact unavailable");
+
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("parses a successful worker outcome after the process exits", async () => {
     const process = child(421);
     const runner = createProcessArchitectureReviewRunner({
       start: vi.fn().mockReturnValue(process),
       writeInput: () => {},
-      groupExited: async () => {},
     });
     const review = runner.review({
       revision,
@@ -86,24 +131,48 @@ describe("architecture review process runner", () => {
     });
   });
 
-  it("terminates the reviewer process group, forces it after grace, and waits for close", async () => {
+  it("attaches output listeners before delivering startup and closing stdin", async () => {
     const process = child(420);
-    let groupExit!: () => void;
-    const groupExited = new Promise<void>((resolve) => { groupExit = resolve; });
-    const kill = vi.fn((_pid: number, signal: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        process.emit("close", null);
-        groupExit();
-      }
+    const events: string[] = [];
+    Object.defineProperty(process, "stdin", {
+      value: Object.assign(new EventEmitter(), {
+        end: (startup: string) => {
+          events.push(`startup:${startup}`);
+          process.stdout?.emit("data", `${JSON.stringify({ status: "skipped", reason: "covered" })}\n`);
+          process.emit("close", 0);
+        },
+      }),
     });
+    const runner = createProcessArchitectureReviewRunner({
+      startup: "trusted-startup",
+      start: vi.fn((arguments_: readonly string[]) => {
+        events.push(`launch:${arguments_.join(",")}`);
+        return process;
+      }),
+      writeInput: () => {},
+    });
+
+    await expect(runner.review({
+      revision,
+      checkoutPath: "/jobs/architecture-review-228",
+      priorProposals,
+      model: "planner-model",
+      artifactDirectory: "/jobs/review-artifacts/job-228",
+    })).resolves.toEqual({ status: "skipped", reason: "covered" });
+
+    expect(events).toEqual([
+      `launch:${revision},/jobs/architecture-review-228,planner-model,/jobs/review-artifacts/job-228`,
+      "startup:trusted-startup",
+    ]);
+  });
+
+  it("maps a lifecycle timeout to the architecture-review timeout error", async () => {
+    const process = child(421);
     const runner = createProcessArchitectureReviewRunner({
       timeoutMilliseconds: 0,
       graceMilliseconds: 0,
       start: vi.fn().mockReturnValue(process),
       writeInput: () => {},
-      kill,
-      groupExited: () => groupExited,
-      wait: async () => {},
     });
 
     await expect(runner.review({
@@ -113,9 +182,6 @@ describe("architecture review process runner", () => {
       model: "planner-model",
       artifactDirectory: "/jobs/review-artifacts/job-228",
     })).rejects.toThrow("Architecture review execution timed out");
-
-    expect(kill).toHaveBeenNthCalledWith(1, -420, "SIGTERM");
-    expect(kill).toHaveBeenNthCalledWith(2, -420, "SIGKILL");
   });
 
   it("fails with the worker diagnostics when the worker exits unsuccessfully", async () => {
@@ -123,7 +189,6 @@ describe("architecture review process runner", () => {
     const runner = createProcessArchitectureReviewRunner({
       start: vi.fn().mockReturnValue(process),
       writeInput: () => {},
-      groupExited: async () => {},
     });
     const review = runner.review({
       revision,
