@@ -614,6 +614,104 @@ describe("Target Checkout real Git filesystem integration", () => {
     await expect(pathExists(checkoutPath)).resolves.toBe(true);
   });
 
+  it("retains a created checkout when a polluted descriptor masks an accessor value", async () => {
+    const fixture = await createFixture();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    const value = vi.fn(() => "business value");
+    const callbackResult = Object.defineProperty({ disposition: "cleanup" }, "value", {
+      enumerable: true,
+      get: value,
+    });
+    const originalValue = Object.getOwnPropertyDescriptor(Object.prototype, "value");
+    let checkoutPath = "";
+    let error: unknown;
+
+    Object.defineProperty(Object.prototype, "value", {
+      configurable: true,
+      value: "prototype business value",
+    });
+    try {
+      try {
+        await checkout.withCheckout({ revision: fixture.hiddenRevision }, async (path) => {
+          checkoutPath = path;
+          return callbackResult as never;
+        });
+      } catch (caught) {
+        error = caught;
+      }
+    } finally {
+      if (originalValue === undefined) {
+        Reflect.deleteProperty(Object.prototype, "value");
+      } else {
+        Object.defineProperty(Object.prototype, "value", originalValue);
+      }
+    }
+
+    expect(error).toMatchObject({ message: "Target Checkout disposition is invalid" });
+    expect(value).not.toHaveBeenCalled();
+    await expect(pathExists(checkoutPath)).resolves.toBe(true);
+  });
+
+  it("retains a created checkout when a polluted descriptor masks an accessor disposition", async () => {
+    const fixture = await createFixture();
+    const checkout = createTargetCheckout({
+      sourceRepositoryPath: fixture.trustedPath,
+      checkoutRoot: fixture.checkoutRoot,
+      execute: async (file, arguments_, environment) => {
+        if (file === "npm") return { stdout: "", stderr: "" };
+        const actualArguments = arguments_.map((argument) =>
+          argument === "https://github.com/example/repository.git" ? fixture.remotePath : argument,
+        );
+        const result = await executeFile(file, actualArguments, { env: environment });
+        return { stdout: result.stdout, stderr: result.stderr };
+      },
+    });
+    const disposition = vi.fn(() => "cleanup");
+    const callbackResult = Object.defineProperty({ value: "business value" }, "disposition", {
+      enumerable: true,
+      get: disposition,
+    });
+    const originalValue = Object.getOwnPropertyDescriptor(Object.prototype, "value");
+    let checkoutPath = "";
+    let error: unknown;
+
+    Object.defineProperty(Object.prototype, "value", {
+      configurable: true,
+      value: "cleanup",
+    });
+    try {
+      try {
+        await checkout.withCheckout({ revision: fixture.hiddenRevision }, async (path) => {
+          checkoutPath = path;
+          return callbackResult as never;
+        });
+      } catch (caught) {
+        error = caught;
+      }
+    } finally {
+      if (originalValue === undefined) {
+        Reflect.deleteProperty(Object.prototype, "value");
+      } else {
+        Object.defineProperty(Object.prototype, "value", originalValue);
+      }
+    }
+
+    expect(error).toMatchObject({ message: "Target Checkout disposition is invalid" });
+    expect(disposition).not.toHaveBeenCalled();
+    await expect(pathExists(checkoutPath)).resolves.toBe(true);
+  });
+
   it("preserves a typed blocked checkout for diagnosis", async () => {
     const fixture = await createFixture();
     const checkout = createTargetCheckout({

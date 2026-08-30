@@ -43,7 +43,7 @@ function statusFor(
     }
     const descriptor = Object.getOwnPropertyDescriptor(value, "status");
     if (
-      descriptor === undefined || !("value" in descriptor) ||
+      descriptor === undefined || !Object.hasOwn(descriptor, "value") ||
       typeof descriptor.value !== "string" || !acceptedStatuses[operation].has(descriptor.value)
     ) {
       return invalidTargetOperationOutcome();
