@@ -206,8 +206,8 @@ export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
         const value = Object.getOwnPropertyDescriptor(result, "value");
         const disposition = Object.getOwnPropertyDescriptor(result, "disposition");
         if (
-          value === undefined || !("value" in value) ||
-          disposition === undefined || !("value" in disposition) ||
+          value === undefined || !Object.hasOwn(value, "value") ||
+          disposition === undefined || !Object.hasOwn(disposition, "value") ||
           (disposition.value !== "cleanup" && disposition.value !== "retain")
         ) {
           throw new Error("Target Checkout disposition is invalid");

@@ -129,6 +129,41 @@ describe("Target operation outcome policy", () => {
     expect(status).not.toHaveBeenCalled();
   });
 
+  it("rejects an own status accessor when the descriptor prototype is polluted", () => {
+    const status = vi.fn(() => "implemented");
+    const outcome = Object.defineProperty({}, "status", {
+      enumerable: true,
+      get: status,
+    });
+    const originalValue = Object.getOwnPropertyDescriptor(Object.prototype, "value");
+    let error: unknown;
+
+    Object.defineProperty(Object.prototype, "value", {
+      configurable: true,
+      value: "implemented",
+    });
+    try {
+      try {
+        classifyTargetOperationOutcome("implement-issue", outcome);
+      } catch (caught) {
+        error = caught;
+      }
+    } finally {
+      if (originalValue === undefined) {
+        Reflect.deleteProperty(Object.prototype, "value");
+      } else {
+        Object.defineProperty(Object.prototype, "value", originalValue);
+      }
+    }
+
+    expect(error).toBeInstanceOf(targetOperationOutcome.InvalidTargetOperationOutcomeError);
+    expect(error).toMatchObject({
+      name: "InvalidTargetOperationOutcomeError",
+      message: INVALID_OUTCOME_MESSAGE,
+    });
+    expect(status).not.toHaveBeenCalled();
+  });
+
   it("rejects an own throwing status accessor without invoking it or serializing its payload", () => {
     const status = vi.fn(() => {
       throw new Error("getter payload");
