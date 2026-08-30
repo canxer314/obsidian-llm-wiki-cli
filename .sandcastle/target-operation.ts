@@ -21,6 +21,7 @@ import type { FeedbackReconcileAuthorization } from "./feedback-implementation-a
 import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
 import {
   trustAgentWorkerExit,
+  trustTargetOperationTimeout,
   type TrustedAgentWorkerName,
 } from "./trusted-failure.ts";
 import type { TargetOperationStartupSnapshot } from "./target-operation-startup.ts";
@@ -174,7 +175,19 @@ interface TargetOperationRunnerOptions {
 }
 
 export function createTargetOperationRunner(options: TargetOperationRunnerOptions) {
-  return createTargetOperationRunnerWithWorker(options, runAgentWorker);
+  const runner = createTargetOperationRunnerWithWorker(options, runAgentWorker);
+  return {
+    async run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown> {
+      try {
+        return await runner.run(invocation);
+      } catch (error) {
+        if (error instanceof AgentWorkerTimeoutError) {
+          throw trustTargetOperationTimeout(error, invocation.operation);
+        }
+        throw error;
+      }
+    },
+  };
 }
 
 export function createTargetOperationRunnerWithWorker(

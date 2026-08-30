@@ -86,6 +86,7 @@ const representativeScenarios: readonly Scenario[] = [
       log: "timed-out",
       blocked: true,
       diagnostic: true,
+      diagnosticSummary: "Target operation implement-issue timed out",
     },
   },
   {

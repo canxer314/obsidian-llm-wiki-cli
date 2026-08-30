@@ -5,11 +5,20 @@ import { join } from "node:path";
 import { types } from "node:util";
 
 import { appendInheritedJobOutput } from "./job-logs.ts";
+import { trustCheckoutCommandExit } from "./trusted-failure.ts";
+
+function commandFailureSummary(
+  file: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): string {
+  return `${file} exited with ${code ?? signal ?? "unknown status"}`;
+}
 
 // Child stderr may come from untrusted Target revision lifecycle scripts, so
-// the full message is for local diagnosis only. `publicSummary` is the only
-// classification trusted GitHub diagnostics may publish: pattern redaction
-// cannot recognize transformed secrets (e.g. base64-encoded credentials).
+// the full message is for local diagnosis only. Its private-registry summary is
+// the only classification trusted GitHub diagnostics may publish: pattern
+// redaction cannot recognize transformed secrets (e.g. base64 credentials).
 class CommandExecutionError extends Error {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
@@ -24,7 +33,7 @@ class CommandExecutionError extends Error {
     readonly stdout: string;
     readonly stderr: string;
   }) {
-    const publicSummary = `${options.file} exited with ${options.code ?? options.signal ?? "unknown status"}`;
+    const publicSummary = commandFailureSummary(options.file, options.code, options.signal);
     super(`${publicSummary}: ${options.stderr}`);
     this.name = "CommandExecutionError";
     this.code = options.code;
@@ -75,13 +84,14 @@ async function executeStreamingFile(
         reject(logError);
         return;
       }
-      reject(new CommandExecutionError({
+      const failure = new CommandExecutionError({
         file,
         code,
         signal,
         stdout,
         stderr,
-      }));
+      });
+      reject(trustCheckoutCommandExit(failure, file, code));
     });
   });
 }

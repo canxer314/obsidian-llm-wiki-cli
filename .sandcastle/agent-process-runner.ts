@@ -21,10 +21,9 @@ export class AgentWorkerTimeoutError extends Error {
 }
 
 // A worker that exits unsuccessfully may be untrusted Target revision code
-// whose stderr carries operation-transformed secrets. The full message stays
-// available for local diagnosis; `publicSummary` is the only classification
-// trusted GitHub diagnostics may publish, because pattern redaction cannot
-// recognize transformed secrets (e.g. base64-encoded credentials).
+// whose stderr carries operation-transformed secrets. The full message and
+// `publicSummary` property stay available for local diagnosis; only a trusted
+// producer's private-registry classification may reach GitHub diagnostics.
 export class AgentWorkerExitError extends Error {
   declare readonly code: number | null;
   declare readonly publicSummary: string;
