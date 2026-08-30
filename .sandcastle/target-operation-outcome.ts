@@ -1,5 +1,7 @@
 import { types } from "node:util";
 
+import { trustFailureDiagnostic } from "./trusted-failure.ts";
+
 import type { TargetOperationIdentity } from "./target-operation.ts";
 
 type TargetOperationOutcome = Readonly<Record<string, unknown>> & { readonly status: string };
@@ -27,7 +29,8 @@ export class InvalidTargetOperationOutcomeError extends Error {
 }
 
 function invalidTargetOperationOutcome(): never {
-  throw new InvalidTargetOperationOutcomeError();
+  const failure = new InvalidTargetOperationOutcomeError();
+  throw trustFailureDiagnostic(failure, failure.message);
 }
 
 function statusFor(

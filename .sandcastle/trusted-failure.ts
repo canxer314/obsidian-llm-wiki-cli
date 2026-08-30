@@ -22,6 +22,14 @@ export type TrustedAgentWorkerName =
     | "split-prd"
     | "architecture-review"}`;
 
+export function trustFailureDiagnostic<T extends object>(
+  failure: T,
+  summary: string,
+): T {
+  trustedFailureSummaries.set(failure, summary);
+  return failure;
+}
+
 export function trustAgentWorkerExit<T extends object>(
   failure: T,
   workerName: TrustedAgentWorkerName,
@@ -30,11 +38,10 @@ export function trustAgentWorkerExit<T extends object>(
   if (!trustedAgentWorkerNames.has(workerName)) {
     throw new Error("Trusted Agent worker classification is invalid");
   }
-  trustedFailureSummaries.set(
+  return trustFailureDiagnostic(
     failure,
     `${workerName} worker exited with ${code ?? "signal"}`,
   );
-  return failure;
 }
 
 export function trustedFailureSummary(failure: unknown): string | undefined {

@@ -3,7 +3,10 @@ import {
 } from "./automation-command-route.ts";
 import { diagnosticSummary } from "./redaction.ts";
 import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
-import { trustedFailureSummary } from "./trusted-failure.ts";
+import {
+  trustedFailureSummary,
+  trustFailureDiagnostic,
+} from "./trusted-failure.ts";
 import type {
   AuthorizedTargetOperationInvocation,
   LabelTriggeredTargetOperationInvocation,
@@ -106,29 +109,28 @@ export function createTargetOperationCommandRunner(options: {
 
 // Errors that embed child-process stderr — worker exits and checkout command
 // failures — may carry operation-transformed secrets that pattern redaction
-// cannot recognize. Trusted runtime producers authenticate a coarse
-// classification without exposing a property that arbitrary thrown values can
-// forge. Free-text redaction remains a defense-in-depth fallback for failures
-// raised entirely by trusted code.
+// cannot recognize. Trusted runtime producers authenticate every object-originated
+// public diagnostic without exposing a property that arbitrary thrown values can
+// forge. Unregistered objects receive only a deterministic classification.
 function failureDiagnosticSummary(error: unknown): string {
   const publicSummary = trustedFailureSummary(error);
   if (publicSummary !== undefined) return diagnosticSummary(publicSummary);
+  if (
+    (typeof error === "object" && error !== null) ||
+    typeof error === "function"
+  ) {
+    return "Unknown Target operation failure";
+  }
   try {
-    if (typeof error === "object" && error !== null) {
-      const message = Object.getOwnPropertyDescriptor(error, "message");
-      if (
-        message !== undefined && Object.hasOwn(message, "value") &&
-        typeof message.value === "string"
-      ) {
-        return diagnosticSummary(message.value);
-      }
-      return "Unknown Target operation failure";
-    }
-    if (typeof error === "function") return "Unknown Target operation failure";
     return diagnosticSummary(String(error));
   } catch {
     return "Unknown Target operation failure";
   }
+}
+
+function commandFailure(message: string): Error {
+  const failure = new Error(message);
+  return trustFailureDiagnostic(failure, message);
 }
 
 function requireOperationSecurity(
@@ -143,13 +145,13 @@ function requireOperationSecurity(
     state.pullRequest.headSha !== state.revision ||
     state.pullRequest.baseRepository !== state.pullRequest.headRepository
   ) {
-    throw new Error(`Pull Request #${number} is not an authorized same-repository revision`);
+    throw commandFailure(`Pull Request #${number} is not an authorized same-repository revision`);
   }
 }
 
 function requireRevision(revision: string): void {
   if (!/^[0-9a-f]{40}$/u.test(revision)) {
-    throw new Error("Target operation requires a full authorized revision");
+    throw commandFailure("Target operation requires a full authorized revision");
   }
 }
 
@@ -164,7 +166,7 @@ function requireAvailable(
     state.labels.includes("agent:in-progress") ||
     state.labels.includes("agent:blocked")
   ) {
-    throw new Error(`Work Item #${number} is not available for acquisition`);
+    throw commandFailure(`Work Item #${number} is not available for acquisition`);
   }
 }
 
@@ -179,7 +181,7 @@ function requireAcquiring(
     !state.labels.includes("agent:in-progress") ||
     state.labels.includes("agent:blocked")
   ) {
-    throw new Error(`Work Item #${number} changed while acquisition was starting`);
+    throw commandFailure(`Work Item #${number} changed while acquisition was starting`);
   }
 }
 
@@ -197,7 +199,7 @@ function requireSettled(
     !state.labels.includes("agent:in-progress") ||
     state.labels.includes("agent:blocked")
   ) {
-    throw new Error(`Work Item #${number} changed while acquisition was settling`);
+    throw commandFailure(`Work Item #${number} changed while acquisition was settling`);
   }
 }
 

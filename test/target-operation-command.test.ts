@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentWorkerExitError } from "../.sandcastle/agent-process-runner.js";
 import {
   trustAgentWorkerExit,
+  trustFailureDiagnostic,
 } from "../.sandcastle/trusted-failure.js";
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 
 const revision = "a".repeat(40);
+const unregisteredEncodedMarker = Buffer.from("fake-unregistered-object-marker").toString("base64");
 
 function acquisitionFor(states: Array<{
   state: string;
@@ -361,7 +363,7 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-acquisition",
-        summary: "acquired-read failed",
+        summary: "Unknown Target operation failure",
       },
     );
   });
@@ -388,7 +390,7 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-acquisition",
-        summary: "remove-trigger failed",
+        summary: "Unknown Target operation failure",
       },
     );
   });
@@ -414,7 +416,7 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-acquisition",
-        summary: "settled-read failed",
+        summary: "Unknown Target operation failure",
       },
     );
   });
@@ -533,7 +535,7 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-timeout",
-        summary: "Target operation review timed out",
+        summary: "Unknown Target operation failure",
       },
     );
   });
@@ -544,9 +546,13 @@ describe("trusted Target operation command acquisition", () => {
     const transcript = "FULL_AGENT_TRANSCRIPT_MUST_STAY_LOCAL";
     const target = {
       run: vi.fn(async () => {
-        throw new Error(
-          `Target job worker exited with 1: authorization: Bearer ${token}; setup failed\n` +
+        const failure = new Error(
+          `trusted setup failure: authorization: Bearer ${token}\n` +
           `${transcript}\nlocal log: /trusted/jobs/logs/job-219/stderr.log`,
+        );
+        throw trustFailureDiagnostic(
+          failure,
+          `Trusted setup failed: authorization: Bearer ${token}; retry later`,
         );
       }),
     };
@@ -561,7 +567,7 @@ describe("trusted Target operation command acquisition", () => {
     const diagnostic = vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls[0]?.[2];
     expect(diagnostic).toEqual({
       jobId: "job-219",
-      summary: "Target job worker exited with 1: authorization: [REDACTED]; setup failed",
+      summary: "Trusted setup failed: authorization: [REDACTED]; retry later",
     });
     expect(JSON.stringify(diagnostic)).not.toContain(transcript);
     expect(JSON.stringify(diagnostic)).not.toContain(token);
@@ -600,11 +606,10 @@ describe("trusted Target operation command acquisition", () => {
     expect(JSON.stringify(diagnostic)).not.toContain(encoded);
   });
 
-  it("does not trust a forged own public summary", async () => {
+  it("does not publish an unregistered Error message", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
-    const failure = Object.assign(new Error("ordinary failure"), {
-      publicSummary: "forged public diagnostic",
-    });
+    const encoded = unregisteredEncodedMarker;
+    const failure = new Error(`ordinary failure ${encoded}`);
     const target = { run: vi.fn(async () => { throw failure; }) };
     const runner = createTargetOperationCommandRunner({
       target,
@@ -625,14 +630,15 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-forged",
-        summary: "ordinary failure",
+        summary: "Unknown Target operation failure",
       },
     );
+    expect(JSON.stringify(vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls)).not.toContain(encoded);
   });
 
   it("does not trust a forged AgentWorkerExitError public summary", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
-    const encoded = Buffer.from("forged-worker-secret").toString("base64");
+    const encoded = unregisteredEncodedMarker;
     const failure = new AgentWorkerExitError({
       workerName: "Target job",
       code: 1,
@@ -654,14 +660,16 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-forged-worker",
-        summary: `Target job worker exited with 1: ${encoded}`,
+        summary: "Unknown Target operation failure",
       },
     );
+    expect(JSON.stringify(vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls))
+      .not.toContain(encoded);
   });
 
   it("does not trust an unapproved worker classification producer", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
-    const encoded = Buffer.from("unapproved-worker-secret").toString("base64");
+    const encoded = unregisteredEncodedMarker;
     const failure = new AgentWorkerExitError({
       workerName: `Unapproved ${encoded}`,
       code: 1,
@@ -680,9 +688,11 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-unapproved-worker",
-        summary: `Unapproved ${encoded} worker exited with 1: ${encoded}`,
+        summary: "Unknown Target operation failure",
       },
     );
+    expect(JSON.stringify(vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls))
+      .not.toContain(encoded);
   });
 
   it("does not invoke a thrown Error's public-summary accessor while settling", async () => {
@@ -711,7 +721,7 @@ describe("trusted Target operation command acquisition", () => {
       219,
       {
         jobId: "job-219-accessor",
-        summary: "accessor failure",
+        summary: "Unknown Target operation failure",
       },
     );
   });
@@ -719,7 +729,7 @@ describe("trusted Target operation command acquisition", () => {
   it("does not invoke a thrown Error's message accessor while settling", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
     const failure = new Error("original message");
-    const message = vi.fn(() => { throw new Error("getter escaped settlement"); });
+    const message = vi.fn(() => unregisteredEncodedMarker);
     Object.defineProperty(failure, "message", { get: message });
     const target = { run: vi.fn(async () => { throw failure; }) };
     const runner = createTargetOperationCommandRunner({
@@ -745,6 +755,8 @@ describe("trusted Target operation command acquisition", () => {
         summary: "Unknown Target operation failure",
       },
     );
+    expect(JSON.stringify(vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls))
+      .not.toContain(unregisteredEncodedMarker);
   });
 
   it("settles a revoked Proxy failure with a deterministic fallback", async () => {
@@ -778,14 +790,20 @@ describe("trusted Target operation command acquisition", () => {
 
   it.each([
     ["a primitive", "primitive failure", "primitive failure"],
-    ["a plain object", { message: "plain-object failure" }, "plain-object failure"],
-    ["an ordinary Error", new Error("ordinary Error failure"), "ordinary Error failure"],
     [
-      "an inherited forged summary",
-      Object.assign(Object.create({ publicSummary: "forged inherited diagnostic" }), {
-        message: "inherited-summary failure",
-      }),
-      "inherited-summary failure",
+      "a plain object",
+      { message: `plain-object failure ${unregisteredEncodedMarker}` },
+      "Unknown Target operation failure",
+    ],
+    [
+      "an ordinary Error",
+      new Error(`ordinary Error failure ${unregisteredEncodedMarker}`),
+      "Unknown Target operation failure",
+    ],
+    [
+      "an inherited message",
+      Object.create({ message: `inherited failure ${unregisteredEncodedMarker}` }),
+      "Unknown Target operation failure",
     ],
   ])("deterministically diagnoses %s", async (_caseName, failure, expectedSummary) => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
@@ -810,15 +828,16 @@ describe("trusted Target operation command acquisition", () => {
       summary: expectedSummary,
     });
     expect(diagnostic!.summary.length).toBeLessThanOrEqual(500);
+    expect(JSON.stringify(diagnostic)).not.toContain(unregisteredEncodedMarker);
   });
 
-  it("ignores Object.prototype public-summary pollution", async () => {
+  it("ignores Object.prototype message pollution", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
-    const failure = new Error("prototype-pollution failure");
-    const pollutedSummary = vi.fn(() => "polluted public diagnostic");
-    Object.defineProperty(Object.prototype, "publicSummary", {
+    const failure = {};
+    Object.defineProperty(Object.prototype, "message", {
       configurable: true,
-      get: pollutedSummary,
+      value: unregisteredEncodedMarker,
+      writable: true,
     });
     try {
       const target = { run: vi.fn(async () => { throw failure; }) };
@@ -829,7 +848,6 @@ describe("trusted Target operation command acquisition", () => {
       });
 
       await expect(runner.run("review", 219)).rejects.toBe(failure);
-      expect(pollutedSummary).not.toHaveBeenCalled();
       expect(acquisition.events).toEqual([
         "add-in-progress",
         "remove-trigger",
@@ -842,11 +860,13 @@ describe("trusted Target operation command acquisition", () => {
         219,
         {
           jobId: "job-219-prototype-pollution",
-          summary: "prototype-pollution failure",
+          summary: "Unknown Target operation failure",
         },
       );
+      expect(JSON.stringify(vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls))
+        .not.toContain(unregisteredEncodedMarker);
     } finally {
-      delete Object.prototype.publicSummary;
+      delete Object.prototype.message;
     }
   });
 

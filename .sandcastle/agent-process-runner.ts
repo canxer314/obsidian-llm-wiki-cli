@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
 import { runJobWithTimeout } from "./job-timeout.ts";
+import { trustFailureDiagnostic } from "./trusted-failure.ts";
 import {
   appendJobOutputFromEnvironment,
 } from "./job-logs.ts";
@@ -176,7 +177,8 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
     })),
   });
   if (result.status === "timed-out") {
-    throw new AgentWorkerTimeoutError(options.timeoutMessage);
+    const failure = new AgentWorkerTimeoutError(options.timeoutMessage);
+    throw trustFailureDiagnostic(failure, failure.message);
   }
   const captured = await output!;
   if (captured.logError !== undefined) throw captured.logError;
