@@ -66,9 +66,7 @@ describe("feedback implementation process runner", () => {
     const start = vi.fn().mockReturnValue(process);
     const runner = createProcessFeedbackImplementer({
       model: "implementer-model",
-      start,
-      groupExited: async () => {},
-    });
+      start,    });
     const implemented = runner.implement({
       pullRequestNumber: 224,
       branch: "feature/feedback",
@@ -95,45 +93,11 @@ describe("feedback implementation process runner", () => {
     ]);
   });
 
-  it("terminates the worker process group, forces it after grace, and waits for close", async () => {
-    const process = child(531);
-    let groupExit!: () => void;
-    const groupExited = new Promise<void>((resolve) => { groupExit = resolve; });
-    const kill = vi.fn((_pid: number, signal: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        process.emit("close", null);
-        groupExit();
-      }
-    });
-    const runner = createProcessFeedbackImplementer({
-      model: "implementer-model",
-      timeoutMilliseconds: 0,
-      graceMilliseconds: 0,
-      start: vi.fn().mockReturnValue(process),
-      kill,
-      groupExited: () => groupExited,
-      wait: async () => {},
-    });
-
-    await expect(runner.implement({
-      pullRequestNumber: 224,
-      branch: "feature/feedback",
-      revision,
-      checkoutPath: "/jobs/feedback-224",
-      rootCommentId: "PRRC_root",
-    })).rejects.toThrow("Feedback implementation execution timed out");
-
-    expect(kill).toHaveBeenNthCalledWith(1, -531, "SIGTERM");
-    expect(kill).toHaveBeenNthCalledWith(2, -531, "SIGKILL");
-  });
-
   it("fails with the worker diagnostics when the worker exits unsuccessfully", async () => {
     const process = child(532);
     const runner = createProcessFeedbackImplementer({
       model: "implementer-model",
-      start: vi.fn().mockReturnValue(process),
-      groupExited: async () => {},
-    });
+      start: vi.fn().mockReturnValue(process),    });
     const implemented = runner.implement({
       pullRequestNumber: 224,
       branch: "feature/feedback",

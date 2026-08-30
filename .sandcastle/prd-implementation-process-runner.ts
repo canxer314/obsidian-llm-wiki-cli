@@ -9,9 +9,6 @@ export function createProcessPrdImplementer(options: {
   readonly timeoutMilliseconds?: number | undefined;
   readonly graceMilliseconds?: number | undefined;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
-  readonly kill?: ((pid: number, signal: NodeJS.Signals) => void) | undefined;
-  readonly wait?: ((milliseconds: number) => Promise<void>) | undefined;
-  readonly groupExited?: ((pid: number) => Promise<void>) | undefined;
 }) {
   return {
     async implement(request: {
@@ -39,9 +36,6 @@ export function createProcessPrdImplementer(options: {
         timeoutMilliseconds: options.timeoutMilliseconds,
         graceMilliseconds: options.graceMilliseconds,
         start: options.start,
-        kill: options.kill,
-        wait: options.wait,
-        groupExited: options.groupExited,
       });
       return workerJson(result, "PRD implementation");
     },

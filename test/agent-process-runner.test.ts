@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { runAgentWorker, workerJson } from "../.sandcastle/agent-process-runner.js";
+import { runAgentWorker, runTargetJob, workerJson } from "../.sandcastle/agent-process-runner.js";
 
 function child(pid: number): ChildProcess & EventEmitter {
   const process = new EventEmitter() as ChildProcess & EventEmitter;
@@ -108,18 +108,16 @@ describe("agent process runner", () => {
     const logDirectory = join(root, "stdout.log");
     mkdirSync(logDirectory);
     const process = child(601);
-    const running = runAgentWorker({
+    const running = runTargetJob({
       checkoutPath: "unused",
       workerFile: "unused.ts",
       workerName: "fixture",
       arguments_: [],
       timeoutMessage: "Fixture worker timed out",
       start: () => process,
-      processGroupOwner: true,
-      inheritedEnvironment: {
+      environment: {
         SANDCASTLE_JOB_STDOUT_LOG: logDirectory,
       },
-      groupExited: async () => {},
     });
 
     try {

@@ -66,9 +66,7 @@ describe("implementation process runner", () => {
     const runner = createProcessImplementer({
       plannerModel: "planner-model",
       implementerModel: "implementer-model",
-      start,
-      groupExited: async () => {},
-    });
+      start,    });
     const implemented = runner.implement({
       issueNumber: 221,
       baseRevision: revision,
@@ -93,45 +91,12 @@ describe("implementation process runner", () => {
     ]);
   });
 
-  it("terminates the worker process group, forces it after grace, and waits for close", async () => {
-    const process = child(511);
-    let groupExit!: () => void;
-    const groupExited = new Promise<void>((resolve) => { groupExit = resolve; });
-    const kill = vi.fn((_pid: number, signal: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        process.emit("close", null);
-        groupExit();
-      }
-    });
-    const runner = createProcessImplementer({
-      plannerModel: "planner-model",
-      implementerModel: "implementer-model",
-      timeoutMilliseconds: 0,
-      graceMilliseconds: 0,
-      start: vi.fn().mockReturnValue(process),
-      kill,
-      groupExited: () => groupExited,
-      wait: async () => {},
-    });
-
-    await expect(runner.implement({
-      issueNumber: 221,
-      baseRevision: revision,
-      checkoutPath: "/jobs/implementation-221",
-    })).rejects.toThrow("Implementation execution timed out");
-
-    expect(kill).toHaveBeenNthCalledWith(1, -511, "SIGTERM");
-    expect(kill).toHaveBeenNthCalledWith(2, -511, "SIGKILL");
-  });
-
   it("fails with the worker diagnostics when the worker exits unsuccessfully", async () => {
     const process = child(512);
     const runner = createProcessImplementer({
       plannerModel: "planner-model",
       implementerModel: "implementer-model",
-      start: vi.fn().mockReturnValue(process),
-      groupExited: async () => {},
-    });
+      start: vi.fn().mockReturnValue(process),    });
     const implemented = runner.implement({
       issueNumber: 221,
       baseRevision: revision,

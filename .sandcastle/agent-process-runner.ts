@@ -1,15 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
-import { runJobWithTimeout } from "./job-timeout.ts";
-import {
-  appendJobOutputFromEnvironment,
-} from "./job-logs.ts";
-import { workerProcessOptions } from "./worker-process.ts";
+import { appendJobOutputFromEnvironment } from "./job-logs.ts";
+import { createWorkerProcessLifecycle, type WorkerProcessRole } from "./worker-process-lifecycle.ts";
+import { INHERITED_JOB_PROCESS_GROUP } from "./worker-process.ts";
 
-// Upstream agent workflows time out after sixty minutes. These workers carry
-// no inner clock, so the outer process-group clock fires at that mark itself;
-// after the grace interval the whole descendant tree is force-killed.
 const AGENT_JOB_TIMEOUT_MILLISECONDS = 60 * 60 * 1000;
 const AGENT_JOB_GRACE_MILLISECONDS = 10 * 1000;
 
@@ -20,10 +15,6 @@ export class AgentWorkerTimeoutError extends Error {
   }
 }
 
-// A worker that exits unsuccessfully may be untrusted Target revision code
-// whose stderr carries operation-transformed secrets. The full message and
-// `publicSummary` property stay available for local diagnosis; only a trusted
-// producer's private-registry classification may reach GitHub diagnostics.
 export class AgentWorkerExitError extends Error {
   declare readonly code: number | null;
   declare readonly publicSummary: string;
@@ -59,62 +50,7 @@ export interface AgentWorkerResult {
   readonly diagnostics: string;
 }
 
-interface CapturedAgentWorkerResult extends AgentWorkerResult {
-  readonly logError?: unknown;
-}
-
-function outputOf(
-  child: ChildProcess,
-  environment: Readonly<Record<string, string>> | undefined,
-): Promise<CapturedAgentWorkerResult> {
-  return new Promise((resolveOutput, reject) => {
-    let output = "";
-    let diagnostics = "";
-    let logError: unknown;
-    const append = (
-      stream: "stdout" | "stderr",
-      chunk: Buffer | string,
-    ): void => {
-      if (environment === undefined || logError !== undefined) return;
-      try {
-        appendJobOutputFromEnvironment(environment, stream, chunk);
-      } catch (error) {
-        logError = error;
-      }
-    };
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      output += String(chunk);
-      append("stdout", chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      diagnostics += String(chunk);
-      append("stderr", chunk);
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolveOutput({
-      output,
-      code,
-      diagnostics,
-      ...(logError === undefined ? {} : { logError }),
-    }));
-  });
-}
-
-function groupExit(pid: number): Promise<void> {
-  return new Promise((resolveExit) => {
-    const check = () => {
-      try {
-        process.kill(-pid, 0);
-        setTimeout(check, 10);
-      } catch {
-        resolveExit();
-      }
-    };
-    check();
-  });
-}
-
-export interface AgentWorkerOptions {
+interface FixedAgentWorkerOptions {
   readonly checkoutPath: string;
   readonly workerFile: string;
   readonly workerName: string;
@@ -124,62 +60,78 @@ export interface AgentWorkerOptions {
   readonly timeoutMilliseconds?: number | undefined;
   readonly graceMilliseconds?: number | undefined;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
-  readonly kill?: ((pid: number, signal: NodeJS.Signals) => void) | undefined;
-  readonly wait?: ((milliseconds: number) => Promise<void>) | undefined;
-  readonly groupExited?: ((pid: number) => Promise<void>) | undefined;
-  readonly processGroupOwner?: boolean | undefined;
-  readonly inheritedEnvironment?: Readonly<Record<string, string>> | undefined;
 }
 
-export async function runAgentWorker(options: AgentWorkerOptions): Promise<AgentWorkerResult> {
-  const processOptions = workerProcessOptions(
-    options.processGroupOwner === true ? "owner" : "nested",
-    options.inheritedEnvironment,
-  );
-  const start = options.start ?? ((arguments_) => spawn(process.execPath, [
-    "--experimental-strip-types",
-    resolve(options.checkoutPath, ".sandcastle", options.workerFile),
-    ...arguments_,
-  ], {
-    detached: processOptions.detached,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: processOptions.environment,
-  }));
-  const captureEnvironment = options.processGroupOwner === true
-    ? options.inheritedEnvironment
-    : undefined;
-  if (processOptions.inherited) {
-    const child = start(options.arguments_);
-    child.stdin?.end(options.input);
-    return outputOf(child, captureEnvironment);
-  }
-  let output: Promise<CapturedAgentWorkerResult> | undefined;
-  const result = await runJobWithTimeout({
-    start: () => {
-      const child = start(options.arguments_);
-      if (child.pid === undefined) throw new Error(`${options.workerName} worker did not expose a process ID`);
-      child.stdin?.end(options.input);
-      output = outputOf(child, captureEnvironment);
-      return {
-        pid: child.pid,
-        exited: output.then(() => undefined),
-        groupExited: (options.groupExited ?? groupExit)(child.pid),
-      };
-    },
+export type AgentWorkerOptions = FixedAgentWorkerOptions;
+
+export interface TargetJobOptions extends FixedAgentWorkerOptions {
+  readonly environment?: Readonly<Record<string, string>> | undefined;
+}
+
+function inheritedJobLogEnvironment(): Readonly<Record<string, string>> {
+  return Object.fromEntries([
+    "SANDCASTLE_JOB_STDOUT_LOG",
+    "SANDCASTLE_JOB_STDERR_LOG",
+  ].flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]!]]));
+}
+
+function processEnvironment(
+  role: WorkerProcessRole,
+  environment: Readonly<Record<string, string>> | undefined,
+  inherited: boolean,
+): Readonly<Record<string, string>> {
+  return {
+    HOME: process.env.HOME ?? "",
+    PATH: process.env.PATH ?? "",
+    ...(role === "owner" || inherited ? { [INHERITED_JOB_PROCESS_GROUP]: "1" } : {}),
+    ...(role === "owner" ? environment : inheritedJobLogEnvironment()),
+  };
+}
+
+async function runFixedAgentWorker(
+  options: FixedAgentWorkerOptions,
+  role: WorkerProcessRole,
+  environment?: Readonly<Record<string, string>>,
+): Promise<AgentWorkerResult> {
+  const lifecycle = createWorkerProcessLifecycle();
+  let outputSinkEnvironment: Readonly<Record<string, string | undefined>> = {};
+  const result = await lifecycle.run({
+    role,
     timeoutMilliseconds: options.timeoutMilliseconds ?? AGENT_JOB_TIMEOUT_MILLISECONDS,
     graceMilliseconds: options.graceMilliseconds ?? AGENT_JOB_GRACE_MILLISECONDS,
-    kill: options.kill ?? process.kill,
-    wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => {
-      const timer = setTimeout(resolveWait, milliseconds);
-      timer.unref();
-    })),
+    ...(options.input === undefined ? {} : { startup: options.input }),
+    outputSink: (stream, chunk) => appendJobOutputFromEnvironment(
+      outputSinkEnvironment,
+      stream,
+      chunk,
+    ),
+    launch: (admit, disposition) => {
+      outputSinkEnvironment = role === "owner" ? environment ?? {} : disposition.inherited
+        ? process.env
+        : {};
+      const start = options.start ?? ((arguments_: readonly string[]) => spawn(process.execPath, [
+        "--experimental-strip-types",
+        resolve(options.checkoutPath, ".sandcastle", options.workerFile),
+        ...arguments_,
+      ], {
+        detached: disposition.detached,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: processEnvironment(role, environment, disposition.inherited),
+      }));
+      admit(start(options.arguments_));
+    },
   });
-  if (result.status === "timed-out") {
-    throw new AgentWorkerTimeoutError(options.timeoutMessage);
-  }
-  const captured = await output!;
-  if (captured.logError !== undefined) throw captured.logError;
-  return captured;
+  if (result.status === "timed-out") throw new AgentWorkerTimeoutError(options.timeoutMessage);
+  if (result.outputSinkError !== undefined) throw result.outputSinkError;
+  return { output: result.stdout, code: result.code, diagnostics: result.stderr };
+}
+
+export function runAgentWorker(options: AgentWorkerOptions): Promise<AgentWorkerResult> {
+  return runFixedAgentWorker(options, "nested");
+}
+
+export function runTargetJob(options: TargetJobOptions): Promise<AgentWorkerResult> {
+  return runFixedAgentWorker(options, "owner", options.environment);
 }
 
 export function workerJson<TResult>(

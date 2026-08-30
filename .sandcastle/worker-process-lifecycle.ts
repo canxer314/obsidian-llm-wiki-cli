@@ -130,7 +130,7 @@ function observeChild(
       child.stderr?.on("data", onStderr);
       child.stdout?.once("error", onError);
       child.stderr?.once("error", onError);
-      child.stdin?.once("error", onError);
+      child.stdin?.once?.("error", onError);
       child.once("error", onError);
       child.once("close", onClose);
     } catch (error) {

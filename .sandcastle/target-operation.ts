@@ -5,8 +5,10 @@ import {
   AgentWorkerExitError,
   AgentWorkerTimeoutError,
   runAgentWorker,
+  runTargetJob,
   workerJson,
   type AgentWorkerOptions,
+  type TargetJobOptions,
 } from "./agent-process-runner.ts";
 import type {
   TargetCheckout,
@@ -168,14 +170,11 @@ interface TargetOperationRunnerOptions {
   readonly startup: TargetOperationStartupSnapshot;
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
-  readonly start?: AgentWorkerOptions["start"];
-  readonly kill?: AgentWorkerOptions["kill"];
-  readonly wait?: AgentWorkerOptions["wait"];
-  readonly groupExited?: AgentWorkerOptions["groupExited"];
+  readonly start?: (arguments_: readonly string[]) => import("node:child_process").ChildProcess;
 }
 
 export function createTargetOperationRunner(options: TargetOperationRunnerOptions) {
-  const runner = createTargetOperationRunnerWithWorker(options, runAgentWorker);
+  const runner = createTargetOperationRunnerWithWorker(options, runTargetJob);
   return {
     async run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown> {
       try {
@@ -192,7 +191,7 @@ export function createTargetOperationRunner(options: TargetOperationRunnerOption
 
 export function createTargetOperationRunnerWithWorker(
   options: TargetOperationRunnerOptions,
-  runWorker: typeof runAgentWorker,
+  runWorker: typeof runTargetJob,
 ) {
   return {
     async run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown> {
@@ -228,11 +227,7 @@ export function createTargetOperationRunnerWithWorker(
           timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeout(invocation.operation),
           graceMilliseconds: options.graceMilliseconds ?? TARGET_JOB_GRACE_MILLISECONDS,
           start: options.start,
-          kill: options.kill,
-          wait: options.wait,
-          groupExited: options.groupExited,
-          processGroupOwner: true,
-          inheritedEnvironment: log === undefined ? undefined : inheritedJobLogEnvironment(log),
+          environment: log === undefined ? undefined : inheritedJobLogEnvironment(log),
         });
         const outcome = classifyTargetOperationOutcome(
           invocation.operation,

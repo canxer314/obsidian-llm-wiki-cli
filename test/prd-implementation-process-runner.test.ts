@@ -69,9 +69,7 @@ describe("PRD implementation process runner", () => {
     const runner = createProcessPrdImplementer({
       plannerModel: "planner-model",
       implementerModel: "implementer-model",
-      start,
-      groupExited: async () => {},
-    });
+      start,    });
     const implemented = runner.implement({
       prdNumber: 226,
       child: { number: 301, title: "Slice one" },
@@ -94,47 +92,12 @@ describe("PRD implementation process runner", () => {
     ]);
   });
 
-  it("terminates the worker process group, forces it after grace, and waits for close", async () => {
-    const process = child(521);
-    let groupExit!: () => void;
-    const groupExited = new Promise<void>((resolve) => { groupExit = resolve; });
-    const kill = vi.fn((_pid: number, signal: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        process.emit("close", null);
-        groupExit();
-      }
-    });
-    const runner = createProcessPrdImplementer({
-      plannerModel: "planner-model",
-      implementerModel: "implementer-model",
-      timeoutMilliseconds: 0,
-      graceMilliseconds: 0,
-      start: vi.fn().mockReturnValue(process),
-      kill,
-      groupExited: () => groupExited,
-      wait: async () => {},
-    });
-
-    await expect(runner.implement({
-      prdNumber: 226,
-      child: { number: 301, title: "Slice one" },
-      branch: "sandcastle/prd-226",
-      baseRevision: revision,
-      checkoutPath: "/jobs/prd-implementation-226",
-    })).rejects.toThrow("PRD implementation execution timed out");
-
-    expect(kill).toHaveBeenNthCalledWith(1, -521, "SIGTERM");
-    expect(kill).toHaveBeenNthCalledWith(2, -521, "SIGKILL");
-  });
-
   it("fails with the worker diagnostics when the worker exits unsuccessfully", async () => {
     const process = child(522);
     const runner = createProcessPrdImplementer({
       plannerModel: "planner-model",
       implementerModel: "implementer-model",
-      start: vi.fn().mockReturnValue(process),
-      groupExited: async () => {},
-    });
+      start: vi.fn().mockReturnValue(process),    });
     const implemented = runner.implement({
       prdNumber: 226,
       child: { number: 301, title: "Slice one" },

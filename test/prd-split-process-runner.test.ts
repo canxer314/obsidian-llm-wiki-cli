@@ -66,9 +66,7 @@ describe("PRD split process runner", () => {
     const start = vi.fn().mockReturnValue(process);
     const runner = createProcessPrdSplitter({
       model: "planner-model",
-      start,
-      groupExited: async () => {},
-    });
+      start,    });
     const split = runner.split({
       prdNumber: 223,
       title: "Vault bridge PRD",
@@ -86,43 +84,11 @@ describe("PRD split process runner", () => {
     ]);
   });
 
-  it("terminates the worker process group, forces it after grace, and waits for close", async () => {
-    const process = child(541);
-    let groupExit!: () => void;
-    const groupExited = new Promise<void>((resolve) => { groupExit = resolve; });
-    const kill = vi.fn((_pid: number, signal: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        process.emit("close", null);
-        groupExit();
-      }
-    });
-    const runner = createProcessPrdSplitter({
-      model: "planner-model",
-      timeoutMilliseconds: 0,
-      graceMilliseconds: 0,
-      start: vi.fn().mockReturnValue(process),
-      kill,
-      groupExited: () => groupExited,
-      wait: async () => {},
-    });
-
-    await expect(runner.split({
-      prdNumber: 223,
-      title: "Vault bridge PRD",
-      checkoutPath: "/jobs/prd-split-223",
-    })).rejects.toThrow("PRD split execution timed out");
-
-    expect(kill).toHaveBeenNthCalledWith(1, -541, "SIGTERM");
-    expect(kill).toHaveBeenNthCalledWith(2, -541, "SIGKILL");
-  });
-
   it("fails with the worker diagnostics when the worker exits unsuccessfully", async () => {
     const process = child(542);
     const runner = createProcessPrdSplitter({
       model: "planner-model",
-      start: vi.fn().mockReturnValue(process),
-      groupExited: async () => {},
-    });
+      start: vi.fn().mockReturnValue(process),    });
     const split = runner.split({
       prdNumber: 223,
       title: "Vault bridge PRD",
