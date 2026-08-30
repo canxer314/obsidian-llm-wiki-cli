@@ -6,8 +6,6 @@ import type { PrdSlice } from "./prd-split-extraction.ts";
 export function createProcessPrdSplitter(options: {
   readonly startup: string;
   readonly model: string;
-  readonly timeoutMilliseconds?: number | undefined;
-  readonly graceMilliseconds?: number | undefined;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
 }) {
   return {
@@ -28,8 +26,6 @@ export function createProcessPrdSplitter(options: {
         ],
         input: options.startup,
         timeoutMessage: "PRD split execution timed out",
-        timeoutMilliseconds: options.timeoutMilliseconds,
-        graceMilliseconds: options.graceMilliseconds,
         start: options.start,
       });
       const parsed = workerJson<{ readonly slices: readonly PrdSlice[] }>(result, "PRD split");

@@ -12,16 +12,13 @@ type Execute = (
 
 function createProcessGitExecutor(options: {
   readonly environment?: Readonly<Record<string, string>>;
-  readonly timeoutMilliseconds?: number;
-  readonly graceMilliseconds?: number;
 }): Execute {
   const lifecycle = createWorkerProcessLifecycle();
   return async (arguments_) => {
-    const timeoutMilliseconds = options.timeoutMilliseconds ?? GIT_COMMAND_TIMEOUT_MILLISECONDS;
     const completed = await lifecycle.run({
       role: "nested",
-      timeoutMilliseconds,
-      graceMilliseconds: options.graceMilliseconds ?? GIT_COMMAND_GRACE_MILLISECONDS,
+      timeoutMilliseconds: GIT_COMMAND_TIMEOUT_MILLISECONDS,
+      graceMilliseconds: GIT_COMMAND_GRACE_MILLISECONDS,
       launch: (admit, disposition) => {
         const child = spawn("git", [...arguments_], {
           detached: disposition.detached,
@@ -29,11 +26,10 @@ function createProcessGitExecutor(options: {
           ...(options.environment === undefined ? {} : { env: options.environment }),
         });
         admit(child);
-        if (child.pid === undefined) throw new Error("spawn git ENOENT");
       },
     });
     if (completed.status === "timed-out") {
-      throw new Error(`git command timed out after ${timeoutMilliseconds}ms`);
+      throw new Error(`git command timed out after ${GIT_COMMAND_TIMEOUT_MILLISECONDS}ms`);
     }
     if (completed.code !== 0) {
       throw new Error(`git exited with ${completed.code ?? "signal"}: ${completed.stderr}`);
@@ -57,8 +53,6 @@ export function createProcessBranchUpdater(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
   readonly resolver?: BranchUpdateResolver;
-  readonly timeoutMilliseconds?: number;
-  readonly graceMilliseconds?: number;
 }) {
   const execute = options.execute ?? createProcessGitExecutor(options);
   return {

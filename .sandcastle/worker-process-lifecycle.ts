@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 
-import { runJobWithTimeout } from "./job-timeout.ts";
+import { runJobWithTimeout, type CancellableWait, type Wait } from "./job-timeout.ts";
 import { INHERITED_JOB_PROCESS_GROUP } from "./worker-process.ts";
 
 export type WorkerProcessRole = "owner" | "nested";
@@ -30,13 +30,16 @@ interface CapturedChildOutput {
 interface ObservedChild {
   readonly output: Promise<CapturedChildOutput>;
   readonly exited: Promise<void>;
+  dispose(error?: unknown): void;
 }
+
+interface GroupExitObservation extends CancellableWait {}
 
 interface WorkerProcessLifecycleOptions {
   readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
-  readonly wait?: (milliseconds: number) => Promise<void>;
+  readonly wait?: Wait;
   readonly probeGroup?: (pid: number) => void;
-  readonly groupExited?: (pid: number) => Promise<void>;
+  readonly groupExited?: (pid: number) => Promise<void> | GroupExitObservation;
 }
 
 interface WorkerProcessRunOptions {
@@ -51,11 +54,18 @@ interface WorkerProcessRunOptions {
   ) => void;
 }
 
-function wait(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    timer.unref();
-  });
+function wait(milliseconds: number): CancellableWait {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    completed: new Promise((resolve) => {
+      timer = setTimeout(resolve, milliseconds);
+      timer.unref();
+    }),
+    cancel: () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
 }
 
 function isGroupAbsent(error: unknown): boolean {
@@ -74,116 +84,181 @@ function observeChild(
   child: ChildProcess,
   outputSink: WorkerProcessRunOptions["outputSink"],
 ): ObservedChild {
+  let stdout = "";
+  let stderr = "";
+  let outputSinkError: unknown;
+  let exitSettled = false;
+  let outputSettled = false;
   let resolveExit!: () => void;
-  let rejectExit!: (error: Error) => void;
-  const exitSignal = new Promise<void>((resolve, reject) => {
+  let rejectExit!: (error: unknown) => void;
+  let resolveOutput!: (output: CapturedChildOutput) => void;
+  let rejectOutput!: (error: unknown) => void;
+
+  const exited = new Promise<void>((resolve, reject) => {
     resolveExit = resolve;
     rejectExit = reject;
   });
-  const onExit = (): void => resolveExit();
-  const onExitError = (error: Error): void => rejectExit(error);
-  child.once("exit", onExit);
-  child.once("close", onExit);
-  child.once("error", onExitError);
   const output = new Promise<CapturedChildOutput>((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
-    let outputSinkError: unknown;
-    let settled = false;
-    const settle = (callback: () => void): void => {
-      if (settled) return;
-      settled = true;
-      removeListeners();
-      callback();
-    };
-    const append = (stream: "stdout" | "stderr", chunk: Buffer | string): void => {
-      if (stream === "stdout") stdout += String(chunk);
-      else stderr += String(chunk);
-      if (outputSink === undefined || outputSinkError !== undefined) return;
-      try {
-        outputSink(stream, chunk);
-      } catch (error) {
-        outputSinkError = error;
-      }
-    };
-    const onStdout = (chunk: Buffer | string): void => append("stdout", chunk);
-    const onStderr = (chunk: Buffer | string): void => append("stderr", chunk);
-    const onError = (error: Error): void => settle(() => reject(error));
-    const onClose = (code: number | null): void => settle(() => resolve({
+    resolveOutput = resolve;
+    rejectOutput = reject;
+  });
+  const removeExitListeners = (): void => {
+    child.off("exit", onExit);
+    child.off("close", onExit);
+    child.off("error", onExitError);
+  };
+  const removeOutputListeners = (): void => {
+    child.stdout?.off?.("data", onStdout);
+    child.stderr?.off?.("data", onStderr);
+    child.stdout?.off?.("error", onOutputError);
+    child.stderr?.off?.("error", onOutputError);
+    child.stdin?.off?.("error", onOutputError);
+    child.off("error", onOutputError);
+    child.off("close", onClose);
+  };
+  const settleExit = (error?: unknown): void => {
+    if (exitSettled) return;
+    exitSettled = true;
+    removeExitListeners();
+    if (error === undefined) resolveExit();
+    else rejectExit(error);
+  };
+  const settleOutput = (code?: number | null, error?: unknown): void => {
+    if (outputSettled) return;
+    outputSettled = true;
+    removeOutputListeners();
+    if (error !== undefined) rejectOutput(error);
+    else resolveOutput({
       stdout,
       stderr,
-      code,
+      code: code ?? null,
       ...(outputSinkError === undefined ? {} : { outputSinkError }),
-    }));
-    const removeListeners = (): void => {
-      child.stdout?.off?.("data", onStdout);
-      child.stderr?.off?.("data", onStderr);
-      child.stdout?.off?.("error", onError);
-      child.stderr?.off?.("error", onError);
-      child.stdin?.off?.("error", onError);
-      child.off("error", onError);
-      child.off("close", onClose);
-    };
-
+    });
+  };
+  function onExit(): void {
+    settleExit();
+  }
+  function onExitError(error: Error): void {
+    settleExit(error);
+    settleOutput(undefined, error);
+  }
+  const append = (stream: "stdout" | "stderr", chunk: Buffer | string): void => {
+    if (stream === "stdout") stdout += String(chunk);
+    else stderr += String(chunk);
+    if (outputSink === undefined || outputSinkError !== undefined) return;
     try {
-      child.stdout?.on("data", onStdout);
-      child.stderr?.on("data", onStderr);
-      child.stdout?.once("error", onError);
-      child.stderr?.once("error", onError);
-      child.stdin?.once?.("error", onError);
-      child.once("error", onError);
-      child.once("close", onClose);
+      outputSink(stream, chunk);
     } catch (error) {
-      settle(() => reject(error));
+      outputSinkError = error;
     }
+  };
+  function onStdout(chunk: Buffer | string): void {
+    append("stdout", chunk);
+  }
+  function onStderr(chunk: Buffer | string): void {
+    append("stderr", chunk);
+  }
+  function onOutputError(error: Error): void {
+    settleExit(error);
+    settleOutput(undefined, error);
+  }
+  function onClose(code: number | null): void {
+    settleOutput(code);
+  }
+  const dispose = (error?: unknown): void => {
+    settleExit(error ?? new Error("Worker process observation was cancelled"));
+    settleOutput(undefined, error ?? new Error("Worker process observation was cancelled"));
+  };
+
+  try {
+    child.once("exit", onExit);
+    child.once("close", onExit);
+    child.once("error", onExitError);
+    child.stdout?.on("data", onStdout);
+    child.stderr?.on("data", onStderr);
+    child.stdout?.once("error", onOutputError);
+    child.stderr?.once("error", onOutputError);
+    child.stdin?.once?.("error", onOutputError);
+    child.once("error", onOutputError);
+    child.once("close", onClose);
+  } catch (error) {
+    dispose(error);
+  }
+
+  void output.catch(() => undefined);
+  void exited.catch(() => undefined);
+  return { output, exited, dispose };
+}
+
+function groupExitObservation(
+  pid: number,
+  options: WorkerProcessLifecycleOptions,
+): GroupExitObservation {
+  if (options.groupExited !== undefined) {
+    const observation = options.groupExited(pid);
+    if ("completed" in observation) return observation;
+    return { completed: observation, cancel: () => {} };
+  }
+
+  const probe = options.probeGroup ?? ((groupPid: number) => process.kill(-groupPid, 0));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelled = false;
+  const completed = new Promise<void>((resolve, reject) => {
+    const check = (): void => {
+      if (cancelled) return;
+      try {
+        probe(pid);
+      } catch (error) {
+        if (isGroupAbsent(error)) resolve();
+        else reject(error);
+        return;
+      }
+      timer = setTimeout(check, 10);
+      timer.unref();
+    };
+    check();
   });
-  const exited = Promise.race([
-    exitSignal,
-    output.then(() => undefined),
-  ]);
-  return { output, exited };
+  return {
+    completed,
+    cancel: () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
 }
 
 export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOptions = {}) {
   const environment = process.env;
-  const groupExited = options.groupExited ?? ((pid: number) => new Promise<void>((resolve, reject) => {
-    const probe = options.probeGroup ?? ((groupPid: number) => process.kill(-groupPid, 0));
-    const check = (): void => {
-      try {
-        probe(pid);
-      } catch (error) {
-        if (isGroupAbsent(error)) {
-          resolve();
-          return;
-        }
-        reject(error);
-        return;
-      }
-      const timer = setTimeout(check, 10);
-      timer.unref();
-    };
-    check();
-  }));
 
   return {
     async run(runOptions: WorkerProcessRunOptions): Promise<WorkerProcessLifecycleOutcome> {
       const disposition = dispositionFor(runOptions.role, environment);
       let child: ChildProcess | undefined;
       let observed: ObservedChild | undefined;
+      let groupObservation: GroupExitObservation | undefined;
       const admit = (admitted: ChildProcess): void => {
         if (child !== undefined) throw new Error("Worker process was admitted more than once");
         child = admitted;
         observed = observeChild(admitted, runOptions.outputSink);
       };
-      const launch = (): void => {
+      const launch = async (): Promise<void> => {
         try {
           runOptions.launch(admit, disposition);
           if (child === undefined || observed === undefined) {
             throw new Error("Worker process was not admitted");
           }
-          if (child.pid === undefined) throw new Error("Worker process did not expose a process ID");
+          if (child.pid === undefined) {
+            await Promise.race([
+              observed.exited,
+              observed.output.then(() => undefined),
+              new Promise<void>((resolve) => setImmediate(resolve)),
+            ]);
+            if (child.pid === undefined) throw new Error("Worker process did not expose a process ID");
+          }
           child.stdin?.end(runOptions.startup);
         } catch (error) {
+          observed?.dispose(error);
           if (observed !== undefined) {
             void observed.output.catch(() => undefined);
             void observed.exited.catch(() => undefined);
@@ -192,28 +267,38 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
         }
       };
 
-      if (disposition.inherited) {
-        launch();
-        const completed = await observed!.output;
-        return { status: "completed", ...completed };
-      }
+      try {
+        if (disposition.inherited) {
+          await launch();
+          const completed = await observed!.output;
+          return { status: "completed", ...completed };
+        }
 
-      const result = await runJobWithTimeout({
-        start: () => {
-          launch();
-          return {
-            pid: child!.pid!,
-            exited: observed!.exited,
-            groupExited: groupExited(child!.pid!),
-          };
-        },
-        timeoutMilliseconds: runOptions.timeoutMilliseconds,
-        graceMilliseconds: runOptions.graceMilliseconds,
-        kill: options.kill ?? process.kill,
-        wait: options.wait ?? wait,
-      });
-      if (result.status === "timed-out") return { status: "timed-out" };
-      return { status: "completed", ...(await observed!.output) };
+        await launch();
+        const result = await runJobWithTimeout({
+          start: () => {
+            groupObservation = groupExitObservation(child!.pid!, options);
+            return {
+              pid: child!.pid!,
+              exited: observed!.exited,
+              groupExited: groupObservation.completed,
+            };
+          },
+          timeoutMilliseconds: runOptions.timeoutMilliseconds,
+          graceMilliseconds: runOptions.graceMilliseconds,
+          kill: options.kill ?? process.kill,
+          wait: options.wait ?? wait,
+        });
+        if (result.status === "timed-out") return { status: "timed-out" };
+        return { status: "completed", ...(await observed!.output) };
+      } finally {
+        groupObservation?.cancel();
+        if (observed !== undefined) {
+          observed.dispose();
+          void observed.output.catch(() => undefined);
+          void observed.exited.catch(() => undefined);
+        }
+      }
     },
   };
 }

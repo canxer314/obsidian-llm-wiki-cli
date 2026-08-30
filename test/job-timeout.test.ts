@@ -125,6 +125,29 @@ describe("job process-group timeout", () => {
     expect(() => process.kill(descendant, 0)).toThrow();
   });
 
+  it("cleans up the process group before propagating a child infrastructure failure", async () => {
+    const events: string[] = [];
+    let failChild!: (error: unknown) => void;
+    const exited = new Promise<void>((_resolve, reject) => { failChild = reject; });
+    let completeGroup!: () => void;
+    const groupExited = new Promise<void>((resolve) => { completeGroup = resolve; });
+    const running = runJobWithTimeout({
+      start: () => ({ pid: 421, exited, groupExited }),
+      timeoutMilliseconds: 60_000,
+      graceMilliseconds: 0,
+      kill: (pid, signal) => {
+        events.push(`kill:${pid}:${signal}`);
+        if (signal === "SIGKILL") completeGroup();
+      },
+      wait: async () => {},
+    });
+
+    failChild(new Error("stream failed"));
+
+    await expect(running).rejects.toThrow("stream failed");
+    expect(events).toEqual(["kill:-421:SIGTERM", "kill:-421:SIGKILL"]);
+  });
+
   it("tolerates a process group exiting immediately before a signal", async () => {
     let completeGroup!: () => void;
     const groupExited = new Promise<void>((resolve) => { completeGroup = resolve; });

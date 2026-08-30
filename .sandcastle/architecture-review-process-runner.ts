@@ -24,15 +24,14 @@ function parseOutcome(result: {
   if (result.code !== 0) {
     throw new Error(`Architecture review worker exited with ${result.code ?? "signal"}: ${result.stderr}`);
   }
-  const line = result.stdout.trim().split("\n").at(-1);
-  if (line === undefined) throw new Error("Architecture review worker did not return an outcome");
+  const output = result.stdout.trim();
+  if (output.length === 0) throw new Error("Architecture review worker did not return an outcome");
+  const line = output.split("\n").at(-1)!;
   return JSON.parse(line) as ArchitectureReviewOutcome;
 }
 
 export function createProcessArchitectureReviewRunner(options: {
   readonly startup: string;
-  readonly timeoutMilliseconds?: number;
-  readonly graceMilliseconds?: number;
   readonly start?: (arguments_: readonly string[]) => ChildProcess;
   readonly writeInput?: (path: string, priorProposals: readonly ArchitectureReviewProposal[]) => void;
 }) {
@@ -70,8 +69,8 @@ export function createProcessArchitectureReviewRunner(options: {
       const result = await lifecycle.run({
         role: "nested",
         startup: options.startup,
-        timeoutMilliseconds: options.timeoutMilliseconds ?? WORKER_TIMEOUT_MILLISECONDS + FORCE_KILL_MARGIN_MILLISECONDS,
-        graceMilliseconds: options.graceMilliseconds ?? ARCHITECTURE_REVIEW_GRACE_MILLISECONDS,
+        timeoutMilliseconds: WORKER_TIMEOUT_MILLISECONDS + FORCE_KILL_MARGIN_MILLISECONDS,
+        graceMilliseconds: ARCHITECTURE_REVIEW_GRACE_MILLISECONDS,
         launch: (admit, disposition) => admit(start(arguments_, disposition.detached)),
       });
       if (result.status === "timed-out") throw new Error("Architecture review execution timed out");

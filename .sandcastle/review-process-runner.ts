@@ -19,8 +19,6 @@ function parseReview(result: { readonly stdout: string; readonly stderr: string;
 
 export function createProcessReviewRunner(options: {
   readonly startup: string;
-  readonly timeoutMilliseconds?: number;
-  readonly graceMilliseconds?: number;
   readonly start?: (arguments_: readonly string[], detached: boolean) => ChildProcess;
 }) {
   const lifecycle = createWorkerProcessLifecycle();
@@ -57,8 +55,8 @@ export function createProcessReviewRunner(options: {
       ];
       const result = await lifecycle.run({
         role: "nested",
-        timeoutMilliseconds: options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
-        graceMilliseconds: options.graceMilliseconds ?? REVIEW_GRACE_MILLISECONDS,
+        timeoutMilliseconds: REVIEW_TIMEOUT_MILLISECONDS,
+        graceMilliseconds: REVIEW_GRACE_MILLISECONDS,
         startup: options.startup,
         launch: (admit, disposition) => admit(start(arguments_, disposition.detached)),
       });

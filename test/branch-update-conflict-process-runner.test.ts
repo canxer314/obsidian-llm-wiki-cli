@@ -115,15 +115,4 @@ describe("branch update conflict process runner", () => {
     await expect(resolved).rejects.toThrow(message);
   });
 
-  it("maps lifecycle timeout to the conflict-resolution timeout error", async () => {
-    const resolver = createProcessBranchUpdateConflictResolver({
-      startup: "startup",
-      model: "merger-model",
-      timeoutMilliseconds: 0,
-      graceMilliseconds: 0,
-      start: () => child(554),
-    });
-
-    await expect(resolver.resolve(request)).rejects.toThrow("Branch update conflict resolution timed out");
-  });
 });

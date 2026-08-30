@@ -166,22 +166,45 @@ describe("architecture review process runner", () => {
     ]);
   });
 
-  it("maps a lifecycle timeout to the architecture-review timeout error", async () => {
-    const process = child(421);
+  it.each([
+    [null, "terminated", "Architecture review worker exited with signal: terminated"],
+    [0, "", "Architecture review worker did not return an outcome"],
+  ] as const)("fails closed for code %s and output absence", async (code, diagnostics, message) => {
+    const process = child(423);
     const runner = createProcessArchitectureReviewRunner({
-      timeoutMilliseconds: 0,
-      graceMilliseconds: 0,
       start: vi.fn().mockReturnValue(process),
       writeInput: () => {},
     });
-
-    await expect(runner.review({
+    const review = runner.review({
       revision,
       checkoutPath: "/jobs/architecture-review-228",
       priorProposals,
       model: "planner-model",
       artifactDirectory: "/jobs/review-artifacts/job-228",
-    })).rejects.toThrow("Architecture review execution timed out");
+    });
+    process.stderr?.emit("data", diagnostics);
+    process.emit("close", code);
+
+    await expect(review).rejects.toThrow(message);
+  });
+
+  it("rejects malformed architecture-review output", async () => {
+    const process = child(424);
+    const runner = createProcessArchitectureReviewRunner({
+      start: vi.fn().mockReturnValue(process),
+      writeInput: () => {},
+    });
+    const review = runner.review({
+      revision,
+      checkoutPath: "/jobs/architecture-review-228",
+      priorProposals,
+      model: "planner-model",
+      artifactDirectory: "/jobs/review-artifacts/job-228",
+    });
+    process.stdout?.emit("data", "not json");
+    process.emit("close", 0);
+
+    await expect(review).rejects.toThrow(/JSON/u);
   });
 
   it("fails with the worker diagnostics when the worker exits unsuccessfully", async () => {
