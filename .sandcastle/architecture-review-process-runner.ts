@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { runJobWithTimeout } from "./job-timeout.ts";
+import { createWorkerProcessLifecycle } from "./worker-process-lifecycle.ts";
 import { workerProcessOptions } from "./worker-process.ts";
 import type {
   ArchitectureReviewOutcome,
@@ -16,40 +16,15 @@ const WORKER_TIMEOUT_MILLISECONDS = 20 * 60 * 1000;
 const FORCE_KILL_MARGIN_MILLISECONDS = 60 * 1000;
 const ARCHITECTURE_REVIEW_GRACE_MILLISECONDS = 10 * 1000;
 
-function outputOf(child: ChildProcess): Promise<{ readonly output: string; readonly code: number | null; readonly diagnostics: string }> {
-  return new Promise((resolveOutput, reject) => {
-    let output = "";
-    let diagnostics = "";
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      output += String(chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      diagnostics += String(chunk);
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolveOutput({ output, code, diagnostics }));
-  });
-}
-
-function groupExit(pid: number): Promise<void> {
-  return new Promise((resolveExit) => {
-    const check = () => {
-      try {
-        process.kill(-pid, 0);
-        setTimeout(check, 10);
-      } catch {
-        resolveExit();
-      }
-    };
-    check();
-  });
-}
-
-function parseOutcome(result: { readonly output: string; readonly code: number | null; readonly diagnostics: string }): ArchitectureReviewOutcome {
+function parseOutcome(result: {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly code: number | null;
+}): ArchitectureReviewOutcome {
   if (result.code !== 0) {
-    throw new Error(`Architecture review worker exited with ${result.code ?? "signal"}: ${result.diagnostics}`);
+    throw new Error(`Architecture review worker exited with ${result.code ?? "signal"}: ${result.stderr}`);
   }
-  const line = result.output.trim().split("\n").at(-1);
+  const line = result.stdout.trim().split("\n").at(-1);
   if (line === undefined) throw new Error("Architecture review worker did not return an outcome");
   return JSON.parse(line) as ArchitectureReviewOutcome;
 }
@@ -60,23 +35,17 @@ export function createProcessArchitectureReviewRunner(options: {
   readonly graceMilliseconds?: number;
   readonly start?: (arguments_: readonly string[]) => ChildProcess;
   readonly writeInput?: (path: string, priorProposals: readonly ArchitectureReviewProposal[]) => void;
-  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
-  readonly wait?: (milliseconds: number) => Promise<void>;
-  readonly groupExited?: (pid: number) => Promise<void>;
 }) {
-  const processOptions = workerProcessOptions("nested");
-  const start = options.start ?? ((arguments_) => spawn(process.execPath, [
+  const lifecycle = createWorkerProcessLifecycle();
+  const start = (arguments_: readonly string[], detached: boolean) => options.start?.(arguments_) ?? spawn(process.execPath, [
     "--experimental-strip-types",
     resolve(import.meta.dirname, "architecture-review-worker.ts"),
     ...arguments_,
   ], {
-    detached: processOptions.detached,
+    detached,
     stdio: ["pipe", "pipe", "pipe"],
-    env: processOptions.environment,
-  }));
-  // The worker runs with a stripped environment, so the trusted parent hands
-  // the prior proposals over through the local job artifact directory. The
-  // write is synchronous so output listeners attach before callers can emit.
+    env: workerProcessOptions("nested").environment,
+  });
   const writeInput = options.writeInput ?? ((path, priorProposals) => {
     writeFileSync(path, JSON.stringify(priorProposals), { mode: 0o600 });
   });
@@ -98,35 +67,15 @@ export function createProcessArchitectureReviewRunner(options: {
         request.model,
         request.artifactDirectory,
       ];
-      if (processOptions.inherited) {
-        const child = start(arguments_);
-        child.stdin?.end(options.startup);
-        return parseOutcome(await outputOf(child));
-      }
-      let child: ChildProcess | undefined;
-      let output: Promise<{ readonly output: string; readonly code: number | null; readonly diagnostics: string }> | undefined;
-      const result = await runJobWithTimeout({
-        start: () => {
-          child = start(arguments_);
-          if (child.pid === undefined) throw new Error("Architecture review worker did not expose a process ID");
-          child.stdin?.end(options.startup);
-          output = outputOf(child);
-          return {
-            pid: child.pid,
-            exited: output.then(() => undefined),
-            groupExited: (options.groupExited ?? groupExit)(child.pid),
-          };
-        },
+      const result = await lifecycle.run({
+        role: "nested",
+        startup: options.startup,
         timeoutMilliseconds: options.timeoutMilliseconds ?? WORKER_TIMEOUT_MILLISECONDS + FORCE_KILL_MARGIN_MILLISECONDS,
         graceMilliseconds: options.graceMilliseconds ?? ARCHITECTURE_REVIEW_GRACE_MILLISECONDS,
-        kill: options.kill ?? process.kill,
-        wait: options.wait ?? (async (milliseconds) => new Promise((resolveWait) => {
-          const timer = setTimeout(resolveWait, milliseconds);
-          timer.unref();
-        })),
+        launch: (admit, disposition) => admit(start(arguments_, disposition.detached)),
       });
       if (result.status === "timed-out") throw new Error("Architecture review execution timed out");
-      return parseOutcome(await output!);
+      return parseOutcome(result);
     },
   };
 }
