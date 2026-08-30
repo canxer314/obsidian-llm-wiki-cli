@@ -791,23 +791,70 @@ describe("trusted Target operation command acquisition", () => {
   });
 
   it.each([
-    ["a primitive", "primitive failure", "primitive failure"],
+    ["a base64 string", unregisteredEncodedMarker, unregisteredEncodedMarker],
+    [
+      "a hex string",
+      Buffer.from("fake-unregistered-primitive-marker").toString("hex"),
+      "66616b652d756e726567697374657265642d7072696d69746976652d6d61726b6572",
+    ],
+    ["a number", 371, "371"],
+    ["a bigint", 371n, "371"],
+    ["a boolean", true, "true"],
+    ["undefined", undefined, "undefined"],
+    ["null", null, "null"],
+    [
+      "a symbol",
+      Symbol("fake-unregistered-primitive-marker"),
+      "fake-unregistered-primitive-marker",
+    ],
+  ])("does not publish an unregistered primitive thrown as %s", async (
+    _caseName,
+    failure,
+    forbiddenPublicText,
+  ) => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const target = { run: vi.fn(async () => { throw failure; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-primitive",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    expect(acquisition.ports.addBlocked).toHaveBeenCalledOnce();
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-primitive",
+        summary: "Unknown Target operation failure",
+      },
+    );
+    expect(JSON.stringify(vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls))
+      .not.toContain(forbiddenPublicText);
+  });
+
+  it.each([
     [
       "a plain object",
       { message: `plain-object failure ${unregisteredEncodedMarker}` },
-      "Unknown Target operation failure",
     ],
     [
       "an ordinary Error",
       new Error(`ordinary Error failure ${unregisteredEncodedMarker}`),
-      "Unknown Target operation failure",
     ],
     [
       "an inherited message",
       Object.create({ message: `inherited failure ${unregisteredEncodedMarker}` }),
-      "Unknown Target operation failure",
     ],
-  ])("deterministically diagnoses %s", async (_caseName, failure, expectedSummary) => {
+  ])("deterministically diagnoses %s", async (_caseName, failure) => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
     const target = { run: vi.fn(async () => { throw failure; }) };
     const runner = createTargetOperationCommandRunner({
@@ -827,7 +874,7 @@ describe("trusted Target operation command acquisition", () => {
     const diagnostic = vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls[0]?.[2];
     expect(diagnostic).toEqual({
       jobId: "job-219-unknown",
-      summary: expectedSummary,
+      summary: "Unknown Target operation failure",
     });
     expect(diagnostic!.summary.length).toBeLessThanOrEqual(500);
     expect(JSON.stringify(diagnostic)).not.toContain(unregisteredEncodedMarker);
