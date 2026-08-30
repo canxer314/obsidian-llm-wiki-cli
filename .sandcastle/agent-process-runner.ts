@@ -26,7 +26,8 @@ export class AgentWorkerTimeoutError extends Error {
 // trusted GitHub diagnostics may publish, because pattern redaction cannot
 // recognize transformed secrets (e.g. base64-encoded credentials).
 export class AgentWorkerExitError extends Error {
-  readonly publicSummary: string;
+  declare readonly code: number | null;
+  declare readonly publicSummary: string;
 
   constructor(options: {
     readonly workerName: string;
@@ -36,7 +37,20 @@ export class AgentWorkerExitError extends Error {
     const publicSummary = `${options.workerName} worker exited with ${options.code ?? "signal"}`;
     super(`${publicSummary}: ${options.diagnostics}`);
     this.name = "AgentWorkerExitError";
-    this.publicSummary = publicSummary;
+    Object.defineProperties(this, {
+      code: {
+        configurable: false,
+        enumerable: true,
+        value: options.code,
+        writable: false,
+      },
+      publicSummary: {
+        configurable: false,
+        enumerable: true,
+        value: publicSummary,
+        writable: false,
+      },
+    });
   }
 }
 
@@ -169,9 +183,17 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
   return captured;
 }
 
-export function workerJson<TResult>(result: AgentWorkerResult, workerName: string): TResult {
+export function workerJson<TResult>(
+  result: AgentWorkerResult,
+  workerName: string,
+  exitError: (options: {
+    readonly workerName: string;
+    readonly code: number | null;
+    readonly diagnostics: string;
+  }) => Error = (options) => new AgentWorkerExitError(options),
+): TResult {
   if (result.code !== 0) {
-    throw new AgentWorkerExitError({
+    throw exitError({
       workerName,
       code: result.code,
       diagnostics: result.diagnostics,

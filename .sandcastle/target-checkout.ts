@@ -15,7 +15,7 @@ class CommandExecutionError extends Error {
   readonly signal: NodeJS.Signals | null;
   readonly stdout: string;
   readonly stderr: string;
-  readonly publicSummary: string;
+  declare readonly publicSummary: string;
 
   constructor(options: {
     readonly file: string;
@@ -31,7 +31,12 @@ class CommandExecutionError extends Error {
     this.signal = options.signal;
     this.stdout = options.stdout;
     this.stderr = options.stderr;
-    this.publicSummary = publicSummary;
+    Object.defineProperty(this, "publicSummary", {
+      configurable: false,
+      enumerable: true,
+      value: publicSummary,
+      writable: false,
+    });
   }
 }
 

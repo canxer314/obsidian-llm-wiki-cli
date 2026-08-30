@@ -31,6 +31,7 @@ type Scenario = {
     readonly log: "running" | "completed" | "failed" | "timed-out";
     readonly blocked: boolean;
     readonly diagnostic: boolean;
+    readonly diagnosticSummary?: string;
   };
 };
 
@@ -175,6 +176,7 @@ const representativeScenarios: readonly Scenario[] = [
       log: "failed",
       blocked: true,
       diagnostic: true,
+      diagnosticSummary: "Target job worker exited with 1",
     },
   },
   {
@@ -401,6 +403,12 @@ describe("Target operation failure projections", () => {
       expect(labels.has("agent:blocked")).toBe(scenario.expected.blocked);
       expect(labels.has("agent:in-progress")).toBe(false);
       expect(diagnostics.length > 0).toBe(scenario.expected.diagnostic);
+      if (scenario.expected.diagnosticSummary !== undefined) {
+        expect(diagnostics).toEqual([{
+          jobId: `job-${scenario.name}`,
+          summary: scenario.expected.diagnosticSummary,
+        }]);
+      }
       for (const diagnostic of diagnostics) {
         expect(diagnostic.jobId).toBe(`job-${scenario.name}`);
         expect(diagnostic.summary.length).toBeLessThanOrEqual(500);
@@ -518,7 +526,7 @@ describe("Target operation failure projections", () => {
     // the classified exit summary; the specific "returned invalid JSON"
     // reason stays in the local job log for the operator.
     expect(diagnostics[0]!.summary)
-      .toBe("Target operation implement-issue worker exited with 1");
+      .toBe("Target job worker exited with 1");
     expect(diagnostics[0]!.summary).not.toContain(malformedPayloadMarker);
   });
 
@@ -611,7 +619,7 @@ describe("Target operation failure projections", () => {
     expect(labels).toEqual(new Set(["agent:blocked"]));
     expect(diagnostics).toEqual([{
       jobId: "job-encoded-credential-exfiltration",
-      summary: "Target operation implement-issue worker exited with 1",
+      summary: "Target job worker exited with 1",
     }]);
     expect(diagnostics[0]!.summary).not.toContain(exfiltratedCredential);
     expect(diagnostics[0]!.summary).not.toContain(encodedExfiltratedCredential);

@@ -2,6 +2,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 
 import {
+  AgentWorkerExitError,
   AgentWorkerTimeoutError,
   runAgentWorker,
   workerJson,
@@ -18,6 +19,10 @@ import {
 } from "./job-logs.ts";
 import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
 import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
+import {
+  trustAgentWorkerExit,
+  type TrustedAgentWorkerName,
+} from "./trusted-failure.ts";
 import type { TargetOperationStartupSnapshot } from "./target-operation-startup.ts";
 
 export type TargetOperationIdentity =
@@ -85,6 +90,18 @@ const targetOperationEntries: Readonly<Record<TargetOperationIdentity, string>> 
   "architecture-review": "operations/architecture-review.ts",
 };
 
+function trustedWorkerJson<TResult>(
+  result: Awaited<ReturnType<typeof runAgentWorker>>,
+  workerName: TrustedAgentWorkerName,
+): TResult {
+  return workerJson(result, workerName, (options) =>
+    trustAgentWorkerExit(
+      new AgentWorkerExitError(options),
+      workerName,
+      options.code,
+    ));
+}
+
 export async function executeTargetOperationInCheckout(options: {
   readonly checkout: TargetCheckout;
   readonly startup: TargetOperationStartupSnapshot;
@@ -133,7 +150,10 @@ export async function executeTargetOperationInCheckout(options: {
       input: JSON.stringify(options.startup),
       timeoutMessage: `Target operation ${operation} timed out`,
     });
-    const outcome = classifyTargetOperationOutcome(operation, workerJson(result, `Target operation ${operation}`));
+    const outcome = classifyTargetOperationOutcome(
+      operation,
+      trustedWorkerJson(result, `Target operation ${operation}`),
+    );
     return {
       value: outcome.outcome,
       disposition: outcome.kind === "blocked" ? "retain" : "cleanup",
@@ -203,7 +223,7 @@ export function createTargetOperationRunnerWithWorker(
         });
         const outcome = classifyTargetOperationOutcome(
           invocation.operation,
-          workerJson(result, `Target operation ${invocation.operation}`),
+          trustedWorkerJson(result, "Target job"),
         );
         operationFailed = false;
         if (log !== undefined) {

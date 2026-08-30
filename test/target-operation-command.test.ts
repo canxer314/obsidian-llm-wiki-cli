@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentWorkerExitError } from "../.sandcastle/agent-process-runner.js";
+import {
+  trustAgentWorkerExit,
+} from "../.sandcastle/trusted-failure.js";
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 
 const revision = "a".repeat(40);
@@ -571,11 +574,11 @@ describe("trusted Target operation command acquisition", () => {
     const encoded = Buffer.from(credential).toString("base64");
     const target = {
       run: vi.fn(async () => {
-        throw new AgentWorkerExitError({
+        throw trustAgentWorkerExit(new AgentWorkerExitError({
           workerName: "Target job",
           code: 1,
           diagnostics: `setup failed ${encoded}`,
-        });
+        }), "Target job", 1);
       }),
     };
     const runner = createTargetOperationCommandRunner({
@@ -595,6 +598,256 @@ describe("trusted Target operation command acquisition", () => {
     });
     expect(JSON.stringify(diagnostic)).not.toContain(credential);
     expect(JSON.stringify(diagnostic)).not.toContain(encoded);
+  });
+
+  it("does not trust a forged own public summary", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const failure = Object.assign(new Error("ordinary failure"), {
+      publicSummary: "forged public diagnostic",
+    });
+    const target = { run: vi.fn(async () => { throw failure; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-forged",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-forged",
+        summary: "ordinary failure",
+      },
+    );
+  });
+
+  it("does not trust a forged AgentWorkerExitError public summary", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const encoded = Buffer.from("forged-worker-secret").toString("base64");
+    const failure = new AgentWorkerExitError({
+      workerName: "Target job",
+      code: 1,
+      diagnostics: encoded,
+    });
+    expect(() => {
+      (failure as { publicSummary: string }).publicSummary = `forged ${encoded}`;
+    }).toThrow();
+    const target = { run: vi.fn(async () => { throw failure; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-forged-worker",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-forged-worker",
+        summary: `Target job worker exited with 1: ${encoded}`,
+      },
+    );
+  });
+
+  it("does not trust an unapproved worker classification producer", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const encoded = Buffer.from("unapproved-worker-secret").toString("base64");
+    const failure = new AgentWorkerExitError({
+      workerName: `Unapproved ${encoded}`,
+      code: 1,
+      diagnostics: encoded,
+    });
+    const target = { run: vi.fn(async () => { throw failure; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-unapproved-worker",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-unapproved-worker",
+        summary: `Unapproved ${encoded} worker exited with 1: ${encoded}`,
+      },
+    );
+  });
+
+  it("does not invoke a thrown Error's public-summary accessor while settling", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const failure = new Error("accessor failure");
+    const publicSummary = vi.fn(() => { throw new Error("getter escaped settlement"); });
+    Object.defineProperty(failure, "publicSummary", { get: publicSummary });
+    const target = { run: vi.fn(async () => { throw failure; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-accessor",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
+    expect(publicSummary).not.toHaveBeenCalled();
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-accessor",
+        summary: "accessor failure",
+      },
+    );
+  });
+
+  it("does not invoke a thrown Error's message accessor while settling", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const failure = new Error("original message");
+    const message = vi.fn(() => { throw new Error("getter escaped settlement"); });
+    Object.defineProperty(failure, "message", { get: message });
+    const target = { run: vi.fn(async () => { throw failure; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-message-accessor",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
+    expect(message).not.toHaveBeenCalled();
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-message-accessor",
+        summary: "Unknown Target operation failure",
+      },
+    );
+  });
+
+  it("settles a revoked Proxy failure with a deterministic fallback", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const target = { run: vi.fn(async () => { throw revoked.proxy; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-proxy",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(revoked.proxy);
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+      "review",
+      219,
+      {
+        jobId: "job-219-proxy",
+        summary: "Unknown Target operation failure",
+      },
+    );
+  });
+
+  it.each([
+    ["a primitive", "primitive failure", "primitive failure"],
+    ["a plain object", { message: "plain-object failure" }, "plain-object failure"],
+    ["an ordinary Error", new Error("ordinary Error failure"), "ordinary Error failure"],
+    [
+      "an inherited forged summary",
+      Object.assign(Object.create({ publicSummary: "forged inherited diagnostic" }), {
+        message: "inherited-summary failure",
+      }),
+      "inherited-summary failure",
+    ],
+  ])("deterministically diagnoses %s", async (_caseName, failure, expectedSummary) => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const target = { run: vi.fn(async () => { throw failure; }) };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219-unknown",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
+    const diagnostic = vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls[0]?.[2];
+    expect(diagnostic).toEqual({
+      jobId: "job-219-unknown",
+      summary: expectedSummary,
+    });
+    expect(diagnostic!.summary.length).toBeLessThanOrEqual(500);
+  });
+
+  it("ignores Object.prototype public-summary pollution", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const failure = new Error("prototype-pollution failure");
+    const pollutedSummary = vi.fn(() => "polluted public diagnostic");
+    Object.defineProperty(Object.prototype, "publicSummary", {
+      configurable: true,
+      get: pollutedSummary,
+    });
+    try {
+      const target = { run: vi.fn(async () => { throw failure; }) };
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId: () => "job-219-prototype-pollution",
+      });
+
+      await expect(runner.run("review", 219)).rejects.toBe(failure);
+      expect(pollutedSummary).not.toHaveBeenCalled();
+      expect(acquisition.events).toEqual([
+        "add-in-progress",
+        "remove-trigger",
+        "add-blocked",
+        "add-blocked-diagnostic",
+        "remove-in-progress",
+      ]);
+      expect(acquisition.ports.addBlockedDiagnostic).toHaveBeenCalledWith(
+        "review",
+        219,
+        {
+          jobId: "job-219-prototype-pollution",
+          summary: "prototype-pollution failure",
+        },
+      );
+    } finally {
+      delete Object.prototype.publicSummary;
+    }
   });
 
   it("owns blocked and finally labels when the target process fails", async () => {
