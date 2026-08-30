@@ -134,7 +134,10 @@ export async function executeTargetOperationInCheckout(options: {
       timeoutMessage: `Target operation ${operation} timed out`,
     });
     const outcome = classifyTargetOperationOutcome(operation, workerJson(result, `Target operation ${operation}`));
-    return { value: outcome.outcome, disposition: outcome.checkout };
+    return {
+      value: outcome.outcome,
+      disposition: outcome.kind === "blocked" ? "retain" : "cleanup",
+    };
   });
 }
 
@@ -204,7 +207,9 @@ export function createTargetOperationRunnerWithWorker(
         );
         operationFailed = false;
         if (log !== undefined) {
-          await completeJobLog(log, { status: outcome.jobLog });
+          await completeJobLog(log, {
+            status: outcome.kind === "blocked" ? "failed" : "completed",
+          });
         }
         return outcome.outcome;
       } catch (error) {

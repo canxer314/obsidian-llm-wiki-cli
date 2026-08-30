@@ -40,7 +40,7 @@ const acceptedOutcomes = [
 
 describe("Target operation outcome policy", () => {
   it.each(acceptedOutcomes)(
-    "classifies %s/%s as a completed cleanup outcome without changing its business result",
+    "classifies %s/%s as completed without changing its business result",
     (operation, status) => {
       const outcome = { status, marker: `${operation}-${status}` };
 
@@ -48,11 +48,10 @@ describe("Target operation outcome policy", () => {
 
       expect(classification.outcome).toBe(outcome);
       expect(classification).toEqual({
+        kind: "completed",
         outcome,
-        checkout: "cleanup",
-        jobLog: "completed",
-        automation: "completed",
       });
+      expect(Object.keys(classification)).toEqual(["kind", "outcome"]);
     },
   );
 
@@ -64,18 +63,17 @@ describe("Target operation outcome policy", () => {
     ["update-branch", "refused"],
     ["split-prd", "refused"],
     ["architecture-review", "refused"],
-  ] as const)("treats accepted %s/%s as completed cleanup", (operation, status) => {
+  ] as const)("treats accepted %s/%s as completed", (operation, status) => {
     const outcome = { status, reason: "business refusal" };
 
     const classification = classifyTargetOperationOutcome(operation, outcome);
 
     expect(classification.outcome).toBe(outcome);
     expect(classification).toEqual({
+      kind: "completed",
       outcome,
-      checkout: "cleanup",
-      jobLog: "completed",
-      automation: "completed",
     });
+    expect(Object.keys(classification)).toEqual(["kind", "outcome"]);
   });
 
   it.each([
@@ -93,11 +91,10 @@ describe("Target operation outcome policy", () => {
 
     expect(classification.outcome).toBe(outcome);
     expect(classification).toEqual({
+      kind: "blocked",
       outcome,
-      checkout: "retain",
-      jobLog: "failed",
-      automation: "blocked",
     });
+    expect(Object.keys(classification)).toEqual(["kind", "outcome"]);
   });
 
   it.each([

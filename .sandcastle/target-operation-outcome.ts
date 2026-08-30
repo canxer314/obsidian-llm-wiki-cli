@@ -2,15 +2,11 @@ import { types } from "node:util";
 
 import type { TargetOperationIdentity } from "./target-operation.ts";
 
-export type TargetCheckoutDisposition = "cleanup" | "retain";
-
 type TargetOperationOutcome = Readonly<Record<string, unknown>> & { readonly status: string };
 
 export interface TargetOperationOutcomeClassification {
+  readonly kind: "completed" | "blocked";
   readonly outcome: TargetOperationOutcome;
-  readonly checkout: TargetCheckoutDisposition;
-  readonly jobLog: "completed" | "failed";
-  readonly automation: "completed" | "blocked";
 }
 
 const acceptedStatuses: Readonly<Record<TargetOperationIdentity, ReadonlySet<string>>> = {
@@ -65,7 +61,7 @@ export function classifyTargetOperationOutcome(
   const status = statusFor(operation, value);
   const outcome = value as TargetOperationOutcome;
   if (status === "blocked") {
-    return { outcome, checkout: "retain", jobLog: "failed", automation: "blocked" };
+    return { kind: "blocked", outcome };
   }
-  return { outcome, checkout: "cleanup", jobLog: "completed", automation: "completed" };
+  return { kind: "completed", outcome };
 }
