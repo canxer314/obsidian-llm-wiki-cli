@@ -183,6 +183,22 @@ describe("worker process lifecycle", () => {
     })).rejects.toThrow("stream failed");
   });
 
+  it("settles output observation when launch fails after admitting a child", async () => {
+    const process = child(undefined);
+
+    await expect(createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => {
+        admit(process);
+        throw new Error("launch failed after admission");
+      },
+    })).rejects.toThrow("launch failed after admission");
+
+    process.emit("error", new Error("spawn failed"));
+  });
+
   it("records the first output-sink failure while continuing output capture", async () => {
     const process = child();
     const sink = vi.fn((stream: "stdout" | "stderr", chunk: Buffer | string) => {

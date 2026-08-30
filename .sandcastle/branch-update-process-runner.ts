@@ -1,98 +1,42 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 
 import type { BranchUpdateResult } from "./branch-update-automation.ts";
-import { runJobWithTimeout } from "./job-timeout.ts";
-import { workerProcessOptions } from "./worker-process.ts";
+import { createWorkerProcessLifecycle } from "./worker-process-lifecycle.ts";
 
 const GIT_COMMAND_TIMEOUT_MILLISECONDS = 5 * 60 * 1000;
 const GIT_COMMAND_GRACE_MILLISECONDS = 10 * 1000;
 
 type Execute = (
-  file: string,
   arguments_: readonly string[],
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
-
-function outputOf(child: ChildProcess): Promise<{ readonly stdout: string; readonly stderr: string; readonly code: number | null }> {
-  return new Promise((resolveOutput, reject) => {
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      stdout += String(chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr += String(chunk);
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolveOutput({ stdout, stderr, code }));
-  });
-}
-
-function groupExit(pid: number): Promise<void> {
-  return new Promise((resolveExit) => {
-    const check = () => {
-      try {
-        process.kill(-pid, 0);
-        setTimeout(check, 10);
-      } catch {
-        resolveExit();
-      }
-    };
-    check();
-  });
-}
 
 function createProcessGitExecutor(options: {
   readonly environment?: Readonly<Record<string, string>>;
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
 }): Execute {
-  const processOptions = workerProcessOptions("nested");
-  return async (file, arguments_) => {
-    if (processOptions.inherited) {
-      const child = spawn(file, [...arguments_], {
-        detached: processOptions.detached,
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(options.environment === undefined ? {} : { env: options.environment }),
-      });
-      const completed = await outputOf(child);
-      if (completed.code !== 0) {
-        throw new Error(`${file} exited with ${completed.code ?? "signal"}: ${completed.stderr}`);
-      }
-      return completed;
-    }
-    let output: Promise<{ readonly stdout: string; readonly stderr: string; readonly code: number | null }> | undefined;
-    const result = await runJobWithTimeout({
-      start: () => {
-        const child = spawn(file, [...arguments_], {
-          detached: processOptions.detached,
+  const lifecycle = createWorkerProcessLifecycle();
+  return async (arguments_) => {
+    const timeoutMilliseconds = options.timeoutMilliseconds ?? GIT_COMMAND_TIMEOUT_MILLISECONDS;
+    const completed = await lifecycle.run({
+      role: "nested",
+      timeoutMilliseconds,
+      graceMilliseconds: options.graceMilliseconds ?? GIT_COMMAND_GRACE_MILLISECONDS,
+      launch: (admit, disposition) => {
+        const child = spawn("git", [...arguments_], {
+          detached: disposition.detached,
           stdio: ["ignore", "pipe", "pipe"],
           ...(options.environment === undefined ? {} : { env: options.environment }),
         });
-        output = outputOf(child);
-        if (child.pid === undefined) {
-          void output.catch(() => undefined);
-          throw new Error(`spawn ${file} ENOENT`);
-        }
-        return {
-          pid: child.pid,
-          exited: output.then(() => undefined),
-          groupExited: groupExit(child.pid),
-        };
+        admit(child);
+        if (child.pid === undefined) throw new Error("spawn git ENOENT");
       },
-      timeoutMilliseconds: options.timeoutMilliseconds ?? GIT_COMMAND_TIMEOUT_MILLISECONDS,
-      graceMilliseconds: options.graceMilliseconds ?? GIT_COMMAND_GRACE_MILLISECONDS,
-      kill: process.kill,
-      wait: async (milliseconds) => new Promise((resolveWait) => {
-        const timer = setTimeout(resolveWait, milliseconds);
-        timer.unref();
-      }),
     });
-    if (result.status === "timed-out") {
-      throw new Error(`${file} command timed out after ${options.timeoutMilliseconds ?? GIT_COMMAND_TIMEOUT_MILLISECONDS}ms`);
+    if (completed.status === "timed-out") {
+      throw new Error(`git command timed out after ${timeoutMilliseconds}ms`);
     }
-    const completed = await output!;
     if (completed.code !== 0) {
-      throw new Error(`${file} exited with ${completed.code ?? "signal"}: ${completed.stderr}`);
+      throw new Error(`git exited with ${completed.code ?? "signal"}: ${completed.stderr}`);
     }
     return completed;
   };
@@ -125,7 +69,7 @@ export function createProcessBranchUpdater(options: {
       readonly revision: string;
       readonly checkoutPath: string;
     }): Promise<BranchUpdateResult> {
-      const git = (arguments_: readonly string[]) => execute("git", ["-C", request.checkoutPath, ...arguments_]);
+      const git = (arguments_: readonly string[]) => execute(["-C", request.checkoutPath, ...arguments_]);
       const revisionOf = async (ref: string) => (await git(["rev-parse", ref])).stdout.trim();
       const unresolvedConflicts = async () => (await git(["diff", "--name-only", "--diff-filter=U"])).stdout
         .split("\n").map((line) => line.trim()).filter(Boolean);
