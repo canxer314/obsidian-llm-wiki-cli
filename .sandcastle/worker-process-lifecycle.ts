@@ -176,12 +176,20 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
         observed = observeChild(admitted, runOptions.outputSink);
       };
       const launch = (): void => {
-        runOptions.launch(admit, disposition);
-        if (child === undefined || observed === undefined) {
-          throw new Error("Worker process was not admitted");
+        try {
+          runOptions.launch(admit, disposition);
+          if (child === undefined || observed === undefined) {
+            throw new Error("Worker process was not admitted");
+          }
+          if (child.pid === undefined) throw new Error("Worker process did not expose a process ID");
+          child.stdin?.end(runOptions.startup);
+        } catch (error) {
+          if (observed !== undefined) {
+            void observed.output.catch(() => undefined);
+            void observed.exited.catch(() => undefined);
+          }
+          throw error;
         }
-        if (child.pid === undefined) throw new Error("Worker process did not expose a process ID");
-        child.stdin?.end(runOptions.startup);
       };
 
       if (disposition.inherited) {
