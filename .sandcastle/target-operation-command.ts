@@ -113,23 +113,13 @@ export function createTargetOperationCommandRunner(options: {
 
 // Errors that embed child-process stderr — worker exits and checkout command
 // failures — may carry operation-transformed secrets that pattern redaction
-// cannot recognize. Trusted runtime producers authenticate every object-originated
-// public diagnostic without exposing a property that arbitrary thrown values can
-// forge. Unregistered objects receive only a deterministic classification.
+// cannot recognize. Trusted runtime producers authenticate every specific
+// public diagnostic without exposing authority that arbitrary thrown values can
+// forge. Every unregistered value receives only a deterministic classification.
 function failureDiagnosticSummary(error: unknown): string {
   const publicSummary = trustedFailureSummary(error);
   if (publicSummary !== undefined) return diagnosticSummary(publicSummary);
-  if (
-    (typeof error === "object" && error !== null) ||
-    typeof error === "function"
-  ) {
-    return "Unknown Target operation failure";
-  }
-  try {
-    return diagnosticSummary(String(error));
-  } catch {
-    return "Unknown Target operation failure";
-  }
+  return "Unknown Target operation failure";
 }
 
 function requireOperationSecurity(
