@@ -83,9 +83,7 @@ export function createTargetOperationCommandRunner(options: {
         }
         return outcome.outcome;
       } catch (error) {
-        const summary = diagnosticSummary(
-          error instanceof Error ? error.message : String(error),
-        );
+        const summary = failureDiagnosticSummary(error);
         await Promise.allSettled([
           options.acquisition.addBlocked(route.targetOperation, number),
           options.acquisition.addBlockedDiagnostic(route.targetOperation, number, {
@@ -103,6 +101,24 @@ export function createTargetOperationCommandRunner(options: {
       }
     },
   };
+}
+
+// Errors that embed child-process stderr — worker exits and checkout command
+// failures — may carry operation-transformed secrets that pattern redaction
+// cannot recognize. Those errors carry a trusted classification alongside
+// their full local message; publication to the Automation Work Item uses only
+// that classification. Free-text redaction remains as a defense-in-depth
+// fallback for failures raised entirely by trusted code.
+interface TrustedFailureClassification {
+  readonly publicSummary?: unknown;
+}
+
+function failureDiagnosticSummary(error: unknown): string {
+  const publicSummary = (error as TrustedFailureClassification | null | undefined)?.publicSummary;
+  if (typeof publicSummary === "string" && publicSummary.length > 0) {
+    return diagnosticSummary(publicSummary);
+  }
+  return diagnosticSummary(error instanceof Error ? error.message : String(error));
 }
 
 function requireOperationSecurity(

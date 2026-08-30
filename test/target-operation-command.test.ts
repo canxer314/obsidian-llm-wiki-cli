@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { AgentWorkerExitError } from "../.sandcastle/agent-process-runner.js";
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 
 const revision = "a".repeat(40);
@@ -562,6 +563,38 @@ describe("trusted Target operation command acquisition", () => {
     expect(JSON.stringify(diagnostic)).not.toContain(transcript);
     expect(JSON.stringify(diagnostic)).not.toContain(token);
     expect(JSON.stringify(diagnostic)).not.toContain("/trusted/jobs/logs");
+  });
+
+  it("publishes only the trusted exit classification when worker diagnostics carry an encoded credential", async () => {
+    const acquisition = acquisitionFor([available, acquiring, acquired]);
+    const credential = "fake-secret-for-issue-359";
+    const encoded = Buffer.from(credential).toString("base64");
+    const target = {
+      run: vi.fn(async () => {
+        throw new AgentWorkerExitError({
+          workerName: "Target job",
+          code: 1,
+          diagnostics: `setup failed ${encoded}`,
+        });
+      }),
+    };
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId: () => "job-219",
+    });
+
+    await expect(runner.run("review", 219)).rejects.toThrow(
+      `Target job worker exited with 1: setup failed ${encoded}`,
+    );
+
+    const diagnostic = vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls[0]?.[2];
+    expect(diagnostic).toEqual({
+      jobId: "job-219",
+      summary: "Target job worker exited with 1",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(credential);
+    expect(JSON.stringify(diagnostic)).not.toContain(encoded);
   });
 
   it("owns blocked and finally labels when the target process fails", async () => {
