@@ -9,9 +9,6 @@ export function createProcessBranchUpdateConflictResolver(options: {
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
   readonly start?: (arguments_: readonly string[]) => ChildProcess;
-  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
-  readonly wait?: (milliseconds: number) => Promise<void>;
-  readonly groupExited?: (pid: number) => Promise<void>;
 }): BranchUpdateResolver {
   return {
     async resolve(request) {
@@ -33,11 +30,12 @@ export function createProcessBranchUpdateConflictResolver(options: {
         timeoutMilliseconds: options.timeoutMilliseconds,
         graceMilliseconds: options.graceMilliseconds,
         start: options.start,
-        kill: options.kill,
-        wait: options.wait,
-        groupExited: options.groupExited,
       });
-      return workerJson<{ readonly comment: string }>(result, "Branch update conflict resolution");
+      const resolution = workerJson<{ readonly comment?: unknown }>(result, "Branch update conflict resolution");
+      if (typeof resolution.comment !== "string" || resolution.comment.length === 0) {
+        throw new Error("Branch update conflict resolution worker returned invalid result");
+      }
+      return { comment: resolution.comment };
     },
   };
 }
