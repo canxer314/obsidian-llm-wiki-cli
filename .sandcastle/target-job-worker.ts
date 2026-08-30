@@ -12,15 +12,20 @@ interface TargetJobInput {
   readonly invocation: AuthorizedTargetOperationInvocation;
 }
 
-let input = "";
-for await (const chunk of process.stdin) input += chunk;
-const job = JSON.parse(input) as TargetJobInput;
-if (process.env[INHERITED_JOB_PROCESS_GROUP] !== "1") {
-  throw new Error("Target job worker requires an inherited process group");
-}
+try {
+  let input = "";
+  for await (const chunk of process.stdin) input += chunk;
+  const job = JSON.parse(input) as TargetJobInput;
+  if (process.env[INHERITED_JOB_PROCESS_GROUP] !== "1") {
+    throw new Error("Target job worker requires an inherited process group");
+  }
 
-console.log(JSON.stringify(await executeTargetOperationInCheckout({
-  checkout: createTargetCheckout(job.checkout),
-  startup: job.startup,
-  invocation: job.invocation,
-})));
+  console.log(JSON.stringify(await executeTargetOperationInCheckout({
+    checkout: createTargetCheckout(job.checkout),
+    startup: job.startup,
+    invocation: job.invocation,
+  })));
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}

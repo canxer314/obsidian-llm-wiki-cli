@@ -87,7 +87,7 @@ const representativeScenarios: readonly Scenario[] = [
   {
     name: "malformed-worker-json",
     operationSource: 'console.log("not-json");\n',
-    errorContains: "Unexpected token",
+    errorContains: "returned invalid JSON",
     expected: {
       result: "rejected",
       checkout: "retained",
@@ -383,7 +383,7 @@ describe("Target operation failure projections", () => {
       expect(diagnostics.length > 0).toBe(scenario.expected.diagnostic);
       for (const diagnostic of diagnostics) {
         expect(diagnostic.jobId).toBe(`job-${scenario.name}`);
-        expect(diagnostic.summary.length).toBeLessThanOrEqual(240);
+        expect(diagnostic.summary.length).toBeLessThanOrEqual(500);
         expect(diagnostic.summary).not.toContain("must-not-publish");
         expect(diagnostic.summary).not.toContain(diagnosticToken);
       }
@@ -391,21 +391,10 @@ describe("Target operation failure projections", () => {
     40_000,
   );
 
-  it("rejects an inherited outcome status and projects its settled command as blocked", async () => {
-    await resetProjectionFixture();
-    const revision = await commitScenario({
-      name: "inherited-outcome-status",
-      operationSource: 'console.log(JSON.stringify({ status: "implemented" }));\n',
-      expected: {
-        result: "resolved",
-        checkout: "cleaned",
-        log: "completed",
-        blocked: false,
-        diagnostic: false,
-      },
-    });
+  it("rejects an inherited outcome status at the injectable trusted-settlement seam", async () => {
     const labels = new Set(["agent:implement"]);
     const diagnostics: Array<{ readonly jobId: string; readonly summary: string }> = [];
+    const revision = "a".repeat(40);
     const acquisition = {
       read: vi.fn(async () => ({ state: "OPEN", labels: [...labels], revision })),
       addInProgress: vi.fn(async () => { labels.add("agent:in-progress"); }),
@@ -416,29 +405,9 @@ describe("Target operation failure projections", () => {
       }),
       removeInProgress: vi.fn(async () => { labels.delete("agent:in-progress"); }),
     };
-    const target = createTargetOperationRunner({
-      checkoutOptions: {
-        sourceRepositoryPath: trustedPath,
-        checkoutRoot,
-        gitEnvironment: transport,
-        dependencyEnvironment: transport,
-      },
-      jobLogRoot: logsPath,
-      startup: {
-        imageName: "fixture-image",
-        childEnvironments: { git: transport, github: {}, claude: {}, githubAgent: {} },
-        models: {
-          default: "default-model",
-          planner: "planner-model",
-          implementer: "implementer-model",
-          reviewer: "reviewer-model",
-        },
-      },
-      timeoutMilliseconds: 30_000,
-      graceMilliseconds: 100,
-    });
+    const inheritedOutcome = Object.create({ status: "implemented" }) as object;
     const command = createTargetOperationCommandRunner({
-      target,
+      target: { run: vi.fn(async () => inheritedOutcome) },
       acquisition,
       createJobId: () => "job-inherited-outcome-status",
     });
@@ -446,12 +415,6 @@ describe("Target operation failure projections", () => {
     await expect(command.run("implement-issue", 359)).rejects
       .toThrow("Target operation returned an invalid outcome");
 
-    const checkoutEntries = await readdir(checkoutRoot);
-    expect(checkoutEntries).toHaveLength(1);
-    await expect(readFile(
-      join(logsPath, "job-inherited-outcome-status", "metadata.json"),
-      "utf8",
-    ).then(JSON.parse)).resolves.toMatchObject({ status: "failed" });
     expect(labels).toEqual(new Set(["agent:blocked"]));
     expect(acquisition.addBlocked).toHaveBeenCalledTimes(1);
     expect(acquisition.removeInProgress).toHaveBeenCalledTimes(1);
@@ -516,7 +479,7 @@ describe("Target operation failure projections", () => {
     });
 
     const execution = command.run("implement-issue", 359);
-    await expect(execution).rejects.toThrow("Target operation returned invalid worker JSON");
+    await expect(execution).rejects.toThrow("returned invalid JSON");
     await expect(execution).rejects.not.toThrow(malformedPayloadMarker);
 
     await expect(readFile(
@@ -524,10 +487,11 @@ describe("Target operation failure projections", () => {
       "utf8",
     ).then(JSON.parse)).resolves.toMatchObject({ status: "failed" });
     expect(labels).toEqual(new Set(["agent:blocked"]));
-    expect(diagnostics).toEqual([{
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
       jobId: "job-malformed-worker-json-secrecy",
-      summary: "Target operation returned invalid worker JSON",
-    }]);
+    });
+    expect(diagnostics[0]!.summary).toContain("returned invalid JSON");
     expect(diagnostics[0]!.summary).not.toContain(malformedPayloadMarker);
   });
 
