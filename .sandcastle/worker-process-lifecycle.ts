@@ -37,7 +37,6 @@ interface WorkerProcessLifecycleOptions {
   readonly wait?: (milliseconds: number) => Promise<void>;
   readonly probeGroup?: (pid: number) => void;
   readonly groupExited?: (pid: number) => Promise<void>;
-  readonly environment?: Readonly<Record<string, string>>;
 }
 
 interface WorkerProcessRunOptions {
@@ -146,7 +145,7 @@ function observeChild(
 }
 
 export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOptions = {}) {
-  const environment = options.environment ?? process.env;
+  const environment = process.env;
   const groupExited = options.groupExited ?? ((pid: number) => new Promise<void>((resolve, reject) => {
     const probe = options.probeGroup ?? ((groupPid: number) => process.kill(-groupPid, 0));
     const check = (): void => {
@@ -181,6 +180,7 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
         if (child === undefined || observed === undefined) {
           throw new Error("Worker process was not admitted");
         }
+        if (child.pid === undefined) throw new Error("Worker process did not expose a process ID");
         child.stdin?.end(runOptions.startup);
       };
 
@@ -193,11 +193,10 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
       const result = await runJobWithTimeout({
         start: () => {
           launch();
-          if (child!.pid === undefined) throw new Error("Worker process did not expose a process ID");
           return {
-            pid: child!.pid,
+            pid: child!.pid!,
             exited: observed!.exited,
-            groupExited: groupExited(child!.pid),
+            groupExited: groupExited(child!.pid!),
           };
         },
         timeoutMilliseconds: runOptions.timeoutMilliseconds,

@@ -145,6 +145,14 @@ describe("worker process lifecycle", () => {
       launch: (admit) => admit(child(undefined)),
     })).rejects.toThrow("Worker process did not expose a process ID");
 
+    globalThis.process.env[INHERITED_JOB_PROCESS_GROUP] = "1";
+    await expect(lifecycle.run({
+      role: "nested",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(child(undefined)),
+    })).rejects.toThrow("Worker process did not expose a process ID");
+
     const eventFailure = child();
     const eventRunning = lifecycle.run({
       role: "owner",
@@ -204,7 +212,7 @@ describe("worker process lifecycle", () => {
 
   it("derives inherited nested behavior from the trusted environment", async () => {
     globalThis.process.env[INHERITED_JOB_PROCESS_GROUP] = "1";
-    const childProcess = child(undefined);
+    const childProcess = child(402);
     const probe = vi.fn();
     const kill = vi.fn();
     const dispositions: unknown[] = [];
