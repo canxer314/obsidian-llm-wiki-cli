@@ -1,3 +1,7 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { createProcessBranchUpdater } from "../.sandcastle/branch-update-process-runner.js";
@@ -14,6 +18,17 @@ const request = {
   revision,
   checkoutPath: "/safe/disposable-checkout",
 };
+
+function fakeGit(script: string): { readonly directory: string; readonly environment: Readonly<Record<string, string>> } {
+  const directory = mkdtempSync(join(tmpdir(), "branch-update-git-"));
+  const git = join(directory, "git");
+  writeFileSync(git, `#!/bin/bash\n${script}\n`);
+  chmodSync(git, 0o700);
+  return {
+    directory,
+    environment: { PATH: directory, HOME: directory },
+  };
+}
 
 function gitMock(options: {
   readonly revisions: readonly string[];
@@ -72,6 +87,46 @@ describe("process branch updater", () => {
       revision,
       checkoutPath: "/safe/disposable-checkout",
     })).rejects.toThrow(/spawn git ENOENT/u);
+  });
+
+  it("captures complete stdout through the production fixed-Git launch path", async () => {
+    const fixture = fakeGit(`
+case "$3:$4" in
+  rev-parse:HEAD) printf '0123456789abcdef'; printf '0123456789abcdef01234567\\n' ;;
+  rev-parse:origin/master) printf 'aaaaaaaaaaaaaaaaaaaa'; printf 'aaaaaaaaaaaaaaaaaaaa\\n' ;;
+  merge-base:HEAD) printf 'aaaaaaaaaaaaaaaa'; printf 'aaaaaaaaaaaaaaaaaaaaaaaa\\n' ;;
+esac
+printf 'diagnostic-part-one' >&2
+printf '%s' '-part-two' >&2
+`);
+    try {
+      const updater = createProcessBranchUpdater({ environment: fixture.environment });
+      await expect(updater.update(request)).resolves.toEqual({ status: "up-to-date" });
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("captures complete stderr for a production Git nonzero exit", async () => {
+    const fixture = fakeGit("printf 'first diagnostic ' >&2\nprintf 'second diagnostic' >&2\nexit 7");
+    try {
+      const updater = createProcessBranchUpdater({ environment: fixture.environment });
+      await expect(updater.update(request)).rejects.toThrow(
+        "git exited with 7: first diagnostic second diagnostic",
+      );
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("maps a production Git signal exit", async () => {
+    const fixture = fakeGit("printf 'terminated' >&2\nkill -TERM $$");
+    try {
+      const updater = createProcessBranchUpdater({ environment: fixture.environment });
+      await expect(updater.update(request)).rejects.toThrow("git exited with signal: terminated");
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
   });
 
   it("short-circuits an already-up-to-date branch without merging or pushing", async () => {

@@ -42,10 +42,16 @@ describe("worker process lifecycle ownership", () => {
     expect(timeoutImports).toEqual([lifecycleName]);
     expect(lifecycle).toContain('from "./job-timeout.ts"');
     expect(timeout).toContain("runJobWithTimeout");
+    for (const name of [...protocolRunners, ...agentProtocolRunners]) {
+      const content = source(name);
+      expect(content).not.toMatch(/\b(?:kill|wait|groupExited|probeGroup|processGroupOwner|inherited)\s*:/u);
+      if (name !== "agent-process-runner.ts") {
+        expect(content).not.toMatch(/readonly\s+(?:timeoutMilliseconds|graceMilliseconds)\??\s*:/u);
+      }
+    }
     for (const name of protocolRunners) {
       const content = source(name);
       expect(content).not.toMatch(/\brunJobWithTimeout\b/u);
-      expect(content).not.toMatch(/\b(?:kill|wait|groupExited|probeGroup|processGroupOwner|inherited)\s*:/u);
       expect(content).not.toMatch(/\blifecycle\??\s*:/u);
       expect(content).not.toMatch(/\.on\(["']data["']/u);
     }

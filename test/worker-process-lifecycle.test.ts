@@ -42,6 +42,17 @@ function completed(
   return running;
 }
 
+function expectNoLifecycleListeners(process: FakeChild): void {
+  expect(process.eventNames()).toEqual([]);
+  expect(process.stdin.eventNames()).toEqual([]);
+  expect(process.stdout.eventNames()).toEqual([]);
+  expect(process.stderr.eventNames()).toEqual([]);
+}
+
+async function eventLoopTurn(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 const inheritedMarker = process.env[INHERITED_JOB_PROCESS_GROUP];
 
 afterEach(() => {
@@ -196,7 +207,7 @@ describe("worker process lifecycle", () => {
       },
     })).rejects.toThrow("launch failed after admission");
 
-    process.emit("error", new Error("spawn failed"));
+    expectNoLifecycleListeners(process);
   });
 
   it("records the first output-sink failure while continuing output capture", async () => {
@@ -365,6 +376,206 @@ describe("worker process lifecycle", () => {
     });
     denied.emit("close", 0);
     await expect(running).rejects.toThrow("denied");
+  });
+
+  it("observes an early EPERM group-probe failure while the child remains running", async () => {
+    const process = child(413);
+    const running = createWorkerProcessLifecycle({
+      probeGroup: () => { throw Object.assign(new Error("probe denied"), { code: "EPERM" }); },
+    }).run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(process),
+    });
+    const rejected = expect(running).rejects.toThrow("probe denied");
+
+    await eventLoopTurn();
+
+    await rejected;
+    expectNoLifecycleListeners(process);
+  });
+
+  it("admits exactly one child and rejects launch completion without admission", async () => {
+    const admitted = child(414);
+    const duplicate = child(415);
+    await expect(createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => {
+        admit(admitted);
+        admit(duplicate);
+      },
+    })).rejects.toThrow("Worker process was admitted more than once");
+    expectNoLifecycleListeners(admitted);
+    expectNoLifecycleListeners(duplicate);
+
+    await expect(createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: () => {},
+    })).rejects.toThrow("Worker process was not admitted");
+  });
+
+  it.each([
+    ["exact payload", "exact payload"],
+    ["no payload", undefined],
+  ] as const)("closes stdin after delivering %s", async (_case, startup) => {
+    const process = child(416);
+    const end = vi.fn((input?: string) => process.emit("close", 0));
+    process.stdin.end = end;
+
+    await expect(createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      ...(startup === undefined ? {} : { startup }),
+      launch: (admit) => admit(process),
+    })).resolves.toMatchObject({ status: "completed", code: 0 });
+
+    expect(end).toHaveBeenCalledOnce();
+    expect(end).toHaveBeenCalledWith(startup);
+    expectNoLifecycleListeners(process);
+  });
+
+  it("removes every installed listener after exit then close and close-only completion", async () => {
+    for (const events of [["exit", "close"], ["close"]] as const) {
+      const process = child(417);
+      const running = createWorkerProcessLifecycle().run({
+        role: "owner",
+        timeoutMilliseconds: 1_000,
+        graceMilliseconds: 1,
+        launch: (admit) => admit(process),
+      });
+      for (const event of events) process.emit(event, 0);
+
+      await expect(running).resolves.toMatchObject({ status: "completed", code: 0 });
+      expectNoLifecycleListeners(process);
+    }
+  });
+
+  it("removes every installed listener on child, stdin, and stream failures", async () => {
+    const childFailure = child(418);
+    const childRunning = createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(childFailure),
+    });
+    childFailure.emit("error", new Error("child failed"));
+    await expect(childRunning).rejects.toThrow("child failed");
+    expectNoLifecycleListeners(childFailure);
+
+    const stdinFailure = child(419);
+    stdinFailure.stdin.end = () => { throw new Error("stdin failed"); };
+    await expect(createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(stdinFailure),
+    })).rejects.toThrow("stdin failed");
+    expectNoLifecycleListeners(stdinFailure);
+
+    for (const stream of ["stdin", "stdout", "stderr"] as const) {
+      const streamFailure = child(420);
+      const running = createWorkerProcessLifecycle().run({
+        role: "owner",
+        timeoutMilliseconds: 1_000,
+        graceMilliseconds: 1,
+        launch: (admit) => admit(streamFailure),
+      });
+      streamFailure[stream].emit("error", new Error(`${stream} failed`));
+      await expect(running).rejects.toThrow(`${stream} failed`);
+      expectNoLifecycleListeners(streamFailure);
+    }
+  });
+
+  it("removes listeners after missing PID and synchronous stream setup failure", async () => {
+    const missingPid = child(undefined);
+    await expect(createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(missingPid),
+    })).rejects.toThrow("Worker process did not expose a process ID");
+    expectNoLifecycleListeners(missingPid);
+
+    const streamFailure = child(421);
+    Object.defineProperty(streamFailure, "stdout", {
+      value: { on: () => { throw new Error("stream setup failed"); } },
+    });
+    await expect(createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(streamFailure),
+    })).rejects.toThrow("stream setup failed");
+    expect(streamFailure.eventNames()).toEqual([]);
+    expect(streamFailure.stdin.eventNames()).toEqual([]);
+    expect(streamFailure.stderr.eventNames()).toEqual([]);
+  });
+
+  it("settles competing child terminal events once and leaves no lifecycle work", async () => {
+    const process = child(422);
+    const running = createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(process),
+    });
+    process.emit("exit", 0);
+    process.emit("close", 0);
+    process.emit("close", 9);
+
+    await expect(running).resolves.toMatchObject({ status: "completed", code: 0 });
+    expectNoLifecycleListeners(process);
+  });
+
+  it("cancels deadline, grace, and group polling work after settlement", async () => {
+    vi.useFakeTimers();
+    try {
+      const completedProcess = child(423);
+      const cancelGrace = vi.fn();
+      const completed = createWorkerProcessLifecycle({
+        groupExited: () => Promise.resolve(),
+        wait: () => ({ completed: new Promise<void>(() => {}), cancel: cancelGrace }),
+      }).run({
+        role: "owner",
+        timeoutMilliseconds: 1_000,
+        graceMilliseconds: 100,
+        launch: (admit) => admit(completedProcess),
+      });
+      completedProcess.emit("close", 0);
+      await expect(completed).resolves.toMatchObject({ status: "completed", code: 0 });
+      expect(cancelGrace).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+
+      vi.useRealTimers();
+      const failedProcess = child(424);
+      let groupPresent = true;
+      const probe = vi.fn(() => {
+        if (!groupPresent) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      });
+      const failed = createWorkerProcessLifecycle({
+        probeGroup: probe,
+        kill: () => { groupPresent = false; },
+        wait: async () => {},
+      }).run({
+        role: "owner",
+        timeoutMilliseconds: 1_000,
+        graceMilliseconds: 1,
+        launch: (admit) => admit(failedProcess),
+      });
+      failedProcess.emit("error", new Error("child failed"));
+      await expect(failed).rejects.toThrow("child failed");
+      const probesAfterSettlement = probe.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(probe).toHaveBeenCalledTimes(probesAfterSettlement);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("waits for an ignoring POSIX descendant after its leader exits", async () => {

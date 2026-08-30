@@ -6,8 +6,6 @@ import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
 export function createProcessFeedbackImplementer(options: {
   readonly startup: string;
   readonly model: string;
-  readonly timeoutMilliseconds?: number | undefined;
-  readonly graceMilliseconds?: number | undefined;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
 }) {
   return {
@@ -32,8 +30,6 @@ export function createProcessFeedbackImplementer(options: {
         ],
         input: options.startup,
         timeoutMessage: "Feedback implementation execution timed out",
-        timeoutMilliseconds: options.timeoutMilliseconds,
-        graceMilliseconds: options.graceMilliseconds,
         start: options.start,
       });
       const workerResult = workerJson<{ readonly status: "implemented"; readonly reply: FeedbackReplyIntent }>(result, "Feedback implementation");

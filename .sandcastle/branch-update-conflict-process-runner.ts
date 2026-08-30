@@ -6,8 +6,6 @@ import type { BranchUpdateResolver } from "./branch-update-process-runner.ts";
 export function createProcessBranchUpdateConflictResolver(options: {
   readonly startup: string;
   readonly model: string;
-  readonly timeoutMilliseconds?: number;
-  readonly graceMilliseconds?: number;
   readonly start?: (arguments_: readonly string[]) => ChildProcess;
 }): BranchUpdateResolver {
   return {
@@ -27,8 +25,6 @@ export function createProcessBranchUpdateConflictResolver(options: {
         ],
         input: options.startup,
         timeoutMessage: "Branch update conflict resolution timed out",
-        timeoutMilliseconds: options.timeoutMilliseconds,
-        graceMilliseconds: options.graceMilliseconds,
         start: options.start,
       });
       const resolution = workerJson<{ readonly comment?: unknown }>(result, "Branch update conflict resolution");

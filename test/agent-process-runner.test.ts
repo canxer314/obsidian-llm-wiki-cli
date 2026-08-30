@@ -134,6 +134,53 @@ describe("agent process runner", () => {
     }
   });
 
+  it("surfaces a log-sink failure only after descendant-group exit is confirmed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-log-descendant-failure-"));
+    const marker = join(root, "descendant.pid");
+    const log = await createJobLog({
+      root,
+      jobId: "fixture",
+      operation: "fixture",
+      revision: "0".repeat(40),
+    });
+    rmSync(log.stdoutPath);
+    mkdirSync(log.stdoutPath);
+    const script = [
+      `bash -c 'trap "" TERM; sleep 30' </dev/null >/dev/null 2>&1 &`,
+      `echo $! > "${marker}"`,
+      "printf worker-output",
+      "exit 0",
+    ].join("\n");
+
+    try {
+      const running = runTargetJob({
+        checkoutPath: "unused",
+        workerFile: "unused.ts",
+        workerName: "fixture",
+        arguments_: [],
+        timeoutMessage: "Fixture worker timed out",
+        timeoutMilliseconds: 1_000,
+        graceMilliseconds: 20,
+        start: () => spawn("bash", ["-c", script], {
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        }),
+        log,
+      });
+
+      await expect(running).rejects.toMatchObject({ code: "EISDIR" });
+      const descendant = Number(readFileSync(marker, "utf8"));
+      expect(() => process.kill(descendant, 0)).toThrow();
+    } finally {
+      try {
+        process.kill(Number(readFileSync(marker, "utf8")), "SIGKILL");
+      } catch {
+        // The lifecycle normally confirms exit before the adapter rejects.
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("loads the fixed worker from the authorized Target Checkout", async () => {
     const checkoutPath = mkdtempSync(join(tmpdir(), "authorized-worker-"));
     const workerDirectory = join(checkoutPath, ".sandcastle");
@@ -192,7 +239,6 @@ describe("agent process runner", () => {
     const workerDirectory = join(checkoutPath, ".sandcastle");
     mkdirSync(workerDirectory);
     writeFileSync(join(workerDirectory, "fixture-worker.ts"), 'process.stdout.write("nested");\n');
-    const kill = vi.fn();
 
     try {
       await expect(runAgentWorker({
@@ -201,48 +247,11 @@ describe("agent process runner", () => {
         workerName: "fixture",
         arguments_: [],
         timeoutMessage: "Fixture worker timed out",
-        timeoutMilliseconds: 1,
-        kill,
       })).resolves.toMatchObject({ code: 0, output: "nested" });
-      expect(kill).not.toHaveBeenCalled();
     } finally {
       if (previous === undefined) delete process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
       else process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP = previous;
       rmSync(checkoutPath, { force: true, recursive: true });
-    }
-  });
-
-  it("terminates a TERM-ignoring descendant after its successful leader exits", async () => {
-    const marker = join(tmpdir(), `agent-successful-leader-descendant-${process.pid}.pid`);
-    const script = [
-      `bash -c 'trap "" TERM; sleep 30' </dev/null >/dev/null 2>&1 &`,
-      `echo $! > "${marker}"`,
-      "exit 0",
-    ].join(" ");
-
-    try {
-      await expect(runAgentWorker({
-        checkoutPath: "unused",
-        workerFile: "unused.ts",
-        workerName: "test",
-        arguments_: [],
-        timeoutMessage: "Agent execution timed out",
-        timeoutMilliseconds: 1_000,
-        graceMilliseconds: 100,
-        start: () => spawn("bash", ["-c", script], {
-          detached: true,
-          stdio: ["ignore", "pipe", "pipe"],
-        }),
-      })).resolves.toMatchObject({ code: 0 });
-
-      await expectProcessDead(Number(readFileSync(marker, "utf8")));
-    } finally {
-      try {
-        process.kill(Number(readFileSync(marker, "utf8")), "SIGKILL");
-      } catch {
-        // The assertion path normally leaves no process to clean up.
-      }
-      rmSync(marker, { force: true });
     }
   });
 });

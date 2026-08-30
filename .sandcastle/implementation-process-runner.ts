@@ -6,8 +6,6 @@ export function createProcessImplementer(options: {
   readonly startup: string;
   readonly plannerModel: string;
   readonly implementerModel: string;
-  readonly timeoutMilliseconds?: number | undefined;
-  readonly graceMilliseconds?: number | undefined;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
 }) {
   return {
@@ -29,8 +27,6 @@ export function createProcessImplementer(options: {
         ],
         input: options.startup,
         timeoutMessage: "Implementation execution timed out",
-        timeoutMilliseconds: options.timeoutMilliseconds,
-        graceMilliseconds: options.graceMilliseconds,
         start: options.start,
       });
       return workerJson(result, "Implementation");

@@ -61,14 +61,14 @@ interface FixedAgentWorkerOptions {
   readonly arguments_: readonly string[];
   readonly input?: string | undefined;
   readonly timeoutMessage: string;
-  readonly timeoutMilliseconds?: number | undefined;
-  readonly graceMilliseconds?: number | undefined;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
 }
 
 export type AgentWorkerOptions = FixedAgentWorkerOptions;
 
 export interface TargetJobOptions extends FixedAgentWorkerOptions {
+  readonly timeoutMilliseconds: number;
+  readonly graceMilliseconds: number;
   readonly log?: JobLog | undefined;
 }
 
@@ -101,14 +101,16 @@ function processEnvironment(
 async function runFixedAgentWorker(
   options: FixedAgentWorkerOptions,
   role: WorkerProcessRole,
+  timeoutMilliseconds: number,
+  graceMilliseconds: number,
   log?: JobLog,
 ): Promise<AgentWorkerResult> {
   const lifecycle = createWorkerProcessLifecycle();
   let outputSinkEnvironment: Readonly<Record<string, string | undefined>> = {};
   const result = await lifecycle.run({
     role,
-    timeoutMilliseconds: options.timeoutMilliseconds ?? AGENT_JOB_TIMEOUT_MILLISECONDS,
-    graceMilliseconds: options.graceMilliseconds ?? AGENT_JOB_GRACE_MILLISECONDS,
+    timeoutMilliseconds,
+    graceMilliseconds,
     ...(options.input === undefined ? {} : { startup: options.input }),
     outputSink: (stream, chunk) => appendJobOutputFromEnvironment(
       outputSinkEnvironment,
@@ -135,11 +137,22 @@ async function runFixedAgentWorker(
 }
 
 export function runAgentWorker(options: AgentWorkerOptions): Promise<AgentWorkerResult> {
-  return runFixedAgentWorker(options, "nested");
+  return runFixedAgentWorker(
+    options,
+    "nested",
+    AGENT_JOB_TIMEOUT_MILLISECONDS,
+    AGENT_JOB_GRACE_MILLISECONDS,
+  );
 }
 
 export function runTargetJob(options: TargetJobOptions): Promise<AgentWorkerResult> {
-  return runFixedAgentWorker(options, "owner", options.log);
+  return runFixedAgentWorker(
+    options,
+    "owner",
+    options.timeoutMilliseconds,
+    options.graceMilliseconds,
+    options.log,
+  );
 }
 
 export function workerJson<TResult>(
