@@ -8,67 +8,91 @@ import { createProcessReviewRunner } from "../.sandcastle/review-process-runner.
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
 function child(pid: number): ChildProcess & EventEmitter {
+  const stdin = new EventEmitter() as EventEmitter & { end(input?: string): void };
+  stdin.end = () => {};
   const process = new EventEmitter() as ChildProcess & EventEmitter;
   Object.defineProperties(process, {
     pid: { value: pid },
+    stdin: { value: stdin },
     stdout: { value: new EventEmitter() },
     stderr: { value: new EventEmitter() },
   });
   return process;
 }
 
+const reviewRequest = {
+  pullRequestNumber: 220,
+  branch: "feature/review",
+  revision,
+  checkoutPath: "/jobs/review-220",
+  reviewThreads: [],
+  model: "reviewer-model",
+  artifactDirectory: "/jobs/review-artifacts/job-220",
+};
+
 describe("reviewer process runner", () => {
-  it("terminates the reviewer process group, forces it after grace, and waits for close", async () => {
+  it("registers output listeners before writing trusted startup and preserves the review argv protocol", async () => {
     const process = child(420);
-    let groupExit!: () => void;
-    const groupExited = new Promise<void>((resolve) => { groupExit = resolve; });
-    const kill = vi.fn((_pid: number, signal: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        process.emit("close", null);
-        groupExit();
-      }
-    });
-    const runner = createProcessReviewRunner({
-      timeoutMilliseconds: 0,
-      graceMilliseconds: 0,
-      start: vi.fn().mockReturnValue(process),
-      kill,
-      groupExited: () => groupExited,
-      wait: async () => {},
-    });
+    const start = vi.fn().mockReturnValue(process);
+    const order: string[] = [];
+    process.stdin!.end = (startup?: string) => {
+      order.push(`stdin:${startup}`);
+      process.stdout?.emit("data", "reviewer log\n");
+      process.stdout?.emit("data", `${JSON.stringify({ summary: "Looks good.", inlineComments: [], replies: [] })}\n`);
+      process.emit("close", 0);
+    };
+    const runner = createProcessReviewRunner({ start, startup: "trusted startup" });
 
-    await expect(runner.review({
-      pullRequestNumber: 220,
-      branch: "feature/review",
+    await expect(runner.review(reviewRequest)).resolves.toEqual({ summary: "Looks good.", inlineComments: [], replies: [] });
+
+    expect(order).toEqual(["stdin:trusted startup"]);
+    expect(start).toHaveBeenCalledOnce();
+    expect(start.mock.calls[0]![0]).toEqual([
+      "220",
+      "feature/review",
       revision,
-      checkoutPath: "/jobs/review-220",
-      reviewThreads: [],
-      model: "reviewer-model",
-      artifactDirectory: "/jobs/review-artifacts/job-220",
-    })).rejects.toThrow("Reviewer execution timed out");
-
-    expect(kill).toHaveBeenNthCalledWith(1, -420, "SIGTERM");
-    expect(kill).toHaveBeenNthCalledWith(2, -420, "SIGKILL");
+      "/jobs/review-220",
+      "[]",
+      "reviewer-model",
+      "/jobs/review-artifacts/job-220",
+    ]);
   });
 
   it("parses a successful worker review after the process exits", async () => {
     const process = child(421);
     const runner = createProcessReviewRunner({
       start: vi.fn().mockReturnValue(process),
-      groupExited: async () => {},
     });
-    const review = runner.review({
-      pullRequestNumber: 220,
-      branch: "feature/review",
-      revision,
-      checkoutPath: "/jobs/review-220",
-      reviewThreads: [],
-      model: "reviewer-model",
-      artifactDirectory: "/jobs/review-artifacts/job-220",
-    });
+    const review = runner.review(reviewRequest);
     process.stdout?.emit("data", `${JSON.stringify({ summary: "Looks good.", inlineComments: [], replies: [] })}\n`);
     process.emit("close", 0);
 
     await expect(review).resolves.toEqual({ summary: "Looks good.", inlineComments: [], replies: [] });
+  });
+
+  it.each([
+    [1, "Sandbox unavailable", "Reviewer worker exited with 1: Sandbox unavailable"],
+    [null, "terminated", "Reviewer worker exited with signal: terminated"],
+  ])("fails closed for exit code %s", async (code, diagnostics, message) => {
+    const process = child(422);
+    const runner = createProcessReviewRunner({ start: vi.fn().mockReturnValue(process) });
+    const review = runner.review(reviewRequest);
+    process.stderr?.emit("data", diagnostics);
+    process.emit("close", code);
+
+    await expect(review).rejects.toThrow(message);
+  });
+
+  it.each([
+    ["", "Unexpected end of JSON input"],
+    ["not json", "Unexpected token 'o', \"not json\" is not valid JSON"],
+  ])("rejects invalid successful output %j", async (output, message) => {
+    const process = child(423);
+    const runner = createProcessReviewRunner({ start: vi.fn().mockReturnValue(process) });
+    const review = runner.review(reviewRequest);
+    process.stdout?.emit("data", output);
+    process.emit("close", 0);
+
+    await expect(review).rejects.toThrow(message);
   });
 });
