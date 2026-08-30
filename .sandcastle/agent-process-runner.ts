@@ -20,6 +20,26 @@ export class AgentWorkerTimeoutError extends Error {
   }
 }
 
+// A worker that exits unsuccessfully may be untrusted Target revision code
+// whose stderr carries operation-transformed secrets. The full message stays
+// available for local diagnosis; `publicSummary` is the only classification
+// trusted GitHub diagnostics may publish, because pattern redaction cannot
+// recognize transformed secrets (e.g. base64-encoded credentials).
+export class AgentWorkerExitError extends Error {
+  readonly publicSummary: string;
+
+  constructor(options: {
+    readonly workerName: string;
+    readonly code: number | null;
+    readonly diagnostics: string;
+  }) {
+    const publicSummary = `${options.workerName} worker exited with ${options.code ?? "signal"}`;
+    super(`${publicSummary}: ${options.diagnostics}`);
+    this.name = "AgentWorkerExitError";
+    this.publicSummary = publicSummary;
+  }
+}
+
 export interface AgentWorkerResult {
   readonly output: string;
   readonly code: number | null;
@@ -151,7 +171,11 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
 
 export function workerJson<TResult>(result: AgentWorkerResult, workerName: string): TResult {
   if (result.code !== 0) {
-    throw new Error(`${workerName} worker exited with ${result.code ?? "signal"}: ${result.diagnostics}`);
+    throw new AgentWorkerExitError({
+      workerName,
+      code: result.code,
+      diagnostics: result.diagnostics,
+    });
   }
   const output = result.output.trim();
   if (output.length === 0) throw new Error(`${workerName} worker did not return a result`);

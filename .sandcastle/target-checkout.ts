@@ -6,11 +6,33 @@ import { types } from "node:util";
 
 import { appendInheritedJobOutput } from "./job-logs.ts";
 
-interface CommandExecutionError extends Error {
+// Child stderr may come from untrusted Target revision lifecycle scripts, so
+// the full message is for local diagnosis only. `publicSummary` is the only
+// classification trusted GitHub diagnostics may publish: pattern redaction
+// cannot recognize transformed secrets (e.g. base64-encoded credentials).
+class CommandExecutionError extends Error {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly stdout: string;
   readonly stderr: string;
+  readonly publicSummary: string;
+
+  constructor(options: {
+    readonly file: string;
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+    readonly stdout: string;
+    readonly stderr: string;
+  }) {
+    const publicSummary = `${options.file} exited with ${options.code ?? options.signal ?? "unknown status"}`;
+    super(`${publicSummary}: ${options.stderr}`);
+    this.name = "CommandExecutionError";
+    this.code = options.code;
+    this.signal = options.signal;
+    this.stdout = options.stdout;
+    this.stderr = options.stderr;
+    this.publicSummary = publicSummary;
+  }
 }
 
 async function executeStreamingFile(
@@ -48,10 +70,13 @@ async function executeStreamingFile(
         reject(logError);
         return;
       }
-      reject(Object.assign(
-        new Error(`${file} exited with ${code ?? signal ?? "unknown status"}: ${stderr}`),
-        { code, signal, stdout, stderr },
-      ) as CommandExecutionError);
+      reject(new CommandExecutionError({
+        file,
+        code,
+        signal,
+        stdout,
+        stderr,
+      }));
     });
   });
 }

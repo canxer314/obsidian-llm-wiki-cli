@@ -12,6 +12,9 @@ import { createTargetOperationRunner } from "../.sandcastle/target-operation.js"
 const executeFile = promisify(execFile);
 const remoteUrl = "https://github.com/example/target-failure-projection.git";
 const diagnosticToken = `ghp_${"s".repeat(36)}`;
+const exfiltratedCredential = "fake-secret-for-issue-359";
+const encodedDiagnosticToken = Buffer.from(diagnosticToken).toString("base64");
+const encodedExfiltratedCredential = Buffer.from(exfiltratedCredential).toString("base64");
 
 const git = async (arguments_: readonly string[], environment?: NodeJS.ProcessEnv): Promise<string> =>
   (await executeFile("git", [...arguments_], { env: environment })).stdout.trim();
@@ -19,7 +22,7 @@ const git = async (arguments_: readonly string[], environment?: NodeJS.ProcessEn
 type Scenario = {
   readonly name: string;
   readonly operationSource: string;
-  readonly setupFailure?: boolean;
+  readonly setupFailureScript?: string;
   readonly timeoutMilliseconds?: number;
   readonly errorContains?: string;
   readonly expected: {
@@ -147,8 +150,25 @@ const representativeScenarios: readonly Scenario[] = [
   {
     name: "checkout-setup-failure",
     operationSource: 'console.log(JSON.stringify({ status: "implemented" }));\n',
-    setupFailure: true,
+    setupFailureScript: `node -e "throw new Error('setup failure token=${diagnosticToken}')"`,
     errorContains: diagnosticToken,
+    expected: {
+      result: "rejected",
+      checkout: "retained",
+      log: "failed",
+      blocked: true,
+      diagnostic: true,
+    },
+  },
+  {
+    // The preinstall script is untrusted Target revision code: it writes an
+    // operation-transformed (base64) credential to stderr, which npm surfaces
+    // in its own stderr. Publication must carry only the trusted exit
+    // classification; the encoded credential stays in local logs.
+    name: "checkout-setup-failure-encoded-credential",
+    operationSource: 'console.log(JSON.stringify({ status: "implemented" }));\n',
+    setupFailureScript: `node -e "console.error('${encodedExfiltratedCredential}'); process.exit(1)"`,
+    errorContains: encodedExfiltratedCredential,
     expected: {
       result: "rejected",
       checkout: "retained",
@@ -294,9 +314,9 @@ describe("Target operation failure projections", () => {
       name: "target-failure-projection-fixture",
       version: "1.0.0",
       private: true,
-      ...(scenario.setupFailure === true
-        ? { scripts: { preinstall: `node -e "throw new Error('setup failure token=${diagnosticToken}')"` } }
-        : {}),
+      ...(scenario.setupFailureScript === undefined
+        ? {}
+        : { scripts: { preinstall: scenario.setupFailureScript } }),
     }));
     await writeFile(
       join(contributorPath, ".sandcastle", "operations", "implement-issue.ts"),
@@ -386,6 +406,9 @@ describe("Target operation failure projections", () => {
         expect(diagnostic.summary.length).toBeLessThanOrEqual(500);
         expect(diagnostic.summary).not.toContain("must-not-publish");
         expect(diagnostic.summary).not.toContain(diagnosticToken);
+        expect(diagnostic.summary).not.toContain(encodedDiagnosticToken);
+        expect(diagnostic.summary).not.toContain(exfiltratedCredential);
+        expect(diagnostic.summary).not.toContain(encodedExfiltratedCredential);
       }
     },
     40_000,
@@ -491,9 +514,108 @@ describe("Target operation failure projections", () => {
     expect(diagnostics[0]).toMatchObject({
       jobId: "job-malformed-worker-json-secrecy",
     });
-    expect(diagnostics[0]!.summary).toContain("returned invalid JSON");
+    // Worker-exit stderr is an untrusted channel, so publication carries only
+    // the classified exit summary; the specific "returned invalid JSON"
+    // reason stays in the local job log for the operator.
+    expect(diagnostics[0]!.summary)
+      .toBe("Target operation implement-issue worker exited with 1");
     expect(diagnostics[0]!.summary).not.toContain(malformedPayloadMarker);
   });
+
+  it("keeps an operation-exfiltrated encoded credential in local logs but out of the published diagnostic", async () => {
+    await resetProjectionFixture();
+    const scenario: Scenario = {
+      name: "encoded-credential-stderr-exfiltration",
+      // The operation is untrusted Target revision code. It reads the startup
+      // credential delivered on stdin, base64-encodes it, writes it to stderr,
+      // and exits unsuccessfully — the exact trust-boundary chain rejected by
+      // the #359 acceptance re-review.
+      operationSource: [
+        'let input = "";',
+        "for await (const chunk of process.stdin) input += chunk;",
+        "const startup = JSON.parse(input);",
+        "const credential = startup.childEnvironments.github.GH_TOKEN;",
+        'if (typeof credential !== "string") throw new Error("startup credential missing");',
+        'console.error(Buffer.from(credential, "utf8").toString("base64"));',
+        "process.exit(1);",
+      ].join("\n"),
+      expected: {
+        result: "rejected",
+        checkout: "retained",
+        log: "failed",
+        blocked: true,
+        diagnostic: true,
+      },
+    };
+    const revision = await commitScenario(scenario);
+    const labels = new Set(["agent:implement"]);
+    const diagnostics: Array<{ readonly jobId: string; readonly summary: string }> = [];
+    const acquisition = {
+      read: vi.fn(async () => ({ state: "OPEN", labels: [...labels], revision })),
+      addInProgress: vi.fn(async () => { labels.add("agent:in-progress"); }),
+      removeTrigger: vi.fn(async () => { labels.delete("agent:implement"); }),
+      addBlocked: vi.fn(async () => { labels.add("agent:blocked"); }),
+      addBlockedDiagnostic: vi.fn(async (_operation, _number, diagnostic) => {
+        diagnostics.push(diagnostic);
+      }),
+      removeInProgress: vi.fn(async () => { labels.delete("agent:in-progress"); }),
+    };
+    const target = createTargetOperationRunner({
+      checkoutOptions: {
+        sourceRepositoryPath: trustedPath,
+        checkoutRoot,
+        gitEnvironment: transport,
+        dependencyEnvironment: transport,
+      },
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: {
+          git: transport,
+          github: { GH_TOKEN: exfiltratedCredential },
+          claude: {},
+          githubAgent: {},
+        },
+        models: {
+          default: "default-model",
+          planner: "planner-model",
+          implementer: "implementer-model",
+          reviewer: "reviewer-model",
+        },
+      },
+      timeoutMilliseconds: 30_000,
+      graceMilliseconds: 100,
+    });
+    const command = createTargetOperationCommandRunner({
+      target,
+      acquisition,
+      createJobId: () => "job-encoded-credential-exfiltration",
+    });
+
+    const execution = command.run("implement-issue", 359);
+    // The full untrusted stderr remains available in the local failure.
+    await expect(execution).rejects.toThrow(encodedExfiltratedCredential);
+    await expect(readFile(
+      join(logsPath, "job-encoded-credential-exfiltration", "stderr.log"),
+      "utf8",
+    )).resolves.toContain(encodedExfiltratedCredential);
+
+    // Trusted settlement keeps the checkout retained, the log failed, and
+    // publishes only the classified exit summary — never the raw credential,
+    // its base64 transformation, or any other untrusted stderr text.
+    await expect(readdir(checkoutRoot)).resolves.toHaveLength(1);
+    await expect(readFile(
+      join(logsPath, "job-encoded-credential-exfiltration", "metadata.json"),
+      "utf8",
+    ).then(JSON.parse)).resolves.toMatchObject({ status: "failed" });
+    expect(labels).toEqual(new Set(["agent:blocked"]));
+    expect(diagnostics).toEqual([{
+      jobId: "job-encoded-credential-exfiltration",
+      summary: "Target operation implement-issue worker exited with 1",
+    }]);
+    expect(diagnostics[0]!.summary).not.toContain(exfiltratedCredential);
+    expect(diagnostics[0]!.summary).not.toContain(encodedExfiltratedCredential);
+  }, 40_000);
 
   it("projects scheduled architecture review failure without Automation Work Item settlement", async () => {
     await resetProjectionFixture();

@@ -109,6 +109,29 @@ describe("Target Checkout", () => {
     expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["clone"]));
   });
 
+  it("surfaces command execution failures with a trusted public summary beside the local stderr detail", async () => {
+    const root = await mkdtemp(join(tmpdir(), "target-checkout-command-failure-"));
+    try {
+      const checkout = createTargetCheckout({
+        sourceRepositoryPath: join(root, "missing-source"),
+        checkoutRoot: join(root, "checkouts"),
+      });
+
+      let caught: unknown;
+      try {
+        await checkout.withCheckout({ revision }, async () => ({ value: {}, disposition: "cleanup" }));
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).toHaveProperty("publicSummary", "git exited with 128");
+      expect((caught as Error).message).toContain("git exited with 128: fatal: cannot change to");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     "git@github.com:example/repository.git",
     "ssh://git@github.com/example/repository.git",

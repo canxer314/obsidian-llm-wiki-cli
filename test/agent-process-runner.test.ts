@@ -74,6 +74,33 @@ describe("agent process runner", () => {
         diagnostics: "terminated",
       }, "fixture")).toThrow("fixture worker exited with signal: terminated");
     });
+
+    it("carries a trusted public summary alongside untrusted exit diagnostics", () => {
+      const encoded = "ZmFrZS1zZWNyZXQtZm9yLWlzc3VlLTM1OQ==";
+
+      try {
+        workerJson({
+          code: 3,
+          output: "ignored",
+          diagnostics: `setup failed ${encoded}`,
+        }, "fixture");
+        throw new Error("Expected worker exit to be rejected");
+      } catch (error) {
+        expect(error).toHaveProperty(
+          "message",
+          `fixture worker exited with 3: setup failed ${encoded}`,
+        );
+        expect(error).toHaveProperty("publicSummary", "fixture worker exited with 3");
+      }
+
+      try {
+        workerJson({ code: null, output: "ignored", diagnostics: "terminated" }, "fixture");
+        throw new Error("Expected worker exit to be rejected");
+      } catch (error) {
+        expect(error).toHaveProperty("message", "fixture worker exited with signal: terminated");
+        expect(error).toHaveProperty("publicSummary", "fixture worker exited with signal");
+      }
+    });
   });
 
   it("rejects a whole job through the normal lifecycle when log appending fails", async () => {
