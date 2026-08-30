@@ -1,6 +1,6 @@
 import { types } from "node:util";
 
-import { trustFailureDiagnostic } from "./trusted-failure.ts";
+import { trustInvalidTargetOperationOutcome } from "./trusted-failure.ts";
 
 import type { TargetOperationIdentity } from "./target-operation.ts";
 
@@ -30,7 +30,7 @@ export class InvalidTargetOperationOutcomeError extends Error {
 
 function invalidTargetOperationOutcome(): never {
   const failure = new InvalidTargetOperationOutcomeError();
-  throw trustFailureDiagnostic(failure, failure.message);
+  throw trustInvalidTargetOperationOutcome(failure);
 }
 
 function statusFor(

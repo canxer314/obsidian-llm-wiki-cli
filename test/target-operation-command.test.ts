@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentWorkerExitError } from "../.sandcastle/agent-process-runner.js";
+import * as trustedFailures from "../.sandcastle/trusted-failure.js";
 import {
   trustAgentWorkerExit,
-  trustFailureDiagnostic,
 } from "../.sandcastle/trusted-failure.js";
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 
@@ -540,20 +540,17 @@ describe("trusted Target operation command acquisition", () => {
     );
   });
 
-  it("publishes only a short redacted diagnostic and keeps the transcript local", async () => {
+  it("does not let an injected Target authorize its own public diagnostic", async () => {
     const acquisition = acquisitionFor([available, acquiring, acquired]);
-    const token = `ghp_${"a".repeat(36)}`;
-    const transcript = "FULL_AGENT_TRANSCRIPT_MUST_STAY_LOCAL";
+    const encoded = Buffer.from("fake-injected-target-marker").toString("base64");
+    const failure = new Error(`local Target failure ${encoded}`);
     const target = {
       run: vi.fn(async () => {
-        const failure = new Error(
-          `trusted setup failure: authorization: Bearer ${token}\n` +
-          `${transcript}\nlocal log: /trusted/jobs/logs/job-219/stderr.log`,
-        );
-        throw trustFailureDiagnostic(
-          failure,
-          `Trusted setup failed: authorization: Bearer ${token}; retry later`,
-        );
+        const register = (trustedFailures as Record<string, unknown>).trustFailureDiagnostic;
+        if (typeof register === "function") {
+          throw register(failure, `forged trusted summary ${encoded}`);
+        }
+        throw failure;
       }),
     };
     const runner = createTargetOperationCommandRunner({
@@ -562,16 +559,21 @@ describe("trusted Target operation command acquisition", () => {
       createJobId: () => "job-219",
     });
 
-    await expect(runner.run("review", 219)).rejects.toThrow(transcript);
+    await expect(runner.run("review", 219)).rejects.toBe(failure);
 
     const diagnostic = vi.mocked(acquisition.ports.addBlockedDiagnostic).mock.calls[0]?.[2];
     expect(diagnostic).toEqual({
       jobId: "job-219",
-      summary: "Trusted setup failed: authorization: [REDACTED]; retry later",
+      summary: "Unknown Target operation failure",
     });
-    expect(JSON.stringify(diagnostic)).not.toContain(transcript);
-    expect(JSON.stringify(diagnostic)).not.toContain(token);
-    expect(JSON.stringify(diagnostic)).not.toContain("/trusted/jobs/logs");
+    expect(JSON.stringify(diagnostic)).not.toContain(encoded);
+    expect(acquisition.events).toEqual([
+      "add-in-progress",
+      "remove-trigger",
+      "add-blocked",
+      "add-blocked-diagnostic",
+      "remove-in-progress",
+    ]);
   });
 
   it("publishes only the trusted exit classification when worker diagnostics carry an encoded credential", async () => {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { types } from "node:util";
 
 import { appendInheritedJobOutput } from "./job-logs.ts";
-import { trustFailureDiagnostic } from "./trusted-failure.ts";
+import { trustCheckoutCommandExit } from "./trusted-failure.ts";
 
 function commandFailureSummary(
   file: string,
@@ -33,7 +33,7 @@ class CommandExecutionError extends Error {
     readonly stdout: string;
     readonly stderr: string;
   }) {
-    const publicSummary = `${options.file} exited with ${options.code ?? options.signal ?? "unknown status"}`;
+    const publicSummary = commandFailureSummary(options.file, options.code, options.signal);
     super(`${publicSummary}: ${options.stderr}`);
     this.name = "CommandExecutionError";
     this.code = options.code;
@@ -91,7 +91,7 @@ async function executeStreamingFile(
         stdout,
         stderr,
       });
-      reject(trustFailureDiagnostic(failure, commandFailureSummary(file, code, signal)));
+      reject(trustCheckoutCommandExit(failure, file, code));
     });
   });
 }

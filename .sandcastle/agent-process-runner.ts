@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
 import { runJobWithTimeout } from "./job-timeout.ts";
-import { trustFailureDiagnostic } from "./trusted-failure.ts";
 import {
   appendJobOutputFromEnvironment,
 } from "./job-logs.ts";
@@ -22,10 +21,9 @@ export class AgentWorkerTimeoutError extends Error {
 }
 
 // A worker that exits unsuccessfully may be untrusted Target revision code
-// whose stderr carries operation-transformed secrets. The full message stays
-// available for local diagnosis; `publicSummary` is the only classification
-// trusted GitHub diagnostics may publish, because pattern redaction cannot
-// recognize transformed secrets (e.g. base64-encoded credentials).
+// whose stderr carries operation-transformed secrets. The full message and
+// `publicSummary` property stay available for local diagnosis; only a trusted
+// producer's private-registry classification may reach GitHub diagnostics.
 export class AgentWorkerExitError extends Error {
   declare readonly code: number | null;
   declare readonly publicSummary: string;
@@ -177,8 +175,7 @@ export async function runAgentWorker(options: AgentWorkerOptions): Promise<Agent
     })),
   });
   if (result.status === "timed-out") {
-    const failure = new AgentWorkerTimeoutError(options.timeoutMessage);
-    throw trustFailureDiagnostic(failure, failure.message);
+    throw new AgentWorkerTimeoutError(options.timeoutMessage);
   }
   const captured = await output!;
   if (captured.logError !== undefined) throw captured.logError;

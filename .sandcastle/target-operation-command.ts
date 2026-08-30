@@ -4,8 +4,12 @@ import {
 import { diagnosticSummary } from "./redaction.ts";
 import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
 import {
+  invalidTargetOperationRevisionFailure,
   trustedFailureSummary,
-  trustFailureDiagnostic,
+  unauthorizedPullRequestFailure,
+  unavailableWorkItemFailure,
+  workItemChangedWhileSettlingFailure,
+  workItemChangedWhileStartingFailure,
 } from "./trusted-failure.ts";
 import type {
   AuthorizedTargetOperationInvocation,
@@ -128,11 +132,6 @@ function failureDiagnosticSummary(error: unknown): string {
   }
 }
 
-function commandFailure(message: string): Error {
-  const failure = new Error(message);
-  return trustFailureDiagnostic(failure, message);
-}
-
 function requireOperationSecurity(
   operation: LabelTriggeredTargetOperationIdentity,
   state: TargetOperationAcquisitionState,
@@ -145,13 +144,13 @@ function requireOperationSecurity(
     state.pullRequest.headSha !== state.revision ||
     state.pullRequest.baseRepository !== state.pullRequest.headRepository
   ) {
-    throw commandFailure(`Pull Request #${number} is not an authorized same-repository revision`);
+    throw unauthorizedPullRequestFailure(number);
   }
 }
 
 function requireRevision(revision: string): void {
   if (!/^[0-9a-f]{40}$/u.test(revision)) {
-    throw commandFailure("Target operation requires a full authorized revision");
+    throw invalidTargetOperationRevisionFailure();
   }
 }
 
@@ -166,7 +165,7 @@ function requireAvailable(
     state.labels.includes("agent:in-progress") ||
     state.labels.includes("agent:blocked")
   ) {
-    throw commandFailure(`Work Item #${number} is not available for acquisition`);
+    throw unavailableWorkItemFailure(number);
   }
 }
 
@@ -181,7 +180,7 @@ function requireAcquiring(
     !state.labels.includes("agent:in-progress") ||
     state.labels.includes("agent:blocked")
   ) {
-    throw commandFailure(`Work Item #${number} changed while acquisition was starting`);
+    throw workItemChangedWhileStartingFailure(number);
   }
 }
 
@@ -199,7 +198,7 @@ function requireSettled(
     !state.labels.includes("agent:in-progress") ||
     state.labels.includes("agent:blocked")
   ) {
-    throw commandFailure(`Work Item #${number} changed while acquisition was settling`);
+    throw workItemChangedWhileSettlingFailure(number);
   }
 }
 
