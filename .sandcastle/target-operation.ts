@@ -7,8 +7,6 @@ import {
   runAgentWorker,
   runTargetJob,
   workerJson,
-  type AgentWorkerOptions,
-  type TargetJobOptions,
 } from "./agent-process-runner.ts";
 import type {
   TargetCheckout,
@@ -17,7 +15,6 @@ import type {
 import {
   completeJobLog,
   createJobLog,
-  inheritedJobLogEnvironment,
 } from "./job-logs.ts";
 import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
 import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
@@ -227,7 +224,7 @@ export function createTargetOperationRunnerWithWorker(
           timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeout(invocation.operation),
           graceMilliseconds: options.graceMilliseconds ?? TARGET_JOB_GRACE_MILLISECONDS,
           start: options.start,
-          environment: log === undefined ? undefined : inheritedJobLogEnvironment(log),
+          log,
         });
         const outcome = classifyTargetOperationOutcome(
           invocation.operation,

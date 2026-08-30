@@ -1,7 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
-import { appendJobOutputFromEnvironment } from "./job-logs.ts";
+import {
+  appendJobOutputFromEnvironment,
+  inheritedJobLogEnvironment,
+  type JobLog,
+} from "./job-logs.ts";
 import { createWorkerProcessLifecycle, type WorkerProcessRole } from "./worker-process-lifecycle.ts";
 import { INHERITED_JOB_PROCESS_GROUP } from "./worker-process.ts";
 
@@ -65,33 +69,39 @@ interface FixedAgentWorkerOptions {
 export type AgentWorkerOptions = FixedAgentWorkerOptions;
 
 export interface TargetJobOptions extends FixedAgentWorkerOptions {
-  readonly environment?: Readonly<Record<string, string>> | undefined;
+  readonly log?: JobLog | undefined;
 }
 
-function inheritedJobLogEnvironment(): Readonly<Record<string, string>> {
+function inheritedJobLogEnvironmentFromProcess(): Readonly<Record<string, string>> {
   return Object.fromEntries([
     "SANDCASTLE_JOB_STDOUT_LOG",
     "SANDCASTLE_JOB_STDERR_LOG",
   ].flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]!]]));
 }
 
+function outputEnvironment(
+  role: WorkerProcessRole,
+  log: JobLog | undefined,
+): Readonly<Record<string, string | undefined>> {
+  return role === "owner" ? log === undefined ? {} : inheritedJobLogEnvironment(log) : process.env;
+}
+
 function processEnvironment(
   role: WorkerProcessRole,
-  environment: Readonly<Record<string, string>> | undefined,
-  inherited: boolean,
+  log: JobLog | undefined,
 ): Readonly<Record<string, string>> {
   return {
     HOME: process.env.HOME ?? "",
     PATH: process.env.PATH ?? "",
-    ...(role === "owner" || inherited ? { [INHERITED_JOB_PROCESS_GROUP]: "1" } : {}),
-    ...(role === "owner" ? environment : inheritedJobLogEnvironment()),
+    [INHERITED_JOB_PROCESS_GROUP]: "1",
+    ...(role === "owner" ? log === undefined ? {} : inheritedJobLogEnvironment(log) : inheritedJobLogEnvironmentFromProcess()),
   };
 }
 
 async function runFixedAgentWorker(
   options: FixedAgentWorkerOptions,
   role: WorkerProcessRole,
-  environment?: Readonly<Record<string, string>>,
+  log?: JobLog,
 ): Promise<AgentWorkerResult> {
   const lifecycle = createWorkerProcessLifecycle();
   let outputSinkEnvironment: Readonly<Record<string, string | undefined>> = {};
@@ -105,18 +115,16 @@ async function runFixedAgentWorker(
       stream,
       chunk,
     ),
-    launch: (admit, disposition) => {
-      outputSinkEnvironment = role === "owner" ? environment ?? {} : disposition.inherited
-        ? process.env
-        : {};
+    launch: (admit, { detached }) => {
+      outputSinkEnvironment = outputEnvironment(role, log);
       const start = options.start ?? ((arguments_: readonly string[]) => spawn(process.execPath, [
         "--experimental-strip-types",
         resolve(options.checkoutPath, ".sandcastle", options.workerFile),
         ...arguments_,
       ], {
-        detached: disposition.detached,
+        detached,
         stdio: ["pipe", "pipe", "pipe"],
-        env: processEnvironment(role, environment, disposition.inherited),
+        env: processEnvironment(role, log),
       }));
       admit(start(options.arguments_));
     },
@@ -131,7 +139,7 @@ export function runAgentWorker(options: AgentWorkerOptions): Promise<AgentWorker
 }
 
 export function runTargetJob(options: TargetJobOptions): Promise<AgentWorkerResult> {
-  return runFixedAgentWorker(options, "owner", options.environment);
+  return runFixedAgentWorker(options, "owner", options.log);
 }
 
 export function workerJson<TResult>(

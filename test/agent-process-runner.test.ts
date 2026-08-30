@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { createJobLog } from "../.sandcastle/job-logs.js";
 import { runAgentWorker, runTargetJob, workerJson } from "../.sandcastle/agent-process-runner.js";
 
 function child(pid: number): ChildProcess & EventEmitter {
@@ -105,8 +106,14 @@ describe("agent process runner", () => {
 
   it("rejects a whole job through the normal lifecycle when log appending fails", async () => {
     const root = mkdtempSync(join(tmpdir(), "agent-log-append-failure-"));
-    const logDirectory = join(root, "stdout.log");
-    mkdirSync(logDirectory);
+    const log = await createJobLog({
+      root,
+      jobId: "fixture",
+      operation: "fixture",
+      revision: "0".repeat(40),
+    });
+    rmSync(log.stdoutPath);
+    mkdirSync(log.stdoutPath);
     const process = child(601);
     const running = runTargetJob({
       checkoutPath: "unused",
@@ -115,9 +122,7 @@ describe("agent process runner", () => {
       arguments_: [],
       timeoutMessage: "Fixture worker timed out",
       start: () => process,
-      environment: {
-        SANDCASTLE_JOB_STDOUT_LOG: logDirectory,
-      },
+      log,
     });
 
     try {
