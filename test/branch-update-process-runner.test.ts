@@ -123,7 +123,7 @@ describe("process branch updater", () => {
     });
 
     await expect(updater.update(request)).rejects.toThrow("Conflict-resolution agent produced no commits");
-    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["push"]));
+    expect(execute).not.toHaveBeenCalledWith(expect.arrayContaining(["push"]));
   });
 
   it("fails closed when the conflict-resolution agent leaves unresolved paths", async () => {
@@ -139,7 +139,7 @@ describe("process branch updater", () => {
     });
 
     await expect(updater.update(request)).rejects.toThrow("Conflict-resolution agent left unresolved conflicts in:\nsrc/other.ts");
-    expect(execute).not.toHaveBeenCalledWith("git", expect.arrayContaining(["push"]));
+    expect(execute).not.toHaveBeenCalledWith(expect.arrayContaining(["push"]));
   });
 
   it("surfaces a rejected force-with-lease push", async () => {
