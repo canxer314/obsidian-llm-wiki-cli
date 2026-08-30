@@ -6,8 +6,15 @@ import {
   inheritedJobLogEnvironment,
   type JobLog,
 } from "./job-logs.ts";
-import { createWorkerProcessLifecycle, type WorkerProcessRole } from "./worker-process-lifecycle.ts";
-import { INHERITED_JOB_PROCESS_GROUP } from "./worker-process.ts";
+import {
+  createWorkerProcessLifecycle,
+  type WorkerProcessLaunchDisposition,
+  type WorkerProcessRole,
+} from "./worker-process-lifecycle.ts";
+import {
+  INHERITED_JOB_PROCESS_GROUP,
+  workerProcessEnvironment,
+} from "./worker-process.ts";
 
 const AGENT_JOB_TIMEOUT_MILLISECONDS = 60 * 60 * 1000;
 const AGENT_JOB_GRACE_MILLISECONDS = 10 * 1000;
@@ -72,13 +79,6 @@ export interface TargetJobOptions extends FixedAgentWorkerOptions {
   readonly log?: JobLog | undefined;
 }
 
-function inheritedJobLogEnvironmentFromProcess(): Readonly<Record<string, string>> {
-  return Object.fromEntries([
-    "SANDCASTLE_JOB_STDOUT_LOG",
-    "SANDCASTLE_JOB_STDERR_LOG",
-  ].flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]!]]));
-}
-
 function outputEnvironment(
   role: WorkerProcessRole,
   log: JobLog | undefined,
@@ -87,14 +87,15 @@ function outputEnvironment(
 }
 
 function processEnvironment(
-  role: WorkerProcessRole,
+  disposition: WorkerProcessLaunchDisposition,
   log: JobLog | undefined,
 ): Readonly<Record<string, string>> {
   return {
-    HOME: process.env.HOME ?? "",
-    PATH: process.env.PATH ?? "",
+    ...workerProcessEnvironment(
+      disposition,
+      log === undefined ? {} : inheritedJobLogEnvironment(log),
+    ),
     [INHERITED_JOB_PROCESS_GROUP]: "1",
-    ...(role === "owner" ? log === undefined ? {} : inheritedJobLogEnvironment(log) : inheritedJobLogEnvironmentFromProcess()),
   };
 }
 
@@ -117,22 +118,22 @@ async function runFixedAgentWorker(
       stream,
       chunk,
     ),
-    launch: (admit, { detached }) => {
+    launch: (admit, disposition) => {
       outputSinkEnvironment = outputEnvironment(role, log);
       const start = options.start ?? ((arguments_: readonly string[]) => spawn(process.execPath, [
         "--experimental-strip-types",
         resolve(options.checkoutPath, ".sandcastle", options.workerFile),
         ...arguments_,
       ], {
-        detached,
+        detached: disposition.detached,
         stdio: ["pipe", "pipe", "pipe"],
-        env: processEnvironment(role, log),
+        env: processEnvironment(disposition, log),
       }));
       admit(start(options.arguments_));
     },
   });
+  if (Object.hasOwn(result, "outputSinkError")) throw result.outputSinkError;
   if (result.status === "timed-out") throw new AgentWorkerTimeoutError(options.timeoutMessage);
-  if (result.outputSinkError !== undefined) throw result.outputSinkError;
   return { output: result.stdout, code: result.code, diagnostics: result.stderr };
 }
 

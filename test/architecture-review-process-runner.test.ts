@@ -24,6 +24,27 @@ function child(pid: number): ChildProcess & EventEmitter {
   return process;
 }
 
+const architectureReviewRequest = {
+  revision,
+  checkoutPath: "/jobs/architecture-review-228",
+  priorProposals,
+  model: "planner-model",
+  artifactDirectory: "/jobs/review-artifacts/job-228",
+};
+
+let nextPid = 600;
+async function runArchitectureOutput(output: unknown): Promise<unknown> {
+  const process = child(nextPid++);
+  const runner = createProcessArchitectureReviewRunner({
+    start: vi.fn().mockReturnValue(process),
+    writeInput: () => {},
+  });
+  const review = runner.review(architectureReviewRequest);
+  process.stdout?.emit("data", JSON.stringify(output));
+  process.emit("close", 0);
+  return review;
+}
+
 describe("architecture review process runner", () => {
   it("hands the prior proposals to the worker through the job artifact directory", async () => {
     const process = child(419);
@@ -186,6 +207,39 @@ describe("architecture review process runner", () => {
     process.emit("close", code);
 
     await expect(review).rejects.toThrow(message);
+  });
+
+  it.each([
+    ["empty object", {}],
+    ["null", null],
+    ["unknown status", { status: "unknown" }],
+    ["incomplete skipped", { status: "skipped" }],
+    ["incomplete proposed", { status: "proposed", title: "title" }],
+    ["invalid candidates", {
+      status: "proposed",
+      title: "title",
+      body: "body",
+      oneLineSummary: "summary",
+      candidatesConsidered: [],
+    }],
+    ["overlong title", {
+      status: "proposed",
+      title: "x".repeat(257),
+      body: "body",
+      oneLineSummary: "summary",
+      candidatesConsidered: ["candidate"],
+    }],
+    ["wrong field type", { status: "skipped", reason: 1 }],
+    ["extra field", { status: "skipped", reason: "covered", secret: "do-not-publish" }],
+  ])("rejects schema-invalid architecture-review output: %s", async (_case, output) => {
+    const failure = await runArchitectureOutput(output).catch((error: unknown) => error);
+
+    expect(failure).toHaveProperty(
+      "message",
+      "Architecture review worker returned an invalid outcome",
+    );
+    expect(String(failure)).not.toContain(JSON.stringify(output));
+    expect(String(failure)).not.toContain("do-not-publish");
   });
 
   it("rejects malformed architecture-review output", async () => {

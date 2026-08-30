@@ -1,11 +1,18 @@
 import type { ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
-import { runJobWithTimeout, type CancellableWait, type Wait } from "./job-timeout.ts";
+import {
+  runJobWithTimeout,
+  terminateJobProcessGroup,
+  type CancellableWait,
+  type Wait,
+} from "./job-timeout.ts";
 import { INHERITED_JOB_PROCESS_GROUP } from "./worker-process.ts";
 
 export type WorkerProcessRole = "owner" | "nested";
 
 export interface WorkerProcessLaunchDisposition {
+  readonly role: WorkerProcessRole;
   readonly detached: boolean;
   readonly inherited: boolean;
 }
@@ -18,7 +25,10 @@ export type WorkerProcessLifecycleOutcome =
     readonly code: number | null;
     readonly outputSinkError?: unknown;
   }
-  | { readonly status: "timed-out" };
+  | {
+    readonly status: "timed-out";
+    readonly outputSinkError?: unknown;
+  };
 
 interface CapturedChildOutput {
   readonly stdout: string;
@@ -77,7 +87,7 @@ function dispositionFor(
   environment: Readonly<Record<string, string | undefined>>,
 ): WorkerProcessLaunchDisposition {
   const inherited = role === "nested" && environment[INHERITED_JOB_PROCESS_GROUP] === "1";
-  return { detached: !inherited, inherited };
+  return { role, detached: !inherited, inherited };
 }
 
 function observeChild(
@@ -86,6 +96,11 @@ function observeChild(
 ): ObservedChild {
   let stdout = "";
   let stderr = "";
+  const decoders = {
+    stdout: new StringDecoder("utf8"),
+    stderr: new StringDecoder("utf8"),
+  };
+  let outputSinkFailed = false;
   let outputSinkError: unknown;
   let exitSettled = false;
   let outputSettled = false;
@@ -128,12 +143,16 @@ function observeChild(
     outputSettled = true;
     removeOutputListeners();
     if (error !== undefined) rejectOutput(error);
-    else resolveOutput({
-      stdout,
-      stderr,
-      code: code ?? null,
-      ...(outputSinkError === undefined ? {} : { outputSinkError }),
-    });
+    else {
+      stdout += decoders.stdout.end();
+      stderr += decoders.stderr.end();
+      resolveOutput({
+        stdout,
+        stderr,
+        code: code ?? null,
+        ...(outputSinkFailed ? { outputSinkError } : {}),
+      });
+    }
   };
   function onExit(): void {
     settleExit();
@@ -143,12 +162,15 @@ function observeChild(
     settleOutput(undefined, error);
   }
   const append = (stream: "stdout" | "stderr", chunk: Buffer | string): void => {
-    if (stream === "stdout") stdout += String(chunk);
-    else stderr += String(chunk);
-    if (outputSink === undefined || outputSinkError !== undefined) return;
+    const decoder = decoders[stream];
+    const decoded = typeof chunk === "string" ? decoder.end() + chunk : decoder.write(chunk);
+    if (stream === "stdout") stdout += decoded;
+    else stderr += decoded;
+    if (outputSink === undefined || outputSinkFailed) return;
     try {
       outputSink(stream, chunk);
     } catch (error) {
+      outputSinkFailed = true;
       outputSinkError = error;
     }
   };
@@ -194,38 +216,43 @@ function groupExitObservation(
   pid: number,
   options: WorkerProcessLifecycleOptions,
 ): GroupExitObservation {
-  if (options.groupExited !== undefined) {
-    const observation = options.groupExited(pid);
-    if ("completed" in observation) return observation;
-    return { completed: observation, cancel: () => {} };
-  }
+  const observed = (): GroupExitObservation => {
+    if (options.groupExited !== undefined) {
+      const observation = options.groupExited(pid);
+      if ("completed" in observation) return observation;
+      return { completed: observation, cancel: () => {} };
+    }
 
-  const probe = options.probeGroup ?? ((groupPid: number) => process.kill(-groupPid, 0));
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let cancelled = false;
-  const completed = new Promise<void>((resolve, reject) => {
-    const check = (): void => {
-      if (cancelled) return;
-      try {
-        probe(pid);
-      } catch (error) {
-        if (isGroupAbsent(error)) resolve();
-        else reject(error);
-        return;
-      }
-      timer = setTimeout(check, 10);
-      timer.unref();
+    const probe = options.probeGroup ?? ((groupPid: number) => process.kill(-groupPid, 0));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const completed = new Promise<void>((resolve, reject) => {
+      const check = (): void => {
+        if (cancelled) return;
+        try {
+          probe(pid);
+        } catch (error) {
+          if (isGroupAbsent(error)) resolve();
+          else reject(error);
+          return;
+        }
+        timer = setTimeout(check, 10);
+        timer.unref();
+      };
+      check();
+    });
+    return {
+      completed,
+      cancel: () => {
+        cancelled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        timer = undefined;
+      },
     };
-    check();
-  });
-  return {
-    completed,
-    cancel: () => {
-      cancelled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      timer = undefined;
-    },
   };
+  const observation = observed();
+  void observation.completed.catch(() => undefined);
+  return observation;
 }
 
 export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOptions = {}) {
@@ -237,6 +264,7 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
       let child: ChildProcess | undefined;
       let observed: ObservedChild | undefined;
       let groupObservation: GroupExitObservation | undefined;
+      let cleanupDelegated = false;
       const admit = (admitted: ChildProcess): void => {
         if (child !== undefined) throw new Error("Worker process was admitted more than once");
         child = admitted;
@@ -258,12 +286,28 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
           }
           child.stdin?.end(runOptions.startup);
         } catch (error) {
-          observed?.dispose(error);
-          if (observed !== undefined) {
-            void observed.output.catch(() => undefined);
-            void observed.exited.catch(() => undefined);
-          }
           throw error;
+        }
+      };
+      const cleanupOwnedGroup = async (failure: unknown): Promise<void> => {
+        if (disposition.inherited || child?.pid === undefined) return;
+        groupObservation?.cancel();
+        groupObservation = groupExitObservation(child.pid, options);
+        try {
+          await terminateJobProcessGroup({
+            pid: child.pid,
+            groupExited: groupObservation.completed,
+            graceMilliseconds: runOptions.graceMilliseconds,
+            kill: options.kill ?? process.kill,
+            wait: options.wait ?? wait,
+          });
+        } catch (cleanupError) {
+          const failureMessage = failure instanceof Error ? failure.message : String(failure);
+          throw new AggregateError(
+            [failure, cleanupError],
+            `Worker process failed (${failureMessage}) and process-group cleanup could not be confirmed`,
+            { cause: failure },
+          );
         }
       };
 
@@ -275,6 +319,7 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
         }
 
         await launch();
+        cleanupDelegated = true;
         const result = await runJobWithTimeout({
           start: () => {
             groupObservation = groupExitObservation(child!.pid!, options);
@@ -282,6 +327,11 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
               pid: child!.pid!,
               exited: observed!.exited,
               groupExited: groupObservation.completed,
+              renewGroupExited: () => {
+                groupObservation?.cancel();
+                groupObservation = groupExitObservation(child!.pid!, options);
+                return groupObservation.completed;
+              },
             };
           },
           timeoutMilliseconds: runOptions.timeoutMilliseconds,
@@ -289,8 +339,19 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
           kill: options.kill ?? process.kill,
           wait: options.wait ?? wait,
         });
-        if (result.status === "timed-out") return { status: "timed-out" };
+        if (result.status === "timed-out") {
+          const completed = await observed!.output;
+          return {
+            status: "timed-out",
+            ...(Object.hasOwn(completed, "outputSinkError")
+              ? { outputSinkError: completed.outputSinkError }
+              : {}),
+          };
+        }
         return { status: "completed", ...(await observed!.output) };
+      } catch (error) {
+        if (!cleanupDelegated) await cleanupOwnedGroup(error);
+        throw error;
       } finally {
         groupObservation?.cancel();
         if (observed !== undefined) {

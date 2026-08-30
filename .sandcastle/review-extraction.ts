@@ -27,10 +27,10 @@ const replySchema = z.strictObject({
   body: z.string().min(1),
 });
 
-const reviewSchema = z.strictObject({
+export const reviewSchema = z.strictObject({
   summary: z.string().min(1),
-  inlineComments: z.array(inlineCommentSchema).default([]),
-  replies: z.array(replySchema).default([]),
+  inlineComments: z.array(inlineCommentSchema),
+  replies: z.array(replySchema),
 });
 
 function producePrompt(request: {

@@ -57,6 +57,18 @@ describe("worker process lifecycle ownership", () => {
     }
   });
 
+  it("keeps semantic disposition in the lifecycle and environment construction as a consumer", () => {
+    const workerProcess = source("worker-process.ts");
+    const dispositionOwners = productionSources()
+      .filter(({ content }) => /INHERITED_JOB_PROCESS_GROUP\]\s*===\s*["']1["']/u.test(content))
+      .map(({ name }) => name);
+
+    expect(dispositionOwners).toEqual([lifecycleName]);
+    expect(workerProcess).toContain("workerProcessEnvironment(");
+    expect(workerProcess).not.toContain("workerProcessOptions(");
+    expect(workerProcess).not.toMatch(/\b(?:detached|inherited)\s*:/u);
+  });
+
   it("does not turn lifecycle admission into a command specification", () => {
     expect(lifecycle).not.toMatch(/\bspawn\b/u);
     expect(lifecycle).not.toMatch(

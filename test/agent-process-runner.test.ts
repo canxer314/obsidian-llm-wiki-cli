@@ -181,6 +181,44 @@ describe("agent process runner", () => {
     }
   });
 
+  it("surfaces a log-sink failure after timeout cleanup instead of replacing it with timeout", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-log-timeout-failure-"));
+    const log = await createJobLog({
+      root,
+      jobId: "fixture",
+      operation: "fixture",
+      revision: "0".repeat(40),
+    });
+    rmSync(log.stdoutPath);
+    mkdirSync(log.stdoutPath);
+    const script = [
+      "process.stdout.write('worker-output');",
+      "process.on('SIGTERM', () => {});",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+
+    try {
+      const running = runTargetJob({
+        checkoutPath: "unused",
+        workerFile: "unused.ts",
+        workerName: "fixture",
+        arguments_: [],
+        timeoutMessage: "Fixture worker timed out",
+        timeoutMilliseconds: 200,
+        graceMilliseconds: 10,
+        start: () => spawn(process.execPath, ["-e", script], {
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        }),
+        log,
+      });
+
+      await expect(running).rejects.toMatchObject({ code: "EISDIR" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("loads the fixed worker from the authorized Target Checkout", async () => {
     const checkoutPath = mkdtempSync(join(tmpdir(), "authorized-worker-"));
     const workerDirectory = join(checkoutPath, ".sandcastle");
@@ -228,6 +266,32 @@ describe("agent process runner", () => {
         output: JSON.stringify({ snapshot: "round-one" }),
       });
     } finally {
+      rmSync(checkoutPath, { force: true, recursive: true });
+    }
+  });
+
+  it("marks a standalone Agent worker as the owner for its nested descendants", async () => {
+    const previous = process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
+    delete process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
+    const checkoutPath = mkdtempSync(join(tmpdir(), "standalone-agent-worker-"));
+    const workerDirectory = join(checkoutPath, ".sandcastle");
+    mkdirSync(workerDirectory);
+    writeFileSync(
+      join(workerDirectory, "fixture-worker.ts"),
+      'process.stdout.write(process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP ?? "missing");\n',
+    );
+
+    try {
+      await expect(runAgentWorker({
+        checkoutPath,
+        workerFile: "fixture-worker.ts",
+        workerName: "fixture",
+        arguments_: [],
+        timeoutMessage: "Fixture worker timed out",
+      })).resolves.toMatchObject({ code: 0, output: "1" });
+    } finally {
+      if (previous === undefined) delete process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
+      else process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP = previous;
       rmSync(checkoutPath, { force: true, recursive: true });
     }
   });

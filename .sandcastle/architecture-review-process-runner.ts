@@ -2,12 +2,16 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { createWorkerProcessLifecycle } from "./worker-process-lifecycle.ts";
-import { workerProcessOptions } from "./worker-process.ts";
+import {
+  createWorkerProcessLifecycle,
+  type WorkerProcessLaunchDisposition,
+} from "./worker-process-lifecycle.ts";
+import { workerProcessEnvironment } from "./worker-process.ts";
 import type {
   ArchitectureReviewOutcome,
   ArchitectureReviewProposal,
 } from "./architecture-review-automation.ts";
+import { architectureReviewSchema } from "./architecture-review-extraction.ts";
 
 // Upstream architecture-review jobs time out after twenty minutes. The worker
 // aborts itself at that mark so a timeout stays a classified graceful failure;
@@ -27,7 +31,12 @@ function parseOutcome(result: {
   const output = result.stdout.trim();
   if (output.length === 0) throw new Error("Architecture review worker did not return an outcome");
   const line = output.split("\n").at(-1)!;
-  return JSON.parse(line) as ArchitectureReviewOutcome;
+  const parsed: unknown = JSON.parse(line);
+  const outcome = architectureReviewSchema.safeParse(parsed);
+  if (!outcome.success) {
+    throw new Error("Architecture review worker returned an invalid outcome");
+  }
+  return outcome.data;
 }
 
 export function createProcessArchitectureReviewRunner(options: {
@@ -36,14 +45,15 @@ export function createProcessArchitectureReviewRunner(options: {
   readonly writeInput?: (path: string, priorProposals: readonly ArchitectureReviewProposal[]) => void;
 }) {
   const lifecycle = createWorkerProcessLifecycle();
-  const start = (arguments_: readonly string[], detached: boolean) => options.start?.(arguments_) ?? spawn(process.execPath, [
+  const start = (arguments_: readonly string[], disposition: WorkerProcessLaunchDisposition) =>
+    options.start?.(arguments_) ?? spawn(process.execPath, [
     "--experimental-strip-types",
     resolve(import.meta.dirname, "architecture-review-worker.ts"),
     ...arguments_,
   ], {
-    detached,
+    detached: disposition.detached,
     stdio: ["pipe", "pipe", "pipe"],
-    env: workerProcessOptions("nested").environment,
+    env: workerProcessEnvironment(disposition),
   });
   const writeInput = options.writeInput ?? ((path, priorProposals) => {
     writeFileSync(path, JSON.stringify(priorProposals), { mode: 0o600 });
@@ -71,7 +81,7 @@ export function createProcessArchitectureReviewRunner(options: {
         startup: options.startup,
         timeoutMilliseconds: WORKER_TIMEOUT_MILLISECONDS + FORCE_KILL_MARGIN_MILLISECONDS,
         graceMilliseconds: ARCHITECTURE_REVIEW_GRACE_MILLISECONDS,
-        launch: (admit, disposition) => admit(start(arguments_, disposition.detached)),
+        launch: (admit, disposition) => admit(start(arguments_, disposition)),
       });
       if (result.status === "timed-out") throw new Error("Architecture review execution timed out");
       return parseOutcome(result);
