@@ -21,18 +21,17 @@ export function createProcessReviewRunner(options: {
   readonly startup: string;
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
-  readonly start?: (arguments_: readonly string[], disposition: { readonly detached: boolean; readonly inherited: boolean }) => ChildProcess;
-  readonly lifecycle?: ReturnType<typeof createWorkerProcessLifecycle>;
+  readonly start?: (arguments_: readonly string[], detached: boolean) => ChildProcess;
 }) {
-  const lifecycle = options.lifecycle ?? createWorkerProcessLifecycle();
-  const start = options.start ?? ((arguments_, disposition) => {
+  const lifecycle = createWorkerProcessLifecycle();
+  const start = options.start ?? ((arguments_, detached) => {
     const processOptions = workerProcessOptions("nested");
     return spawn(process.execPath, [
       "--experimental-strip-types",
       resolve(import.meta.dirname, "review-worker.ts"),
       ...arguments_,
     ], {
-      detached: disposition.detached,
+      detached,
       stdio: ["pipe", "pipe", "pipe"],
       env: processOptions.environment,
     });
@@ -61,7 +60,7 @@ export function createProcessReviewRunner(options: {
         timeoutMilliseconds: options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
         graceMilliseconds: options.graceMilliseconds ?? REVIEW_GRACE_MILLISECONDS,
         startup: options.startup,
-        launch: (admit, disposition) => admit(start(arguments_, disposition)),
+        launch: (admit, disposition) => admit(start(arguments_, disposition.detached)),
       });
       if (result.status === "timed-out") throw new Error("Reviewer execution timed out");
       return parseReview(result);
