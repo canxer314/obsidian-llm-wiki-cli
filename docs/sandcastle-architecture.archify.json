@@ -1,0 +1,300 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": ".sandcastle 自动化执行架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/canxer314/obsidian-llm-wiki-cli",
+      "revision": "c1d8730acd1e7c9134e02857501b438ad1a5a866"
+    },
+    "viewBox": [
+      1390,
+      840
+    ]
+  },
+  "components": [
+    {
+      "id": "github",
+      "type": "external",
+      "label": "GitHub 工作项",
+      "sublabel": "Issue · PR · labels",
+      "brand": "github",
+      "sources": [
+        {
+          "path": ".sandcastle/main.ts",
+          "line": 49,
+          "end_line": 54
+        }
+      ],
+      "pos": [
+        40,
+        260
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "dispatcher",
+      "type": "backend",
+      "label": "Dispatcher + Target Job",
+      "sublabel": "调度锁 · owner worker",
+      "sources": [
+        {
+          "path": ".sandcastle/main.ts",
+          "line": 55,
+          "end_line": 148
+        },
+        {
+          "path": ".sandcastle/agent-process-runner.ts",
+          "line": 149,
+          "end_line": 157
+        }
+      ],
+      "pos": [
+        320,
+        260
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "checkout",
+      "type": "security",
+      "label": "隔离 Checkout",
+      "sublabel": "临时 clone · detached HEAD",
+      "sources": [
+        {
+          "path": ".sandcastle/target-checkout.ts",
+          "line": 166,
+          "end_line": 241
+        }
+      ],
+      "pos": [
+        600,
+        260
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "operationWorker",
+      "type": "backend",
+      "label": "Operation Worker",
+      "sublabel": "7 类目标操作入口",
+      "sources": [
+        {
+          "path": ".sandcastle/target-operation.ts",
+          "line": 83,
+          "end_line": 161
+        }
+      ],
+      "pos": [
+        880,
+        260
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "dockerSandbox",
+      "type": "cloud",
+      "label": "Docker Sandbox",
+      "sublabel": "host network · 固定镜像",
+      "brand": "docker",
+      "sources": [
+        {
+          "path": ".sandcastle/target-operation-startup.ts",
+          "line": 8,
+          "end_line": 13
+        }
+      ],
+      "pos": [
+        1160,
+        260
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "processLifecycle",
+      "type": "security",
+      "label": "进程生命周期护栏",
+      "sublabel": "进程组 · 超时 · 宽限终止",
+      "sources": [
+        {
+          "path": ".sandcastle/worker-process-lifecycle.ts",
+          "line": 258,
+          "end_line": 365
+        }
+      ],
+      "pos": [
+        305,
+        530
+      ],
+      "size": [
+        210,
+        80
+      ]
+    },
+    {
+      "id": "environmentProfiles",
+      "type": "security",
+      "label": "环境白名单配置",
+      "sublabel": "claude · githubAgent",
+      "sources": [
+        {
+          "path": ".sandcastle/automation-environment.ts",
+          "line": 50,
+          "end_line": 71
+        }
+      ],
+      "pos": [
+        880,
+        530
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "claudeAgent",
+      "type": "frontend",
+      "label": "Claude Code Agent",
+      "sublabel": "plan · implement · review",
+      "brand": "claude",
+      "sources": [
+        {
+          "path": ".sandcastle/implementer-session.ts",
+          "line": 50,
+          "end_line": 75
+        }
+      ],
+      "pos": [
+        1160,
+        530
+      ],
+      "size": [
+        180,
+        80
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "可信宿主控制面",
+      "wraps": [
+        "dispatcher"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "授权目标代码边界",
+      "wraps": [
+        "checkout",
+        "operationWorker"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "容器 Agent Session",
+      "wraps": [
+        "dockerSandbox",
+        "claudeAgent"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "githubToDispatcher",
+      "from": "github",
+      "to": "dispatcher",
+      "label": "标签与 PR 状态"
+    },
+    {
+      "id": "dispatcherToCheckout",
+      "from": "dispatcher",
+      "to": "checkout",
+      "label": "授权 revision"
+    },
+    {
+      "id": "checkoutToOperation",
+      "from": "checkout",
+      "to": "operationWorker",
+      "label": "校验入口后启动",
+      "variant": "security"
+    },
+    {
+      "id": "operationToSandbox",
+      "from": "operationWorker",
+      "to": "dockerSandbox",
+      "label": "角色化 startup",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sandboxToAgent",
+      "from": "dockerSandbox",
+      "to": "claudeAgent",
+      "label": "run() 与 cwd",
+      "labelAt": [
+        1250,
+        430
+      ],
+      "variant": "emphasis"
+    },
+    {
+      "id": "lifecycleToOperation",
+      "from": "processLifecycle",
+      "to": "operationWorker",
+      "label": "nested 继承",
+      "variant": "security"
+    },
+    {
+      "id": "environmentToSandbox",
+      "from": "environmentProfiles",
+      "to": "dockerSandbox",
+      "label": "按能力注入",
+      "variant": "security"
+    },
+    {
+      "id": "lifecycleToDispatcher",
+      "from": "processLifecycle",
+      "to": "dispatcher",
+      "label": "owner 进程组",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主执行链",
+      "items": [
+        "GitHub 命令经调度锁进入 owner worker",
+        "隔离 checkout 校验 revision、远端与私有 .env",
+        "operation worker 在容器中启动对应 Agent Session"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "失效安全",
+      "items": [
+        "环境变量按能力白名单注入，不透传宿主私有配置",
+        "owner / nested 共享进程组归属并集中执行超时清理",
+        "stdout / stderr 汇入 Job Logs，公开失败仅使用可信摘要"
+      ]
+    }
+  ]
+}
