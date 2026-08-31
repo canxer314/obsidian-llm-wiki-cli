@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 
-import { workerProcessOptions } from "./worker-process.ts";
-import { createWorkerProcessLifecycle } from "./worker-process-lifecycle.ts";
-import type { ExtractedReview } from "./review-extraction.ts";
+import { workerProcessEnvironment } from "./worker-process.ts";
+import {
+  createWorkerProcessLifecycle,
+  type WorkerProcessLaunchDisposition,
+} from "./worker-process-lifecycle.ts";
+import { reviewSchema, type ExtractedReview } from "./review-extraction.ts";
 
 const REVIEW_TIMEOUT_MILLISECONDS = 30 * 60 * 1000;
 const REVIEW_GRACE_MILLISECONDS = 10 * 1000;
@@ -14,26 +17,33 @@ function parseReview(result: { readonly stdout: string; readonly stderr: string;
   }
   const line = result.stdout.trim().split("\n").at(-1);
   if (line === undefined) throw new Error("Reviewer worker did not return a review");
-  return JSON.parse(line) as ExtractedReview;
+  const parsed: unknown = JSON.parse(line);
+  const review = reviewSchema.safeParse(parsed);
+  if (!review.success) throw new Error("Reviewer worker returned an invalid review");
+  return review.data;
 }
 
 export function createProcessReviewRunner(options: {
   readonly startup: string;
-  readonly start?: (arguments_: readonly string[], detached: boolean) => ChildProcess;
+  readonly start?: (
+    arguments_: readonly string[],
+    detached: boolean,
+  ) => ChildProcess;
 }) {
   const lifecycle = createWorkerProcessLifecycle();
-  const start = options.start ?? ((arguments_, detached) => {
-    const processOptions = workerProcessOptions("nested");
-    return spawn(process.execPath, [
-      "--experimental-strip-types",
-      resolve(import.meta.dirname, "review-worker.ts"),
-      ...arguments_,
-    ], {
-      detached,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: processOptions.environment,
-    });
-  });
+  const start = options.start === undefined
+    ? (arguments_: readonly string[], disposition: WorkerProcessLaunchDisposition) =>
+      spawn(process.execPath, [
+        "--experimental-strip-types",
+        resolve(import.meta.dirname, "review-worker.ts"),
+        ...arguments_,
+      ], {
+        detached: disposition.detached,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: workerProcessEnvironment(disposition),
+      })
+    : (arguments_: readonly string[], disposition: WorkerProcessLaunchDisposition) =>
+      options.start!(arguments_, disposition.detached);
   return {
     async review(request: {
       readonly pullRequestNumber: number;
@@ -58,7 +68,7 @@ export function createProcessReviewRunner(options: {
         timeoutMilliseconds: REVIEW_TIMEOUT_MILLISECONDS,
         graceMilliseconds: REVIEW_GRACE_MILLISECONDS,
         startup: options.startup,
-        launch: (admit, disposition) => admit(start(arguments_, disposition.detached)),
+        launch: (admit, disposition) => admit(start(arguments_, disposition)),
       });
       if (result.status === "timed-out") throw new Error("Reviewer execution timed out");
       return parseReview(result);

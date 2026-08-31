@@ -53,6 +53,46 @@ async function eventLoopTurn(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+async function realIgnoringGroup(): Promise<ChildProcess> {
+  const script = String.raw`
+    const { spawn } = require("node:child_process");
+    process.on("SIGTERM", () => {});
+    const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    descendant.once("spawn", () => process.stdout.write("ready\\n"));
+    setInterval(() => {}, 1000);
+  `;
+  const childProcess = spawn(process.execPath, ["-e", script], {
+    detached: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  await new Promise<void>((resolve, reject) => {
+    childProcess.once("error", reject);
+    childProcess.stdout!.once("data", () => resolve());
+  });
+  return childProcess;
+}
+
+function groupIsPresent(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function expectRealGroupAbsent(process: ChildProcess): Promise<void> {
+  const pid = process.pid!;
+  try {
+    expect(groupIsPresent(pid)).toBe(false);
+  } finally {
+    if (groupIsPresent(pid)) process.kill(-pid, "SIGKILL");
+  }
+}
+
 const inheritedMarker = process.env[INHERITED_JOB_PROCESS_GROUP];
 
 afterEach(() => {
@@ -113,6 +153,58 @@ describe("worker process lifecycle", () => {
       stderr: "problem details",
       code: 3,
     });
+  });
+
+  it("decodes UTF-8 code points split across two and three Buffer chunks on both streams", async () => {
+    const process = child();
+    const running = createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      launch: (admit) => admit(process),
+    });
+    const twoChunks = Buffer.from("你");
+    const threeChunks = Buffer.from("好");
+    for (const stream of [process.stdout, process.stderr]) {
+      stream.emit("data", twoChunks.subarray(0, 1));
+      stream.emit("data", twoChunks.subarray(1));
+      stream.emit("data", threeChunks.subarray(0, 1));
+      stream.emit("data", threeChunks.subarray(1, 2));
+      stream.emit("data", threeChunks.subarray(2));
+    }
+    process.emit("close", 0);
+
+    await expect(running).resolves.toMatchObject({
+      stdout: "你好",
+      stderr: "你好",
+    });
+  });
+
+  it("preserves mixed string and Buffer order while delivering raw chunks to the sink", async () => {
+    const process = child();
+    const first = Buffer.from("你");
+    const last = Buffer.from("好");
+    const chunks: Array<readonly ["stdout" | "stderr", Buffer | string]> = [];
+    const running = createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      outputSink: (stream, chunk) => chunks.push([stream, chunk]),
+      launch: (admit) => admit(process),
+    });
+    process.stdout.emit("data", first.subarray(0, 1));
+    process.stdout.emit("data", first.subarray(1));
+    process.stdout.emit("data", " between ");
+    process.stdout.emit("data", last);
+    process.emit("close", 0);
+
+    await expect(running).resolves.toMatchObject({ stdout: "你 between 好" });
+    expect(chunks).toEqual([
+      ["stdout", first.subarray(0, 1)],
+      ["stdout", first.subarray(1)],
+      ["stdout", " between "],
+      ["stdout", last],
+    ]);
   });
 
   it.each([0, 9, null] as const)("returns the raw exit code %s", async (code) => {
@@ -210,6 +302,169 @@ describe("worker process lifecycle", () => {
     expectNoLifecycleListeners(process);
   });
 
+  it.each([
+    ["stdin", (admit: (process: ChildProcess) => void, process: FakeChild) => {
+      process.stdin.end = () => { throw new Error("stdin failed after admission"); };
+      admit(process);
+    }, "stdin failed after admission"],
+    ["launch", (admit: (process: ChildProcess) => void, process: FakeChild) => {
+      admit(process);
+      throw new Error("launch failed after admission");
+    }, "launch failed after admission"],
+  ] as const)("cleans up an owned group before reporting a synchronous post-admission %s failure", async (
+    _failure,
+    launch,
+    message,
+  ) => {
+    const process = child(425);
+    let groupPresent = true;
+    const signals: NodeJS.Signals[] = [];
+    const lifecycle = createWorkerProcessLifecycle({
+      probeGroup: () => {
+        if (!groupPresent) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      },
+      kill: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === "SIGKILL") {
+          groupPresent = false;
+          process.emit("close", null);
+        }
+      },
+      wait: async () => {},
+    });
+
+    await expect(lifecycle.run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 0,
+      startup: "trusted input",
+      launch: (admit) => launch(admit, process),
+    })).rejects.toThrow(message);
+
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(groupPresent).toBe(false);
+    expectNoLifecycleListeners(process);
+  });
+
+  it("does not clean up the shared group after an inherited post-admission failure", async () => {
+    globalThis.process.env[INHERITED_JOB_PROCESS_GROUP] = "1";
+    const process = child(426);
+    process.stdin.end = () => { throw new Error("nested stdin failed"); };
+    const kill = vi.fn();
+    const probeGroup = vi.fn();
+
+    await expect(createWorkerProcessLifecycle({ kill, probeGroup }).run({
+      role: "nested",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      startup: "trusted input",
+      launch: (admit) => admit(process),
+    })).rejects.toThrow("nested stdin failed");
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(probeGroup).not.toHaveBeenCalled();
+    expectNoLifecycleListeners(process);
+  });
+
+  it("cleans up an owned group before reporting a late probe failure after child completion", async () => {
+    const process = child(428);
+    let rejectInitialProbe!: (error: unknown) => void;
+    const initialObservation = new Promise<void>((_resolve, reject) => {
+      rejectInitialProbe = reject;
+    });
+    let groupPresent = true;
+    let observationCount = 0;
+    let confirmGroupExit!: () => void;
+    const confirmation = new Promise<void>((resolve) => { confirmGroupExit = resolve; });
+    const signals: NodeJS.Signals[] = [];
+    const original = Object.assign(new Error("late probe denied"), { code: "EPERM" });
+    let waitCount = 0;
+    let releaseInitialGrace!: () => void;
+    const initialGrace = new Promise<void>((resolve) => { releaseInitialGrace = resolve; });
+    const running = createWorkerProcessLifecycle({
+      groupExited: () => observationCount++ === 0 ? initialObservation : confirmation,
+      kill: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === "SIGKILL") {
+          groupPresent = false;
+          confirmGroupExit();
+        }
+      },
+      wait: async () => {
+        if (waitCount++ === 0) await initialGrace;
+      },
+    }).run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 0,
+      launch: (admit) => admit(process),
+    });
+    process.emit("close", 0);
+    await eventLoopTurn();
+    rejectInitialProbe(original);
+    await eventLoopTurn();
+    expect(signals).toEqual([]);
+    releaseInitialGrace();
+
+    await expect(running).rejects.toBe(original);
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(groupPresent).toBe(false);
+    expect(observationCount).toBe(2);
+    expectNoLifecycleListeners(process);
+  });
+
+  it("force-kills before failing closed when cleanup confirmation also rejects", async () => {
+    const process = child(429);
+    const original = Object.assign(new Error("probe denied"), { code: "EPERM" });
+    const confirmation = Object.assign(new Error("confirmation denied"), { code: "EPERM" });
+    let observationCount = 0;
+    let groupPresent = true;
+    const signals: NodeJS.Signals[] = [];
+    const running = createWorkerProcessLifecycle({
+      groupExited: () => Promise.reject(observationCount++ === 0 ? original : confirmation),
+      kill: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === "SIGKILL") groupPresent = false;
+      },
+      wait: async () => {},
+    }).run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 0,
+      launch: (admit) => admit(process),
+    });
+
+    const failure = await running.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure).toMatchObject({ cause: original });
+    expect((failure as AggregateError).errors).toEqual([original, confirmation]);
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(groupPresent).toBe(false);
+  });
+
+  it("fails closed with the original infrastructure error as cause when cleanup fails", async () => {
+    const process = child(427);
+    const original = Object.assign(new Error("probe denied"), { code: "EPERM" });
+    const cleanup = Object.assign(new Error("signal denied"), { code: "EACCES" });
+
+    const running = createWorkerProcessLifecycle({
+      probeGroup: () => { throw original; },
+      kill: () => { throw cleanup; },
+      wait: async () => {},
+    }).run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 0,
+      launch: (admit) => admit(process),
+    });
+
+    const failure = await running.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure).toMatchObject({ cause: original });
+    expect((failure as AggregateError).errors).toEqual([original, cleanup]);
+    expect(String(failure)).toContain("probe denied");
+  });
+
   it("records the first output-sink failure while continuing output capture", async () => {
     const process = child();
     const sink = vi.fn((stream: "stdout" | "stderr", chunk: Buffer | string) => {
@@ -237,6 +492,30 @@ describe("worker process lifecycle", () => {
     expect(sink).toHaveBeenCalledTimes(1);
   });
 
+  it("records throw undefined as a present sink failure and stops later sink calls", async () => {
+    const process = child();
+    const sink = vi.fn(() => { throw undefined; });
+    const running = createWorkerProcessLifecycle().run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      outputSink: sink,
+      launch: (admit) => admit(process),
+    });
+    process.stdout.emit("data", "first");
+    process.stderr.emit("data", "second");
+    process.emit("close", 0);
+
+    await expect(running).resolves.toEqual({
+      status: "completed",
+      stdout: "first",
+      stderr: "second",
+      code: 0,
+      outputSinkError: undefined,
+    });
+    expect(sink).toHaveBeenCalledOnce();
+  });
+
   it("derives inherited nested behavior from the trusted environment", async () => {
     globalThis.process.env[INHERITED_JOB_PROCESS_GROUP] = "1";
     const childProcess = child(402);
@@ -255,7 +534,7 @@ describe("worker process lifecycle", () => {
     childProcess.emit("close", 0);
 
     await expect(running).resolves.toMatchObject({ status: "completed", code: 0 });
-    expect(dispositions).toEqual([{ detached: false, inherited: true }]);
+    expect(dispositions).toEqual([{ role: "nested", detached: false, inherited: true }]);
     expect(probe).not.toHaveBeenCalled();
     expect(kill).not.toHaveBeenCalled();
   });
@@ -276,7 +555,7 @@ describe("worker process lifecycle", () => {
     childProcess.emit("close", 0);
 
     await expect(running).resolves.toMatchObject({ status: "completed", code: 0 });
-    expect(dispositions).toEqual([{ detached: true, inherited: false }]);
+    expect(dispositions).toEqual([{ role, detached: true, inherited: false }]);
   });
 
   it("waits for graceful group cleanup before reporting a timeout", async () => {
@@ -378,21 +657,37 @@ describe("worker process lifecycle", () => {
     await expect(running).rejects.toThrow("denied");
   });
 
-  it("observes an early EPERM group-probe failure while the child remains running", async () => {
+  it("cleans up an owned group before reporting an early probe infrastructure failure", async () => {
     const process = child(413);
+    let probeCount = 0;
+    let groupPresent = true;
+    const signals: NodeJS.Signals[] = [];
     const running = createWorkerProcessLifecycle({
-      probeGroup: () => { throw Object.assign(new Error("probe denied"), { code: "EPERM" }); },
+      probeGroup: () => {
+        probeCount += 1;
+        if (probeCount === 1) {
+          throw Object.assign(new Error("probe denied"), { code: "EPERM" });
+        }
+        if (!groupPresent) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      },
+      kill: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === "SIGKILL") {
+          groupPresent = false;
+          process.emit("close", null);
+        }
+      },
+      wait: async () => {},
     }).run({
       role: "owner",
       timeoutMilliseconds: 1_000,
-      graceMilliseconds: 1,
+      graceMilliseconds: 0,
       launch: (admit) => admit(process),
     });
-    const rejected = expect(running).rejects.toThrow("probe denied");
 
-    await eventLoopTurn();
-
-    await rejected;
+    await expect(running).rejects.toThrow("probe denied");
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(groupPresent).toBe(false);
     expectNoLifecycleListeners(process);
   });
 
@@ -577,6 +872,87 @@ describe("worker process lifecycle", () => {
       vi.useRealTimers();
     }
   });
+
+  it("force-kills a real group before failing closed when every probe is denied", { timeout: 10_000 }, async () => {
+    const childProcess = await realIgnoringGroup();
+    const pid = childProcess.pid!;
+    const denied = Object.assign(new Error("persistent probe denial"), { code: "EPERM" });
+    try {
+      const running = createWorkerProcessLifecycle({
+        probeGroup: () => { throw denied; },
+        wait: async () => {},
+      }).run({
+        role: "owner",
+        timeoutMilliseconds: 5_000,
+        graceMilliseconds: 0,
+        launch: (admit) => admit(childProcess),
+      });
+
+      const failure = await running.catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure).toMatchObject({ cause: denied });
+      for (let attempt = 0; attempt < 100 && groupIsPresent(pid); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(groupIsPresent(pid)).toBe(false);
+    } finally {
+      if (groupIsPresent(pid)) process.kill(-pid, "SIGKILL");
+    }
+  });
+
+  it.each(["probe", "stdin", "launch"] as const)(
+    "removes a real SIGTERM-ignoring group before rejecting an owned post-admission %s failure",
+    { timeout: 10_000 },
+    async (failure) => {
+      const childProcess = await realIgnoringGroup();
+      const pid = childProcess.pid!;
+      let firstProbe = true;
+      let settled = false;
+      if (failure === "stdin") {
+        childProcess.stdin!.end = (() => {
+          throw new Error("real stdin failure");
+        }) as typeof childProcess.stdin.end;
+      }
+      const lifecycle = createWorkerProcessLifecycle({
+        ...(failure === "probe" ? {
+          probeGroup: (groupPid) => {
+            if (firstProbe) {
+              firstProbe = false;
+              throw Object.assign(new Error("real probe denied"), { code: "EPERM" });
+            }
+            process.kill(-groupPid, 0);
+          },
+        } : {}),
+        wait: async () => {
+          expect(groupIsPresent(pid)).toBe(true);
+          expect(settled).toBe(false);
+        },
+      });
+      const running = lifecycle.run({
+        role: "owner",
+        timeoutMilliseconds: 5_000,
+        graceMilliseconds: 1,
+        startup: "trusted input",
+        launch: (admit) => {
+          admit(childProcess);
+          if (failure === "launch") throw new Error("real launch failure");
+        },
+      }).finally(() => { settled = true; });
+
+      try {
+        await expect(running).rejects.toThrow(
+          failure === "probe"
+            ? "real probe denied"
+            : failure === "stdin"
+              ? "real stdin failure"
+              : "real launch failure",
+        );
+        await expectRealGroupAbsent(childProcess);
+      } finally {
+        if (groupIsPresent(pid)) process.kill(-pid, "SIGKILL");
+      }
+    },
+  );
 
   it("waits for an ignoring POSIX descendant after its leader exits", async () => {
     const marker = join(tmpdir(), `worker-lifecycle-descendant-${process.pid}-${Date.now()}.pid`);

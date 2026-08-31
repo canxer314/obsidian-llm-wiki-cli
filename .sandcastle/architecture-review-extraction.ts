@@ -18,7 +18,7 @@ import type {
 // Upstream-equivalent output contract (course-video-manager
 // architecture-review.ts at the accepted baseline): a discriminated union of
 // an accepted proposal and an explicit skip.
-const architectureReviewSchema = z.discriminatedUnion("status", [
+export const architectureReviewSchema = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("proposed"),
     title: z.string().min(1).max(256),

@@ -30,6 +30,16 @@ const reviewRequest = {
   artifactDirectory: "/jobs/review-artifacts/job-220",
 };
 
+let nextPid = 500;
+async function runReviewOutput(output: unknown): Promise<unknown> {
+  const process = child(nextPid++);
+  const runner = createProcessReviewRunner({ start: vi.fn().mockReturnValue(process) });
+  const review = runner.review(reviewRequest);
+  process.stdout?.emit("data", JSON.stringify(output));
+  process.emit("close", 0);
+  return review;
+}
+
 describe("reviewer process runner", () => {
   it("registers output listeners before writing trusted startup and preserves the review argv protocol", async () => {
     const process = child(420);
@@ -81,6 +91,41 @@ describe("reviewer process runner", () => {
     process.emit("close", code);
 
     await expect(review).rejects.toThrow(message);
+  });
+
+  it.each([
+    ["empty object", {}],
+    ["null", null],
+    ["missing arrays", { summary: "review" }],
+    ["wrong comments type", { summary: "review", inlineComments: {}, replies: [] }],
+    ["wrong replies type", { summary: "review", inlineComments: [], replies: "none" }],
+    ["invalid nested comment", {
+      summary: "review",
+      inlineComments: [{ path: "../secret", line: 1, body: "problem" }],
+      replies: [],
+    }],
+    ["invalid nested reply", {
+      summary: "review",
+      inlineComments: [],
+      replies: [{ commentId: 2, body: "fixed" }],
+    }],
+    ["unsafe absolute path", {
+      summary: "review",
+      inlineComments: [{ path: "/secret", line: 1, body: "problem" }],
+      replies: [],
+    }],
+    ["invalid line number", {
+      summary: "review",
+      inlineComments: [{ path: "src/file.ts", line: 0, body: "problem" }],
+      replies: [],
+    }],
+    ["extra field", { summary: "review", inlineComments: [], replies: [], secret: "do-not-publish" }],
+  ])("rejects schema-invalid successful output: %s", async (_case, output) => {
+    const failure = await runReviewOutput(output).catch((error: unknown) => error);
+
+    expect(failure).toHaveProperty("message", "Reviewer worker returned an invalid review");
+    expect(String(failure)).not.toContain(JSON.stringify(output));
+    expect(String(failure)).not.toContain("do-not-publish");
   });
 
   it.each([
