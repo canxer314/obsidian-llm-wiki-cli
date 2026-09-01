@@ -6,7 +6,11 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createTargetCheckout, removeExpiredFailureCheckouts } from "../.sandcastle/target-checkout.js";
+import {
+  createTargetCheckout,
+  removeExpiredFailureCheckouts,
+  targetCheckoutProcessOptions,
+} from "../.sandcastle/target-checkout.js";
 
 const executeFile = promisify(execFile);
 const revision = "0123456789abcdef0123456789abcdef01234567";
@@ -17,6 +21,115 @@ const git = async (arguments_: readonly string[]): Promise<string> =>
 
 const pathExists = async (path: string): Promise<boolean> =>
   access(path).then(() => true, () => false);
+
+describe("Target Checkout process options", () => {
+  it.each([
+    undefined,
+    null,
+    {},
+    { sourceRepositoryPath: "" },
+    { sourceRepositoryPath: 42 },
+  ])("rejects an invalid trusted source path %#", (value) => {
+    expect(() => targetCheckoutProcessOptions(value))
+      .toThrow("Target Checkout process options are invalid");
+  });
+
+  it.each([
+    ["empty checkout root", { sourceRepositoryPath: "/trusted/source", checkoutRoot: "" }],
+    ["non-string checkout root", { sourceRepositoryPath: "/trusted/source", checkoutRoot: 42 }],
+    ["null Git environment", { sourceRepositoryPath: "/trusted/source", gitEnvironment: null }],
+    ["array Git environment", { sourceRepositoryPath: "/trusted/source", gitEnvironment: [] }],
+    ["non-string Git environment value", { sourceRepositoryPath: "/trusted/source", gitEnvironment: { SECRET: 42 } }],
+    ["non-object dependency environment", { sourceRepositoryPath: "/trusted/source", dependencyEnvironment: "SECRET" }],
+    ["extra process option", { sourceRepositoryPath: "/trusted/source", execute: "git" }],
+    ["prototype process option", { sourceRepositoryPath: "/trusted/source", prototype: {} }],
+    ["constructor process option", { sourceRepositoryPath: "/trusted/source", constructor: {} }],
+    ["__proto__ process option", JSON.parse('{"sourceRepositoryPath":"/trusted/source","__proto__":{}}')],
+    ["non-plain environment", {
+      sourceRepositoryPath: "/trusted/source",
+      gitEnvironment: Object.assign(Object.create({ inherited: "value" }), { PATH: "/bin" }),
+    }],
+  ])("rejects %s", (_caseName, value) => {
+    expect(() => targetCheckoutProcessOptions(value))
+      .toThrow("Target Checkout process options are invalid");
+  });
+
+  it("does not evaluate accessors or proxies", () => {
+    const readSource = vi.fn(() => "/trusted/source");
+    const accessor = Object.defineProperty({}, "sourceRepositoryPath", {
+      enumerable: true,
+      get: readSource,
+    });
+
+    expect(() => targetCheckoutProcessOptions(accessor))
+      .toThrow("Target Checkout process options are invalid");
+    expect(() => targetCheckoutProcessOptions(new Proxy(
+      { sourceRepositoryPath: "/trusted/source" },
+      {},
+    ))).toThrow("Target Checkout process options are invalid");
+    expect(readSource).not.toHaveBeenCalled();
+  });
+
+  it("preserves all optional values in an independent validated process snapshot", () => {
+    const value = {
+      sourceRepositoryPath: "/trusted/source",
+      checkoutRoot: "/jobs",
+      gitEnvironment: { PATH: "/git", TOKEN: "git-secret" },
+      dependencyEnvironment: { PATH: "/npm", TOKEN: "npm-secret" },
+    };
+
+    const snapshot = targetCheckoutProcessOptions(value);
+    value.sourceRepositoryPath = "/changed/source";
+    value.gitEnvironment.TOKEN = "changed";
+    value.dependencyEnvironment.TOKEN = "changed";
+
+    expect(snapshot).toEqual({
+      sourceRepositoryPath: "/trusted/source",
+      checkoutRoot: "/jobs",
+      gitEnvironment: { PATH: "/git", TOKEN: "git-secret" },
+      dependencyEnvironment: { PATH: "/npm", TOKEN: "npm-secret" },
+    });
+  });
+
+  it("preserves prototype-looking environment names as own string values", () => {
+    const gitEnvironment = JSON.parse('{"__proto__":"literal","constructor":"command"}');
+
+    const snapshot = targetCheckoutProcessOptions({
+      sourceRepositoryPath: "/trusted/source",
+      gitEnvironment,
+    });
+
+    expect(Object.hasOwn(snapshot.gitEnvironment!, "__proto__")).toBe(true);
+    expect(snapshot.gitEnvironment?.["__proto__"]).toBe("literal");
+    expect(snapshot.gitEnvironment?.constructor).toBe("command");
+  });
+
+  it("redacts invalid paths and environment values", () => {
+    const secret = "TOP_SECRET_CHECKOUT_VALUE";
+
+    let error: unknown;
+    try {
+      targetCheckoutProcessOptions({
+        sourceRepositoryPath: `/private/${secret}`,
+        gitEnvironment: { TOKEN: 42, SECRET: secret },
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({ message: "Target Checkout process options are invalid" });
+    expect((error as Error).message).not.toContain(secret);
+  });
+
+  it("returns an independent validated process snapshot", () => {
+    const value = { sourceRepositoryPath: "/trusted/source" };
+
+    const snapshot = targetCheckoutProcessOptions(value);
+    value.sourceRepositoryPath = "/changed/source";
+
+    expect(snapshot).toEqual({ sourceRepositoryPath: "/trusted/source" });
+  });
+});
 
 describe("Target Checkout", () => {
   it("clones the resolved GitHub remote and fetches then verifies only the acquired revision", async () => {

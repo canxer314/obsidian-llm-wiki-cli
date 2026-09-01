@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   runTargetOperationWithDependencies,
@@ -160,5 +160,70 @@ describe("Target operation startup", () => {
       ...snapshot,
       models: { planner: "planner-model" },
     })).toThrow("Target operation startup snapshot is invalid");
+  });
+
+  it.each([
+    ["extra top-level field", { ...snapshot, authority: true }],
+    ["extra child environment", {
+      ...snapshot,
+      childEnvironments: { ...snapshot.childEnvironments, extra: {} },
+    }],
+    ["extra model", { ...snapshot, models: { ...snapshot.models, extra: "model" } }],
+    ["array child environments", { ...snapshot, childEnvironments: [] }],
+    ["array models", { ...snapshot, models: [] }],
+    ["non-string environment value", {
+      ...snapshot,
+      childEnvironments: {
+        ...snapshot.childEnvironments,
+        git: { TOKEN: 42 },
+      },
+    }],
+    ["non-plain environment", {
+      ...snapshot,
+      childEnvironments: {
+        ...snapshot.childEnvironments,
+        git: Object.assign(Object.create({ inherited: "value" }), { PATH: "/git" }),
+      },
+    }],
+  ])("rejects an inexact %s", (_caseName, value) => {
+    expect(() => targetOperationStartupSnapshot(value))
+      .toThrow("Target operation startup snapshot is invalid");
+  });
+
+  it("does not evaluate startup accessors or proxies", () => {
+    const imageName = vi.fn(() => "fixture-image");
+    const accessor = Object.defineProperty({
+      childEnvironments: snapshot.childEnvironments,
+      models: snapshot.models,
+    }, "imageName", { enumerable: true, get: imageName });
+
+    expect(() => targetOperationStartupSnapshot(accessor))
+      .toThrow("Target operation startup snapshot is invalid");
+    expect(() => targetOperationStartupSnapshot(new Proxy(snapshot, {})))
+      .toThrow("Target operation startup snapshot is invalid");
+    expect(imageName).not.toHaveBeenCalled();
+  });
+
+  it("returns an independent startup snapshot without leaking invalid values", () => {
+    const secret = "TOP_SECRET_STARTUP";
+    const value = structuredClone(snapshot) as {
+      imageName: string;
+      childEnvironments: { git: { PATH: string } };
+      models: { planner: string };
+    };
+    const parsed = targetOperationStartupSnapshot(value);
+    value.childEnvironments.git.PATH = secret;
+    value.models.planner = secret;
+
+    expect(parsed.childEnvironments.git.PATH).toBe("/git");
+    expect(parsed.models.planner).toBe("planner-model");
+    let error: unknown;
+    try {
+      targetOperationStartupSnapshot({ ...snapshot, models: { ...snapshot.models, secret } });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({ message: "Target operation startup snapshot is invalid" });
+    expect((error as Error).message).not.toContain(secret);
   });
 });
