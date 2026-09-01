@@ -192,6 +192,8 @@ function observeChild(
     settleOutput(undefined, error ?? new Error("Worker process observation was cancelled"));
   };
 
+  void output.catch(() => undefined);
+  void exited.catch(() => undefined);
   try {
     child.once("exit", onExit);
     child.once("close", onExit);
@@ -205,10 +207,9 @@ function observeChild(
     child.once("close", onClose);
   } catch (error) {
     dispose(error);
+    throw error;
   }
 
-  void output.catch(() => undefined);
-  void exited.catch(() => undefined);
   return { output, exited, dispose };
 }
 
@@ -250,7 +251,12 @@ function groupExitObservation(
       },
     };
   };
-  const observation = observed();
+  let observation: GroupExitObservation;
+  try {
+    observation = observed();
+  } catch (error) {
+    observation = { completed: Promise.reject(error), cancel: () => {} };
+  }
   void observation.completed.catch(() => undefined);
   return observation;
 }
@@ -289,14 +295,19 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
           throw error;
         }
       };
+      const renewGroupObservation = (): Promise<void> => {
+        groupObservation?.cancel();
+        groupObservation = groupExitObservation(child!.pid!, options);
+        return groupObservation.completed;
+      };
       const cleanupOwnedGroup = async (failure: unknown): Promise<void> => {
         if (disposition.inherited || child?.pid === undefined) return;
-        groupObservation?.cancel();
-        groupObservation = groupExitObservation(child.pid, options);
+        const groupExited = renewGroupObservation();
         try {
           await terminateJobProcessGroup({
             pid: child.pid,
-            groupExited: groupObservation.completed,
+            groupExited,
+            renewGroupExited: renewGroupObservation,
             graceMilliseconds: runOptions.graceMilliseconds,
             kill: options.kill ?? process.kill,
             wait: options.wait ?? wait,
@@ -327,11 +338,7 @@ export function createWorkerProcessLifecycle(options: WorkerProcessLifecycleOpti
               pid: child!.pid!,
               exited: observed!.exited,
               groupExited: groupObservation.completed,
-              renewGroupExited: () => {
-                groupObservation?.cancel();
-                groupObservation = groupExitObservation(child!.pid!, options);
-                return groupObservation.completed;
-              },
+              renewGroupExited: renewGroupObservation,
             };
           },
           timeoutMilliseconds: runOptions.timeoutMilliseconds,

@@ -286,6 +286,72 @@ describe("worker process lifecycle", () => {
     })).rejects.toThrow("stream failed");
   });
 
+  it.each(["child", "stdin", "stdout", "stderr"] as const)(
+    "aborts startup delivery when %s listener registration fails",
+    async (target) => {
+      const process = child(432);
+      const startup = vi.fn();
+      process.stdin.end = startup;
+      const emitter = target === "child" ? process : process[target];
+      const registration = target === "stdout" || target === "stderr" ? "on" : "once";
+      const original = emitter[registration];
+      emitter[registration] = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+        const failingEvent = target === "child" ? "exit" : target === "stdin" ? "error" : "data";
+        if (event === failingEvent) throw new Error(`${target} listener setup failed before startup`);
+        return original.call(emitter, event, listener);
+      }) as typeof original;
+      let confirmGroupExit!: () => void;
+      const groupExited = new Promise<void>((resolve) => { confirmGroupExit = resolve; });
+      const signals: NodeJS.Signals[] = [];
+      const running = createWorkerProcessLifecycle({
+        groupExited: () => groupExited,
+        kill: (_pid, signal) => {
+          signals.push(signal);
+          if (signal === "SIGKILL") confirmGroupExit();
+        },
+        wait: async () => {},
+      }).run({
+        role: "owner",
+        timeoutMilliseconds: 1_000,
+        graceMilliseconds: 0,
+        startup: "trusted startup",
+        launch: (admit) => admit(process),
+      });
+
+      await expect(running).rejects.toThrow(`${target} listener setup failed before startup`);
+      expect(startup).not.toHaveBeenCalled();
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expectNoLifecycleListeners(process);
+    },
+  );
+
+  it("rejects inherited listener setup without startup delivery or shared-group cleanup", async () => {
+    globalThis.process.env[INHERITED_JOB_PROCESS_GROUP] = "1";
+    const process = child(433);
+    const startup = vi.fn();
+    process.stdin.end = startup;
+    const stderr = process.stderr;
+    stderr.once = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+      if (event === "error") throw new Error("nested listener setup failed");
+      return EventEmitter.prototype.once.call(stderr, event, listener);
+    }) as typeof stderr.once;
+    const kill = vi.fn();
+    const probeGroup = vi.fn();
+
+    await expect(createWorkerProcessLifecycle({ kill, probeGroup }).run({
+      role: "nested",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 1,
+      startup: "trusted startup",
+      launch: (admit) => admit(process),
+    })).rejects.toThrow("nested listener setup failed");
+
+    expect(startup).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+    expect(probeGroup).not.toHaveBeenCalled();
+    expectNoLifecycleListeners(process);
+  });
+
   it("settles output observation when launch fails after admitting a child", async () => {
     const process = child(undefined);
 
@@ -364,6 +430,104 @@ describe("worker process lifecycle", () => {
     expect(kill).not.toHaveBeenCalled();
     expect(probeGroup).not.toHaveBeenCalled();
     expectNoLifecycleListeners(process);
+  });
+
+  it("confirms owned-group cleanup after synchronous observation construction fails", async () => {
+    const process = child(431);
+    const setupFailure = new Error("observation setup failed");
+    let observationCount = 0;
+    let confirmGroupExit!: () => void;
+    const confirmation = new Promise<void>((resolve) => { confirmGroupExit = resolve; });
+    const signals: NodeJS.Signals[] = [];
+    const running = createWorkerProcessLifecycle({
+      groupExited: () => {
+        if (observationCount++ === 0) throw setupFailure;
+        return confirmation;
+      },
+      kill: (_pid, signal) => { signals.push(signal); },
+      wait: async () => {},
+    }).run({
+      role: "owner",
+      timeoutMilliseconds: 1_000,
+      graceMilliseconds: 0,
+      launch: (admit) => admit(process),
+    });
+    let settled = false;
+    void running.finally(() => { settled = true; }).catch(() => undefined);
+
+    await eventLoopTurn();
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(observationCount).toBe(2);
+    expect(settled).toBe(false);
+
+    confirmGroupExit();
+    await expect(running).rejects.toBe(setupFailure);
+    expectNoLifecycleListeners(process);
+  });
+
+  it("renews failed group polling and confirms absence before reporting a child failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const process = child(430);
+      const childFailure = new Error("child failed before polling failed");
+      const probeFailure = Object.assign(new Error("probe denied during cleanup"), {
+        code: "EPERM",
+      });
+      const signals: NodeJS.Signals[] = [];
+      let probeCount = 0;
+      let groupPresent = true;
+      let releaseGrace!: () => void;
+      const grace = new Promise<void>((resolve) => { releaseGrace = resolve; });
+      const running = createWorkerProcessLifecycle({
+        probeGroup: () => {
+          probeCount += 1;
+          if (probeCount === 2) throw probeFailure;
+          if (!groupPresent) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        },
+        kill: (_pid, signal) => { signals.push(signal); },
+        wait: () => grace,
+      }).run({
+        role: "owner",
+        timeoutMilliseconds: 1_000,
+        graceMilliseconds: 100,
+        launch: (admit) => admit(process),
+      });
+      let settled = false;
+      const settlement = running.then(
+        () => {
+          settled = true;
+          return undefined;
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+
+      process.emit("error", childFailure);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(signals).toEqual(["SIGTERM"]);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(probeCount).toBe(2);
+      expect(settled).toBe(false);
+
+      releaseGrace();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(probeCount).toBe(3);
+      expect(settled).toBe(false);
+
+      groupPresent = false;
+      await vi.advanceTimersByTimeAsync(10);
+      const failure = await settlement;
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure).toMatchObject({ cause: childFailure });
+      expect((failure as AggregateError).errors).toEqual([childFailure, probeFailure]);
+      expectNoLifecycleListeners(process);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("cleans up an owned group before reporting a late probe failure after child completion", async () => {
@@ -461,7 +625,9 @@ describe("worker process lifecycle", () => {
     const failure = await running.catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AggregateError);
     expect(failure).toMatchObject({ cause: original });
-    expect((failure as AggregateError).errors).toEqual([original, cleanup]);
+    const cleanupFailure = (failure as AggregateError).errors[1];
+    expect(cleanupFailure).toBeInstanceOf(AggregateError);
+    expect((cleanupFailure as AggregateError).errors).toEqual([original, cleanup]);
     expect(String(failure)).toContain("probe denied");
   });
 

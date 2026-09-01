@@ -10,6 +10,13 @@ type Execute = (
   arguments_: readonly string[],
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
+function requireFullRevision(revision: string): string {
+  if (!/^[0-9a-f]{40}$/u.test(revision)) {
+    throw new Error("Branch update produced an invalid revision");
+  }
+  return revision;
+}
+
 function createProcessGitExecutor(options: {
   readonly environment?: Readonly<Record<string, string>>;
 }): Execute {
@@ -106,12 +113,12 @@ export function createProcessBranchUpdater(options: {
         if (unresolved.length > 0) {
           throw new Error(`Conflict-resolution agent left unresolved conflicts in:\n${unresolved.join("\n")}`);
         }
-        await push(postSha);
-        return { status: "updated", revision: postSha, comment: resolved.comment };
+        const revision = requireFullRevision(postSha);
+        await push(revision);
+        return { status: "updated", revision, comment: resolved.comment };
       }
 
-      const revision = await revisionOf("HEAD");
-      if (!/^[0-9a-f]{40}$/u.test(revision)) throw new Error("Branch update produced an invalid revision");
+      const revision = requireFullRevision(await revisionOf("HEAD"));
       await push(revision);
       return { status: "updated", revision };
     },
