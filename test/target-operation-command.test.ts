@@ -179,6 +179,30 @@ describe("trusted Target operation command acquisition", () => {
     ]);
   });
 
+  it("rejects malformed reconciliation before reading or mutating acquisition state", async () => {
+    const target = { run: vi.fn() };
+    const acquisition = acquisitionFor([available]);
+    const createJobId = vi.fn(() => "job-219");
+    const runner = createTargetOperationCommandRunner({
+      target,
+      acquisition: acquisition.ports,
+      createJobId,
+    });
+
+    await expect(runner.run("implement-feedback", 219, {
+      invocation: "reconcile",
+      expectedReply: {
+        rootCommentId: "",
+        body: "reply body must not appear in the error",
+      },
+    })).rejects.toThrow("Target feedback reconciliation authorization is invalid");
+    expect(Object.values(acquisition.ports).every((method) =>
+      vi.mocked(method).mock.calls.length === 0
+    )).toBe(true);
+    expect(createJobId).not.toHaveBeenCalled();
+    expect(target.run).not.toHaveBeenCalled();
+  });
+
   it("refuses explicit feedback reconciliation without a visible command", async () => {
     const acquisition = acquisitionFor([{
       ...available,
@@ -220,9 +244,46 @@ describe("trusted Target operation command acquisition", () => {
 
   it.each([
     ["missing Pull Request metadata", { ...available, pullRequest: undefined }],
+    ["null Pull Request metadata", {
+      ...available,
+      pullRequest: null as unknown as typeof pullRequest,
+    }],
+    ["primitive Pull Request metadata", {
+      ...available,
+      pullRequest: "metadata" as unknown as typeof pullRequest,
+    }],
+    ["array Pull Request metadata", {
+      ...available,
+      pullRequest: [] as unknown as typeof pullRequest,
+    }],
     ["a mismatched Pull Request head SHA", {
       ...available,
       pullRequest: { ...pullRequest, headSha: "b".repeat(40) },
+    }],
+    ["a malformed matching Pull Request head SHA", {
+      ...available,
+      revision: "not-a-revision",
+      pullRequest: { ...pullRequest, headSha: "not-a-revision" },
+    }],
+    ["an empty Pull Request head ref", {
+      ...available,
+      pullRequest: { ...pullRequest, headRefName: "" },
+    }],
+    ["an empty Pull Request base ref", {
+      ...available,
+      pullRequest: { ...pullRequest, baseRefName: "" },
+    }],
+    ["an empty Pull Request base repository", {
+      ...available,
+      pullRequest: { ...pullRequest, baseRepository: "", headRepository: "" },
+    }],
+    ["an empty Pull Request head repository", {
+      ...available,
+      pullRequest: { ...pullRequest, headRepository: "" },
+    }],
+    ["extra Pull Request metadata", {
+      ...available,
+      pullRequest: { ...pullRequest, unexpected: "authority" },
     }],
   ])("rejects initial acquisition with %s before mutating labels", async (_caseName, initial) => {
     const target = { run: vi.fn() };

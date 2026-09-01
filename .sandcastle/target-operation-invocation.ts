@@ -39,43 +39,34 @@ interface OuterTargetOperationInvocation {
   readonly number: number;
 }
 
-export type AuthorizedTargetOperationInvocation =
-  | (AcquiredTargetOperationInvocation & OuterTargetOperationInvocation & {
+type LabelTriggeredTargetOperationWorkerInvocation =
+  | (AcquiredTargetOperationInvocation & {
       readonly operation: IssueTargetOperationIdentity;
     })
-  | (AcquiredTargetOperationInvocation & OuterTargetOperationInvocation & {
+  | (AcquiredTargetOperationInvocation & {
       readonly operation: PullRequestTargetOperationIdentity;
       readonly pullRequest: TargetPullRequestAuthorization;
     })
-  | (AcquiredTargetOperationInvocation & OuterTargetOperationInvocation & {
+  | (AcquiredTargetOperationInvocation & {
       readonly operation: "implement-feedback";
       readonly pullRequest: TargetPullRequestAuthorization;
       readonly reconcile?: FeedbackReconcileAuthorization;
-    })
-  | {
-      readonly operation: "architecture-review";
-      readonly revision: string;
-      readonly jobId: string;
-    };
+    });
+
+type ScheduledArchitectureReviewInvocation = {
+  readonly operation: "architecture-review";
+  readonly revision: string;
+  readonly jobId: string;
+};
+
+export type AuthorizedTargetOperationInvocation =
+  | (LabelTriggeredTargetOperationWorkerInvocation &
+      OuterTargetOperationInvocation)
+  | ScheduledArchitectureReviewInvocation;
 
 export type TargetOperationWorkerInvocation =
-  | (AcquiredTargetOperationInvocation & {
-      readonly operation: IssueTargetOperationIdentity;
-    })
-  | (AcquiredTargetOperationInvocation & {
-      readonly operation: PullRequestTargetOperationIdentity;
-      readonly pullRequest: TargetPullRequestAuthorization;
-    })
-  | (AcquiredTargetOperationInvocation & {
-      readonly operation: "implement-feedback";
-      readonly pullRequest: TargetPullRequestAuthorization;
-      readonly reconcile?: FeedbackReconcileAuthorization;
-    })
-  | {
-      readonly operation: "architecture-review";
-      readonly revision: string;
-      readonly jobId: string;
-    };
+  | LabelTriggeredTargetOperationWorkerInvocation
+  | ScheduledArchitectureReviewInvocation;
 
 export interface ParsedTargetOperationWorkerInvocation {
   readonly number: number | undefined;
@@ -153,9 +144,28 @@ function isPullRequestAuthorization(value: unknown, revision: string): boolean {
     value.baseRepository === value.headRepository;
 }
 
-function labelInvocationKeys(
+function outerLabelInvocationKeys(
   operation: LabelTriggeredTargetOperationIdentity,
-  outer: boolean,
+  hasReconcile: boolean,
+): ReadonlySet<string> {
+  const keys = new Set([
+    "operation",
+    "number",
+    "revision",
+    "jobId",
+    "acquired",
+  ]);
+  if (
+    operation === "implement-feedback" ||
+    operation === "review" ||
+    operation === "update-branch"
+  ) keys.add("pullRequest");
+  if (operation === "implement-feedback" && hasReconcile) keys.add("reconcile");
+  return keys;
+}
+
+function workerLabelInvocationKeys(
+  operation: LabelTriggeredTargetOperationIdentity,
   hasReconcile: boolean,
 ): ReadonlySet<string> {
   const keys = new Set([
@@ -163,7 +173,6 @@ function labelInvocationKeys(
     "revision",
     "jobId",
     "acquired",
-    ...(outer ? ["number"] : []),
   ]);
   if (
     operation === "implement-feedback" ||
@@ -186,17 +195,14 @@ function requireScheduledInvocation(
   ) throw new Error(message);
 }
 
-function requireLabelInvocation(
+function requireAuthorizedOuterLabelInvocation(
   value: Record<string, unknown>,
   operation: LabelTriggeredTargetOperationIdentity,
-  outer: boolean,
 ): void {
   if (!isFullRevision(value.revision) || !isNonEmptyString(value.jobId)) {
-    throw new Error(outer
-      ? "Target operation requires an authorized invocation"
-      : "Target operation invocation is invalid");
+    throw new Error("Target operation requires an authorized invocation");
   }
-  if (outer && (!Number.isSafeInteger(value.number) || (value.number as number) < 1)) {
+  if (!Number.isSafeInteger(value.number) || (value.number as number) < 1) {
     throw new Error("Target operation Work Item number is invalid");
   }
   if (value.acquired !== true) {
@@ -217,7 +223,38 @@ function requireLabelInvocation(
   }
   if (!hasOnlyKeys(
     value,
-    labelInvocationKeys(operation, outer, "reconcile" in value),
+    outerLabelInvocationKeys(operation, "reconcile" in value),
+  )) {
+    throw new Error("Target operation invocation is invalid");
+  }
+}
+
+function requireAuthorizedWorkerLabelInvocation(
+  value: Record<string, unknown>,
+  operation: LabelTriggeredTargetOperationIdentity,
+): void {
+  if (!isFullRevision(value.revision) || !isNonEmptyString(value.jobId)) {
+    throw new Error("Target operation invocation is invalid");
+  }
+  if (value.acquired !== true) {
+    throw new Error("Target operation invocation is not acquired");
+  }
+  if (
+    (operation === "implement-feedback" || operation === "review" || operation === "update-branch") &&
+    !isPullRequestAuthorization(value.pullRequest, value.revision)
+  ) {
+    throw new Error("Target Pull Request operation requires an acquired same-repository revision");
+  }
+  if (
+    operation === "implement-feedback" &&
+    "reconcile" in value &&
+    !isFeedbackReconcileAuthorization(value.reconcile)
+  ) {
+    throw new Error("Target feedback reconciliation authorization is invalid");
+  }
+  if (!hasOnlyKeys(
+    value,
+    workerLabelInvocationKeys(operation, "reconcile" in value),
   )) {
     throw new Error("Target operation invocation is invalid");
   }
@@ -255,12 +292,22 @@ function materializeFeedbackReconcileAuthorization(
   };
 }
 
-function materializeOuterInvocation(
+export function parseFeedbackReconcileAuthorization(
+  value: unknown,
+): FeedbackReconcileAuthorization {
+  if (!isFeedbackReconcileAuthorization(value)) {
+    throw new Error("Target feedback reconciliation authorization is invalid");
+  }
+  return materializeFeedbackReconcileAuthorization(
+    value as Record<string, unknown>,
+  );
+}
+
+function materializeLabelWorkerInvocation(
   value: Record<string, unknown>,
-): AuthorizedTargetOperationInvocation {
+): LabelTriggeredTargetOperationWorkerInvocation {
   const common = {
     operation: value.operation as LabelTriggeredTargetOperationIdentity,
-    number: value.number as number,
     revision: value.revision as string,
     jobId: value.jobId as string,
     acquired: true as const,
@@ -294,41 +341,12 @@ function materializeOuterInvocation(
   };
 }
 
-function materializeWorkerInvocation(
+function materializeOuterInvocation(
   value: Record<string, unknown>,
-): TargetOperationWorkerInvocation {
-  const common = {
-    operation: value.operation as LabelTriggeredTargetOperationIdentity,
-    revision: value.revision as string,
-    jobId: value.jobId as string,
-    acquired: true as const,
-  };
-  if (common.operation === "implement-feedback") {
-    return {
-      ...common,
-      operation: common.operation,
-      pullRequest: materializePullRequestAuthorization(
-        value.pullRequest as Record<string, unknown>,
-      ),
-      ...(value.reconcile === undefined ? {} : {
-        reconcile: materializeFeedbackReconcileAuthorization(
-          value.reconcile as Record<string, unknown>,
-        ),
-      }),
-    };
-  }
-  if (common.operation === "review" || common.operation === "update-branch") {
-    return {
-      ...common,
-      operation: common.operation,
-      pullRequest: materializePullRequestAuthorization(
-        value.pullRequest as Record<string, unknown>,
-      ),
-    };
-  }
+): AuthorizedTargetOperationInvocation {
   return {
-    ...common,
-    operation: common.operation,
+    ...materializeLabelWorkerInvocation(value),
+    number: value.number as number,
   };
 }
 
@@ -349,7 +367,7 @@ export function parseAuthorizedTargetOperationInvocation(
       jobId: value.jobId as string,
     };
   }
-  requireLabelInvocation(value, value.operation, true);
+  requireAuthorizedOuterLabelInvocation(value, value.operation);
   return materializeOuterInvocation(value);
 }
 
@@ -412,8 +430,8 @@ export function parseTargetOperationWorkerInvocation(
       jobId: invocation.jobId as string,
     };
   } else {
-    requireLabelInvocation(invocation, operation, false);
-    authorizedInvocation = materializeWorkerInvocation(invocation);
+    requireAuthorizedWorkerLabelInvocation(invocation, operation);
+    authorizedInvocation = materializeLabelWorkerInvocation(invocation);
   }
   return {
     number,

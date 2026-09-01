@@ -14,6 +14,7 @@ import {
 import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
 import {
   parseAuthorizedTargetOperationInvocation,
+  parseFeedbackReconcileAuthorization,
   type AuthorizedTargetOperationInvocation,
   type LabelTriggeredTargetOperationIdentity,
 } from "./target-operation-invocation.ts";
@@ -59,6 +60,9 @@ export function createTargetOperationCommandRunner(options: {
       if (reconcile !== undefined && operation !== "implement-feedback") {
         throw new Error("Only feedback implementation supports reconciliation");
       }
+      const authorizedReconcile = reconcile === undefined
+        ? undefined
+        : parseFeedbackReconcileAuthorization(reconcile);
 
       const initial = await options.acquisition.read(route.targetOperation, number);
       requireAvailable(initial, route.trigger, number);
@@ -83,7 +87,7 @@ export function createTargetOperationCommandRunner(options: {
           jobId,
           acquired: true,
           ...(acquired.pullRequest === undefined ? {} : { pullRequest: acquired.pullRequest }),
-          ...(reconcile === undefined ? {} : { reconcile }),
+          ...(authorizedReconcile === undefined ? {} : { reconcile: authorizedReconcile }),
         });
         const result = await options.target.run(invocation);
         const outcome = classifyTargetOperationOutcome(operation, result);
@@ -130,13 +134,46 @@ function requireOperationSecurity(
 ): void {
   const pullRequestOperation = operation === "implement-feedback" || operation === "review" || operation === "update-branch";
   if (!pullRequestOperation) return;
-  if (
-    state.pullRequest === undefined ||
-    state.pullRequest.headSha !== state.revision ||
-    state.pullRequest.baseRepository !== state.pullRequest.headRepository
-  ) {
+  if (!isAuthorizedPullRequestState(state)) {
     throw unauthorizedPullRequestFailure(number);
   }
+}
+
+function isAuthorizedPullRequestState(
+  state: TargetOperationAcquisitionState,
+): boolean {
+  const pullRequest: unknown = state.pullRequest;
+  if (
+    typeof pullRequest !== "object" ||
+    pullRequest === null ||
+    Array.isArray(pullRequest)
+  ) return false;
+  const authorizedKeys = new Set([
+    "headSha",
+    "headRefName",
+    "baseRefName",
+    "baseRepository",
+    "headRepository",
+  ]);
+  const keys = Reflect.ownKeys(pullRequest);
+  if (
+    keys.length !== authorizedKeys.size ||
+    !keys.every((key) =>
+      typeof key === "string" && authorizedKeys.has(key)
+    )
+  ) return false;
+  const authorization = pullRequest as Record<string, unknown>;
+  return /^[0-9a-f]{40}$/u.test(state.revision) &&
+    authorization.headSha === state.revision &&
+    typeof authorization.headRefName === "string" &&
+    authorization.headRefName.length > 0 &&
+    typeof authorization.baseRefName === "string" &&
+    authorization.baseRefName.length > 0 &&
+    typeof authorization.baseRepository === "string" &&
+    authorization.baseRepository.length > 0 &&
+    typeof authorization.headRepository === "string" &&
+    authorization.headRepository.length > 0 &&
+    authorization.baseRepository === authorization.headRepository;
 }
 
 function requireRevision(revision: string): void {
