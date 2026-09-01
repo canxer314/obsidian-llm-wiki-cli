@@ -11,11 +11,12 @@ import {
   workItemChangedWhileSettlingFailure,
   workItemChangedWhileStartingFailure,
 } from "./trusted-failure.ts";
-import type {
-  AuthorizedTargetOperationInvocation,
-  LabelTriggeredTargetOperationInvocation,
-  LabelTriggeredTargetOperationIdentity,
-} from "./target-operation.ts";
+import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
+import {
+  parseAuthorizedTargetOperationInvocation,
+  type AuthorizedTargetOperationInvocation,
+  type LabelTriggeredTargetOperationIdentity,
+} from "./target-operation-invocation.ts";
 
 export interface TargetOperationAcquisitionState {
   readonly state: string;
@@ -52,7 +53,7 @@ export function createTargetOperationCommandRunner(options: {
     async run(
       operation: LabelTriggeredTargetOperationIdentity,
       number: number,
-      reconcile?: LabelTriggeredTargetOperationInvocation["reconcile"],
+      reconcile?: FeedbackReconcileAuthorization,
     ): Promise<unknown> {
       const route = resolveTargetOperationRoute(operation, number);
       if (reconcile !== undefined && operation !== "implement-feedback") {
@@ -75,7 +76,7 @@ export function createTargetOperationCommandRunner(options: {
         requireSettled(settled, acquired, route.trigger, number);
         acquisitionSettled = true;
 
-        const invocation: AuthorizedTargetOperationInvocation = {
+        const invocation = parseAuthorizedTargetOperationInvocation({
           operation,
           number,
           revision: acquired.revision,
@@ -83,7 +84,7 @@ export function createTargetOperationCommandRunner(options: {
           acquired: true,
           ...(acquired.pullRequest === undefined ? {} : { pullRequest: acquired.pullRequest }),
           ...(reconcile === undefined ? {} : { reconcile }),
-        };
+        });
         const result = await options.target.run(invocation);
         const outcome = classifyTargetOperationOutcome(operation, result);
         if (outcome.kind === "blocked") {

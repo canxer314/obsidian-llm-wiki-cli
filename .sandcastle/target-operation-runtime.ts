@@ -6,10 +6,7 @@ import { createProcessArchitectureReviewRunner } from "./architecture-review-pro
 import { runBranchUpdateAutomationCommand } from "./branch-update-automation.ts";
 import { createProcessBranchUpdateConflictResolver } from "./branch-update-conflict-process-runner.ts";
 import { createProcessBranchUpdater } from "./branch-update-process-runner.ts";
-import {
-  runFeedbackImplementation,
-  type FeedbackReconcileAuthorization,
-} from "./feedback-implementation-automation.ts";
+import { runFeedbackImplementation } from "./feedback-implementation-automation.ts";
 import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
@@ -27,68 +24,10 @@ import {
   readTargetOperationStartup,
   targetWorkerStartup,
 } from "./target-operation-startup.ts";
-import type { TargetOperationIdentity } from "./target-operation.ts";
-
-interface LabelTriggeredTargetOperationInvocation {
-  readonly operation: Exclude<TargetOperationIdentity, "architecture-review">;
-  readonly revision: string;
-  readonly jobId: string;
-  readonly acquired?: true;
-  readonly pullRequest?: {
-    readonly headSha: string;
-    readonly headRefName: string;
-    readonly baseRefName: string;
-    readonly baseRepository: string;
-    readonly headRepository: string;
-  };
-  readonly reconcile?: FeedbackReconcileAuthorization;
-}
-
-interface ScheduledArchitectureReviewInvocation {
-  readonly operation: "architecture-review";
-  readonly revision: string;
-  readonly jobId: string;
-}
-
-type TargetOperationInvocation =
-  | LabelTriggeredTargetOperationInvocation
-  | ScheduledArchitectureReviewInvocation;
-
-function parseInvocation(value: string | undefined): TargetOperationInvocation {
-  if (value === undefined) throw new Error("Target operation invocation is missing");
-  const invocation = JSON.parse(value) as TargetOperationInvocation;
-  if (
-    !/^[0-9a-f]{40}$/u.test(invocation.revision) ||
-    typeof invocation.operation !== "string" ||
-    typeof invocation.jobId !== "string" || invocation.jobId.length === 0
-  ) {
-    throw new Error("Target operation invocation is invalid");
-  }
-  return invocation;
-}
-
-function isAuthorizedScheduledInvocation(invocation: TargetOperationInvocation): boolean {
-  const authorizedKeys = new Set(["operation", "revision", "jobId"]);
-  return Reflect.ownKeys(invocation).length === authorizedKeys.size &&
-    Reflect.ownKeys(invocation).every((key) => typeof key === "string" && authorizedKeys.has(key));
-}
-
-function requirePullRequestSecurity(
-  operation: TargetOperationIdentity,
-  invocation: TargetOperationInvocation,
-): void {
-  const pullRequestOperation = operation === "implement-feedback" || operation === "review" || operation === "update-branch";
-  if (
-    pullRequestOperation && (
-      !("pullRequest" in invocation) ||
-      invocation.pullRequest === undefined ||
-      invocation.pullRequest.headSha !== invocation.revision ||
-      invocation.pullRequest.baseRepository !== invocation.pullRequest.headRepository
-    )
-  ) {
-    throw new Error("Target Pull Request operation requires an acquired same-repository revision");
-  }
-}
+import {
+  parseTargetOperationWorkerInvocation,
+  type TargetOperationIdentity,
+} from "./target-operation-invocation.ts";
 
 export interface TargetOperationRuntimeDependencies {
   readonly readStartup: typeof readTargetOperationStartup;
@@ -158,24 +97,8 @@ export async function runTargetOperationWithDependencies(
   argv: readonly string[],
   dependencies: TargetOperationRuntimeDependencies,
 ): Promise<unknown> {
-  const [numberArgument, invocationArgument] = operation === "architecture-review"
-    ? [undefined, argv[0]]
-    : [argv[0], argv[1]];
-  const number = numberArgument === undefined ? undefined : Number(numberArgument);
-  if (operation !== "architecture-review") {
-    if (!Number.isSafeInteger(number) || number === undefined || number < 1) {
-      throw new Error("Target operation Work Item number is invalid");
-    }
-  }
+  const { number, invocation } = parseTargetOperationWorkerInvocation(operation, argv);
   const workItemNumber = number as number;
-  const invocation = parseInvocation(invocationArgument);
-  if (invocation.operation !== operation) {
-    throw new Error("Target operation wrapper does not match the authorized invocation");
-  }
-  if (operation === "architecture-review" && !isAuthorizedScheduledInvocation(invocation)) {
-    throw new Error("Target operation invocation is invalid");
-  }
-  requirePullRequestSecurity(operation, invocation);
   const checkoutPath = resolve(import.meta.dirname, "..");
   const startupInput = await dependencies.readStartup();
   const startup = startupInput.snapshot;
@@ -200,7 +123,7 @@ export async function runTargetOperationWithDependencies(
   const lease = { acquire: async () => ({ release: async () => {} }) };
   const createJobId = () => invocation.jobId;
 
-  if (operation === "implement-issue") {
+  if (invocation.operation === "implement-issue") {
     return dependencies.runImplementation({ issueNumber: workItemNumber }, {
       github,
       checkout,
@@ -213,7 +136,7 @@ export async function runTargetOperationWithDependencies(
       createJobId,
     });
   }
-  if (operation === "implement-prd") {
+  if (invocation.operation === "implement-prd") {
     return dependencies.runPrdImplementation({ issueNumber: workItemNumber }, {
       github,
       pullRequests: github,
@@ -227,10 +150,10 @@ export async function runTargetOperationWithDependencies(
       createJobId,
     });
   }
-  if (operation === "implement-feedback") {
+  if (invocation.operation === "implement-feedback") {
     return dependencies.runFeedback({
       pullRequestNumber: workItemNumber,
-      ...(invocation.operation === "architecture-review" || invocation.reconcile === undefined
+      ...(invocation.reconcile === undefined
         ? {}
         : { authorization: invocation.reconcile }),
     }, {
@@ -245,7 +168,7 @@ export async function runTargetOperationWithDependencies(
       createJobId,
     });
   }
-  if (operation === "split-prd") {
+  if (invocation.operation === "split-prd") {
     return dependencies.runSplit({ issueNumber: workItemNumber }, {
       github,
       checkout,
@@ -257,7 +180,7 @@ export async function runTargetOperationWithDependencies(
       createJobId,
     });
   }
-  if (operation === "review") {
+  if (invocation.operation === "review") {
     const reviewer = dependencies.createReviewRunner({
       startup: dependencies.targetWorkerStartup(startup, "github-agent"),
     });
@@ -284,7 +207,7 @@ export async function runTargetOperationWithDependencies(
       createJobId,
     });
   }
-  if (operation === "update-branch") {
+  if (invocation.operation === "update-branch") {
     return dependencies.runBranchUpdate({ pullRequestNumber: workItemNumber }, {
       github,
       checkout,
