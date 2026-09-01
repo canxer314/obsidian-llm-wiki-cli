@@ -21,6 +21,37 @@ describe("whole Target job process", () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
+  it("redacts malformed serialized Target job input", async () => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/target-job-worker.ts"),
+    ], {
+      env: { ...process.env, [INHERITED_JOB_PROCESS_GROUP]: "1" },
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    const forbiddenMarker = "TOP_SECRET";
+    const replyBody = `${forbiddenMarker}_REPLY_BODY`;
+    child.stdin.end([
+      '{"checkout":null,"startup":null,"invocation":{',
+      '"operation":"implement-feedback","reconcile":{"expectedReply":{',
+      `"rootCommentId":"root","body":${replyBody}`,
+      "}}}}",
+    ].join(""));
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveExit);
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr.trim()).toBe("Target job input is invalid");
+    expect(stderr).not.toContain(forbiddenMarker);
+    expect(stderr).not.toContain("expectedReply");
+    expect(stderr).not.toContain("Unexpected token");
+  });
+
   it("validates the serialized invocation before constructing checkout execution", async () => {
     const child = spawn(process.execPath, [
       "--experimental-strip-types",
