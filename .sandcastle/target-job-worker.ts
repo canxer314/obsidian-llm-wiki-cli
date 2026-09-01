@@ -1,4 +1,5 @@
 import { createTargetCheckout, type TargetCheckoutProcessOptions } from "./target-checkout.ts";
+import { parseAuthorizedTargetOperationInvocation } from "./target-operation-invocation.ts";
 import {
   executeTargetOperationInCheckout,
   type AuthorizedTargetOperationInvocation,
@@ -12,18 +13,27 @@ interface TargetJobInput {
   readonly invocation: AuthorizedTargetOperationInvocation;
 }
 
+function parseTargetJobInput(value: string): TargetJobInput {
+  try {
+    return JSON.parse(value) as TargetJobInput;
+  } catch {
+    throw new Error("Target job input is invalid");
+  }
+}
+
 try {
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
-  const job = JSON.parse(input) as TargetJobInput;
+  const job = parseTargetJobInput(input);
   if (process.env[INHERITED_JOB_PROCESS_GROUP] !== "1") {
     throw new Error("Target job worker requires an inherited process group");
   }
 
+  const invocation = parseAuthorizedTargetOperationInvocation(job.invocation);
   console.log(JSON.stringify(await executeTargetOperationInCheckout({
     checkout: createTargetCheckout(job.checkout),
     startup: job.startup,
-    invocation: job.invocation,
+    invocation,
   })));
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

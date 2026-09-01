@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createTargetOperationCommandDispatch } from "../.sandcastle/target-operation-dispatch.js";
 import { createAutomationCliDependencies } from "../.sandcastle/automation-target-composition.js";
 import { runAutomationCli } from "../.sandcastle/automation-cli.js";
+import { targetOperationWorkerArguments } from "../.sandcastle/target-operation-invocation.js";
 import type { AuthorizedTargetOperationInvocation } from "../.sandcastle/target-operation.js";
 
 const PRE = "a".repeat(40);
@@ -91,8 +92,7 @@ async function executeFeedbackTarget(
   const child = spawn(process.execPath, [
     "--experimental-strip-types",
     operationEntry,
-    "347",
-    JSON.stringify(invocation),
+    ...targetOperationWorkerArguments(invocation),
   ], {
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"],

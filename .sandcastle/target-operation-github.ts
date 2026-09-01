@@ -1,5 +1,5 @@
 import { resolveTargetOperationRoute } from "./automation-command-route.ts";
-import type { AuthorizedTargetOperationInvocation } from "./target-operation.ts";
+import type { AuthorizedTargetOperationInvocation } from "./target-operation-invocation.ts";
 
 export interface ManagedOperationInvocation {
   readonly operation?: AuthorizedTargetOperationInvocation["operation"];

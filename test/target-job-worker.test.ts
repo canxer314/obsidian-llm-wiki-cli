@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createTargetOperationRunner } from "../.sandcastle/target-operation.js";
+import { INHERITED_JOB_PROCESS_GROUP } from "../.sandcastle/worker-process.js";
 
 const executeFile = promisify(execFile);
 const roots: string[] = [];
@@ -17,6 +19,68 @@ const git = async (arguments_: readonly string[]): Promise<string> =>
 describe("whole Target job process", () => {
   afterEach(async () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  it("redacts malformed serialized Target job input", async () => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/target-job-worker.ts"),
+    ], {
+      env: { ...process.env, [INHERITED_JOB_PROCESS_GROUP]: "1" },
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    const forbiddenMarker = "TOP_SECRET";
+    const replyBody = `${forbiddenMarker}_REPLY_BODY`;
+    child.stdin.end([
+      '{"checkout":null,"startup":null,"invocation":{',
+      '"operation":"implement-feedback","reconcile":{"expectedReply":{',
+      `"rootCommentId":"root","body":${replyBody}`,
+      "}}}}",
+    ].join(""));
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveExit);
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr.trim()).toBe("Target job input is invalid");
+    expect(stderr).not.toContain(forbiddenMarker);
+    expect(stderr).not.toContain("expectedReply");
+    expect(stderr).not.toContain("Unexpected token");
+  });
+
+  it("validates the serialized invocation before constructing checkout execution", async () => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/target-job-worker.ts"),
+    ], {
+      env: { ...process.env, [INHERITED_JOB_PROCESS_GROUP]: "1" },
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    child.stdin.end(JSON.stringify({
+      checkout: null,
+      startup: null,
+      invocation: {
+        operation: "implement-issue",
+        number: 219,
+        revision: "a".repeat(40),
+        jobId: "unacquired-target-job",
+      },
+    }));
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveExit);
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Target operation invocation is not acquired");
+    expect(stderr).not.toContain("Cannot read properties");
   });
 
   it("retains partial setup output when the whole-job deadline kills a hung command", async () => {
@@ -77,6 +141,7 @@ describe("whole Target job process", () => {
       number: 219,
       revision,
       jobId: "hung-setup-job",
+      acquired: true,
     })).rejects.toThrow("Target operation implement-issue timed out");
     await expect(readFile(join(logsPath, "hung-setup-job", "stdout.log"), "utf8"))
       .resolves.toContain("partial clone stdout\n");
@@ -175,6 +240,7 @@ describe("whole Target job process", () => {
       number: 219,
       revision,
       jobId: "job-219",
+      acquired: true,
     })).resolves.toEqual({ status: "implemented", source: "target-revision" });
     await expect(readdir(jobsPath)).resolves.toEqual(["logs"]);
     await expect(readFile(join(logsPath, "job-219", "stdout.log"), "utf8"))

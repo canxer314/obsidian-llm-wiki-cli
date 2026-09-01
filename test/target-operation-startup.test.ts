@@ -91,9 +91,9 @@ describe("Target operation startup", () => {
       ? { operation, revision: "a".repeat(40), jobId: "scheduled-review" }
       : {
           operation,
-          number: 219,
           revision: "a".repeat(40),
           jobId: "work-item-job",
+          acquired: true,
           ...(operation === "implement-feedback" || operation === "review" || operation === "update-branch"
             ? {
                 pullRequest: {

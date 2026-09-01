@@ -16,7 +16,18 @@ import {
   completeJobLog,
   createJobLog,
 } from "./job-logs.ts";
-import type { FeedbackReconcileAuthorization } from "./feedback-implementation-automation.ts";
+import {
+  parseAuthorizedTargetOperationInvocation,
+  targetOperationWorkerArguments,
+  type AuthorizedTargetOperationInvocation,
+  type LabelTriggeredTargetOperationIdentity,
+  type TargetOperationIdentity,
+} from "./target-operation-invocation.ts";
+export type {
+  AuthorizedTargetOperationInvocation,
+  LabelTriggeredTargetOperationIdentity,
+  TargetOperationIdentity,
+} from "./target-operation-invocation.ts";
 import { classifyTargetOperationOutcome } from "./target-operation-outcome.ts";
 import {
   trustAgentWorkerExit,
@@ -24,46 +35,6 @@ import {
   type TrustedAgentWorkerName,
 } from "./trusted-failure.ts";
 import type { TargetOperationStartupSnapshot } from "./target-operation-startup.ts";
-
-export type TargetOperationIdentity =
-  | "implement-issue"
-  | "implement-prd"
-  | "implement-feedback"
-  | "review"
-  | "update-branch"
-  | "split-prd"
-  | "architecture-review";
-
-export type LabelTriggeredTargetOperationIdentity = Exclude<
-  TargetOperationIdentity,
-  "architecture-review"
->;
-
-export interface LabelTriggeredTargetOperationInvocation {
-  readonly operation: LabelTriggeredTargetOperationIdentity;
-  readonly number: number;
-  readonly revision: string;
-  readonly jobId: string;
-  readonly acquired?: true;
-  readonly pullRequest?: {
-    readonly headSha: string;
-    readonly headRefName: string;
-    readonly baseRefName: string;
-    readonly baseRepository: string;
-    readonly headRepository: string;
-  };
-  readonly reconcile?: FeedbackReconcileAuthorization;
-}
-
-export interface ScheduledArchitectureReviewInvocation {
-  readonly operation: "architecture-review";
-  readonly revision: string;
-  readonly jobId: string;
-}
-
-export type AuthorizedTargetOperationInvocation =
-  | LabelTriggeredTargetOperationInvocation
-  | ScheduledArchitectureReviewInvocation;
 
 const TARGET_JOB_GRACE_MILLISECONDS = 10 * 1000;
 const targetOperationTimeouts: Readonly<Record<TargetOperationIdentity, number>> = {
@@ -107,11 +78,9 @@ export async function executeTargetOperationInCheckout(options: {
   readonly startup: TargetOperationStartupSnapshot;
   readonly invocation: AuthorizedTargetOperationInvocation;
 }): Promise<unknown> {
-  const { operation, revision, jobId } = options.invocation;
-  const number = "number" in options.invocation ? options.invocation.number : undefined;
-  const acquired = "acquired" in options.invocation ? options.invocation.acquired : undefined;
-  const pullRequest = "pullRequest" in options.invocation ? options.invocation.pullRequest : undefined;
-  const reconcile = "reconcile" in options.invocation ? options.invocation.reconcile : undefined;
+  const invocation = parseAuthorizedTargetOperationInvocation(options.invocation);
+  const { operation, revision } = invocation;
+  const number = "number" in invocation ? invocation.number : undefined;
   return options.checkout.withCheckout({
     revision,
     ...(number === undefined ? {} : { pullRequestNumber: number }),
@@ -136,17 +105,7 @@ export async function executeTargetOperationInCheckout(options: {
       checkoutPath,
       workerFile: targetOperationEntries[operation],
       workerName: `Target operation ${operation}`,
-      arguments_: [
-        ...(number === undefined ? [] : [String(number)]),
-        JSON.stringify({
-          operation,
-          revision,
-          jobId,
-          ...(acquired === true ? { acquired: true } : {}),
-          ...(pullRequest === undefined ? {} : { pullRequest }),
-          ...(reconcile === undefined ? {} : { reconcile }),
-        }),
-      ],
+      arguments_: targetOperationWorkerArguments(invocation),
       input: JSON.stringify(options.startup),
       timeoutMessage: `Target operation ${operation} timed out`,
     });
@@ -192,7 +151,7 @@ export function createTargetOperationRunnerWithWorker(
 ) {
   return {
     async run(invocation: AuthorizedTargetOperationInvocation): Promise<unknown> {
-      validateInvocation(invocation);
+      const authorizedInvocation = parseAuthorizedTargetOperationInvocation(invocation);
       if (options.checkoutOptions === undefined && options.start === undefined) {
         throw new Error("Target operation requires whole-job checkout configuration");
       }
@@ -203,10 +162,10 @@ export function createTargetOperationRunnerWithWorker(
         ? undefined
         : await createJobLog({
             root: options.jobLogRoot,
-            jobId: invocation.jobId,
-            operation: invocation.operation,
-            ...("number" in invocation ? { number: invocation.number } : {}),
-            revision: invocation.revision,
+            jobId: authorizedInvocation.jobId,
+            operation: authorizedInvocation.operation,
+            ...("number" in authorizedInvocation ? { number: authorizedInvocation.number } : {}),
+            revision: authorizedInvocation.revision,
           });
       let operationFailed = true;
       try {
@@ -218,16 +177,16 @@ export function createTargetOperationRunnerWithWorker(
           input: JSON.stringify({
             checkout: options.checkoutOptions,
             startup: options.startup,
-            invocation,
+            invocation: authorizedInvocation,
           }),
-          timeoutMessage: `Target operation ${invocation.operation} timed out`,
-          timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeout(invocation.operation),
+          timeoutMessage: `Target operation ${authorizedInvocation.operation} timed out`,
+          timeoutMilliseconds: options.timeoutMilliseconds ?? targetOperationTimeout(authorizedInvocation.operation),
           graceMilliseconds: options.graceMilliseconds ?? TARGET_JOB_GRACE_MILLISECONDS,
           start: options.start,
           log,
         });
         const outcome = classifyTargetOperationOutcome(
-          invocation.operation,
+          authorizedInvocation.operation,
           trustedWorkerJson(result, "Target job"),
         );
         operationFailed = false;
@@ -249,35 +208,4 @@ export function createTargetOperationRunnerWithWorker(
       }
     },
   };
-}
-
-function isAuthorizedScheduledInvocation(
-  invocation: ScheduledArchitectureReviewInvocation,
-): boolean {
-  const authorizedKeys = new Set(["operation", "revision", "jobId"]);
-  return Reflect.ownKeys(invocation).length === authorizedKeys.size &&
-    Reflect.ownKeys(invocation).every((key) => typeof key === "string" && authorizedKeys.has(key));
-}
-
-function validateInvocation(invocation: AuthorizedTargetOperationInvocation): void {
-  const { operation, revision, jobId } = invocation;
-  if (operation === "architecture-review" && !isAuthorizedScheduledInvocation(invocation)) {
-    throw new Error("Scheduled architecture review invocation is invalid");
-  }
-  if (operation !== "architecture-review" && (!Number.isSafeInteger(invocation.number) || invocation.number < 1)) {
-    throw new Error("Target operation Work Item number is invalid");
-  }
-  if (!/^[0-9a-f]{40}$/u.test(revision) || jobId.length === 0) {
-    throw new Error("Target operation requires an authorized invocation");
-  }
-  const pullRequestOperation = operation === "implement-feedback" || operation === "review" || operation === "update-branch";
-  if (
-    pullRequestOperation && (
-      invocation.pullRequest === undefined ||
-      invocation.pullRequest.headSha !== revision ||
-      invocation.pullRequest.headRepository !== invocation.pullRequest.baseRepository
-    )
-  ) {
-    throw new Error("Target Pull Request operation requires an acquired same-repository revision");
-  }
 }

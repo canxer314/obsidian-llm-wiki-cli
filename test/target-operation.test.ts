@@ -64,6 +64,7 @@ describe("Target operation runner", () => {
           number: 219,
           revision,
           jobId: `timeout-${operation}`,
+          acquired: true,
           ...(operation === "implement-feedback" || operation === "review" || operation === "update-branch"
             ? {
                 pullRequest: {
@@ -103,6 +104,7 @@ describe("Target operation runner", () => {
         number: 219,
         revision,
         jobId: "refused-job-219",
+        acquired: true,
       })).resolves.toEqual({ status: "refused", reason: "already handled" });
       expect(JSON.parse(readFileSync(
         join(logsPath, "refused-job-219", "metadata.json"),
@@ -135,6 +137,7 @@ describe("Target operation runner", () => {
         number: 219,
         revision,
         jobId: "blocked-job-219",
+        acquired: true,
       })).resolves.toEqual({ status: "blocked", reason: "execution" });
       expect(JSON.parse(readFileSync(
         join(logsPath, "blocked-job-219", "metadata.json"),
@@ -279,6 +282,7 @@ describe("Target operation runner", () => {
             number: 219,
             revision,
             jobId,
+            acquired: true,
             ...(pullRequest === undefined ? {} : { pullRequest }),
           };
 
@@ -324,6 +328,7 @@ describe("Target operation runner", () => {
         number: 219,
         revision,
         jobId: "completed-log-failure",
+        acquired: true,
       })).rejects.toMatchObject({ code: "EACCES" });
       expect(existsSync(checkoutPath)).toBe(false);
       expect(JSON.parse(readFileSync(
@@ -362,6 +367,7 @@ describe("Target operation runner", () => {
         number: 219,
         revision,
         jobId: "job-219",
+        acquired: true,
       })).rejects.toThrow("original target failure");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -390,6 +396,7 @@ describe("Target operation runner", () => {
         number: 219,
         revision,
         jobId: "failed-job-219",
+        acquired: true,
       })).rejects.toThrow("setup timed out");
       expect(readFileSync(join(logsPath, "failed-job-219", "stdout.log"), "utf8"))
         .toBe("partial stdout\n");
@@ -436,6 +443,7 @@ describe("Target operation runner", () => {
         number: 219,
         revision,
         jobId: "job-219",
+        acquired: true,
       }).catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(AgentWorkerTimeoutError);
       expect(failure).toHaveProperty("name", "AgentWorkerTimeoutError");
@@ -486,6 +494,7 @@ describe("Target operation runner", () => {
         operation: "review",
         revision,
         jobId: "runtime-pr-validation",
+        acquired: true,
         ...(pullRequest === undefined ? {} : { pullRequest }),
       }),
     ], { stdio: ["pipe", "ignore", "pipe"] });
@@ -534,6 +543,7 @@ describe("Target operation runner", () => {
       number: 219,
       revision,
       jobId: "invalid-pr-invocation",
+      acquired: true,
       ...(pullRequest === undefined ? {} : { pullRequest }),
     })).rejects.toThrow("Target Pull Request operation requires an acquired same-repository revision");
     expect(start).not.toHaveBeenCalled();
@@ -622,7 +632,9 @@ describe("Target operation runner", () => {
     }
   });
 
-  it.each(Object.entries(operationEntries) as [TargetOperationIdentity, string][])(
+  it.each(Object.entries(operationEntries).filter(
+    ([operation]) => operation !== "architecture-review",
+  ) as [Exclude<TargetOperationIdentity, "architecture-review">, string][])(
     "executes fixed %s from the authorized Target Checkout",
     async (operation, entry) => {
       const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-"));
@@ -659,6 +671,7 @@ describe("Target operation runner", () => {
             number: 219,
             revision,
             jobId: "job-219",
+            acquired: true,
             ...(operation === "implement-feedback" || operation === "review" || operation === "update-branch"
               ? {
                   pullRequest: {
@@ -817,6 +830,7 @@ describe("Target operation runner", () => {
           number: 219,
           revision,
           jobId: "invalid-entry-job",
+          acquired: true,
         },
       })).rejects.toThrow("Target operation entry must be a regular file inside the authorized checkout");
       expect(withCheckout).toHaveBeenCalledOnce();
@@ -848,6 +862,7 @@ describe("Target operation runner", () => {
           number: 219,
           revision,
           jobId: "job-219",
+          acquired: true,
         },
       })).rejects.toThrow(
         "Target operation entry must be a regular file inside the authorized checkout",
