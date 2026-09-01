@@ -75,6 +75,7 @@ export interface ParsedTargetOperationWorkerInvocation {
 
 const FULL_REVISION = /^[0-9a-f]{40}$/u;
 const POSITIVE_INTEGER = /^[1-9]\d*$/u;
+const ACCESSOR_PROPERTY = Symbol("accessor-property");
 const targetOperations = new Set<TargetOperationIdentity>([
   "implement-issue",
   "implement-prd",
@@ -87,6 +88,44 @@ const targetOperations = new Set<TargetOperationIdentity>([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function snapshotRecord(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+): Record<PropertyKey, unknown> | undefined {
+  try {
+    if (!isRecord(value) || seen.has(value)) return undefined;
+    seen.add(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
+      PropertyKey,
+      PropertyDescriptor
+    >;
+    const snapshot = Object.create(null) as Record<PropertyKey, unknown>;
+    for (const key of Reflect.ownKeys(descriptors)) {
+      const descriptor = descriptors[key]!;
+      snapshot[key] = Object.hasOwn(descriptor, "value")
+        ? snapshotNestedAuthorization(key, descriptor.value, seen)
+        : ACCESSOR_PROPERTY;
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    return undefined;
+  }
+}
+
+function snapshotNestedAuthorization(
+  key: PropertyKey,
+  value: unknown,
+  seen: WeakSet<object>,
+): unknown {
+  if (
+    key !== "pullRequest" &&
+    key !== "reconcile" &&
+    key !== "expectedReply"
+  ) return value;
+  if (typeof value !== "object" || value === null) return value;
+  return snapshotRecord(value, seen) ?? ACCESSOR_PROPERTY;
 }
 
 function hasOnlyKeys(value: object, authorizedKeys: ReadonlySet<string>): boolean {
@@ -295,12 +334,14 @@ function materializeFeedbackReconcileAuthorization(
 export function parseFeedbackReconcileAuthorization(
   value: unknown,
 ): FeedbackReconcileAuthorization {
-  if (!isFeedbackReconcileAuthorization(value)) {
+  const snapshot = snapshotRecord(value);
+  if (
+    snapshot === undefined ||
+    !isFeedbackReconcileAuthorization(snapshot)
+  ) {
     throw new Error("Target feedback reconciliation authorization is invalid");
   }
-  return materializeFeedbackReconcileAuthorization(
-    value as Record<string, unknown>,
-  );
+  return materializeFeedbackReconcileAuthorization(snapshot);
 }
 
 function materializeLabelWorkerInvocation(
@@ -353,22 +394,24 @@ function materializeOuterInvocation(
 export function parseAuthorizedTargetOperationInvocation(
   value: unknown,
 ): AuthorizedTargetOperationInvocation {
-  if (!isRecord(value) || !isTargetOperation(value.operation)) {
+  const snapshot = snapshotRecord(value);
+  if (snapshot === undefined || !isTargetOperation(snapshot.operation)) {
     throw new Error("Target operation requires an authorized invocation");
   }
-  if (value.operation === "architecture-review") {
+  const invocation = snapshot as Record<string, unknown>;
+  if (snapshot.operation === "architecture-review") {
     requireScheduledInvocation(
-      value,
+      invocation,
       "Scheduled architecture review invocation is invalid",
     );
     return {
       operation: "architecture-review",
-      revision: value.revision as string,
-      jobId: value.jobId as string,
+      revision: invocation.revision as string,
+      jobId: invocation.jobId as string,
     };
   }
-  requireAuthorizedOuterLabelInvocation(value, value.operation);
-  return materializeOuterInvocation(value);
+  requireAuthorizedOuterLabelInvocation(invocation, snapshot.operation);
+  return materializeOuterInvocation(invocation);
 }
 
 export function targetOperationWorkerArguments(

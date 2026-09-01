@@ -10,6 +10,9 @@ import {
   type AuthorizedTargetOperationInvocation,
 } from "../.sandcastle/target-operation.js";
 import {
+  parseAuthorizedTargetOperationInvocation,
+} from "../.sandcastle/target-operation-invocation.js";
+import {
   runTargetOperationWithDependencies,
   targetOperationRuntimeDependencies,
 } from "../.sandcastle/target-operation-runtime.js";
@@ -118,6 +121,98 @@ function outerLabelInvocation(
 
 function expectNoSideEffects(spies: ReturnType<typeof runtimeSpies>["spies"]): void {
   for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+}
+
+function defineAccessor(
+  value: Record<PropertyKey, unknown>,
+  key: PropertyKey,
+  get: () => unknown,
+): void {
+  Object.defineProperty(value, key, {
+    configurable: true,
+    enumerable: true,
+    get,
+  });
+}
+
+function proxyWithSubstitution<T extends object>(
+  target: T,
+  substitutions: Readonly<Record<PropertyKey, unknown>>,
+): { readonly proxy: T; readonly get: ReturnType<typeof vi.fn> } {
+  const get = vi.fn((value: T, key: PropertyKey, receiver: unknown) =>
+    Object.hasOwn(substitutions, key)
+      ? substitutions[key]
+      : Reflect.get(value, key, receiver));
+  return {
+    proxy: new Proxy(target, { get }),
+    get,
+  };
+}
+
+async function expectOuterInvocationRejected(
+  invocation: Record<PropertyKey, unknown>,
+  message?: string,
+): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "invalid-memory-target-invocation-"));
+  const jobLogRoot = join(root, "logs");
+  const runWorker = vi.fn(async () => ({
+    output: JSON.stringify({ status: "refused", reason: "fixture refusal" }),
+    code: 0,
+    diagnostics: "",
+  }));
+  const runner = createTargetOperationRunnerWithWorker({
+    checkoutOptions: {} as never,
+    jobLogRoot,
+    startup,
+  }, runWorker);
+  const withCheckout = vi.fn();
+
+  try {
+    const runnerExpectation = expect(runner.run(
+      invocation as AuthorizedTargetOperationInvocation,
+    )).rejects;
+    const checkoutExpectation = expect(executeTargetOperationInCheckout({
+      checkout: { withCheckout },
+      startup,
+      invocation: invocation as AuthorizedTargetOperationInvocation,
+    })).rejects;
+    if (message === undefined) {
+      await runnerExpectation.toThrow();
+      await checkoutExpectation.toThrow();
+    } else {
+      await runnerExpectation.toThrow(message);
+      await checkoutExpectation.toThrow(message);
+    }
+
+    expect(runWorker).not.toHaveBeenCalled();
+    expect(withCheckout).not.toHaveBeenCalled();
+    expect(existsSync(jobLogRoot)).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function runOuterInvocation(
+  invocation: Record<PropertyKey, unknown>,
+): Promise<Record<string, unknown>> {
+  const runWorker = vi.fn(async () => ({
+    output: JSON.stringify({ status: "refused", reason: "fixture refusal" }),
+    code: 0,
+    diagnostics: "",
+  }));
+  const runner = createTargetOperationRunnerWithWorker({
+    startup,
+    start: () => {
+      throw new Error("injected Target worker should handle this invocation");
+    },
+  }, runWorker);
+
+  await expect(runner.run(invocation as AuthorizedTargetOperationInvocation))
+    .resolves.toEqual({ status: "refused", reason: "fixture refusal" });
+  const input = JSON.parse(runWorker.mock.calls[0]![0].input) as {
+    invocation: Record<string, unknown>;
+  };
+  return input.invocation;
 }
 
 it.each([
@@ -294,6 +389,329 @@ it("allows the exact scheduled invocation without managed acquisition fields", a
   );
 
   expect(runArchitectureReview).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ["operation", "Target operation requires an authorized invocation", () => {
+    const invocation = outerLabelInvocation("implement-issue", true);
+    const get = vi.fn()
+      .mockReturnValueOnce("implement-issue")
+      .mockReturnValueOnce("review");
+    defineAccessor(invocation, "operation", get);
+    return { invocation, get };
+  }],
+  ["number", "Target operation Work Item number is invalid", () => {
+    const invocation = outerLabelInvocation("implement-issue", true);
+    const get = vi.fn(() => 219);
+    defineAccessor(invocation, "number", get);
+    return { invocation, get };
+  }],
+  ["revision", "Target operation requires an authorized invocation", () => {
+    const invocation = outerLabelInvocation("implement-issue", true);
+    const get = vi.fn()
+      .mockReturnValueOnce(REVISION)
+      .mockReturnValueOnce("b".repeat(40));
+    defineAccessor(invocation, "revision", get);
+    return { invocation, get };
+  }],
+  ["jobId", "Target operation requires an authorized invocation", () => {
+    const invocation = outerLabelInvocation("implement-issue", true);
+    const get = vi.fn(() => "accessor-job");
+    defineAccessor(invocation, "jobId", get);
+    return { invocation, get };
+  }],
+  ["acquired", "Target operation invocation is not acquired", () => {
+    const invocation = outerLabelInvocation("implement-issue", true);
+    const get = vi.fn(() => true);
+    defineAccessor(invocation, "acquired", get);
+    return { invocation, get };
+  }],
+] as const)(
+  "rejects an accessor-backed outer %s before checkout, job-log, or worker effects",
+  async (_field, message, createCase) => {
+    const { invocation, get } = createCase();
+
+    await expectOuterInvocationRejected(invocation, message);
+
+    expect(get).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  ["pullRequest", () => {
+    const invocation = outerLabelInvocation("review", true);
+    const get = vi.fn(() => pullRequest);
+    defineAccessor(invocation, "pullRequest", get);
+    return { invocation, get };
+  }],
+  ...(["headSha", "headRefName", "baseRefName", "baseRepository", "headRepository"] as const)
+    .map((field) => [field, () => {
+      const authorization = { ...pullRequest };
+      const authorizedValue = authorization[field];
+      const get = vi.fn(() => authorizedValue);
+      defineAccessor(authorization, field, get);
+      return {
+        invocation: {
+          ...outerLabelInvocation("review", true),
+          pullRequest: authorization,
+        },
+        get,
+      };
+    }] as const),
+] as const)(
+  "rejects accessor-backed Pull Request authorization field %s before effects",
+  async (_field, createCase) => {
+    const { invocation, get } = createCase();
+
+    await expectOuterInvocationRejected(
+      invocation,
+      "Target Pull Request operation requires an acquired same-repository revision",
+    );
+
+    expect(get).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  ["reconcile", () => {
+    const invocation = {
+      ...outerLabelInvocation("implement-feedback", true),
+      reconcile: { invocation: "reconcile" },
+    };
+    const get = vi.fn(() => ({ invocation: "reconcile" }));
+    defineAccessor(invocation, "reconcile", get);
+    return { invocation, get };
+  }],
+  ...(["baseRevision", "expectedPost"] as const).map((field) => [field, () => {
+    const reconcile = {
+      invocation: "reconcile",
+      [field]: REVISION,
+    };
+    const get = vi.fn(() => REVISION);
+    defineAccessor(reconcile, field, get);
+    return {
+      invocation: {
+        ...outerLabelInvocation("implement-feedback", true),
+        reconcile,
+      },
+      get,
+    };
+  }] as const),
+  ["expectedReply", () => {
+    const authorizedReply = { rootCommentId: "PRRC_root", body: "reply" };
+    const reconcile: Record<string, unknown> = {
+      invocation: "reconcile",
+      expectedReply: authorizedReply,
+    };
+    const get = vi.fn(() => authorizedReply);
+    defineAccessor(reconcile, "expectedReply", get);
+    return {
+      invocation: {
+        ...outerLabelInvocation("implement-feedback", true),
+        reconcile,
+      },
+      get,
+    };
+  }],
+  ...(["rootCommentId", "body"] as const).map((field) => [field, () => {
+    const expectedReply = { rootCommentId: "PRRC_root", body: "reply" };
+    const authorizedValue = expectedReply[field];
+    const get = vi.fn(() => authorizedValue);
+    defineAccessor(expectedReply, field, get);
+    return {
+      invocation: {
+        ...outerLabelInvocation("implement-feedback", true),
+        reconcile: { invocation: "reconcile", expectedReply },
+      },
+      get,
+    };
+  }] as const),
+] as const)(
+  "rejects accessor-backed reconciliation authorization field %s before effects",
+  async (_field, createCase) => {
+    const { invocation, get } = createCase();
+
+    await expectOuterInvocationRejected(
+      invocation,
+      "Target feedback reconciliation authorization is invalid",
+    );
+
+    expect(get).not.toHaveBeenCalled();
+  },
+);
+
+it("binds Proxy-backed authorization to one recursive descriptor snapshot", async () => {
+  const reply = proxyWithSubstitution(
+    { rootCommentId: "PRRC_root", body: "authorized reply" },
+    { rootCommentId: "PRRC_other", body: "substituted reply" },
+  );
+  const reconcile = proxyWithSubstitution({
+    invocation: "reconcile" as const,
+    baseRevision: "b".repeat(40),
+    expectedPost: "c".repeat(40),
+    expectedReply: reply.proxy,
+  }, {
+    invocation: "ordinary",
+    baseRevision: "d".repeat(40),
+    expectedPost: "e".repeat(40),
+    expectedReply: { rootCommentId: "PRRC_other", body: "substituted reply" },
+  });
+  const pullRequestAuthorization = proxyWithSubstitution({ ...pullRequest }, {
+    headSha: "f".repeat(40),
+    headRefName: "substituted-head",
+    baseRefName: "substituted-base",
+    baseRepository: "other/base",
+    headRepository: "other/head",
+  });
+  const invocation = proxyWithSubstitution({
+    ...outerLabelInvocation("implement-feedback", true),
+    pullRequest: pullRequestAuthorization.proxy,
+    reconcile: reconcile.proxy,
+  }, {
+    operation: "review",
+    number: 220,
+    revision: "f".repeat(40),
+    jobId: "substituted-job",
+    acquired: false,
+    pullRequest: { ...pullRequest, headSha: "f".repeat(40) },
+    reconcile: { invocation: "ordinary" },
+  });
+
+  await expect(runOuterInvocation(invocation.proxy)).resolves.toEqual({
+    ...outerLabelInvocation("implement-feedback", true),
+    pullRequest,
+    reconcile: {
+      invocation: "reconcile",
+      baseRevision: "b".repeat(40),
+      expectedPost: "c".repeat(40),
+      expectedReply: { rootCommentId: "PRRC_root", body: "authorized reply" },
+    },
+  });
+  expect(invocation.get).not.toHaveBeenCalled();
+  expect(pullRequestAuthorization.get).not.toHaveBeenCalled();
+  expect(reconcile.get).not.toHaveBeenCalled();
+  expect(reply.get).not.toHaveBeenCalled();
+});
+
+it("binds a Proxy-backed issue operation family to its descriptor snapshot", async () => {
+  const invocation = proxyWithSubstitution(
+    outerLabelInvocation("implement-issue", true),
+    {
+      operation: "review",
+      revision: "b".repeat(40),
+      jobId: "substituted-job",
+      acquired: false,
+      pullRequest,
+    },
+  );
+
+  await expect(runOuterInvocation(invocation.proxy)).resolves.toEqual(
+    outerLabelInvocation("implement-issue", true),
+  );
+  expect(invocation.get).not.toHaveBeenCalled();
+});
+
+it("rejects an accessor when Object.prototype pollutes descriptor values", () => {
+  const invocation = outerLabelInvocation("implement-issue", true);
+  const revision = vi.fn(() => "b".repeat(40));
+  defineAccessor(invocation, "revision", revision);
+  Object.defineProperty(Object.prototype, "value", {
+    configurable: true,
+    value: REVISION,
+  });
+  let failure: unknown;
+
+  try {
+    parseAuthorizedTargetOperationInvocation(invocation);
+  } catch (error) {
+    failure = error;
+  } finally {
+    delete Object.prototype.value;
+  }
+
+  expect(failure).toEqual(new Error("Target operation requires an authorized invocation"));
+  expect(revision).not.toHaveBeenCalled();
+});
+
+it("rejects revoked Proxy authorization with stable redacted categories", async () => {
+  const revokedOuter = Proxy.revocable(outerLabelInvocation("implement-issue", true), {});
+  revokedOuter.revoke();
+  await expectOuterInvocationRejected(
+    revokedOuter.proxy,
+    "Target operation requires an authorized invocation",
+  );
+
+  const revokedPullRequest = Proxy.revocable({ ...pullRequest }, {});
+  revokedPullRequest.revoke();
+  await expectOuterInvocationRejected({
+    ...outerLabelInvocation("review", true),
+    pullRequest: revokedPullRequest.proxy,
+  }, "Target Pull Request operation requires an acquired same-repository revision");
+});
+
+it.each([
+  ["operation", "implement-issue"],
+  ["number", 219],
+  ["revision", REVISION],
+  ["jobId", "inherited-job"],
+  ["acquired", true],
+] as const)("rejects inherited outer authorization field %s", async (field, inheritedValue) => {
+  const invocation = outerLabelInvocation("implement-issue", true);
+  delete invocation[field];
+  Object.setPrototypeOf(invocation, { [field]: inheritedValue });
+
+  await expectOuterInvocationRejected(invocation);
+});
+
+it.each([
+  ["pullRequest", () => {
+    const invocation = outerLabelInvocation("review", true);
+    delete invocation.pullRequest;
+    Object.setPrototypeOf(invocation, { pullRequest });
+    return invocation;
+  }, "Target Pull Request operation requires an acquired same-repository revision"],
+  ["pullRequest.headSha", () => {
+    const authorization = { ...pullRequest } as Record<string, unknown>;
+    delete authorization.headSha;
+    Object.setPrototypeOf(authorization, { headSha: REVISION });
+    return {
+      ...outerLabelInvocation("review", true),
+      pullRequest: authorization,
+    };
+  }, "Target Pull Request operation requires an acquired same-repository revision"],
+  ["reconcile.invocation", () => {
+    const reconcile = Object.create({ invocation: "reconcile" }) as Record<string, unknown>;
+    return {
+      ...outerLabelInvocation("implement-feedback", true),
+      reconcile,
+    };
+  }, "Target feedback reconciliation authorization is invalid"],
+  ["expectedReply.rootCommentId", () => {
+    const expectedReply = { body: "reply" } as Record<string, unknown>;
+    Object.setPrototypeOf(expectedReply, { rootCommentId: "PRRC_root" });
+    return {
+      ...outerLabelInvocation("implement-feedback", true),
+      reconcile: { invocation: "reconcile", expectedReply },
+    };
+  }, "Target feedback reconciliation authorization is invalid"],
+] as const)(
+  "rejects inherited nested authorization field %s",
+  async (_field, createInvocation, message) => {
+    await expectOuterInvocationRejected(createInvocation(), message);
+  },
+);
+
+it.each([
+  ["extra string key", "unexpected"],
+  ["symbol key", Symbol("unexpected-authorization")],
+] as const)("rejects an outer invocation with an %s", async (_caseName, key) => {
+  const invocation = outerLabelInvocation("implement-issue", true);
+  invocation[key] = "authority";
+
+  await expectOuterInvocationRejected(
+    invocation,
+    "Target operation invocation is invalid",
+  );
 });
 
 it.each([

@@ -74,7 +74,551 @@ const available = { state: "OPEN", labels: ["agent:review"], revision, pullReque
 const acquiring = { state: "OPEN", labels: ["agent:review", "agent:in-progress"], revision, pullRequest };
 const acquired = { state: "OPEN", labels: ["agent:in-progress"], revision, pullRequest };
 
+const NON_PULL_REQUEST_OPERATION_CASES = [
+  ["implement-issue", "agent:implement"],
+  ["implement-prd", "agent:implement"],
+  ["split-prd", "agent:to-issues"],
+] as const;
+
+function nonPullRequestAcquisitionStates(
+  trigger: string,
+  overrides: {
+    readonly initial?: Partial<{
+      state: string;
+      labels: string[];
+      revision: string;
+      pullRequest: typeof pullRequest;
+    }>;
+    readonly acquired?: Partial<{
+      state: string;
+      labels: string[];
+      revision: string;
+      pullRequest: typeof pullRequest;
+    }>;
+    readonly settled?: Partial<{
+      state: string;
+      labels: string[];
+      revision: string;
+      pullRequest: typeof pullRequest;
+    }>;
+  } = {},
+) {
+  return [
+    {
+      state: "OPEN",
+      labels: [trigger],
+      revision,
+      ...overrides.initial,
+    },
+    {
+      state: "OPEN",
+      labels: [trigger, "agent:in-progress"],
+      revision,
+      ...overrides.acquired,
+    },
+    {
+      state: "OPEN",
+      labels: ["agent:in-progress"],
+      revision,
+      ...overrides.settled,
+    },
+  ];
+}
+
+function acquisitionTimelineFor(
+  states: ReturnType<typeof nonPullRequestAcquisitionStates>,
+) {
+  const events: string[] = [];
+  let next = 0;
+  return {
+    events,
+    ports: {
+      read: vi.fn(async () => {
+        events.push("read");
+        return states[next++] ?? states.at(-1)!;
+      }),
+      addInProgress: vi.fn(async () => { events.push("add-in-progress"); }),
+      removeTrigger: vi.fn(async () => { events.push("remove-trigger"); }),
+      addBlocked: vi.fn(async () => { events.push("add-blocked"); }),
+      addBlockedDiagnostic: vi.fn(async () => { events.push("add-blocked-diagnostic"); }),
+      removeInProgress: vi.fn(async () => { events.push("remove-in-progress"); }),
+    },
+  };
+}
+
 describe("trusted Target operation command acquisition", () => {
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "allows a valid initial revision to move at the acquired %s snapshot",
+    async (operation, trigger) => {
+      const acquiredRevision = "b".repeat(40);
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        acquired: { revision: acquiredRevision },
+        settled: { revision: acquiredRevision },
+      }));
+      const target = {
+        run: vi.fn(async () => ({ status: "refused", reason: "fixture refusal" })),
+      };
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId: () => `job-${operation}`,
+      });
+
+      await expect(runner.run(operation, 219)).resolves.toEqual({
+        status: "refused",
+        reason: "fixture refusal",
+      });
+      expect(target.run).toHaveBeenCalledWith({
+        operation,
+        number: 219,
+        revision: acquiredRevision,
+        jobId: `job-${operation}`,
+        acquired: true,
+      });
+      expect(acquisition.events).toEqual([
+        "read",
+        "add-in-progress",
+        "read",
+        "remove-trigger",
+        "read",
+        "remove-in-progress",
+      ]);
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "rejects stray Pull Request metadata in the initial %s snapshot before mutation",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        initial: { pullRequest },
+      }));
+      const target = { run: vi.fn() };
+      const createJobId = vi.fn(() => `job-${operation}`);
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation acquisition authorization is invalid",
+      );
+      expect(acquisition.events).toEqual(["read"]);
+      expect(createJobId).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+      expect(acquisition.ports.addInProgress).not.toHaveBeenCalled();
+      expect(acquisition.ports.removeTrigger).not.toHaveBeenCalled();
+      expect(acquisition.ports.addBlocked).not.toHaveBeenCalled();
+      expect(acquisition.ports.addBlockedDiagnostic).not.toHaveBeenCalled();
+      expect(acquisition.ports.removeInProgress).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "rejects an explicit undefined Pull Request field in the initial %s snapshot before mutation",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        initial: { pullRequest: undefined },
+      }));
+      const target = { run: vi.fn() };
+      const createJobId = vi.fn(() => `job-${operation}`);
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation acquisition authorization is invalid",
+      );
+      expect(acquisition.events).toEqual(["read"]);
+      expect(createJobId).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ...NON_PULL_REQUEST_OPERATION_CASES.flatMap(([operation, trigger]) => [
+      [operation, trigger, "initial", 0, ["read"]],
+      [operation, trigger, "acquired", 1, [
+        "read",
+        "add-in-progress",
+        "read",
+        "add-blocked",
+        "add-blocked-diagnostic",
+      ]],
+      [operation, trigger, "settled", 2, [
+        "read",
+        "add-in-progress",
+        "read",
+        "remove-trigger",
+        "read",
+        "add-blocked",
+        "add-blocked-diagnostic",
+      ]],
+    ] as const),
+  ])(
+    "rejects inherited Pull Request metadata for %s (%s) at the %s snapshot",
+    async (operation, trigger, _stage, stateIndex, expectedEvents) => {
+      const states = nonPullRequestAcquisitionStates(trigger);
+      Object.setPrototypeOf(states[stateIndex]!, { pullRequest });
+      const acquisition = acquisitionTimelineFor(states);
+      const target = { run: vi.fn() };
+      const createJobId = vi.fn(() => `job-${operation}`);
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation acquisition authorization is invalid",
+      );
+      expect(acquisition.events).toEqual(expectedEvents);
+      expect(target.run).not.toHaveBeenCalled();
+      if (stateIndex === 0) expect(createJobId).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["initial", 0, ["read"]],
+    ["acquired", 1, [
+      "read",
+      "add-in-progress",
+      "read",
+      "add-blocked",
+      "add-blocked-diagnostic",
+    ]],
+    ["settled", 2, [
+      "read",
+      "add-in-progress",
+      "read",
+      "remove-trigger",
+      "read",
+      "add-blocked",
+      "add-blocked-diagnostic",
+    ]],
+  ] as const)(
+    "rejects accessor-backed Pull Request metadata in the %s snapshot without invoking it",
+    async (_stage, stateIndex, expectedEvents) => {
+      const states = [available, acquiring, acquired].map((state) => ({
+        ...state,
+        pullRequest: { ...pullRequest },
+      }));
+      const headSha = vi.fn(() => revision);
+      Object.defineProperty(states[stateIndex]!.pullRequest, "headSha", {
+        configurable: true,
+        enumerable: true,
+        get: headSha,
+      });
+      const acquisition = acquisitionTimelineFor(states);
+      const target = { run: vi.fn() };
+      const createJobId = vi.fn(() => "job-review");
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId,
+      });
+
+      await expect(runner.run("review", 219)).rejects.toThrow(
+        "Pull Request #219 is not an authorized same-repository revision",
+      );
+      expect(headSha).not.toHaveBeenCalled();
+      expect(acquisition.events).toEqual(expectedEvents);
+      expect(target.run).not.toHaveBeenCalled();
+      if (stateIndex === 0) expect(createJobId).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["Pull Request metadata", () => {
+      const states = [available, acquiring, acquired].map((state) => ({
+        ...state,
+        pullRequest: { ...pullRequest },
+      }));
+      const headSha = vi.fn(() => "b".repeat(40));
+      Object.defineProperty(states[0]!.pullRequest, "headSha", {
+        configurable: true,
+        enumerable: true,
+        get: headSha,
+      });
+      return {
+        states,
+        accessor: headSha,
+        pollutedValue: revision,
+      };
+    }, "Pull Request #219 is not an authorized same-repository revision"],
+    ["label entry", () => {
+      const states = [available, acquiring, acquired].map((state) => ({
+        ...state,
+        labels: [...state.labels],
+        pullRequest: { ...pullRequest },
+      }));
+      const label = vi.fn(() => "agent:review");
+      Object.defineProperty(states[0]!.labels, "0", {
+        configurable: true,
+        enumerable: true,
+        get: label,
+      });
+      return {
+        states,
+        accessor: label,
+        pollutedValue: "agent:review",
+      };
+    }, "Target operation acquisition authorization is invalid"],
+  ] as const)(
+    "rejects accessor-backed %s when Object.prototype pollutes descriptor values",
+    async (_field, createCase, message) => {
+      const { states, accessor, pollutedValue } = createCase();
+      Object.defineProperty(Object.prototype, "value", {
+        configurable: true,
+        value: pollutedValue,
+      });
+      const acquisition = acquisitionTimelineFor(states);
+      const target = { run: vi.fn() };
+      const createJobId = vi.fn(() => "job-review");
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId,
+      });
+      let failure: unknown;
+
+      try {
+        await runner.run("review", 219);
+      } catch (error) {
+        failure = error;
+      } finally {
+        delete Object.prototype.value;
+      }
+
+      expect(failure).toEqual(new Error(message));
+      expect(accessor).not.toHaveBeenCalled();
+      expect(acquisition.events).toEqual(["read"]);
+      expect(createJobId).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "ignores Object.prototype Pull Request pollution for %s acquisition",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger));
+      const target = {
+        run: vi.fn(async () => ({ status: "refused", reason: "fixture refusal" })),
+      };
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId: () => `job-${operation}`,
+      });
+      Object.defineProperty(Object.prototype, "pullRequest", {
+        configurable: true,
+        value: pullRequest,
+      });
+
+      try {
+        await expect(runner.run(operation, 219)).resolves.toEqual({
+          status: "refused",
+          reason: "fixture refusal",
+        });
+        expect(target.run).toHaveBeenCalledWith({
+          operation,
+          number: 219,
+          revision,
+          jobId: `job-${operation}`,
+          acquired: true,
+        });
+      } finally {
+        delete Object.prototype.pullRequest;
+      }
+    },
+  );
+
+  it.each([
+    ["initial", 0, ["read"]],
+    ["acquired", 1, [
+      "read",
+      "add-in-progress",
+      "read",
+      "add-blocked",
+      "add-blocked-diagnostic",
+    ]],
+    ["settled", 2, [
+      "read",
+      "add-in-progress",
+      "read",
+      "remove-trigger",
+      "read",
+      "add-blocked",
+      "add-blocked-diagnostic",
+    ]],
+  ] as const)(
+    "rejects a coercible revision object in the %s snapshot without invoking it",
+    async (_stage, stateIndex, expectedEvents) => {
+      const states = nonPullRequestAcquisitionStates("agent:implement");
+      const toString = vi.fn(() => revision);
+      states[stateIndex]!.revision = { toString } as unknown as string;
+      const acquisition = acquisitionTimelineFor(states);
+      const target = { run: vi.fn() };
+      const createJobId = vi.fn(() => "job-implement-issue");
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId,
+      });
+
+      await expect(runner.run("implement-issue", 219)).rejects.toThrow(
+        "Target operation requires a full authorized revision",
+      );
+      expect(toString).not.toHaveBeenCalled();
+      expect(acquisition.events).toEqual(expectedEvents);
+      expect(target.run).not.toHaveBeenCalled();
+      if (stateIndex === 0) expect(createJobId).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "rejects a malformed full revision in the initial %s snapshot before mutation",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        initial: { revision: "short" },
+      }));
+      const target = { run: vi.fn() };
+      const createJobId = vi.fn(() => `job-${operation}`);
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation requires a full authorized revision",
+      );
+      expect(acquisition.events).toEqual(["read"]);
+      expect(createJobId).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "rejects stray Pull Request metadata in the acquired %s snapshot before trigger removal",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        acquired: { pullRequest },
+      }));
+      const target = { run: vi.fn() };
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId: () => `job-${operation}`,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation acquisition authorization is invalid",
+      );
+      expect(acquisition.events).toEqual([
+        "read",
+        "add-in-progress",
+        "read",
+        "add-blocked",
+        "add-blocked-diagnostic",
+      ]);
+      expect(acquisition.ports.removeTrigger).not.toHaveBeenCalled();
+      expect(acquisition.ports.removeInProgress).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "rejects a malformed full revision in the acquired %s snapshot before trigger removal",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        acquired: { revision: "short" },
+      }));
+      const target = { run: vi.fn() };
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId: () => `job-${operation}`,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation requires a full authorized revision",
+      );
+      expect(acquisition.events).toEqual([
+        "read",
+        "add-in-progress",
+        "read",
+        "add-blocked",
+        "add-blocked-diagnostic",
+      ]);
+      expect(acquisition.ports.removeTrigger).not.toHaveBeenCalled();
+      expect(acquisition.ports.removeInProgress).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "rejects stray Pull Request metadata in the settled %s snapshot before Target execution",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        settled: { pullRequest },
+      }));
+      const target = { run: vi.fn() };
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId: () => `job-${operation}`,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation acquisition authorization is invalid",
+      );
+      expect(acquisition.events).toEqual([
+        "read",
+        "add-in-progress",
+        "read",
+        "remove-trigger",
+        "read",
+        "add-blocked",
+        "add-blocked-diagnostic",
+      ]);
+      expect(acquisition.ports.removeInProgress).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(NON_PULL_REQUEST_OPERATION_CASES)(
+    "rejects a malformed full revision in the settled %s snapshot before Target execution",
+    async (operation, trigger) => {
+      const acquisition = acquisitionTimelineFor(nonPullRequestAcquisitionStates(trigger, {
+        settled: { revision: "short" },
+      }));
+      const target = { run: vi.fn() };
+      const runner = createTargetOperationCommandRunner({
+        target,
+        acquisition: acquisition.ports,
+        createJobId: () => `job-${operation}`,
+      });
+
+      await expect(runner.run(operation, 219)).rejects.toThrow(
+        "Target operation requires a full authorized revision",
+      );
+      expect(acquisition.events).toEqual([
+        "read",
+        "add-in-progress",
+        "read",
+        "remove-trigger",
+        "read",
+        "add-blocked",
+        "add-blocked-diagnostic",
+      ]);
+      expect(acquisition.ports.removeInProgress).not.toHaveBeenCalled();
+      expect(target.run).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not expose scheduled architecture review to label-triggered acquisition", async () => {
     const target = { run: vi.fn() };
     const acquisition = acquisitionFor([{ state: "OPEN", labels: [], revision }]);
@@ -295,7 +839,9 @@ describe("trusted Target operation command acquisition", () => {
     });
 
     await expect(runner.run("review", 219)).rejects.toThrow(
-      "Pull Request #219 is not an authorized same-repository revision",
+      _caseName === "a malformed matching Pull Request head SHA"
+        ? "Target operation requires a full authorized revision"
+        : "Pull Request #219 is not an authorized same-repository revision",
     );
     expect(target.run).not.toHaveBeenCalled();
     expect(acquisition.events).toEqual([]);
@@ -329,12 +875,21 @@ describe("trusted Target operation command acquisition", () => {
   });
 
   it.each([
-    ["revision", { ...acquired, revision: "b".repeat(40), pullRequest }],
-    ["head SHA", { ...acquired, pullRequest: { ...pullRequest, headSha: "b".repeat(40) } }],
+    ["revision", {
+      ...acquired,
+      revision: "b".repeat(40),
+      pullRequest: { ...pullRequest, headSha: "b".repeat(40) },
+    }],
     ["head ref", { ...acquired, pullRequest: { ...pullRequest, headRefName: "other-head" } }],
     ["base ref", { ...acquired, pullRequest: { ...pullRequest, baseRefName: "other-base" } }],
-    ["base repository", { ...acquired, pullRequest: { ...pullRequest, baseRepository: "other/base" } }],
-    ["head repository", { ...acquired, pullRequest: { ...pullRequest, headRepository: "other/head" } }],
+    ["repository", {
+      ...acquired,
+      pullRequest: {
+        ...pullRequest,
+        baseRepository: "other/repository",
+        headRepository: "other/repository",
+      },
+    }],
   ])("rejects settled acquisition drift in %s before Target execution", async (_field, settled) => {
     const target = { run: vi.fn() };
     const acquisition = acquisitionFor([available, acquiring, settled]);
