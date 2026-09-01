@@ -75,6 +75,24 @@ describe("process branch updater", () => {
     ]);
   });
 
+  it.each([
+    ["clean merge", "clean"],
+    ["conflict resolution", "conflict"],
+  ] as const)("rejects a malformed %s revision before pushing", async (_case, merge) => {
+    const execute = gitMock({
+      revisions: [revision, baseRevision, "truncated"],
+      mergeBase: mergeBaseRevision,
+      merge,
+      ...(merge === "conflict" ? { diffs: ["src/index.ts\n", ""] } : {}),
+    });
+    const resolver = { resolve: vi.fn().mockResolvedValue({ comment: "Resolved src/index.ts." }) };
+    const updater = createProcessBranchUpdater({ execute, resolver });
+
+    await expect(updater.update(request)).rejects.toThrow("Branch update produced an invalid revision");
+    expect(execute).not.toHaveBeenCalledWith(expect.arrayContaining(["push"]));
+    if (merge === "conflict") expect(resolver.resolve).toHaveBeenCalledOnce();
+  });
+
   it("spawns git through the purpose-specific environment instead of inheriting the parent", async () => {
     const updater = createProcessBranchUpdater({
       environment: { PATH: "/definitely-not-on-this-host", HOME: "/tmp" },

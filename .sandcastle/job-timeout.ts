@@ -27,11 +27,15 @@ function signalGroup(
   kill: (pid: number, signal: NodeJS.Signals) => void,
   pid: number,
   signal: NodeJS.Signals,
-): void {
+): { readonly status: "sent-or-absent" } | { readonly status: "failed"; readonly error: unknown } {
   try {
     kill(-pid, signal);
+    return { status: "sent-or-absent" };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      return { status: "sent-or-absent" };
+    }
+    return { status: "failed", error };
   }
 }
 
@@ -63,19 +67,63 @@ async function raceGroupWithGrace(
 export async function terminateJobProcessGroup(options: {
   readonly pid: number;
   readonly groupExited: Promise<void>;
+  readonly renewGroupExited?: (() => Promise<void>) | undefined;
   readonly graceMilliseconds: number;
   readonly kill: (pid: number, signal: NodeJS.Signals) => void;
   readonly wait: Wait;
 }): Promise<void> {
-  signalGroup(options.kill, options.pid, "SIGTERM");
+  const throwFailures = (failures: readonly unknown[], message: string): never => {
+    const distinct = failures.filter((failure, index) => failures.indexOf(failure) === index);
+    if (distinct.length === 1) throw distinct[0];
+    throw new AggregateError(distinct, message, { cause: distinct[0] });
+  };
+  const confirmAfterObservationFailure = async (
+    error: unknown,
+    signalFailures: readonly unknown[],
+  ): Promise<never> => {
+    if (options.renewGroupExited === undefined) {
+      return throwFailures(
+        [error, ...signalFailures],
+        "Process-group observation and signaling failed before final exit confirmation",
+      );
+    }
+    try {
+      await options.renewGroupExited();
+    } catch (confirmationError) {
+      return throwFailures(
+        [error, ...signalFailures, confirmationError],
+        "Process-group cleanup could not be confirmed",
+      );
+    }
+    return throwFailures(
+      [error, ...signalFailures],
+      "Process-group observation and signaling failed during cleanup",
+    );
+  };
+
+  const signalFailures: unknown[] = [];
+  const terminated = signalGroup(options.kill, options.pid, "SIGTERM");
+  if (terminated.status === "failed") signalFailures.push(terminated.error);
   const graceful = await raceGroupWithGrace(
     options.groupExited,
     options.graceMilliseconds,
     options.wait,
   );
-  if (graceful.status !== "exited") signalGroup(options.kill, options.pid, "SIGKILL");
-  if (graceful.status === "observation-failed") throw graceful.error;
-  await options.groupExited;
+  if (graceful.status !== "exited") {
+    const killed = signalGroup(options.kill, options.pid, "SIGKILL");
+    if (killed.status === "failed") signalFailures.push(killed.error);
+  }
+  if (graceful.status === "observation-failed") {
+    return await confirmAfterObservationFailure(graceful.error, signalFailures);
+  }
+  try {
+    await options.groupExited;
+  } catch (error) {
+    return await confirmAfterObservationFailure(error, signalFailures);
+  }
+  if (signalFailures.length > 0) {
+    return throwFailures(signalFailures, "Process-group signaling failed during cleanup");
+  }
 }
 
 export async function runJobWithTimeout(options: {
@@ -96,12 +144,16 @@ export async function runJobWithTimeout(options: {
     });
     return Promise.race([promise, groupFailure]);
   };
-  const terminateGroup = (child: {
-    readonly pid: number;
-    readonly groupExited: Promise<void>;
-  }): Promise<void> => terminateJobProcessGroup({
+  const terminateGroup = (
+    child: {
+      readonly pid: number;
+      readonly groupExited: Promise<void>;
+    },
+    renewGroupExited?: (() => Promise<void>) | undefined,
+  ): Promise<void> => terminateJobProcessGroup({
     pid: child.pid,
     groupExited: child.groupExited,
+    renewGroupExited,
     graceMilliseconds: options.graceMilliseconds,
     kill: options.kill,
     wait: options.wait,
@@ -111,9 +163,10 @@ export async function runJobWithTimeout(options: {
   const cleanupAfterFailure = async (
     error: unknown,
     groupExited: Promise<void>,
+    renewGroupExited?: (() => Promise<void>) | undefined,
   ): Promise<never> => {
     try {
-      await terminateGroup({ pid: child.pid, groupExited });
+      await terminateGroup({ pid: child.pid, groupExited }, renewGroupExited);
     } catch (cleanupError) {
       const failureMessage = error instanceof Error ? error.message : String(error);
       throw new AggregateError(
@@ -144,7 +197,11 @@ export async function runJobWithTimeout(options: {
       return await cleanupAfterGroupFailure(error);
     }
     if (outcome.status === "failed") {
-      return await cleanupAfterFailure(outcome.error, child.groupExited);
+      return await cleanupAfterFailure(
+        outcome.error,
+        child.groupExited,
+        child.renewGroupExited,
+      );
     }
     if (outcome.status === "completed") {
       try {

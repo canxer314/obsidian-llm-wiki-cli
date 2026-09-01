@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { AgentWorkerTimeoutError } from "../.sandcastle/agent-process-runner.js";
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 import {
   createTargetOperationRunner,
@@ -430,12 +431,15 @@ describe("Target operation runner", () => {
     });
 
     try {
-      await expect(runner.run({
+      const failure = await runner.run({
         operation: "implement-issue",
         number: 219,
         revision,
         jobId: "job-219",
-      })).rejects.toThrow("Target operation implement-issue timed out");
+      }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AgentWorkerTimeoutError);
+      expect(failure).toHaveProperty("name", "AgentWorkerTimeoutError");
+      expect(failure).toHaveProperty("message", "Target operation implement-issue timed out");
       expect(readFileSync(join(logRoot, "job-219", "stdout.log"), "utf8"))
         .toContain("checkout started\n");
       expect(readFileSync(join(logRoot, "job-219", "stderr.log"), "utf8"))
