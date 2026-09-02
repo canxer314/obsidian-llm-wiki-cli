@@ -1,7 +1,6 @@
 import { join } from "node:path";
 
 import {
-  Output,
   claudeCode,
   run,
   type SandboxHooks,
@@ -10,6 +9,7 @@ import {
 import { z } from "zod";
 
 import { agentLogging } from "./agent-logging.ts";
+import { createSameSessionStructuredExtractor } from "./same-session-structured-extraction.ts";
 import type { PublishedReview, ReviewThreadComment } from "./review-automation.ts";
 
 export type ExtractedReview = PublishedReview;
@@ -63,8 +63,12 @@ export function createSameSessionReviewExtractor(options: {
   readonly createAgent?: typeof claudeCode;
   readonly timeoutMilliseconds?: number;
 }) {
-  const runAgent = options.runAgent ?? run;
-  const createAgent = options.createAgent ?? claudeCode;
+  const extractor = createSameSessionStructuredExtractor({
+    sandbox: options.sandbox,
+    hooks: options.hooks,
+    ...(options.runAgent === undefined ? {} : { runAgent: options.runAgent }),
+    ...(options.createAgent === undefined ? {} : { createAgent: options.createAgent }),
+  });
   return {
     async review(request: {
       readonly pullRequestNumber: number;
@@ -75,40 +79,22 @@ export function createSameSessionReviewExtractor(options: {
       readonly model: string;
       readonly artifactDirectory?: string;
     }): Promise<ExtractedReview> {
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(new Error("Reviewer execution timed out")),
-        options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
+      const logging = agentLogging(
+        request.artifactDirectory === undefined
+          ? undefined
+          : join(request.artifactDirectory, "review.log"),
       );
-      try {
-        const logging = agentLogging(
-          request.artifactDirectory === undefined
-            ? undefined
-            : join(request.artifactDirectory, "review.log"),
-        );
-        const produced = await runAgent({
-          agent: createAgent(request.model),
-          sandbox: options.sandbox,
-          hooks: options.hooks,
-          cwd: request.checkoutPath,
-          ...(logging === undefined ? {} : { logging }),
-          signal: controller.signal,
-          branchStrategy: { type: "head" },
-          maxIterations: 1,
-          prompt: producePrompt(request),
-        });
-        if (produced.resume === undefined) {
-          throw new Error("Reviewer session identity is unavailable");
-        }
-        const extracted = await produced.resume(extractionPrompt, {
-          ...(logging === undefined ? {} : { logging }),
-          signal: controller.signal,
-          output: Output.object({ tag: "review", schema: reviewSchema, maxRetries: 2 }),
-        }) as unknown as { readonly output: ExtractedReview };
-        return extracted.output;
-      } finally {
-        clearTimeout(timeout);
-      }
+      return extractor.extract({
+        model: request.model,
+        checkoutPath: request.checkoutPath,
+        initialPrompt: producePrompt(request),
+        resumedPrompt: extractionPrompt,
+        timeoutMilliseconds: options.timeoutMilliseconds ?? REVIEW_TIMEOUT_MILLISECONDS,
+        timeoutError: new Error("Reviewer execution timed out"),
+        ...(logging === undefined ? {} : { logging }),
+        output: { tag: "review", schema: reviewSchema },
+        missingResumeMessage: "Reviewer session identity is unavailable",
+      });
     },
   };
 }
