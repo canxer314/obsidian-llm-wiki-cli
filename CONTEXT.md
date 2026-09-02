@@ -44,6 +44,10 @@ _Avoid_: Read lock, search result
 Short-lived durable state that lets the Vault Operation Bridge restore an interrupted Change Set before accepting further writes. It exists only for crash recovery and is removed after success or completed restoration.
 _Avoid_: Audit log, version history, Git backup
 
+**Trusted Recovery Baseline**:
+The Primary Operator's explicit local acceptance of the current state of a recovery-blocked Managed Vault after its recovery evidence has been rechecked. It releases the recovery block without proving the interrupted Change Set's result or resuming writes.
+_Avoid_: Forced success, recovery override, automatic recovery
+
 **Managed Trash**:
 The Bridge-owned private trash location inside the Vault's Bridge state directory. Trashing a note or attachment hard-links its exact bytes there before the public path disappears, so every trash is reversible during crash recovery and the Bridge never permanently deletes Vault content. Its private paths never appear in public results.
 _Avoid_: Recycle bin, system trash, deletion
