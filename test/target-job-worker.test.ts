@@ -21,6 +21,86 @@ describe("whole Target job process", () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
+  it.each([
+    [undefined, undefined],
+    ["", undefined],
+    ["0", undefined],
+    ["true", undefined],
+    [" ", undefined],
+    ["inherited", undefined],
+    [undefined, "{"],
+  ])("rejects marker %j before reading input %j", async (marker, input) => {
+    const environment = { ...process.env };
+    if (marker === undefined) delete environment[INHERITED_JOB_PROCESS_GROUP];
+    else environment[INHERITED_JOB_PROCESS_GROUP] = marker;
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/target-job-worker.ts"),
+    ], {
+      env: environment,
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    if (input !== undefined) child.stdin.write(input);
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const closed = new Promise<number | null>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveExit);
+    });
+    let deadline: NodeJS.Timeout | undefined;
+
+    try {
+      const exitCode = await Promise.race([
+        closed,
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error("Target job worker waited for stdin")),
+            1_500,
+          );
+        }),
+      ]);
+
+      expect(exitCode).not.toBe(0);
+      expect(stderr.trim()).toBe("Target job worker requires an inherited process group");
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await closed.catch(() => undefined);
+      }
+    }
+  });
+
+  it.each([
+    ["", "Target job input is missing"],
+    ["{", "Target job input is invalid"],
+    ["null", "Target job input is invalid"],
+  ])("rejects invalid serialized input %j without success output", async (input, message) => {
+    const child = spawn(process.execPath, [
+      "--experimental-strip-types",
+      join(import.meta.dirname, "../.sandcastle/target-job-worker.ts"),
+    ], {
+      env: { ...process.env, [INHERITED_JOB_PROCESS_GROUP]: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stdin.end(input);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveExit);
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stdout).toBe("");
+    expect(stderr.trim()).toBe(message);
+  });
+
   it("redacts malformed serialized Target job input", async () => {
     const child = spawn(process.execPath, [
       "--experimental-strip-types",

@@ -4,6 +4,11 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
 import type { createChildEnvironments } from "./automation-environment.ts";
 import type { SandcastleModels } from "./private-config.ts";
+import {
+  frozenStringRecord,
+  hasExactOwnKeys,
+  ownDataPropertyValues,
+} from "./protocol-record.ts";
 
 function createSandboxProvider(
   environment: Readonly<Record<string, string>>,
@@ -21,32 +26,47 @@ export interface TargetOperationStartupSnapshot {
   readonly models: SandcastleModels;
 }
 
-function strings(value: unknown): value is Readonly<Record<string, string>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value) &&
-    Object.values(value).every((entry) => typeof entry === "string");
+const startupKeys = new Set(["imageName", "childEnvironments", "models"]);
+const childEnvironmentKeys = new Set(["git", "github", "claude", "githubAgent"]);
+const modelKeys = new Set(["default", "planner", "implementer", "reviewer"]);
+
+function ownValues(
+  value: unknown,
+  keys?: ReadonlySet<string>,
+): Readonly<Record<string, unknown>> | undefined {
+  const values = ownDataPropertyValues(value);
+  if (values === undefined) return undefined;
+  if (keys !== undefined && !hasExactOwnKeys(values, keys)) return undefined;
+  return values;
 }
 
 export function targetOperationStartupSnapshot(value: unknown): TargetOperationStartupSnapshot {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Target operation startup snapshot is invalid");
-  }
-  const candidate = value as Partial<TargetOperationStartupSnapshot>;
+  const candidate = ownValues(value, startupKeys);
+  const childEnvironments = ownValues(candidate?.childEnvironments, childEnvironmentKeys);
+  const models = ownValues(candidate?.models, modelKeys);
+  const git = frozenStringRecord(childEnvironments?.git);
+  const github = frozenStringRecord(childEnvironments?.github);
+  const claude = frozenStringRecord(childEnvironments?.claude);
+  const githubAgent = frozenStringRecord(childEnvironments?.githubAgent);
   if (
-    typeof candidate.imageName !== "string" || candidate.imageName.length === 0 ||
-    typeof candidate.childEnvironments !== "object" || candidate.childEnvironments === null ||
-    !strings(candidate.childEnvironments.git) ||
-    !strings(candidate.childEnvironments.github) ||
-    !strings(candidate.childEnvironments.claude) ||
-    !strings(candidate.childEnvironments.githubAgent) ||
-    typeof candidate.models !== "object" || candidate.models === null ||
-    typeof candidate.models.default !== "string" || candidate.models.default.length === 0 ||
-    typeof candidate.models.planner !== "string" || candidate.models.planner.length === 0 ||
-    typeof candidate.models.implementer !== "string" || candidate.models.implementer.length === 0 ||
-    typeof candidate.models.reviewer !== "string" || candidate.models.reviewer.length === 0
-  ) {
-    throw new Error("Target operation startup snapshot is invalid");
-  }
-  return candidate as TargetOperationStartupSnapshot;
+    candidate === undefined || typeof candidate.imageName !== "string" || candidate.imageName.length === 0 ||
+    childEnvironments === undefined || git === undefined || github === undefined ||
+    claude === undefined || githubAgent === undefined || models === undefined ||
+    typeof models.default !== "string" || models.default.length === 0 ||
+    typeof models.planner !== "string" || models.planner.length === 0 ||
+    typeof models.implementer !== "string" || models.implementer.length === 0 ||
+    typeof models.reviewer !== "string" || models.reviewer.length === 0
+  ) throw new Error("Target operation startup snapshot is invalid");
+  return Object.freeze({
+    imageName: candidate.imageName,
+    childEnvironments: Object.freeze({ git, github, claude, githubAgent }),
+    models: Object.freeze({
+      default: models.default,
+      planner: models.planner,
+      implementer: models.implementer,
+      reviewer: models.reviewer,
+    }),
+  });
 }
 
 export interface TargetWorkerStartupSnapshot {
@@ -80,16 +100,20 @@ export async function readTargetWorkerStartup(
   for await (const chunk of input) serialized += String(chunk);
   if (serialized.length === 0) throw new Error("Target worker startup snapshot is missing");
   const candidate = JSON.parse(serialized) as Partial<TargetWorkerStartupSnapshot>;
+  const sandboxEnvironment = frozenStringRecord(candidate.sandboxEnvironment);
+  const githubEnvironment = candidate.githubEnvironment === undefined
+    ? undefined
+    : frozenStringRecord(candidate.githubEnvironment);
   if (
     typeof candidate.imageName !== "string" || candidate.imageName.length === 0 ||
-    !strings(candidate.sandboxEnvironment) ||
-    (candidate.githubEnvironment !== undefined && !strings(candidate.githubEnvironment))
+    sandboxEnvironment === undefined ||
+    (candidate.githubEnvironment !== undefined && githubEnvironment === undefined)
   ) {
     throw new Error("Target worker startup snapshot is invalid");
   }
   return {
-    sandbox: createSandboxProvider(candidate.sandboxEnvironment, candidate.imageName),
-    ...(candidate.githubEnvironment === undefined ? {} : { githubEnvironment: candidate.githubEnvironment }),
+    sandbox: createSandboxProvider(sandboxEnvironment, candidate.imageName),
+    ...(githubEnvironment === undefined ? {} : { githubEnvironment }),
   };
 }
 

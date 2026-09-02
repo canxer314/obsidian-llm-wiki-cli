@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentWorkerTimeoutError } from "../.sandcastle/agent-process-runner.js";
+import { parseTargetJobInput } from "../.sandcastle/target-job-input.js";
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 import {
   createTargetOperationRunner,
@@ -47,12 +48,24 @@ describe("Target operation runner", () => {
     ["architecture-review", 21 * 60 * 1000],
   ] as const)("applies the %i-millisecond whole-job timeout for %s", async (operation, timeoutMilliseconds) => {
     const runWorker = vi.fn(async () => ({ output: JSON.stringify({ status: operationStatuses[operation] }), code: 0, diagnostics: "" }));
-    const runner = createTargetOperationRunnerWithWorker({
-      startup: {
-        imageName: "fixture-image",
-        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
-        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+    const checkout = {
+      sourceRepositoryPath: "/trusted/repository",
+      gitEnvironment: { GIT_SECRET: "git-secret" },
+      dependencyEnvironment: { NPM_SECRET: "npm-secret" },
+    };
+    const startup = {
+      imageName: "fixture-image",
+      childEnvironments: {
+        git: {},
+        github: { GH_TOKEN: "github-secret" },
+        claude: {},
+        githubAgent: {},
       },
+      models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+    };
+    const runner = createTargetOperationRunnerWithWorker({
+      checkoutOptions: checkout,
+      startup,
       start: () => {
         throw new Error("Target operation timeout test start should not run");
       },
@@ -80,6 +93,15 @@ describe("Target operation runner", () => {
 
     await expect(runner.run(invocation)).resolves.toEqual({ status: operationStatuses[operation] });
     expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ timeoutMilliseconds }));
+    const request = runWorker.mock.calls[0]![0];
+    expect(request.arguments_).toEqual([]);
+    expect(parseTargetJobInput(request.input)).toEqual({
+      checkout,
+      startup,
+      invocation,
+    });
+    expect(request.input).toContain("github-secret");
+    expect(JSON.stringify(request.arguments_)).not.toContain("secret");
   });
 
   it("records an accepted refusal as a completed job", async () => {

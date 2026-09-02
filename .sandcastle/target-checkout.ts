@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { types } from "node:util";
 
 import { appendInheritedJobOutput } from "./job-logs.ts";
+import {
+  frozenStringRecord,
+  ownDataPropertyValues,
+} from "./protocol-record.ts";
 import { trustCheckoutCommandExit } from "./trusted-failure.ts";
 
 function commandFailureSummary(
@@ -143,6 +147,45 @@ export interface TargetCheckoutProcessOptions {
   readonly checkoutRoot?: string;
   readonly gitEnvironment?: Readonly<Record<string, string>>;
   readonly dependencyEnvironment?: Readonly<Record<string, string>>;
+}
+
+const targetCheckoutProcessOptionKeys = new Set([
+  "sourceRepositoryPath",
+  "checkoutRoot",
+  "gitEnvironment",
+  "dependencyEnvironment",
+]);
+
+export function targetCheckoutProcessOptions(
+  value: unknown,
+): TargetCheckoutProcessOptions {
+  const input = ownDataPropertyValues(value);
+  if (
+    input === undefined ||
+    !Object.hasOwn(input, "sourceRepositoryPath") ||
+    Object.keys(input).some((key) => !targetCheckoutProcessOptionKeys.has(key))
+  ) throw new Error("Target Checkout process options are invalid");
+  const sourceRepositoryPath = input.sourceRepositoryPath;
+  const checkoutRoot = input.checkoutRoot;
+  const gitEnvironment = input.gitEnvironment === undefined
+    ? undefined
+    : frozenStringRecord(input.gitEnvironment);
+  const dependencyEnvironment = input.dependencyEnvironment === undefined
+    ? undefined
+    : frozenStringRecord(input.dependencyEnvironment);
+  if (
+    typeof sourceRepositoryPath !== "string" || sourceRepositoryPath.length === 0 ||
+    (checkoutRoot !== undefined &&
+      (typeof checkoutRoot !== "string" || checkoutRoot.length === 0)) ||
+    (Object.hasOwn(input, "gitEnvironment") && gitEnvironment === undefined) ||
+    (Object.hasOwn(input, "dependencyEnvironment") && dependencyEnvironment === undefined)
+  ) throw new Error("Target Checkout process options are invalid");
+  return Object.freeze({
+    sourceRepositoryPath,
+    ...(checkoutRoot === undefined ? {} : { checkoutRoot }),
+    ...(gitEnvironment === undefined ? {} : { gitEnvironment }),
+    ...(dependencyEnvironment === undefined ? {} : { dependencyEnvironment }),
+  });
 }
 
 export function createTargetCheckout(options: TargetCheckoutProcessOptions & {
