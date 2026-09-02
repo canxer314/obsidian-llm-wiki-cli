@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createSameSessionArchitectureReviewExtractor } from "../.sandcastle/architecture-review-extraction.js";
+import {
+  architectureReviewSchema,
+  createSameSessionArchitectureReviewExtractor,
+} from "../.sandcastle/architecture-review-extraction.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
@@ -29,6 +32,18 @@ function createExtractor(runAgent: unknown, options: { readonly timeoutMilliseco
 }
 
 describe("same-session architecture review extraction", () => {
+  it("accepts Spec proposals and rejects legacy PRD terminology before publication", () => {
+    expect(architectureReviewSchema.safeParse(proposedOutcome).success).toBe(true);
+    expect(architectureReviewSchema.safeParse({
+      ...proposedOutcome,
+      title: "PRD: Deepen the search indexer",
+    }).success).toBe(false);
+    expect(architectureReviewSchema.safeParse({
+      ...proposedOutcome,
+      body: "# Architecture review\n\n# PRDs: Deepen the search indexer",
+    }).success).toBe(false);
+  });
+
   it("runs one bounded read-only produce pass with the prior proposals, then extracts by resuming that session", async () => {
     const extraction = vi.fn().mockResolvedValue({ commits: [], output: proposedOutcome });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });

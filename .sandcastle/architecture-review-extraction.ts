@@ -18,11 +18,17 @@ import type {
 // Upstream-equivalent output contract (course-video-manager
 // architecture-review.ts at the accepted baseline): a discriminated union of
 // an accepted proposal and an explicit skip.
+const legacyPrdTerminology = /\bPRDs?\b/iu;
+const specProposalText = z.string().min(1).refine(
+  (value) => !legacyPrdTerminology.test(value),
+  "Spec proposals must not use legacy PRD terminology",
+);
+
 export const architectureReviewSchema = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("proposed"),
-    title: z.string().min(1).max(256),
-    body: z.string().min(1),
+    title: specProposalText.pipe(z.string().max(256)),
+    body: specProposalText,
     oneLineSummary: z.string().min(1),
     candidatesConsidered: z.array(z.string().min(1)).min(1),
   }),
@@ -45,11 +51,11 @@ ${JSON.stringify(priorProposals)}
 
 Internally generate three to five candidates, rank them on leverage, locality gain, test-surface improvement, and cost-to-value, and pick the single top candidate. Prepare its Spec with the standard sections (Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope, Further Notes), preceded by an Architecture review section naming the files involved, the problem and the solution in CONTEXT.md and deepening vocabulary, the benefits in terms of locality and leverage, a fenced mermaid before/after diagram of the shallow-to-deep transition, and a recommendation strength of Strong, Worth exploring, or Speculative.
 
-Rules: this pass is read-only — do not modify files, commit, push, or create or edit any GitHub Issue or label; the command publishes an accepted proposal itself. Propose at most one Spec. If every reasonable candidate is already covered by a prior proposal, decide to skip instead. Keep your chosen title, full Spec body, one-line summary, and considered candidates — or your skip reason — in this session for a subsequent formatting request.
+Rules: this pass is read-only — do not modify files, commit, push, or create or edit any GitHub Issue or label; the command publishes an accepted proposal itself. Propose at most one Spec. Use Spec terminology throughout the proposal title and body; never call the proposal a PRD. If every reasonable candidate is already covered by a prior proposal, decide to skip instead. Keep your chosen title, full Spec body, one-line summary, and considered candidates — or your skip reason — in this session for a subsequent formatting request.
 `;
 
 const extractionPrompt = `
-Now emit the outcome of the architecture-review pass as one JSON object inside <output> tags. It has exactly one of two shapes. When you prepared a proposal: {"status":"proposed","title":"...","body":"...","oneLineSummary":"...","candidatesConsidered":["..."]} with a title of at most 256 characters, the full Spec body, a one-line summary, and a non-empty candidatesConsidered array. When you decided to skip: {"status":"skipped","reason":"..."} naming the candidates considered and the prior proposals that already cover them. Emit no fields beyond those listed.
+Now emit the outcome of the architecture-review pass as one JSON object inside <output> tags. It has exactly one of two shapes. When you prepared a proposal: {"status":"proposed","title":"...","body":"...","oneLineSummary":"...","candidatesConsidered":["..."]} with a title of at most 256 characters, the full Spec body, a one-line summary, and a non-empty candidatesConsidered array. The proposal title and body must use Spec terminology throughout and must not contain the legacy term PRD or PRDs. When you decided to skip: {"status":"skipped","reason":"..."} naming the candidates considered and the prior proposals that already cover them. Emit no fields beyond those listed.
 `;
 
 // Upstream architecture-review jobs time out after twenty minutes.
