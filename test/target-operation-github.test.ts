@@ -152,13 +152,13 @@ describe("managed Target operation GitHub view", () => {
     await expect(github.readPullRequest(219)).resolves.toMatchObject({ headSha: publishedRevision });
   });
 
-  it("publishes a later PRD continuation trigger as a business transition", async () => {
+  it("publishes a later Spec continuation trigger as a business transition", async () => {
     const addIssueLabel = vi.fn(async () => {});
     const github = createManagedOperationGithub({
-      readPrd: async () => ({ state: "OPEN", labels: ["agent:in-progress"], baseRevision: revision }),
+      readSpec: async () => ({ state: "OPEN", labels: ["agent:in-progress"], baseRevision: revision }),
       addIssueLabel,
       removeIssueLabel: vi.fn(async () => {}),
-    }, "implement-prd", 219, { revision, acquired: true });
+    }, "implement-spec", 219, { revision, acquired: true });
 
     await github.addIssueLabel(219, "agent:in-progress");
     await github.removeIssueLabel(219, "agent:implement");

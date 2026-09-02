@@ -15,7 +15,7 @@ import type {
 
 interface TargetOperationDispatchGithub {
   readBaseRevision(): Promise<string>;
-  readPrd(number: number): Promise<{
+  readSpec(number: number): Promise<{
     readonly state: string;
     readonly labels: readonly string[];
     readonly baseRevision: string;
@@ -80,10 +80,10 @@ export function createTargetOperationCommandDispatch(options: {
       read: async (operation, number): Promise<TargetOperationAcquisitionState> => {
         const route = resolveTargetOperationRoute(operation, number);
         if (issueOperation(route)) {
-          const issue = await options.github.readPrd(number);
+          const issue = await options.github.readSpec(number);
           const routeMatches = issue.parentNumber === undefined && (
-            operation === "split-prd" ||
-            (operation === "implement-prd"
+            operation === "split-spec" ||
+            (operation === "implement-spec"
               ? issue.subIssueCount > 0
               : issue.subIssueCount === 0)
           );

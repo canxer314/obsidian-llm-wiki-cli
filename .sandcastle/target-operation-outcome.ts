@@ -13,11 +13,11 @@ export interface TargetOperationOutcomeClassification {
 
 const acceptedStatuses: Readonly<Record<TargetOperationIdentity, ReadonlySet<string>>> = {
   "implement-issue": new Set(["implemented", "refused", "blocked"]),
-  "implement-prd": new Set(["implemented", "refused", "blocked"]),
+  "implement-spec": new Set(["implemented", "refused", "blocked"]),
   "implement-feedback": new Set(["implemented", "refused", "blocked"]),
   review: new Set(["reviewed", "refused", "blocked"]),
   "update-branch": new Set(["updated", "up-to-date", "refused", "blocked"]),
-  "split-prd": new Set(["split", "refused", "blocked"]),
+  "split-spec": new Set(["split", "refused", "blocked"]),
   "architecture-review": new Set(["proposed", "skipped", "refused", "blocked"]),
 };
 

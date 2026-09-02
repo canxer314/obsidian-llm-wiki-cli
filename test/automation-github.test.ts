@@ -14,7 +14,7 @@ describe("automation GitHub port", () => {
     const github = createAutomationGithubPort({ execute, environment });
 
     await github.addIssueLabel(221, "agent:implement");
-    await github.removeIssueLabel(221, "agent:to-issues/next");
+    await github.removeIssueLabel(221, "agent:to-tickets/next");
     await github.addPullRequestLabel(220, "agent:in-progress");
     await github.removePullRequestLabel(220, "agent:review/next");
 
@@ -23,7 +23,7 @@ describe("automation GitHub port", () => {
       "-f", "labels[]=agent:implement",
     ], environment);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
-      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/221/labels/agent%3Ato-issues%2Fnext",
+      "api", "--method", "DELETE", "repos/{owner}/{repo}/issues/221/labels/agent%3Ato-tickets%2Fnext",
     ], environment);
     expect(execute).toHaveBeenNthCalledWith(3, "gh", [
       "api", "--method", "POST", "repos/{owner}/{repo}/issues/220/labels",
@@ -76,8 +76,8 @@ describe("automation GitHub port", () => {
       .mockResolvedValue({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await expect(github.publishPrdSplit({
-      prdNumber: 223,
+    await expect(github.publishSpecSplit({
+      specNumber: 223,
       slices: [
         { title: "Prepare vertical path", whatToBuild: "Build the initial path.", acceptanceCriteria: ["Initial path works"] },
         { title: "Extend vertical path", whatToBuild: "Extend the path.", acceptanceCriteria: ["Extension works"] },
@@ -109,11 +109,11 @@ describe("automation GitHub port", () => {
     await expect(github.readIssue(221)).resolves.toEqual(expect.objectContaining({ state: "OPEN" }));
   });
 
-  it("counts all PRD sub-issues across REST pages", async () => {
+  it("counts all Spec sub-issues across REST pages", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify({
         number: 226,
-        title: "A PRD",
+        title: "A Spec",
         state: "open",
         labels: [{ name: "agent:implement" }],
         pull_request: null,
@@ -123,9 +123,9 @@ describe("automation GitHub port", () => {
       .mockResolvedValueOnce({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await expect(github.readPrd(226)).resolves.toEqual({
+    await expect(github.readSpec(226)).resolves.toEqual({
       number: 226,
-      title: "A PRD",
+      title: "A Spec",
       state: "OPEN",
       labels: ["agent:implement"],
       baseRevision: revision,
@@ -137,7 +137,7 @@ describe("automation GitHub port", () => {
     ], undefined);
   });
 
-  it("lists PRD children in order with open blockers and nested sub-issue counts", async () => {
+  it("lists Spec children in order with open blockers and nested sub-issue counts", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({
         stdout: '{"number":301,"title":"First","state":"closed"}\n{"number":302,"title":"Second","state":"open"}\n',
@@ -161,18 +161,18 @@ describe("automation GitHub port", () => {
     ], undefined);
   });
 
-  it("closes an implemented child with its revision and PRD relationship", async () => {
+  it("closes an implemented child with its revision and Spec relationship", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await github.closeImplementedChild({ prdNumber: 226, childNumber: 301, revision });
+    await github.closeImplementedChild({ specNumber: 226, childNumber: 301, revision });
 
     expect(execute).toHaveBeenCalledWith("gh", [
       "issue", "close", "301", "--comment", `Implemented in ${revision}. Part of #226.`,
     ], undefined);
   });
 
-  it("reuses the existing upstream-equivalent Draft Pull Request for a PRD branch", async () => {
+  it("reuses the existing upstream-equivalent Draft Pull Request for a Spec branch", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
       .mockResolvedValueOnce({ stdout: JSON.stringify([{
@@ -180,21 +180,21 @@ describe("automation GitHub port", () => {
         url: "https://example.test/pull/401",
         isDraft: true,
         baseRefName: "master",
-        headRefName: "sandcastle/prd-226",
+        headRefName: "sandcastle/spec-226",
         headRefOid: revision,
       }]), stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await expect(github.ensurePrdDraftPullRequest({
-      prdNumber: 226,
-      branch: "sandcastle/prd-226",
+    await expect(github.ensureSpecDraftPullRequest({
+      specNumber: 226,
+      branch: "sandcastle/spec-226",
       headSha: revision,
     })).resolves.toEqual({ number: 401, url: "https://example.test/pull/401" });
 
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects an existing PRD Pull Request whose head does not match the Implementer commit", async () => {
+  it("rejects an existing Spec Pull Request whose head does not match the Implementer commit", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
       .mockResolvedValueOnce({ stdout: JSON.stringify([{
@@ -202,19 +202,19 @@ describe("automation GitHub port", () => {
         url: "https://example.test/pull/401",
         isDraft: true,
         baseRefName: "master",
-        headRefName: "sandcastle/prd-226",
+        headRefName: "sandcastle/spec-226",
         headRefOid: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       }]), stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await expect(github.ensurePrdDraftPullRequest({
-      prdNumber: 226,
-      branch: "sandcastle/prd-226",
+    await expect(github.ensureSpecDraftPullRequest({
+      specNumber: 226,
+      branch: "sandcastle/spec-226",
       headSha: revision,
     })).rejects.toThrow("head does not match the Implementer commit");
   });
 
-  it("creates the PRD Draft Pull Request with its PRD relationship and verifies the published head", async () => {
+  it("creates the Spec Draft Pull Request with its Spec relationship and verifies the published head", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
       .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
@@ -222,14 +222,14 @@ describe("automation GitHub port", () => {
       .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await expect(github.ensurePrdDraftPullRequest({
-      prdNumber: 226,
-      branch: "sandcastle/prd-226",
+    await expect(github.ensureSpecDraftPullRequest({
+      specNumber: 226,
+      branch: "sandcastle/spec-226",
       headSha: revision,
     })).resolves.toEqual({ number: 401, url: "https://example.test/pull/401" });
 
     expect(execute).toHaveBeenNthCalledWith(3, "gh", [
-      "pr", "create", "--draft", "--head", "sandcastle/prd-226",
+      "pr", "create", "--draft", "--head", "sandcastle/spec-226",
       "--title", "Implement #226", "--body", "Part of #226",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(4, "gh", [
@@ -237,7 +237,7 @@ describe("automation GitHub port", () => {
     ], undefined);
   });
 
-  it("rejects creating a PRD Pull Request when the branch head moved before publication", async () => {
+  it("rejects creating a Spec Pull Request when the branch head moved before publication", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify({ defaultBranchRef: { name: "master" } }), stderr: "" })
       .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
@@ -245,9 +245,9 @@ describe("automation GitHub port", () => {
       .mockResolvedValueOnce({ stdout: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await expect(github.ensurePrdDraftPullRequest({
-      prdNumber: 226,
-      branch: "sandcastle/prd-226",
+    await expect(github.ensureSpecDraftPullRequest({
+      specNumber: 226,
+      branch: "sandcastle/spec-226",
       headSha: revision,
     })).rejects.toThrow("head changed before Pull Request publication");
   });
@@ -262,8 +262,8 @@ describe("automation GitHub port", () => {
       jobId: "job-221",
       summary,
     });
-    await github.addPrdImplementationBlockedDiagnostic(226, {
-      reason: "prd-implementation-execution",
+    await github.addSpecImplementationBlockedDiagnostic(226, {
+      reason: "spec-implementation-execution",
       jobId: "job-226",
       summary,
       childNumber: 301,
@@ -285,7 +285,7 @@ describe("automation GitHub port", () => {
     });
     expect(bodies).toEqual([
       "Automation implementation is blocked (implementation-execution; job job-221). Remove agent:blocked, restore agent:implement, then retry.",
-      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation Spec implementation is blocked (spec-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
       "Automation feedback implementation is blocked (feedback-execution; job job-224). Remove agent:blocked, restore agent:implement, then retry.",
       "Automation branch update is blocked (branch-update-execution; job job-220). Remove agent:blocked, restore agent:update-branch, then retry.",
     ]);
@@ -293,25 +293,25 @@ describe("automation GitHub port", () => {
     expect(bodies).not.toContain(expect.stringContaining(".sandcastle/jobs"));
   });
 
-  it("publishes classified PRD implementation and child failure diagnostics", async () => {
+  it("publishes classified Spec implementation and child failure diagnostics", async () => {
     const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     const github = createAutomationGithubPort({ execute });
 
-    await github.addPrdImplementationBlockedDiagnostic(226, {
-      reason: "prd-implementation-execution",
+    await github.addSpecImplementationBlockedDiagnostic(226, {
+      reason: "spec-implementation-execution",
       jobId: "job-226",
       summary: "push failed",
       childNumber: 301,
     });
-    await github.addChildFailureDiagnostic(301, { prdNumber: 226, jobId: "job-226" });
+    await github.addChildFailureDiagnostic(301, { specNumber: 226, jobId: "job-226" });
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
       "issue", "comment", "226", "--body",
-      "Automation PRD implementation is blocked (prd-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
+      "Automation Spec implementation is blocked (spec-implementation-execution; job job-226) while implementing sub-issue #301. Remove agent:blocked, restore agent:implement, then retry.",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "issue", "comment", "301", "--body",
-      "Implementation attempt failed (job job-226). See PRD #226 for status.",
+      "Implementation attempt failed (job job-226). See Spec #226 for status.",
     ], undefined);
   });
 
@@ -646,7 +646,7 @@ describe("automation GitHub port", () => {
 
     expect(execute).toHaveBeenNthCalledWith(1, "gh", [
       "label", "create", "source:architecture-review", "--color", "5319E7",
-      "--description", "PRDs proposed by the automated architecture-review workflow",
+      "--description", "Specs proposed by the automated architecture-review workflow",
     ], undefined);
     expect(execute).toHaveBeenNthCalledWith(2, "gh", [
       "issue", "create", "--title", "Deepen the search indexer",

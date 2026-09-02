@@ -50,12 +50,12 @@ npm run sandcastle -- inspect
 
 结果为 `"missing"` 时，任何 Automation Command 都不能运行。在 `build-image` 成功前，显式执行、定时 dispatch 和架构 review 都会在获取命令前失败。此类失败不会消费触发标签，不会添加 `agent:in-progress`，也不会创建 Blocked Automation。在检查结果变为 `ready` 前，不要创建 canary、给 canary 添加标签或启用任一 timer。
 
-`"ready"` 只说明当前受信任 checkout 选中的镜像存在且可用，不能证明较早获取的 Pull Request revision 具有相同的 manifest seed。基于当前 base 的 Issue 和 PRD 实现继续使用严格的镜像输入 checksum 和离线安装。针对已获取精确 revision 的 feedback 则使用运行时保护和冻结安装，优先使用镜像缓存，并允许有界的网络 fallback。
+`"ready"` 只说明当前受信任 checkout 选中的镜像存在且可用，不能证明较早获取的 Pull Request revision 具有相同的 manifest seed。基于当前 base 的 Issue 和 Spec 实现继续使用严格的镜像输入 checksum 和离线安装。针对已获取精确 revision 的 feedback 则使用运行时保护和冻结安装，优先使用镜像缓存，并允许有界的网络 fallback。
 
 <a id="agent-container-github-readiness"></a>
 ## Agent 容器的 GitHub readiness
 
-具备 GitHub 能力的 Agent Session 只使用容器环境中的 `GH_TOKEN` 认证，见 #267。每轮定时 dispatch 获取任何 Automation Work Item 前，以及每个显式 GitHub 操作，也就是 `run review`、`run implement`、`run implement-prd`、`run split` 和 `run feedback`，Dispatcher 都会在精确内容寻址的 Agent 镜像中运行只读 `gh auth status` 探测。探测使用与 GitHub Agent 完全相同的环境，包括网络传输配置、Claude/API 白名单、`GH_TOKEN`，以及下文说明的 Git 身份变量。
+具备 GitHub 能力的 Agent Session 只使用容器环境中的 `GH_TOKEN` 认证，见 #267。每轮定时 dispatch 获取任何 Automation Work Item 前，以及每个显式 GitHub 操作，也就是 `run review`、`run implement`、`run implement-spec`、`run split` 和 `run feedback`，Dispatcher 都会在精确内容寻址的 Agent 镜像中运行只读 `gh auth status` 探测。探测使用与 GitHub Agent 完全相同的环境，包括网络传输配置、Claude/API 白名单、`GH_TOKEN`，以及下文说明的 Git 身份变量。
 
 探测不会修改 GitHub。不得把 token 值或 readiness 命令的原始输出复制到日志、保留产物、GitHub 诊断或错误消息中。只能报告分类结果 `ready`、`missing`、`invalid` 或 `unavailable`。结果不是 `ready` 时，`inspect` 不会查询远程命令 frontier。此时 `commandInspection` 字段必须明确为 `"unavailable"`，不能返回空的 `commands` 列表。
 
@@ -87,14 +87,37 @@ npm run sandcastle -- inspect
 npm run sandcastle -- setup-labels
 ```
 
-该命令创建由 Dispatcher 管理的标签：`agent:implement`、`agent:review`、`agent:update-branch`、`agent:queued`、`agent:in-progress`、`agent:blocked`。它不会编辑 Automation Work Item。缺少任一标签时，普通 dispatch 会 fail closed。
+该命令创建全部 canonical trigger 和生命周期标签：`agent:implement`、`agent:review`、`agent:update-branch`、`agent:to-tickets`、`agent:queued`、`agent:in-progress`、`agent:blocked`。它不会编辑 Automation Work Item。缺少任一标签时，普通 dispatch 会 fail closed。
 
-`setup-labels` 不创建以下两个标签：
-
-- `agent:to-issues`，PRD 拆分触发标签。如果不存在，请创建一次：`gh label create agent:to-issues --color 0E8A16`。
-- `source:architecture-review`，由架构 review 发布流程自行创建，可重复执行。
+`source:architecture-review` 不属于这组标签，由架构 review 发布流程自行创建，可重复执行。
 
 旧的 `Sandcastle` / `sandcastle:*` 标签不会触发替代系统，也不会自动转换。不要给保留的历史 Work Item 添加触发标签。
+
+<a id="spec-terminology-cutover"></a>
+## Spec 术语与拆分标签切换
+
+`agent:to-issues` 是旧版的 PRD 拆分标签。新版本只接受 `agent:to-tickets`，不会在运行时兼容旧标签、旧 operation、`prd:<n>` identity 或 `sandcastle/prd-<n>` 分支。必须把标签迁移和新代码部署视为同一个单写入者切换，不能先让旧 Dispatcher 看到新标签，也不能让新 Dispatcher 看到旧标签。
+
+1. 先完成新 revision 的测试和 review。在它尚未位于干净、受信任的 `master` checkout 前，不要修改远程标签。
+2. 停止并禁用两个 timer，并停止可能仍在运行的 service：
+
+   ```bash
+   systemctl --user disable --now sandcastle-dispatch.timer sandcastle-architecture-review.timer
+   systemctl --user stop sandcastle-dispatch.service sandcastle-architecture-review.service
+   ```
+
+3. 确认没有手动 dispatch、旧 watch/claim、GitHub Actions 或运行中的 Agent/Docker worker。使用旧 revision 运行 `npm run sandcastle -- inspect`，并结合 systemd journal、本地任务 metadata 和 GitHub 标签审计，确认没有 active job、`agent:in-progress`、同时带 trigger 与 `agent:in-progress` 的不一致 Work Item，或待恢复的拆分任务。
+4. 记录旧标签的 color、description 和全部关联对象（包括 open/closed Issue 与 Pull Request），并确认目标标签尚不存在。任何仍在推进的 `sandcastle/prd-*` 分支或 Draft Pull Request 都是切换阻断项，不能由新运行时接管。受保护的历史 canary `sandcastle/prd-332` 和 PR #335 必须原样保留，也不能作为新 canary。
+5. 目标标签不存在时，原地重命名标签以保留所有关联：
+
+   ```bash
+   gh api --method PATCH repos/{owner}/{repo}/labels/agent%3Ato-issues \
+     -f new_name=agent:to-tickets
+   ```
+
+   如果目标标签已经存在，立即停止：不要覆盖或删除任一标签。保持 timers 停止，逐对象迁移并证明新旧 association 集完全一致后，才能删除旧标签。
+6. 重新查询标签和全部关联对象，证明旧标签不存在、新标签 metadata 正确且迁移前后集合一致。然后把受信任 checkout 更新到新 revision，按需运行 `build-image`，再运行 `setup-labels` 和 `inspect`；两个 readiness 必须为 `ready`，command frontier 必须符合预期。
+7. 在 timers 仍停止时执行下文全新的 Spec canary。第一条新 Spec command 被获取前，如果新 revision 无法部署，可以保持停机、反向原地改名并恢复旧 revision；一旦产生任何新 Spec GitHub 写入，只能前向修复，不能反向改标签或重写历史。
 
 <a id="deploying-the-systemd-units"></a>
 ## 部署 systemd unit
@@ -157,8 +180,8 @@ readiness 为 `missing`、`invalid` 或 `unavailable` 时，命令返回 `comman
 
 ```bash
 npm run sandcastle -- run implement <issue-number>        # Issue -> 分支 + Draft Pull Request
-npm run sandcastle -- run implement-prd <issue-number>    # 实现一个符合条件的 PRD 子 Issue，然后继续推进
-npm run sandcastle -- run split <issue-number>            # PRD -> 可独立理解的子 Issue
+npm run sandcastle -- run implement-spec <issue-number>    # 实现一个符合条件的 Spec 子 Issue，然后继续推进
+npm run sandcastle -- run split <issue-number>            # Spec -> 可独立理解的子 Issue
 npm run sandcastle -- run review <pr-number>              # review Pull Request
 npm run sandcastle -- run feedback <pr-number>            # 实现 Pull Request feedback
 npm run sandcastle -- run update-branch <pr-number>       # rebase 或更新 Pull Request 分支
@@ -166,9 +189,9 @@ npm run sandcastle -- architecture-review                 # 手动执行架构 r
 npm run sandcastle -- dispatch [--concurrency <1-8>]      # 执行一轮有界 dispatch，默认 2；环境变量：SANDCASTLE_DISPATCH_CONCURRENCY
 ```
 
-具备 GitHub 能力的操作，也就是 `run review`、`run implement`、`run implement-prd`、`run split` 和 `run feedback`，会在 preflight 中运行 Agent 容器 GitHub readiness 探测。探测发生在任何标签或诊断修改之前。`run update-branch` 和 `architecture-review` 不运行该探测。
+具备 GitHub 能力的操作，也就是 `run review`、`run implement`、`run implement-spec`、`run split` 和 `run feedback`，会在 preflight 中运行 Agent 容器 GitHub readiness 探测。探测发生在任何标签或诊断修改之前。`run update-branch` 和 `architecture-review` 不运行该探测。
 
-PRD 实现会在完整的子 Issue 操作期间持有强制的跨进程 issue lease。Implementer 使用与 upstream 兼容的普通 push，把结果推送到持续累积的 `sandcastle/prd-<n>` 分支，不会 force-push。受控 publisher 仍只用于 feedback 实现，其中显式 `--force-with-lease` 用于保护现有 Pull Request 分支。如果让普通 PRD 发布也使用该 publisher，只会增加分支和 PR 恢复状态，不能改善 lease 保证，因此这里有意不这样做。
+Spec 实现会在完整的子 Issue 操作期间持有强制的跨进程 issue lease。Implementer 使用与 upstream 兼容的普通 push，把结果推送到持续累积的 `sandcastle/spec-<n>` 分支，不会 force-push。受控 publisher 仍只用于 feedback 实现，其中显式 `--force-with-lease` 用于保护现有 Pull Request 分支。如果让普通 Spec 发布也使用该 publisher，只会增加分支和 PR 恢复状态，不能改善 lease 保证，因此这里有意不这样做。
 
 <a id="blocked-automation-diagnosis"></a>
 ## 诊断 Blocked Automation
@@ -189,7 +212,7 @@ Agent 容器 GitHub readiness 失败不属于 Blocked Automation。它会让该�
 
 1. 按上文诊断 Blocked Automation。
 2. 移除 `agent:blocked`：`gh issue edit <n> --remove-label agent:blocked`。Pull Request 使用 `gh pr edit`。
-3. 重新添加对应的触发标签，例如 `agent:implement`、`agent:review`、`agent:update-branch` 或 `agent:to-issues`。
+3. 重新添加对应的触发标签，例如 `agent:implement`、`agent:review`、`agent:update-branch` 或 `agent:to-tickets`。
 4. 验证 readiness。重试前，`npm run sandcastle -- inspect` 必须报告 `"imageReadiness":"ready"`。对于具备 GitHub 能力的命令，还必须报告 `"githubAgentReadiness":"ready"`。
 
 下一轮 dispatch 或显式 `run` 命令会获取该命令。Review 重试必须复用现有 Work Item。不要创建替代 Issue、分支或 Pull Request。
@@ -232,8 +255,8 @@ readiness 失败会保留 Work Item 和触发标签，也没有需要移除的 `
 2. **Pull Request review。** 给该 Draft Pull Request 添加 `agent:review`，然后运行 `npm run sandcastle -- run review <pr>`。确认发布的 review 标明了被审查的精确 commit。
 3. **Feedback 实现。** 在 Pull Request 上留下 change request，添加 `agent:implement`，然后运行 `npm run sandcastle -- run feedback <pr>`。确认修复 push 到现有分支，并且实现回复包含 `feedback-reconcile` provenance marker。
 4. **分支更新。** 添加 `agent:update-branch`，然后运行 `npm run sandcastle -- run update-branch <pr>`。确认分支已从 `master` 更新，并使用显式 force-with-lease push。
-5. **PRD 拆分。** 创建专用 PRD Issue，添加 `agent:to-issues`，然后运行 `npm run sandcastle -- run split <n>`。确认创建了可独立理解的子 Issue。
-6. **PRD 继续执行和最终 review。** 给 PRD 添加 `agent:implement`，然后运行 `npm run sandcastle -- run implement-prd <n>`。确认只实现了一个符合条件的子 Issue，并自动请求下一个。最后一个子 Issue 完成后，确认系统自动请求 Pull Request review。
+5. **Spec 拆分。** 创建专用 Spec Issue，添加 `agent:to-tickets`，然后运行 `npm run sandcastle -- run split <n>`。确认创建了可独立理解的子 Issue。
+6. **Spec 继续执行和最终 review。** 给 Spec 添加 `agent:implement`，然后运行 `npm run sandcastle -- run implement-spec <n>`。确认只实现了一个符合条件的子 Issue，并自动请求下一个。最后一个子 Issue 完成后，确认系统自动请求 Pull Request review。
 7. **队列提升。** 创建一个被另一个专用 Issue 阻塞的专用 Issue，添加 `agent:queued`，关闭 blocker，然后运行 `npm run sandcastle -- dispatch`。确认系统根据当前 blocker 状态把标签从 `agent:queued` 改为 `agent:implement`。
 8. **手动架构 review。** 运行 `npm run sandcastle -- architecture-review`。确认系统创建了带 `source:architecture-review` 标签的提案 Issue；如果 backlog guard 或宽松的重复项过滤器生效，则确认日志记录了跳过。
 

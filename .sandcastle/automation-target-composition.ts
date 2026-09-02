@@ -23,12 +23,12 @@ export function createAutomationCliDependencies<TDependencies extends object>(op
       const route = resolveTargetOperationRoute("implement-issue", issueNumber);
       return options.withScheduler(route.identity, () => options.targetOperationCommands.runOperation(route.targetOperation, route.number));
     },
-    runImplementPrd: (issueNumber: number) => {
-      const route = resolveTargetOperationRoute("implement-prd", issueNumber);
+    runImplementSpec: (issueNumber: number) => {
+      const route = resolveTargetOperationRoute("implement-spec", issueNumber);
       return options.withScheduler(route.identity, () => options.targetOperationCommands.runOperation(route.targetOperation, route.number));
     },
     runSplit: (issueNumber: number) => {
-      const route = resolveTargetOperationRoute("split-prd", issueNumber);
+      const route = resolveTargetOperationRoute("split-spec", issueNumber);
       return options.withScheduler(route.identity, () => options.targetOperationCommands.runOperation(route.targetOperation, route.number));
     },
     runUpdate: (pullRequestNumber: number) => {

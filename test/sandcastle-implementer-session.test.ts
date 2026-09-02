@@ -65,9 +65,9 @@ describe("Sandcastle Implementer session adapter", () => {
     expect(request.prompt).toContain("Do not modify .sandcastle/ or .github/workflows/");
   });
 
-  it("resumes the accumulating PRD branch and keeps the PRD relationship for a PRD child", async () => {
+  it("resumes the accumulating Spec branch and keeps the Spec relationship for a Spec child", async () => {
     const runAgent = vi.fn().mockResolvedValue({
-      branch: "sandcastle/prd-226",
+      branch: "sandcastle/spec-226",
       commits: [{ sha: "abc123" }],
     });
     const session = createSandcastleImplementerSession({
@@ -79,15 +79,15 @@ describe("Sandcastle Implementer session adapter", () => {
 
     await session.run({
       model: "implementer-model",
-      branch: "sandcastle/prd-226",
+      branch: "sandcastle/spec-226",
       plan,
-      parentPrd: { number: 226 },
+      parentSpec: { number: 226 },
     });
 
     const request = runAgent.mock.calls[0]![0];
-    expect(request.prompt).toContain("PRD #226");
-    expect(request.prompt).toContain("git fetch origin sandcastle/prd-226");
-    expect(request.prompt).toContain("git checkout -B sandcastle/prd-226 origin/sandcastle/prd-226");
+    expect(request.prompt).toContain("Spec #226");
+    expect(request.prompt).toContain("git fetch origin sandcastle/spec-226");
+    expect(request.prompt).toContain("git checkout -B sandcastle/spec-226 origin/sandcastle/spec-226");
     expect(request.prompt).toContain("Part of #226");
     expect(request.prompt).toContain("Do not rebase or force-push");
     expect(request.prompt).not.toContain("Closes #103");

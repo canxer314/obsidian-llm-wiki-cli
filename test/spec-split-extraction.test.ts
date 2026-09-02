@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createSameSessionPrdSplitExtractor } from "../.sandcastle/prd-split-extraction.js";
+import { createSameSessionSpecSplitExtractor } from "../.sandcastle/spec-split-extraction.js";
 
-describe("same-session PRD split extraction", () => {
+describe("same-session Spec split extraction", () => {
   it("runs one unconstrained split pass, then uses bounded same-session structured extraction", async () => {
     const resume = vi.fn().mockResolvedValue({
       commits: [],
       output: { slices: [{ title: "Create slice", whatToBuild: "Deliver a complete path.", acceptanceCriteria: ["It works"] }] },
     });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume });
-    const splitter = createSameSessionPrdSplitExtractor({
+    const splitter = createSameSessionSpecSplitExtractor({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
       runAgent: runAgent as never,
@@ -17,8 +17,8 @@ describe("same-session PRD split extraction", () => {
     });
 
     await expect(splitter.split({
-      prdNumber: 223,
-      title: "Split a PRD",
+      specNumber: 223,
+      title: "Split a Spec",
       checkoutPath: "/safe/disposable-checkout",
       model: "splitter-model",
     })).resolves.toEqual([{ title: "Create slice", whatToBuild: "Deliver a complete path.", acceptanceCriteria: ["It works"] }]);
@@ -32,7 +32,7 @@ describe("same-session PRD split extraction", () => {
   });
 
   it("fails closed rather than rerunning a non-resumable production pass", async () => {
-    const splitter = createSameSessionPrdSplitExtractor({
+    const splitter = createSameSessionSpecSplitExtractor({
       sandbox: { kind: "fake-sandbox" } as never,
       hooks: { sandbox: { onSandboxReady: [] } },
       runAgent: vi.fn().mockResolvedValue({ commits: [] }) as never,
@@ -40,10 +40,10 @@ describe("same-session PRD split extraction", () => {
     });
 
     await expect(splitter.split({
-      prdNumber: 223,
-      title: "Split a PRD",
+      specNumber: 223,
+      title: "Split a Spec",
       checkoutPath: "/safe/disposable-checkout",
       model: "splitter-model",
-    })).rejects.toThrow("PRD splitter session identity is unavailable");
+    })).rejects.toThrow("Spec splitter session identity is unavailable");
   });
 });

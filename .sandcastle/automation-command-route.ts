@@ -19,7 +19,7 @@ interface RoutePolicy {
   readonly targetOperation: LabelTriggeredTargetOperationIdentity;
   readonly trigger: string;
   readonly receiver: AutomationCommandReceiver;
-  readonly identityNamespace: "issue" | "prd" | "pull-request";
+  readonly identityNamespace: "issue" | "spec" | "pull-request";
 }
 
 const routePolicies: readonly RoutePolicy[] = [
@@ -52,18 +52,18 @@ const routePolicies: readonly RoutePolicy[] = [
     identityNamespace: "issue",
   },
   {
-    operation: "implement-prd",
-    targetOperation: "implement-prd",
+    operation: "implement-spec",
+    targetOperation: "implement-spec",
     trigger: "agent:implement",
     receiver: "issue",
-    identityNamespace: "prd",
+    identityNamespace: "spec",
   },
   {
-    operation: "split-prd",
-    targetOperation: "split-prd",
-    trigger: "agent:to-issues",
+    operation: "split-spec",
+    targetOperation: "split-spec",
+    trigger: "agent:to-tickets",
     receiver: "issue",
-    identityNamespace: "prd",
+    identityNamespace: "spec",
   },
 ];
 

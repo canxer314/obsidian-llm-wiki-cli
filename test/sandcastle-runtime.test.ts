@@ -24,8 +24,8 @@ const implementationWorker = readFileSync(
   resolve(root, ".sandcastle/implementation-worker.ts"),
   "utf8",
 );
-const prdImplementationWorker = readFileSync(
-  resolve(root, ".sandcastle/prd-implementation-worker.ts"),
+const specImplementationWorker = readFileSync(
+  resolve(root, ".sandcastle/spec-implementation-worker.ts"),
   "utf8",
 );
 const smokeTest = readFileSync(
@@ -122,7 +122,7 @@ describe("Sandcastle Docker runtime", () => {
   });
 
   it("keeps current-base implementation workers on the strict install profile", () => {
-    for (const worker of [implementationWorker, prdImplementationWorker]) {
+    for (const worker of [implementationWorker, specImplementationWorker]) {
       expect(worker).toContain('sandboxHooksFor("implementer")');
       expect(worker).not.toContain('sandboxHooksFor("feedback")');
     }

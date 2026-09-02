@@ -6,7 +6,7 @@ Sandcastle 把 GitHub Issue 和 Pull Request 上的显式标签转换为本地�
 <a id="before-you-add-a-label"></a>
 ## 添加标签前
 
-Issue、PRD、review thread 或 Pull Request 必须能够独立说明任务。请写清楚预期行为、相关约束和验收标准。标签只授权相应操作，不能代替任务说明。
+Issue、Spec、review thread 或 Pull Request 必须能够独立说明任务。请写清楚预期行为、相关约束和验收标准。标签只授权相应操作，不能代替任务说明。
 
 本地 Dispatcher 每分钟扫描一次 GitHub。一般只需添加标签并等待下一轮扫描，不需要在本地运行 Sandcastle 命令。
 
@@ -22,14 +22,14 @@ Issue、PRD、review thread 或 Pull Request 必须能够独立说明任务。�
 | GitHub 对象 | 标签 | 请求的操作 | 成功后的停止位置 |
 | --- | --- | --- | --- |
 | 没有子 Issue 的顶层 Issue | `agent:implement` | 规划并实现该 Issue | 一个 `sandcastle/issue-<n>` 分支和一个 Draft Pull Request |
-| 没有子 Issue 的顶层 Issue | `agent:to-issues` | 把 PRD 拆成可独立理解的子 Issue | 相互链接并带 blocking dependency 的子 Issue |
-| 带子 Issue 的顶层 Issue | `agent:implement` | 实现下一个符合条件的 PRD 子 Issue | 自动请求下一个子 Issue；最后一个完成后自动请求 PR review |
+| 没有子 Issue 的顶层 Issue | `agent:to-tickets` | 把 Spec 拆成可独立理解的子 Issue | 相互链接并带 blocking dependency 的子 Issue |
+| 带子 Issue 的顶层 Issue | `agent:implement` | 实现下一个符合条件的 Spec 子 Issue | 自动请求下一个子 Issue；最后一个完成后自动请求 PR review |
 | Draft Pull Request | `agent:review` | review 当前精确 revision，必要时修复 | 发布 review，并将 Pull Request 标记为 Ready for Review |
 | Pull Request | `agent:implement` | 实现可执行的 review feedback | 更新同一分支和 Pull Request |
 | Pull Request | `agent:update-branch` | 从 base branch 更新 head branch | 更新同一分支和 Pull Request |
 | 顶层 Issue | `agent:queued` | 等待所有 blocking Issue 关闭 | 标签改为 `agent:implement`，随后进入普通实现流程 |
 
-不要给 PRD 子 Issue 添加 `agent:queued` 或操作标签。父 PRD 负责推进子 Issue。来自 fork 的 Pull Request 不能执行这些写操作。
+不要给 Spec 子 Issue 添加 `agent:queued` 或操作标签。父 Spec 负责推进子 Issue。来自 fork 的 Pull Request 不能执行这些写操作。
 
 <a id="labels-sandcastle-manages"></a>
 ### Sandcastle 管理的标签
@@ -74,32 +74,32 @@ Issue + agent:implement
   -> 人工合并
 ```
 
-<a id="split-and-implement-a-prd"></a>
-### 拆分并实现 PRD
+<a id="split-and-implement-a-spec"></a>
+### 拆分并实现 Spec
 
 当一个顶层 Issue 描述的工作需要按顺序拆成多个可独立理解的子 Issue 时，使用此流程。
 
-1. 给 PRD 添加拆分触发标签：
+1. 给 Spec 添加拆分触发标签：
 
    ```bash
-   gh issue edit <prd-number> --add-label agent:to-issues
+   gh issue edit <spec-number> --add-label agent:to-tickets
    ```
 
 2. 检查生成的子 Issue 及其 blocking relationship。
-3. 给父 PRD 添加实现触发标签，不要给子 Issue 添加：
+3. 给父 Spec 添加实现触发标签，不要给子 Issue 添加：
 
    ```bash
-   gh issue edit <prd-number> --add-label agent:implement
+   gh issue edit <spec-number> --add-label agent:implement
    ```
 
-4. Sandcastle 每次在共享的 `sandcastle/prd-<prd-number>` 分支上实现一个符合条件的子 Issue。一个子 Issue 成功后，Sandcastle 会关闭它并自动请求下一个。
+4. Sandcastle 每次在共享的 `sandcastle/spec-<spec-number>` 分支上实现一个符合条件的子 Issue。一个子 Issue 成功后，Sandcastle 会关闭它并自动请求下一个。
 5. 最后一个子 Issue 成功后，Sandcastle 会自动给共享 Draft Pull Request 添加 `agent:review`。
 6. review 将 Pull Request 标记为 Ready for Review 后，检查 required checks，再手动合并。
 
 ```text
-PRD + agent:to-issues
+Spec + agent:to-tickets
   -> 相互链接的子 Issue
-  -> 父 PRD + agent:implement
+  -> 父 Spec + agent:implement
   -> 按顺序实现子 Issue
   -> 最后一个 Draft PR 自动获得 agent:review
   -> Ready for Review
@@ -141,7 +141,7 @@ Sandcastle 会更新现有 head branch。如果分支已经是最新状态，它
 gh issue edit <issue-number> --add-label agent:queued
 ```
 
-每轮 dispatch 都会读取当前 dependency 状态。所有 blocker 关闭后，Sandcastle 会把 `agent:queued` 改为 `agent:implement`，无需重放事件或手动提升。系统会拒绝排队的子 Issue，因为子 Issue 的推进由父 PRD 管理。
+每轮 dispatch 都会读取当前 dependency 状态。所有 blocker 关闭后，Sandcastle 会把 `agent:queued` 改为 `agent:implement`，无需重放事件或手动提升。系统会拒绝排队的子 Issue，因为子 Issue 的推进由父 Spec 管理。
 
 <a id="observe-progress"></a>
 ## 查看进度

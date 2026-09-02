@@ -229,7 +229,7 @@ describe("GitHub-capable Agent container readiness", () => {
   });
 
   it("requires the probe only for operations that start GitHub-capable Agent Sessions", () => {
-    for (const operation of ["review", "implement", "implement-prd", "feedback", "split"]) {
+    for (const operation of ["review", "implement", "implement-spec", "feedback", "split"]) {
       expect(githubAgentReadinessRequiredFor(operation)).toBe(true);
     }
     for (const operation of ["update-branch", "architecture-review", "dispatch", "inspect", "setup-labels", "build-image", "anything"]) {

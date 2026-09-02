@@ -4,8 +4,8 @@ import { runArchitectureReviewAutomationCommand } from "../.sandcastle/architect
 import { runBranchUpdateAutomationCommand } from "../.sandcastle/branch-update-automation.js";
 import { runFeedbackImplementation } from "../.sandcastle/feedback-implementation-automation.js";
 import { runImplementationAutomationCommand } from "../.sandcastle/implementation-automation.js";
-import { runPrdImplementationAutomationCommand } from "../.sandcastle/prd-implementation-automation.js";
-import { runPrdSplitAutomationCommand } from "../.sandcastle/prd-split-automation.js";
+import { runSpecImplementationAutomationCommand } from "../.sandcastle/spec-implementation-automation.js";
+import { runSpecSplitAutomationCommand } from "../.sandcastle/spec-split-automation.js";
 import { runQueuePromotionScan } from "../.sandcastle/queue-promotion-automation.js";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
 
@@ -27,10 +27,10 @@ function issue(overrides = {}) {
   };
 }
 
-function prd(overrides = {}) {
+function spec(overrides = {}) {
   return {
     number: 248,
-    title: "A PRD",
+    title: "A Spec",
     state: "OPEN",
     labels: ["agent:implement"],
     baseRevision: REVISION,
@@ -62,21 +62,21 @@ const issueRefusals: readonly (readonly [string, Record<string, unknown>, string
   ["an invalid authorized base revision", { baseRevision: "not-a-sha" }, "Issue #247 has an invalid authorized base revision"],
 ];
 
-const prdPreflightRefusals: readonly (readonly [string, Record<string, unknown>, string])[] = [
-  ["a closed PRD", { state: "CLOSED" }, "Issue #248 is not open"],
-  ["a PRD without the trigger", { labels: [] }, "Issue #248 is not queued for implementation"],
-  ["an in-progress PRD", { labels: ["agent:implement", "agent:in-progress"] }, "Issue #248 is already in progress"],
-  ["a blocked PRD", { labels: ["agent:implement", "agent:blocked"] }, "Issue #248 is blocked"],
-  ["an Issue without sub-issues", { subIssueCount: 0 }, "Issue #248 has no sub-issues and is not a PRD"],
+const specPreflightRefusals: readonly (readonly [string, Record<string, unknown>, string])[] = [
+  ["a closed Spec", { state: "CLOSED" }, "Issue #248 is not open"],
+  ["a Spec without the trigger", { labels: [] }, "Issue #248 is not queued for implementation"],
+  ["an in-progress Spec", { labels: ["agent:implement", "agent:in-progress"] }, "Issue #248 is already in progress"],
+  ["a blocked Spec", { labels: ["agent:implement", "agent:blocked"] }, "Issue #248 is blocked"],
+  ["an Issue without sub-issues", { subIssueCount: 0 }, "Issue #248 has no sub-issues and is not a Spec"],
   ["an invalid authorized base revision", { baseRevision: "not-a-sha" }, "Issue #248 has an invalid authorized base revision"],
 ];
 
 const splitRefusals: readonly (readonly [string, Record<string, unknown>, string])[] = [
-  ["a closed PRD", { state: "CLOSED" }, "Issue #248 is not open"],
-  ["a PRD without the trigger", { labels: [] }, "Issue #248 is not queued for PRD splitting"],
-  ["an in-progress PRD", { labels: ["agent:to-issues", "agent:in-progress"] }, "Issue #248 is already in progress"],
-  ["a blocked PRD", { labels: ["agent:to-issues", "agent:blocked"] }, "Issue #248 is blocked"],
-  ["a PRD that already has children", { subIssueCount: 1 }, "Issue #248 already has 1 sub-issue(s)"],
+  ["a closed Spec", { state: "CLOSED" }, "Issue #248 is not open"],
+  ["a Spec without the trigger", { labels: [] }, "Issue #248 is not queued for Spec splitting"],
+  ["an in-progress Spec", { labels: ["agent:to-tickets", "agent:in-progress"] }, "Issue #248 is already in progress"],
+  ["a blocked Spec", { labels: ["agent:to-tickets", "agent:blocked"] }, "Issue #248 is blocked"],
+  ["a Spec that already has children", { subIssueCount: 1 }, "Issue #248 already has 1 sub-issue(s)"],
   ["a sub-issue", { parentNumber: 100 }, "Issue #248 is itself a sub-issue of #100"],
   ["an invalid authorized base revision", { baseRevision: "not-a-sha" }, "Issue #248 has an invalid authorized base revision"],
 ];
@@ -121,10 +121,10 @@ describe("business refusal semantics (#247)", () => {
     });
   });
 
-  describe("PRD implementation", () => {
-    const portsFor = (readPrd: ReturnType<typeof vi.fn>, listChildren: ReturnType<typeof vi.fn>) => ({
+  describe("Spec implementation", () => {
+    const portsFor = (readSpec: ReturnType<typeof vi.fn>, listChildren: ReturnType<typeof vi.fn>) => ({
       github: {
-        readPrd,
+        readSpec,
         listChildren,
         addIssueLabel: vi.fn(),
         removeIssueLabel: vi.fn(),
@@ -132,7 +132,7 @@ describe("business refusal semantics (#247)", () => {
         closeImplementedChild: vi.fn(),
       },
       pullRequests: {
-        ensurePrdDraftPullRequest: vi.fn(),
+        ensureSpecDraftPullRequest: vi.fn(),
         addPullRequestLabel: vi.fn(),
       },
       checkout: { withCheckout: vi.fn() },
@@ -140,10 +140,10 @@ describe("business refusal semantics (#247)", () => {
       lease,
     });
 
-    it.each(prdPreflightRefusals)("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
-      const ports = portsFor(vi.fn().mockResolvedValue(prd(overrides)), vi.fn());
+    it.each(specPreflightRefusals)("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
+      const ports = portsFor(vi.fn().mockResolvedValue(spec(overrides)), vi.fn());
 
-      await expect(runPrdImplementationAutomationCommand({ issueNumber: 248 }, ports))
+      await expect(runSpecImplementationAutomationCommand({ issueNumber: 248 }, ports))
         .resolves.toEqual({ status: "refused", reason });
 
       expect(ports.github.removeIssueLabel).toHaveBeenCalledWith(248, "agent:implement");
@@ -154,7 +154,7 @@ describe("business refusal semantics (#247)", () => {
     });
 
     const shapeRefusals: readonly (readonly [string, Record<string, unknown>, readonly Record<string, unknown>[], string])[] = [
-      ["a nested PRD", { parentNumber: 100 }, [], "Issue #248 has sub-issues but is itself a sub-issue of #100; nested PRDs are not supported"],
+      ["a nested Spec", { parentNumber: 100 }, [], "Issue #248 has sub-issues but is itself a sub-issue of #100; nested Specs are not supported"],
       [
         "a child with its own sub-issues",
         {},
@@ -162,7 +162,7 @@ describe("business refusal semantics (#247)", () => {
         "Sub-issue #301 itself has sub-issues; nested sub-issues are not supported",
       ],
       [
-        "a PRD whose children are all closed",
+        "a Spec whose children are all closed",
         {},
         [{ number: 301, title: "Child", state: "CLOSED", openBlockerCount: 0, subIssueCount: 0 }],
         "Issue #248 has no open sub-issues to implement",
@@ -177,11 +177,11 @@ describe("business refusal semantics (#247)", () => {
 
     it.each(shapeRefusals)("removes the trigger and explains, without blocking, when refusing %s", async (_case, overrides, children, reason) => {
       const ports = portsFor(
-        vi.fn().mockResolvedValue(prd(overrides)),
+        vi.fn().mockResolvedValue(spec(overrides)),
         vi.fn().mockResolvedValue(children),
       );
 
-      await expect(runPrdImplementationAutomationCommand({ issueNumber: 248 }, ports))
+      await expect(runSpecImplementationAutomationCommand({ issueNumber: 248 }, ports))
         .resolves.toEqual({ status: "refused", reason });
 
       expect(ports.github.removeIssueLabel).toHaveBeenCalledWith(248, "agent:implement");
@@ -192,14 +192,14 @@ describe("business refusal semantics (#247)", () => {
     });
   });
 
-  describe("PRD split", () => {
+  describe("Spec split", () => {
     it.each(splitRefusals)("removes the trigger and explains when refusing %s", async (_case, overrides, reason) => {
       const github = {
-        readPrd: vi.fn().mockResolvedValue({
+        readSpec: vi.fn().mockResolvedValue({
           number: 248,
-          title: "A PRD",
+          title: "A Spec",
           state: "OPEN",
-          labels: ["agent:to-issues"],
+          labels: ["agent:to-tickets"],
           baseRevision: REVISION,
           subIssueCount: 0,
           ...overrides,
@@ -210,17 +210,17 @@ describe("business refusal semantics (#247)", () => {
       };
       const checkout = { withCheckout: vi.fn() };
       const splitter = { split: vi.fn() };
-      const publisher = { publishPrdSplit: vi.fn() };
+      const publisher = { publishSpecSplit: vi.fn() };
 
-      await expect(runPrdSplitAutomationCommand({ issueNumber: 248 }, { github, checkout, splitter, publisher }))
+      await expect(runSpecSplitAutomationCommand({ issueNumber: 248 }, { github, checkout, splitter, publisher }))
         .resolves.toEqual({ status: "refused", reason });
 
-      expect(github.removeIssueLabel).toHaveBeenCalledWith(248, "agent:to-issues");
+      expect(github.removeIssueLabel).toHaveBeenCalledWith(248, "agent:to-tickets");
       expect(github.addRefusalDiagnostic).toHaveBeenCalledWith(248, reason);
       expect(github.addIssueLabel).not.toHaveBeenCalled();
       expect(checkout.withCheckout).not.toHaveBeenCalled();
       expect(splitter.split).not.toHaveBeenCalled();
-      expect(publisher.publishPrdSplit).not.toHaveBeenCalled();
+      expect(publisher.publishSpecSplit).not.toHaveBeenCalled();
     });
   });
 

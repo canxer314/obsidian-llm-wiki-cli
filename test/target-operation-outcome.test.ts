@@ -28,12 +28,12 @@ function expectInvalidTargetOperationOutcome(value: unknown, payloadText?: strin
 
 const acceptedOutcomes = [
   ["implement-issue", "implemented"],
-  ["implement-prd", "implemented"],
+  ["implement-spec", "implemented"],
   ["implement-feedback", "implemented"],
   ["review", "reviewed"],
   ["update-branch", "updated"],
   ["update-branch", "up-to-date"],
-  ["split-prd", "split"],
+  ["split-spec", "split"],
   ["architecture-review", "proposed"],
   ["architecture-review", "skipped"],
 ] as const;
@@ -57,11 +57,11 @@ describe("Target operation outcome policy", () => {
 
   it.each([
     ["implement-issue", "refused"],
-    ["implement-prd", "refused"],
+    ["implement-spec", "refused"],
     ["implement-feedback", "refused"],
     ["review", "refused"],
     ["update-branch", "refused"],
-    ["split-prd", "refused"],
+    ["split-spec", "refused"],
     ["architecture-review", "refused"],
   ] as const)("treats accepted %s/%s as completed", (operation, status) => {
     const outcome = { status, reason: "business refusal" };
@@ -78,11 +78,11 @@ describe("Target operation outcome policy", () => {
 
   it.each([
     "implement-issue",
-    "implement-prd",
+    "implement-spec",
     "implement-feedback",
     "review",
     "update-branch",
-    "split-prd",
+    "split-spec",
     "architecture-review",
   ] as const)("preserves typed %s/blocked separately from an exception", (operation) => {
     const outcome = { status: "blocked", reason: "execution", marker: operation };

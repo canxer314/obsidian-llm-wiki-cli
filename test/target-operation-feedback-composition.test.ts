@@ -173,7 +173,7 @@ async function runFeedbackTarget(options: {
   const dispatch = createTargetOperationCommandDispatch({
     github: {
       readBaseRevision: async () => POST,
-      readPrd: async () => { throw new Error("Feedback composition has no PRD"); },
+      readSpec: async () => { throw new Error("Feedback composition has no Spec"); },
       readPullRequest: async () => pullRequest(),
       addIssueLabel: async () => { throw new Error("Feedback composition has no Issue labels"); },
       removeIssueLabel: async () => { throw new Error("Feedback composition has no Issue labels"); },
@@ -219,7 +219,7 @@ async function createCliFeedbackComposition(scenario: "ordinary" | "reply-only" 
   const targetOperationCommands = createTargetOperationCommandDispatch({
     github: {
       readBaseRevision: async () => POST,
-      readPrd: async () => { throw new Error("Feedback composition has no PRD"); },
+      readSpec: async () => { throw new Error("Feedback composition has no Spec"); },
       readPullRequest: async () => ({
         state: "OPEN",
         labels,

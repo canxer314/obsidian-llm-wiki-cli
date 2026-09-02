@@ -39,11 +39,11 @@ import type { TargetOperationStartupSnapshot } from "./target-operation-startup.
 const TARGET_JOB_GRACE_MILLISECONDS = 10 * 1000;
 const targetOperationTimeouts: Readonly<Record<TargetOperationIdentity, number>> = {
   "implement-issue": 60 * 60 * 1000,
-  "implement-prd": 60 * 60 * 1000,
+  "implement-spec": 60 * 60 * 1000,
   "implement-feedback": 60 * 60 * 1000,
   review: 30 * 60 * 1000,
   "update-branch": 60 * 60 * 1000,
-  "split-prd": 60 * 60 * 1000,
+  "split-spec": 60 * 60 * 1000,
   "architecture-review": 21 * 60 * 1000,
 };
 
@@ -53,11 +53,11 @@ export function targetOperationTimeout(operation: TargetOperationIdentity): numb
 
 const targetOperationEntries: Readonly<Record<TargetOperationIdentity, string>> = {
   "implement-issue": "operations/implement-issue.ts",
-  "implement-prd": "operations/implement-prd.ts",
+  "implement-spec": "operations/implement-spec.ts",
   "implement-feedback": "operations/implement-pr.ts",
   review: "operations/review-pr.ts",
   "update-branch": "operations/update-branch.ts",
-  "split-prd": "operations/split-prd.ts",
+  "split-spec": "operations/split-spec.ts",
   "architecture-review": "operations/architecture-review.ts",
 };
 

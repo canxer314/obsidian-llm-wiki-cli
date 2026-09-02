@@ -58,7 +58,7 @@ describe("automation command CLI", () => {
   it.each([
     ["review", "259", "runReview"],
     ["implement", "259", "runImplement"],
-    ["implement-prd", "259", "runImplementPrd"],
+    ["implement-spec", "259", "runImplementSpec"],
     ["feedback", "259", "runFeedback"],
     ["split", "259", "runSplit"],
   ] as const)("fails missing GitHub-capable Agent readiness before $operation acquires its Work Item", async (operation, number, target) => {
@@ -67,7 +67,7 @@ describe("automation command CLI", () => {
     const dependencies = {
       runReview: vi.fn(),
       runImplement: vi.fn(),
-      runImplementPrd: vi.fn(),
+      runImplementSpec: vi.fn(),
       runFeedback: vi.fn(),
       runSplit: vi.fn(),
       runUpdate: vi.fn(),

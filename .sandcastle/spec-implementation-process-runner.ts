@@ -2,7 +2,7 @@ import type { ChildProcess } from "node:child_process";
 
 import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
 
-export function createProcessPrdImplementer(options: {
+export function createProcessSpecImplementer(options: {
   readonly startup: string;
   readonly plannerModel: string;
   readonly implementerModel: string;
@@ -10,7 +10,7 @@ export function createProcessPrdImplementer(options: {
 }) {
   return {
     async implement(request: {
-      readonly prdNumber: number;
+      readonly specNumber: number;
       readonly child: { readonly number: number; readonly title: string };
       readonly branch: string;
       readonly baseRevision: string;
@@ -18,10 +18,10 @@ export function createProcessPrdImplementer(options: {
     }): Promise<{ readonly branch: string; readonly headSha: string }> {
       const result = await runAgentWorker({
         checkoutPath: request.checkoutPath,
-        workerFile: "prd-implementation-worker.ts",
-        workerName: "PRD implementation",
+        workerFile: "spec-implementation-worker.ts",
+        workerName: "Spec implementation",
         arguments_: [
-          String(request.prdNumber),
+          String(request.specNumber),
           String(request.child.number),
           request.branch,
           request.baseRevision,
@@ -30,10 +30,10 @@ export function createProcessPrdImplementer(options: {
           options.implementerModel,
         ],
         input: options.startup,
-        timeoutMessage: "PRD implementation execution timed out",
+        timeoutMessage: "Spec implementation execution timed out",
         start: options.start,
       });
-      return workerJson(result, "PRD implementation");
+      return workerJson(result, "Spec implementation");
     },
   };
 }

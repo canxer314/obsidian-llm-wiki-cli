@@ -38,18 +38,18 @@ const routes = [
     identity: "issue:104",
   },
   {
-    operation: "implement-prd",
-    targetOperation: "implement-prd",
+    operation: "implement-spec",
+    targetOperation: "implement-spec",
     trigger: "agent:implement",
     receiver: "issue",
-    identity: "prd:105",
+    identity: "spec:105",
   },
   {
-    operation: "split-prd",
-    targetOperation: "split-prd",
-    trigger: "agent:to-issues",
+    operation: "split-spec",
+    targetOperation: "split-spec",
+    trigger: "agent:to-tickets",
     receiver: "issue",
-    identity: "prd:106",
+    identity: "spec:106",
   },
 ] as const;
 
@@ -102,12 +102,13 @@ describe("Automation Command routes", () => {
       "agent:update-branch",
       "agent:implement",
       "agent:review",
-      "agent:to-issues",
+      "agent:to-tickets",
     ]);
   });
 
   it.each([
     ["wrong identity namespace", { number: 101, operation: "review", identity: "issue:101", labels: [] }],
+    ["legacy Spec identity namespace", { number: 101, operation: "implement-spec", identity: "prd:101", labels: [] }],
     ["wrong identity number", { number: 101, operation: "review", identity: "pull-request:102", labels: [] }],
     ["inspection-only unknown", { number: 101, operation: "unknown", identity: "pull-request:101", labels: [] }],
     ["inconsistent target route", { number: 101, operation: "implement", identity: "issue:101", labels: [] }],
@@ -125,7 +126,7 @@ describe("Automation Command routes", () => {
     expect(() => commandRoutesForReceiver("not-a-receiver" as "issue", 101)).toThrow();
   });
 
-  it.each(["unknown", "architecture-review", "not-an-operation"])
+  it.each(["unknown", "architecture-review", "implement-prd", "split-prd", "not-an-operation"])
   ("rejects %s outside the label-triggered route", (operation) => {
     expect(() => resolveAutomationCommandRoute(operation, 101)).toThrow();
     expect(() => resolveTargetOperationRoute(operation, 101)).toThrow();

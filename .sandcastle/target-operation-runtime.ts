@@ -11,10 +11,10 @@ import { createProcessFeedbackImplementer } from "./feedback-process-runner.ts";
 import { createFeedbackPublisher } from "./feedback-publisher.ts";
 import { runImplementationAutomationCommand } from "./implementation-automation.ts";
 import { createProcessImplementer } from "./implementation-process-runner.ts";
-import { runPrdImplementationAutomationCommand } from "./prd-implementation-automation.ts";
-import { createProcessPrdImplementer } from "./prd-implementation-process-runner.ts";
-import { runPrdSplitAutomationCommand } from "./prd-split-automation.ts";
-import { createProcessPrdSplitter } from "./prd-split-process-runner.ts";
+import { runSpecImplementationAutomationCommand } from "./spec-implementation-automation.ts";
+import { createProcessSpecImplementer } from "./spec-implementation-process-runner.ts";
+import { runSpecSplitAutomationCommand } from "./spec-split-automation.ts";
+import { createProcessSpecSplitter } from "./spec-split-process-runner.ts";
 import { createReviewArtifactDirectory } from "./review-artifacts.ts";
 import { runReviewAutomationCommand } from "./review-automation.ts";
 import { createProcessReviewRunner } from "./review-process-runner.ts";
@@ -36,13 +36,13 @@ export interface TargetOperationRuntimeDependencies {
   readonly targetWorkerStartup: typeof targetWorkerStartup;
   readonly runImplementation: typeof runImplementationAutomationCommand;
   readonly createImplementer: typeof createProcessImplementer;
-  readonly runPrdImplementation: typeof runPrdImplementationAutomationCommand;
-  readonly createPrdImplementer: typeof createProcessPrdImplementer;
+  readonly runSpecImplementation: typeof runSpecImplementationAutomationCommand;
+  readonly createSpecImplementer: typeof createProcessSpecImplementer;
   readonly runFeedback: typeof runFeedbackImplementation;
   readonly createFeedbackImplementer: typeof createProcessFeedbackImplementer;
   readonly createFeedbackPublisher: typeof createFeedbackPublisher;
-  readonly runSplit: typeof runPrdSplitAutomationCommand;
-  readonly createSplitter: typeof createProcessPrdSplitter;
+  readonly runSplit: typeof runSpecSplitAutomationCommand;
+  readonly createSplitter: typeof createProcessSpecSplitter;
   readonly runReview: typeof runReviewAutomationCommand;
   readonly createReviewRunner: typeof createProcessReviewRunner;
   readonly createReviewPublisher: typeof createReviewPublisher;
@@ -61,13 +61,13 @@ const productionDependencies: TargetOperationRuntimeDependencies = {
   targetWorkerStartup,
   runImplementation: runImplementationAutomationCommand,
   createImplementer: createProcessImplementer,
-  runPrdImplementation: runPrdImplementationAutomationCommand,
-  createPrdImplementer: createProcessPrdImplementer,
+  runSpecImplementation: runSpecImplementationAutomationCommand,
+  createSpecImplementer: createProcessSpecImplementer,
   runFeedback: runFeedbackImplementation,
   createFeedbackImplementer: createProcessFeedbackImplementer,
   createFeedbackPublisher,
-  runSplit: runPrdSplitAutomationCommand,
-  createSplitter: createProcessPrdSplitter,
+  runSplit: runSpecSplitAutomationCommand,
+  createSplitter: createProcessSpecSplitter,
   runReview: runReviewAutomationCommand,
   createReviewRunner: createProcessReviewRunner,
   createReviewPublisher,
@@ -136,12 +136,12 @@ export async function runTargetOperationWithDependencies(
       createJobId,
     });
   }
-  if (invocation.operation === "implement-prd") {
-    return dependencies.runPrdImplementation({ issueNumber: workItemNumber }, {
+  if (invocation.operation === "implement-spec") {
+    return dependencies.runSpecImplementation({ issueNumber: workItemNumber }, {
       github,
       pullRequests: github,
       checkout,
-      implementer: dependencies.createPrdImplementer({
+      implementer: dependencies.createSpecImplementer({
         startup: dependencies.targetWorkerStartup(startup, "github-agent"),
         plannerModel: startup.models.planner,
         implementerModel: startup.models.implementer,
@@ -168,7 +168,7 @@ export async function runTargetOperationWithDependencies(
       createJobId,
     });
   }
-  if (invocation.operation === "split-prd") {
+  if (invocation.operation === "split-spec") {
     return dependencies.runSplit({ issueNumber: workItemNumber }, {
       github,
       checkout,

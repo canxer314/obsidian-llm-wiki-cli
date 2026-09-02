@@ -16,8 +16,8 @@ const protocolRunnerNames = new Set([
   "branch-update-process-runner.ts",
   "feedback-process-runner.ts",
   "implementation-process-runner.ts",
-  "prd-implementation-process-runner.ts",
-  "prd-split-process-runner.ts",
+  "spec-implementation-process-runner.ts",
+  "spec-split-process-runner.ts",
   "review-process-runner.ts",
 ]);
 
@@ -180,9 +180,9 @@ describe("worker process lifecycle ownership", () => {
       "branch-update-process-runner.ts",
       "feedback-process-runner.ts",
       "implementation-process-runner.ts",
-      "prd-implementation-process-runner.ts",
-      "prd-split-process-runner.ts",
       "review-process-runner.ts",
+      "spec-implementation-process-runner.ts",
+      "spec-split-process-runner.ts",
     ]);
     for (const { name, content } of protocolRunners) {
       expect(content).not.toMatch(/\b(?:kill|wait|groupExited|probeGroup|processGroupOwner|inherited)\s*:/u);

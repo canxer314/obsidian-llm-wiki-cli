@@ -48,12 +48,12 @@ export function parseReconcileFlags(flags: readonly string[]): FeedbackReconcile
   };
 }
 
-export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeedback, TSplit, TUpdate, TDispatch, TInspect, TSetup, TBuildImage, TArchitectureReview>(
+export async function runAutomationCli<TReview, TImplement, TImplementSpec, TFeedback, TSplit, TUpdate, TDispatch, TInspect, TSetup, TBuildImage, TArchitectureReview>(
   argv: readonly string[],
   dependencies: {
     readonly runReview: (pullRequestNumber: number) => Promise<TReview>;
     readonly runImplement: (issueNumber: number) => Promise<TImplement>;
-    readonly runImplementPrd: (issueNumber: number) => Promise<TImplementPrd>;
+    readonly runImplementSpec: (issueNumber: number) => Promise<TImplementSpec>;
     readonly runFeedback: (pullRequestNumber: number, reconcile?: FeedbackReconcileRequest) => Promise<TFeedback>;
     readonly runSplit: (issueNumber: number) => Promise<TSplit>;
     readonly runUpdate: (pullRequestNumber: number) => Promise<TUpdate>;
@@ -64,7 +64,7 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
     readonly buildImage?: () => Promise<TBuildImage>;
     readonly architectureReview?: () => Promise<TArchitectureReview>;
   },
-): Promise<TReview | TImplement | TImplementPrd | TFeedback | TSplit | TUpdate | TDispatch | TInspect | TSetup | TBuildImage | TArchitectureReview> {
+): Promise<TReview | TImplement | TImplementSpec | TFeedback | TSplit | TUpdate | TDispatch | TInspect | TSetup | TBuildImage | TArchitectureReview> {
   if (argv[0] === "build-image") {
     if (argv.length !== 1 || dependencies.buildImage === undefined) throw new AutomationCliError("Expected: build-image");
     return dependencies.buildImage();
@@ -109,23 +109,23 @@ export async function runAutomationCli<TReview, TImplement, TImplementPrd, TFeed
   const [command, operation, number, ...remaining] = argv;
   if (
     command !== "run" ||
-    (operation !== "review" && operation !== "implement" && operation !== "implement-prd" && operation !== "feedback" && operation !== "split" && operation !== "update-branch") ||
+    (operation !== "review" && operation !== "implement" && operation !== "implement-spec" && operation !== "feedback" && operation !== "split" && operation !== "update-branch") ||
     number === undefined ||
     remaining.length > 0
   ) {
-    if (command === "run" && operation !== undefined && !["review", "implement", "implement-prd", "feedback", "split", "update-branch"].includes(operation)) {
+    if (command === "run" && operation !== undefined && !["review", "implement", "implement-spec", "feedback", "split", "update-branch"].includes(operation)) {
       throw new AutomationCliError(`Unknown automation operation: ${operation}`);
     }
-    throw new AutomationCliError(`Expected: run review <pull-request-number>, run feedback <pull-request-number>, run implement <issue-number>, run implement-prd <issue-number>, run split <issue-number>, run update-branch <pull-request-number>, or ${RECONCILE_USAGE.replace("Expected: ", "")}`);
+    throw new AutomationCliError(`Expected: run review <pull-request-number>, run feedback <pull-request-number>, run implement <issue-number>, run implement-spec <issue-number>, run split <issue-number>, run update-branch <pull-request-number>, or ${RECONCILE_USAGE.replace("Expected: ", "")}`);
   }
   if (!/^[1-9]\d*$/u.test(number) || !Number.isSafeInteger(Number(number))) {
-    throw new AutomationCliError(`${operation} requires a positive ${operation === "implement" || operation === "implement-prd" || operation === "split" ? "Issue" : "Pull Request"} number`);
+    throw new AutomationCliError(`${operation} requires a positive ${operation === "implement" || operation === "implement-spec" || operation === "split" ? "Issue" : "Pull Request"} number`);
   }
   await dependencies.preflight?.(operation);
   if (operation === "review") return dependencies.runReview(Number(number));
   if (operation === "feedback") return dependencies.runFeedback(Number(number));
   if (operation === "implement") return dependencies.runImplement(Number(number));
-  if (operation === "implement-prd") return dependencies.runImplementPrd(Number(number));
+  if (operation === "implement-spec") return dependencies.runImplementSpec(Number(number));
   if (operation === "split") return dependencies.runSplit(Number(number));
   return dependencies.runUpdate(Number(number));
 }
