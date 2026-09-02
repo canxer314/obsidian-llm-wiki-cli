@@ -1,198 +1,175 @@
-# Using Sandcastle automation
+<a id="using-sandcastle-automation"></a>
+# 使用 Sandcastle 自动化
 
-Sandcastle turns explicit labels on GitHub Issues and Pull Requests into local
-automation jobs. This guide is for contributors who want to submit and advance
-work. For deployment, credentials, systemd, retained artifacts, or incident
-response, use the [operator runbook](sandcastle-local-dispatcher-runbook.md).
+Sandcastle 把 GitHub Issue 和 Pull Request 上的显式标签转换为本地自动化任务。本指南面向提交和推进工作的贡献者。部署、凭据、systemd、保留产物和故障处理请参阅[运维手册](sandcastle-local-dispatcher-runbook.md)。
 
-## Before you add a label
+<a id="before-you-add-a-label"></a>
+## 添加标签前
 
-Make the Issue, PRD, review thread, or Pull Request self-contained. State the
-requested behavior, relevant constraints, and acceptance criteria. A label
-authorizes an operation; it does not replace the work description.
+Issue、PRD、review thread 或 Pull Request 必须能够独立说明任务。请写清楚预期行为、相关约束和验收标准。标签只授权相应操作，不能代替任务说明。
 
-The local Dispatcher scans GitHub every minute. You normally add a label and
-wait for the next round; you do not need to run a local Sandcastle command.
+本地 Dispatcher 每分钟扫描一次 GitHub。一般只需添加标签并等待下一轮扫描，不需要在本地运行 Sandcastle 命令。
 
 > [!IMPORTANT]
-> Sandcastle does not merge Pull Requests. A successful review makes the Draft
-> Pull Request ready for human review. A person must still verify required
-> checks and merge it.
+> Sandcastle 不会合并 Pull Request。自动 review 成功后，它会把 Draft Pull Request 标记为 Ready for Review。最终仍需人工核对 required checks 并合并。
 
-## Label reference
+<a id="label-reference"></a>
+## 标签参考
 
-### Labels contributors add
+<a id="labels-contributors-add"></a>
+### 贡献者添加的标签
 
-| GitHub object | Label | Requested operation | Successful stopping point |
+| GitHub 对象 | 标签 | 请求的操作 | 成功后的停止位置 |
 | --- | --- | --- | --- |
-| Top-level Issue without sub-issues | `agent:implement` | Plan and implement the Issue | One `sandcastle/issue-<n>` branch and one Draft Pull Request |
-| Top-level Issue without sub-issues | `agent:to-issues` | Split a PRD into self-contained sub-issues | Linked sub-issues with blocking dependencies |
-| Top-level Issue with sub-issues | `agent:implement` | Implement the next eligible PRD child | The next child is requested automatically; the final child requests PR review automatically |
-| Draft Pull Request | `agent:review` | Review the exact current revision and fix it when needed | Published review and a Pull Request marked Ready for Review |
-| Pull Request | `agent:implement` | Implement actionable review feedback | The same branch and Pull Request are updated |
-| Pull Request | `agent:update-branch` | Update the head branch from its base branch | The same branch and Pull Request are updated |
-| Top-level Issue | `agent:queued` | Wait for all blocking Issues to close | The label is changed to `agent:implement`, then normal implementation begins |
+| 没有子 Issue 的顶层 Issue | `agent:implement` | 规划并实现该 Issue | 一个 `sandcastle/issue-<n>` 分支和一个 Draft Pull Request |
+| 没有子 Issue 的顶层 Issue | `agent:to-issues` | 把 PRD 拆成可独立理解的子 Issue | 相互链接并带 blocking dependency 的子 Issue |
+| 带子 Issue 的顶层 Issue | `agent:implement` | 实现下一个符合条件的 PRD 子 Issue | 自动请求下一个子 Issue；最后一个完成后自动请求 PR review |
+| Draft Pull Request | `agent:review` | review 当前精确 revision，必要时修复 | 发布 review，并将 Pull Request 标记为 Ready for Review |
+| Pull Request | `agent:implement` | 实现可执行的 review feedback | 更新同一分支和 Pull Request |
+| Pull Request | `agent:update-branch` | 从 base branch 更新 head branch | 更新同一分支和 Pull Request |
+| 顶层 Issue | `agent:queued` | 等待所有 blocking Issue 关闭 | 标签改为 `agent:implement`，随后进入普通实现流程 |
 
-Do not put `agent:queued` or an operation label on a PRD child. The parent PRD
-drives its children. Pull Requests from forks are not eligible for these write
-operations.
+不要给 PRD 子 Issue 添加 `agent:queued` 或操作标签。父 PRD 负责推进子 Issue。来自 fork 的 Pull Request 不能执行这些写操作。
 
-### Labels Sandcastle manages
+<a id="labels-sandcastle-manages"></a>
+### Sandcastle 管理的标签
 
-| Label | Meaning | Contributor action |
+| 标签 | 含义 | 贡献者该做什么 |
 | --- | --- | --- |
-| `agent:in-progress` | Sandcastle acquired the work item | Do not add or remove it during a job |
-| `agent:blocked` | Execution, timeout, push, or publication failed | Diagnose the failure before authorizing a retry |
+| `agent:in-progress` | Sandcastle 已获取该 Work Item | 任务运行期间不要添加或移除该标签 |
+| `agent:blocked` | 执行、超时、push 或发布失败 | 找出失败原因后再授权重试 |
 
-A trigger label is consumed when Sandcastle acquires its operation. Its absence
-after acquisition does not mean the work was cancelled.
+Sandcastle 获取操作时会消费触发标签。获取后标签消失，不代表任务被取消。
 
-## Common workflows
+<a id="common-workflows"></a>
+## 常用工作流
 
-### Implement an ordinary Issue
+<a id="implement-an-ordinary-issue"></a>
+### 实现普通 Issue
 
-1. Write a complete, top-level Issue with no sub-issues.
-2. Add the implementation label:
+1. 创建一个说明完整、没有子 Issue 的顶层 Issue。
+2. 添加实现标签：
 
    ```bash
    gh issue edit <issue-number> --add-label agent:implement
    ```
 
-3. Wait for Sandcastle to create `sandcastle/issue-<issue-number>` and exactly
-   one Draft Pull Request whose body closes the Issue.
-4. Inspect the implementation and then request automated review on that Draft
-   Pull Request:
+3. 等待 Sandcastle 创建 `sandcastle/issue-<issue-number>` 分支，以及正文中关闭该 Issue 的唯一一个 Draft Pull Request。
+4. 检查实现，然后在该 Draft Pull Request 上请求自动 review：
 
    ```bash
    gh pr edit <pr-number> --add-label agent:review
    ```
 
-5. After Sandcastle publishes its review and marks the Pull Request Ready for
-   Review, verify the required checks and merge it manually.
+5. Sandcastle 发布 review 并将 Pull Request 标记为 Ready for Review 后，检查 required checks，再手动合并。
 
-Ordinary Issue implementation does **not** add `agent:review` automatically.
+普通 Issue 实现不会自动添加 `agent:review`。
 
 ```text
 Issue + agent:implement
-  -> implementation branch + Draft PR
-  -> human adds agent:review
-  -> automated review and possible fixes
+  -> 实现分支 + Draft PR
+  -> 人工添加 agent:review
+  -> 自动 review，必要时修复
   -> Ready for Review
-  -> human merge
+  -> 人工合并
 ```
 
-### Split and implement a PRD
+<a id="split-and-implement-a-prd"></a>
+### 拆分并实现 PRD
 
-Use this flow when one top-level Issue describes work that should be delivered
-as ordered, independently understandable sub-issues.
+当一个顶层 Issue 描述的工作需要按顺序拆成多个可独立理解的子 Issue 时，使用此流程。
 
-1. Add the split trigger to the PRD:
+1. 给 PRD 添加拆分触发标签：
 
    ```bash
    gh issue edit <prd-number> --add-label agent:to-issues
    ```
 
-2. Check the generated sub-issues and their blocking relationships.
-3. Add the implementation trigger to the **parent PRD**, not its children:
+2. 检查生成的子 Issue 及其 blocking relationship。
+3. 给父 PRD 添加实现触发标签，不要给子 Issue 添加：
 
    ```bash
    gh issue edit <prd-number> --add-label agent:implement
    ```
 
-4. Sandcastle implements one eligible child at a time on the shared
-   `sandcastle/prd-<prd-number>` branch. After a child succeeds, it closes that
-   child and requests the next one automatically.
-5. When the last child succeeds, Sandcastle adds `agent:review` to the shared
-   Draft Pull Request automatically.
-6. After review makes the Pull Request ready, verify required checks and merge
-   it manually.
+4. Sandcastle 每次在共享的 `sandcastle/prd-<prd-number>` 分支上实现一个符合条件的子 Issue。一个子 Issue 成功后，Sandcastle 会关闭它并自动请求下一个。
+5. 最后一个子 Issue 成功后，Sandcastle 会自动给共享 Draft Pull Request 添加 `agent:review`。
+6. review 将 Pull Request 标记为 Ready for Review 后，检查 required checks，再手动合并。
 
 ```text
 PRD + agent:to-issues
-  -> linked sub-issues
-  -> parent PRD + agent:implement
-  -> children implemented in order
-  -> automatic agent:review on the final Draft PR
+  -> 相互链接的子 Issue
+  -> 父 PRD + agent:implement
+  -> 按顺序实现子 Issue
+  -> 最后一个 Draft PR 自动获得 agent:review
   -> Ready for Review
-  -> human merge
+  -> 人工合并
 ```
 
-### Implement Pull Request feedback
+<a id="implement-pull-request-feedback"></a>
+### 实现 Pull Request feedback
 
-1. Leave the requested change in an unresolved Pull Request review thread.
-2. Add the implementation label to the Pull Request:
+1. 在尚未解决的 Pull Request review thread 中写明要修改的内容。
+2. 给 Pull Request 添加实现标签：
 
    ```bash
    gh pr edit <pr-number> --add-label agent:implement
    ```
 
-3. Sandcastle implements the selected feedback on the existing head branch,
-   pushes the result to the same Pull Request, and replies with reconciliation
-   evidence.
-4. If another automated review is wanted, add `agent:review` after the feedback
-   implementation has finished.
+3. Sandcastle 在现有 head branch 上实现选中的 feedback，把结果 push 到同一个 Pull Request，并回复 reconciliation evidence。
+4. 如果还需要一次自动 review，请在 feedback 实现完成后添加 `agent:review`。
 
-On a Pull Request, `agent:implement` means **implement review feedback**. It
-does not mean ordinary Issue implementation and does not merge the Pull
-Request.
+在 Pull Request 上，`agent:implement` 表示实现 review feedback。它不表示普通 Issue 实现，也不会合并 Pull Request。
 
-### Update a Pull Request branch
+<a id="update-a-pull-request-branch"></a>
+### 更新 Pull Request 分支
 
-For a non-fork Pull Request that needs the latest base branch:
+需要从最新 base branch 更新且不是来自 fork 的 Pull Request，可以添加：
 
 ```bash
 gh pr edit <pr-number> --add-label agent:update-branch
 ```
 
-Sandcastle updates the existing head branch. If it is already current, it
-leaves a comment and makes no commit. Request review separately when needed.
+Sandcastle 会更新现有 head branch。如果分支已经是最新状态，它只会留下评论，不会创建 commit。需要 review 时请另行请求。
 
-### Queue work behind blockers
+<a id="queue-work-behind-blockers"></a>
+### 排队等待 blocker
 
-Use GitHub blocking dependencies to describe the gate, then label the
-**top-level Issue**:
+用 GitHub blocking dependency 描述阻塞关系，然后给顶层 Issue 添加标签：
 
 ```bash
 gh issue edit <issue-number> --add-label agent:queued
 ```
 
-Each dispatch round reads the current dependency state. Once every blocker is
-closed, Sandcastle changes `agent:queued` to `agent:implement`; no event replay
-or manual promotion is required. A queued sub-issue is refused because its
-parent PRD owns child progression.
+每轮 dispatch 都会读取当前 dependency 状态。所有 blocker 关闭后，Sandcastle 会把 `agent:queued` 改为 `agent:implement`，无需重放事件或手动提升。系统会拒绝排队的子 Issue，因为子 Issue 的推进由父 PRD 管理。
 
-## Observe progress
+<a id="observe-progress"></a>
+## 查看进度
 
-GitHub is the durable status surface:
+GitHub 是持久状态的查看入口：
 
-- the trigger label means the operation is waiting to be acquired;
-- `agent:in-progress` means a job has acquired it;
-- `agent:blocked` plus the diagnostic comment means the job failed;
-- a branch, Draft Pull Request, review, comment, or label transition records a
-  successful operation's result.
+- 触发标签表示操作正在等待获取；
+- `agent:in-progress` 表示任务已获取该操作；
+- `agent:blocked` 和诊断评论表示任务失败；
+- 分支、Draft Pull Request、review、评论或标签变化记录成功结果。
 
-If you also operate the trusted local checkout, the read-only inspection is:
+如果你也负责受信任的本地 checkout，可以运行只读检查：
 
 ```bash
 npm run sandcastle -- inspect
 ```
 
-It reports local image and GitHub readiness, active jobs, and discovered
-commands with eligibility such as `eligible`, `blocked`, `stale-in-progress`,
-or `inconsistent`. It never changes GitHub or local job state.
+该命令报告本地镜像和 GitHub readiness、活动任务及发现的命令，并显示 `eligible`、`blocked`、`stale-in-progress`、`inconsistent` 等 eligibility。它不会修改 GitHub 或本地任务状态。
 
-## Recover blocked work
+<a id="recover-blocked-work"></a>
+## 恢复阻塞任务
 
-Sandcastle does not retry a whole blocked job automatically.
+Sandcastle 不会自动重试整个阻塞任务。
 
-1. Read the classified diagnostic comment on the Issue or Pull Request.
-2. Ask an operator to inspect the local job when the comment is insufficient.
-   Operators use `npm run sandcastle -- inspect`, the systemd journal, and
-   retained artifacts as described in the
-   [runbook](sandcastle-local-dispatcher-runbook.md#blocked-automation-diagnosis).
-3. Fix the underlying problem.
-4. After confirming that no matching job is active, remove `agent:blocked` and
-   restore the original trigger. For example:
+1. 阅读 Issue 或 Pull Request 上经过分类的诊断评论。
+2. 如果评论不足以定位问题，请运维人员检查本地任务。运维人员应按[运维手册](sandcastle-local-dispatcher-runbook.md#blocked-automation-diagnosis)使用 `npm run sandcastle -- inspect`、systemd journal 和保留产物。
+3. 修复根本原因。
+4. 确认没有匹配的活动任务后，移除 `agent:blocked` 并恢复原触发标签。例如：
 
    ```bash
    gh issue edit <issue-number> \
@@ -200,33 +177,22 @@ Sandcastle does not retry a whole blocked job automatically.
      --add-label agent:implement
    ```
 
-   For a Pull Request, use `gh pr edit` and restore the appropriate
-   `agent:review`, `agent:implement`, or `agent:update-branch` trigger.
+   对 Pull Request 使用 `gh pr edit`，并根据操作恢复 `agent:review`、`agent:implement` 或 `agent:update-branch`。
 
-Do not create a replacement Issue, branch, or Pull Request to bypass a blocked
-job. A retry reuses the existing work item and implementation branch.
+不要创建替代 Issue、分支或 Pull Request 来绕过阻塞任务。重试必须复用现有 Work Item 和实现分支。
 
-If `agent:in-progress` appears stale, do not clear it based only on elapsed
-time. An operator must first confirm through inspection and local logs that no
-matching job is active. A work item carrying both a trigger and
-`agent:in-progress` is inconsistent and will not run until corrected manually.
+如果 `agent:in-progress` 看起来已经过期，不要只根据经过的时间清除它。运维人员必须先通过检查和本地日志确认没有匹配的活动任务。一个 Work Item 同时带有触发标签和 `agent:in-progress` 时属于 `inconsistent`，人工修正前不会执行。
 
-A local image or GitHub credential readiness failure happens before acquisition:
-the trigger remains present and Sandcastle does not add `agent:blocked`. An
-operator fixes readiness, after which the next scheduled round can pick up the
-unchanged command.
+本地镜像或 GitHub 凭据 readiness 失败发生在获取之前。触发标签会保留，Sandcastle 不会添加 `agent:blocked`。运维人员恢复 readiness 后，下一轮扫描会获取未变化的命令。
 
-## What Sandcastle does not infer
+<a id="what-sandcastle-does-not-infer"></a>
+## Sandcastle 不会自行推断什么
 
-The Dispatcher validates explicitly labelled work; it does not scan every
-Issue and Pull Request and decide what the repository should do next. In
-particular, it does not:
+Dispatcher 只校验带有显式标签的工作，不会扫描所有 Issue 和 Pull Request 并决定仓库下一步该做什么。它不会：
 
-- infer that an unlabelled Issue is ready to implement;
-- infer that an ordinary implementation Draft Pull Request is ready to review;
-- infer that a Ready Pull Request may be merged;
-- merge or enable GitHub auto-merge.
+- 推断一个没有标签的 Issue 已经可以实现；
+- 推断普通实现产生的 Draft Pull Request 已经可以 review；
+- 推断 Ready Pull Request 可以合并；
+- 合并 Pull Request 或启用 GitHub auto-merge。
 
-The explicit labels above are the authorization boundary. When unsure, leave
-the work item unlabelled and ask a maintainer which single operation should run
-next.
+以上显式标签就是授权边界。不确定时不要给 Work Item 添加标签，请维护者明确下一步只能执行哪一个操作。
