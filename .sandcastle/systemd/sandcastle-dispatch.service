@@ -28,6 +28,8 @@ ExecStart=%h/.nvm/versions/node/v24.19.0/bin/node --experimental-strip-types .sa
 TimeoutStartSec=0
 # Child tools (claude, gh, git, docker, node, npm) resolve through this PATH.
 Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v24.19.0/bin:/usr/local/bin:/usr/bin:/bin
+# Bounded dispatch workers per round (default 2, allowed 1-8).
+Environment=SANDCASTLE_DISPATCH_CONCURRENCY=4
 # No credentials live in this unit. GH_TOKEN, Claude/CC-Switch routing and
 # authentication, and WSL proxy transport settings are loaded at startup from
 # ~/.claude/settings.json and the protected private environment file
