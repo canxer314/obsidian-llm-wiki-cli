@@ -2,11 +2,11 @@ const trustedFailureSummaries = new WeakMap<object, string>();
 
 const trustedTargetOperations = [
   "implement-issue",
-  "implement-prd",
+  "implement-spec",
   "implement-feedback",
   "review",
   "update-branch",
-  "split-prd",
+  "split-spec",
   "architecture-review",
 ] as const;
 const trustedTargetOperationSet = new Set<string>(trustedTargetOperations);

@@ -19,32 +19,32 @@ const revision = "a".repeat(40);
 
 const operationStatuses: Readonly<Record<TargetOperationIdentity, string>> = {
   "implement-issue": "implemented",
-  "implement-prd": "implemented",
+  "implement-spec": "implemented",
   "implement-feedback": "implemented",
   review: "reviewed",
   "update-branch": "updated",
-  "split-prd": "split",
+  "split-spec": "split",
   "architecture-review": "proposed",
 };
 
 const operationEntries: Readonly<Record<TargetOperationIdentity, string>> = {
   "implement-issue": "implement-issue.ts",
-  "implement-prd": "implement-prd.ts",
+  "implement-spec": "implement-spec.ts",
   "implement-feedback": "implement-pr.ts",
   review: "review-pr.ts",
   "update-branch": "update-branch.ts",
-  "split-prd": "split-prd.ts",
+  "split-spec": "split-spec.ts",
   "architecture-review": "architecture-review.ts",
 };
 
 describe("Target operation runner", () => {
   it.each([
     ["implement-issue", 60 * 60 * 1000],
-    ["implement-prd", 60 * 60 * 1000],
+    ["implement-spec", 60 * 60 * 1000],
     ["implement-feedback", 60 * 60 * 1000],
     ["review", 30 * 60 * 1000],
     ["update-branch", 60 * 60 * 1000],
-    ["split-prd", 60 * 60 * 1000],
+    ["split-spec", 60 * 60 * 1000],
     ["architecture-review", 21 * 60 * 1000],
   ] as const)("applies the %i-millisecond whole-job timeout for %s", async (operation, timeoutMilliseconds) => {
     const runWorker = vi.fn(async () => ({ output: JSON.stringify({ status: operationStatuses[operation] }), code: 0, diagnostics: "" }));
@@ -667,7 +667,7 @@ describe("Target operation runner", () => {
         [
           'let input = ""; for await (const chunk of process.stdin) input += chunk;',
           'const startup = JSON.parse(input);',
-          'const invocation = JSON.parse(process.argv[3]); console.log(JSON.stringify({ status: ({ "implement-issue": "implemented", "implement-prd": "implemented", "implement-feedback": "implemented", review: "reviewed", "update-branch": "updated", "split-prd": "split", "architecture-review": "proposed" })[invocation.operation], source: "authorized-operation", number: Number(process.argv[2]), token: startup.childEnvironments.github.GH_TOKEN, tokenInArguments: process.argv.includes(startup.childEnvironments.github.GH_TOKEN) }));',
+          'const invocation = JSON.parse(process.argv[3]); console.log(JSON.stringify({ status: ({ "implement-issue": "implemented", "implement-spec": "implemented", "implement-feedback": "implemented", review: "reviewed", "update-branch": "updated", "split-spec": "split", "architecture-review": "proposed" })[invocation.operation], source: "authorized-operation", number: Number(process.argv[2]), token: startup.childEnvironments.github.GH_TOKEN, tokenInArguments: process.argv.includes(startup.childEnvironments.github.GH_TOKEN) }));',
         ].join("\n"),
       );
       const withCheckout = vi.fn(async (request, action: (path: string) => Promise<{

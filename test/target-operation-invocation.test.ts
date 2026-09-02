@@ -20,8 +20,8 @@ import {
 const REVISION = "a".repeat(40);
 const ISSUE_OPERATIONS = [
   "implement-issue",
-  "implement-prd",
-  "split-prd",
+  "implement-spec",
+  "split-spec",
 ] as const;
 const PULL_REQUEST_OPERATIONS = [
   "implement-feedback",
@@ -30,8 +30,8 @@ const PULL_REQUEST_OPERATIONS = [
 ] as const;
 const NON_FEEDBACK_OPERATIONS = [
   "implement-issue",
-  "implement-prd",
-  "split-prd",
+  "implement-spec",
+  "split-spec",
   "review",
   "update-branch",
 ] as const;
@@ -66,8 +66,8 @@ const sideEffectDependencyNames = [
   "targetWorkerStartup",
   "runImplementation",
   "createImplementer",
-  "runPrdImplementation",
-  "createPrdImplementer",
+  "runSpecImplementation",
+  "createSpecImplementer",
   "runFeedback",
   "createFeedbackImplementer",
   "createFeedbackPublisher",

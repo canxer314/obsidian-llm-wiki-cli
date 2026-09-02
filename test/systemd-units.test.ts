@@ -102,7 +102,7 @@ describe("systemd Dispatcher templates", () => {
     expect(argv).toEqual(["dispatch"]);
     const dispatch = vi.fn().mockResolvedValue({ status: "dispatched", selected: [] });
     await expect(runAutomationCli(argv ?? [], {
-      runReview: vi.fn(), runImplement: vi.fn(), runImplementPrd: vi.fn(),
+      runReview: vi.fn(), runImplement: vi.fn(), runImplementSpec: vi.fn(),
       runFeedback: vi.fn(), runSplit: vi.fn(), runUpdate: vi.fn(), dispatch,
     })).resolves.toEqual({ status: "dispatched", selected: [] });
     expect(dispatch).toHaveBeenCalledOnce();
@@ -118,7 +118,7 @@ describe("systemd Dispatcher templates", () => {
     expect(argv).toEqual(["architecture-review"]);
     const architectureReview = vi.fn().mockResolvedValue({ status: "skipped" });
     await expect(runAutomationCli(argv ?? [], {
-      runReview: vi.fn(), runImplement: vi.fn(), runImplementPrd: vi.fn(),
+      runReview: vi.fn(), runImplement: vi.fn(), runImplementSpec: vi.fn(),
       runFeedback: vi.fn(), runSplit: vi.fn(), runUpdate: vi.fn(), architectureReview,
     })).resolves.toEqual({ status: "skipped" });
     expect(architectureReview).toHaveBeenCalledOnce();

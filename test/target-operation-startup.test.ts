@@ -35,11 +35,11 @@ const snapshot = {
 describe("Target operation startup", () => {
   it.each([
     ["implement-issue", "github-agent-with-cli", "implementer-model", "implementation"],
-    ["implement-prd", "github-agent", "implementer-model", "prd-implementation"],
+    ["implement-spec", "github-agent", "implementer-model", "spec-implementation"],
     ["implement-feedback", "github-agent", "implementer-model", "feedback"],
     ["review", "github-agent", "reviewer-model", "review"],
     ["update-branch", "claude-only", "implementer-model", "branch-update"],
-    ["split-prd", "github-agent", "planner-model", "split"],
+    ["split-spec", "github-agent", "planner-model", "split"],
     ["architecture-review", "claude-only", "planner-model", "architecture-review"],
   ] as const)("composes %s with its %s profile and %s model", async (operation, profile, model, runner) => {
     const events: string[] = [];
@@ -55,8 +55,8 @@ describe("Target operation startup", () => {
         await dependencies.implementer.implement({});
         return { status: "implemented" };
       },
-      createPrdImplementer: (options) => ({ implement: async () => { events.push(`prd-implementation:${options.implementerModel}`); return {}; } }),
-      runPrdImplementation: async (_request, dependencies) => {
+      createSpecImplementer: (options) => ({ implement: async () => { events.push(`spec-implementation:${options.implementerModel}`); return {}; } }),
+      runSpecImplementation: async (_request, dependencies) => {
         await dependencies.implementer.implement({});
         return { status: "implemented" };
       },

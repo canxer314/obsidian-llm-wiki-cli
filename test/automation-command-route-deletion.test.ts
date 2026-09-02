@@ -22,8 +22,8 @@ const canonicalRoutes = [
   ["implement", "implement-feedback", "agent:implement", "pull-request", "pull-request"],
   ["review", "review", "agent:review", "pull-request", "pull-request"],
   ["implement-issue", "implement-issue", "agent:implement", "issue", "issue"],
-  ["implement-prd", "implement-prd", "agent:implement", "issue", "prd"],
-  ["split-prd", "split-prd", "agent:to-issues", "issue", "prd"],
+  ["implement-spec", "implement-spec", "agent:implement", "issue", "spec"],
+  ["split-spec", "split-spec", "agent:to-tickets", "issue", "spec"],
 ] as const;
 
 const migrationSurfaces = [

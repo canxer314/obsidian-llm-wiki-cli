@@ -151,11 +151,11 @@ export async function requireGithubAgentReadiness(options: {
 }
 
 // Operations whose Agent Session contract invokes the GitHub CLI receive the
-// GitHub-capable container environment (#267): Issue/PRD planning and
-// implementation, feedback implementation, Pull Request review, and PRD
+// GitHub-capable container environment (#267): Issue/Spec planning and
+// implementation, feedback implementation, Pull Request review, and Spec
 // splitting. Architecture review, branch update, label setup, and inspection
 // stay on the narrower Claude-only automationSandbox and never run the probe.
-const GITHUB_CAPABLE_OPERATIONS = ["review", "implement", "implement-prd", "feedback", "split"] as const;
+const GITHUB_CAPABLE_OPERATIONS = ["review", "implement", "implement-spec", "feedback", "split"] as const;
 
 export function githubAgentReadinessRequiredFor(operation: string): boolean {
   return (GITHUB_CAPABLE_OPERATIONS as readonly string[]).includes(operation);

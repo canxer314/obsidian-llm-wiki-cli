@@ -76,8 +76,8 @@ const acquired = { state: "OPEN", labels: ["agent:in-progress"], revision, pullR
 
 const NON_PULL_REQUEST_OPERATION_CASES = [
   ["implement-issue", "agent:implement"],
-  ["implement-prd", "agent:implement"],
-  ["split-prd", "agent:to-issues"],
+  ["implement-spec", "agent:implement"],
+  ["split-spec", "agent:to-tickets"],
 ] as const;
 
 function nonPullRequestAcquisitionStates(

@@ -1,22 +1,22 @@
-import { createSameSessionPrdSplitExtractor } from "./prd-split-extraction.ts";
+import { createSameSessionSpecSplitExtractor } from "./spec-split-extraction.ts";
 import { readTargetWorkerStartup } from "./target-operation-startup.ts";
 
-const [prdNumber, title, checkoutPath, model] = process.argv.slice(2);
+const [specNumber, title, checkoutPath, model] = process.argv.slice(2);
 if (
-  prdNumber === undefined ||
+  specNumber === undefined ||
   title === undefined ||
   checkoutPath === undefined ||
   model === undefined
 ) {
-  throw new Error("Expected PRD split worker arguments");
+  throw new Error("Expected Spec split worker arguments");
 }
 
 const startup = await readTargetWorkerStartup();
-const slices = await createSameSessionPrdSplitExtractor({
+const slices = await createSameSessionSpecSplitExtractor({
   sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
 }).split({
-  prdNumber: Number(prdNumber),
+  specNumber: Number(specNumber),
   title,
   checkoutPath,
   model,

@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runPrdImplementationAutomationCommand } from "../.sandcastle/prd-implementation-automation.js";
+import { runSpecImplementationAutomationCommand } from "../.sandcastle/spec-implementation-automation.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const childRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-function prd(overrides = {}) {
+function spec(overrides = {}) {
   return {
     number: 226,
-    title: "Continue PRD implementation",
+    title: "Continue Spec implementation",
     state: "OPEN",
     labels: ["agent:implement"],
     baseRevision: revision,
@@ -39,7 +39,7 @@ function portsFor(overrides: {
   const events: string[] = [];
   const labels = new Set(["agent:implement"]);
   const github = {
-    readPrd: vi.fn(async () => prd({ labels: [...labels] })),
+    readSpec: vi.fn(async () => spec({ labels: [...labels] })),
     listChildren: vi.fn(),
     addIssueLabel: vi.fn(async (number: number, label: string) => {
       labels.add(label);
@@ -51,12 +51,12 @@ function portsFor(overrides: {
     }),
     addRefusalDiagnostic: vi.fn(async (number: number, reason: string) => events.push(`refusal:${number}:${reason}`)),
     closeImplementedChild: vi.fn(async (request: { childNumber: number; revision: string }) => events.push(`close:${request.childNumber}:${request.revision}`)),
-    addPrdImplementationBlockedDiagnostic: vi.fn(async (number: number, diagnostic: { jobId: string }) => events.push(`blocked:${number}:${diagnostic.jobId}`)),
+    addSpecImplementationBlockedDiagnostic: vi.fn(async (number: number, diagnostic: { jobId: string }) => events.push(`blocked:${number}:${diagnostic.jobId}`)),
     addChildFailureDiagnostic: vi.fn(async (number: number) => events.push(`child-failure:${number}`)),
     ...overrides.github,
   };
   const pullRequests = {
-    ensurePrdDraftPullRequest: vi.fn(async (request: { branch: string }) => {
+    ensureSpecDraftPullRequest: vi.fn(async (request: { branch: string }) => {
       events.push(`ensure-pr:${request.branch}`);
       return { number: 401, url: "https://example.test/pr/401" };
     }),
@@ -85,34 +85,34 @@ function portsFor(overrides: {
   return { events, github, pullRequests, checkout, implementer, lease, createJobId: overrides.createJobId };
 }
 
-describe("PRD implementation automation command", () => {
-  it("implements the first open child on the accumulating PRD branch and requests the next child", async () => {
+describe("Spec implementation automation command", () => {
+  it("implements the first open child on the accumulating Spec branch and requests the next child", async () => {
     const ports = portsFor();
     ports.github.listChildren
       .mockResolvedValueOnce([child(301), child(302), child(303)])
       .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302), child(303)]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "implemented",
       childNumber: 301,
-      branch: "sandcastle/prd-226",
+      branch: "sandcastle/spec-226",
       pullRequestUrl: "https://example.test/pr/401",
       continuation: "next-child",
     });
 
     expect(ports.implementer.implement).toHaveBeenCalledWith(expect.objectContaining({
-      prdNumber: 226,
+      specNumber: 226,
       child: { number: 301, title: "Child 301" },
-      branch: "sandcastle/prd-226",
+      branch: "sandcastle/spec-226",
       baseRevision: revision,
     }));
-    expect(ports.pullRequests.ensurePrdDraftPullRequest).toHaveBeenCalledWith(expect.objectContaining({
-      prdNumber: 226,
-      branch: "sandcastle/prd-226",
+    expect(ports.pullRequests.ensureSpecDraftPullRequest).toHaveBeenCalledWith(expect.objectContaining({
+      specNumber: 226,
+      branch: "sandcastle/spec-226",
       headSha: childRevision,
     }));
     expect(ports.github.closeImplementedChild).toHaveBeenCalledWith({
-      prdNumber: 226,
+      specNumber: 226,
       childNumber: 301,
       revision: childRevision,
     });
@@ -120,9 +120,9 @@ describe("PRD implementation automation command", () => {
       "add:226:agent:in-progress",
       "remove:226:agent:implement",
       `checkout:${revision}`,
-      "implement:301:sandcastle/prd-226",
+      "implement:301:sandcastle/spec-226",
       `close:301:${childRevision}`,
-      "ensure-pr:sandcastle/prd-226",
+      "ensure-pr:sandcastle/spec-226",
       "add:226:agent:implement",
       "remove:226:agent:in-progress",
     ]);
@@ -133,9 +133,9 @@ describe("PRD implementation automation command", () => {
   it("refuses when the cross-process lease is unavailable before selecting a child", async () => {
     const ports = portsFor({ lease: { acquire: vi.fn(async () => undefined) } });
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "refused",
-      reason: "PRD #226 is already being implemented",
+      reason: "Spec #226 is already being implemented",
     });
 
     expect(ports.github.listChildren).not.toHaveBeenCalled();
@@ -143,24 +143,24 @@ describe("PRD implementation automation command", () => {
     expect(ports.implementer.implement).not.toHaveBeenCalled();
   });
 
-  it("blocks when the PRD target changes while implementation is being acquired", async () => {
+  it("blocks when the Spec target changes while implementation is being acquired", async () => {
     const ports = portsFor({ createJobId: () => "job-226" });
-    const initialRead = ports.github.readPrd;
+    const initialRead = ports.github.readSpec;
     let reads = 0;
-    ports.github.readPrd = vi.fn(async () => {
+    ports.github.readSpec = vi.fn(async () => {
       reads += 1;
       return reads === 1
         ? initialRead()
-        : prd({
+        : spec({
           labels: ["agent:in-progress"],
           baseRevision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         });
     });
     ports.github.listChildren.mockResolvedValue([child(301), child(302), child(303)]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "blocked",
-      reason: "prd-implementation-execution",
+      reason: "spec-implementation-execution",
       jobId: "job-226",
     });
 
@@ -176,7 +176,7 @@ describe("PRD implementation automation command", () => {
       .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302), child(303)])
       .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302, { state: "CLOSED" }), child(303)]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual(
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual(
       expect.objectContaining({ status: "implemented", childNumber: 302, continuation: "next-child" }),
     );
 
@@ -184,7 +184,7 @@ describe("PRD implementation automation command", () => {
       child: { number: 302, title: "Child 302" },
     }));
     expect(ports.github.closeImplementedChild).toHaveBeenCalledWith({
-      prdNumber: 226,
+      specNumber: 226,
       childNumber: 302,
       revision: childRevision,
     });
@@ -196,10 +196,10 @@ describe("PRD implementation automation command", () => {
       .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302, { state: "CLOSED" }), child(303)])
       .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302, { state: "CLOSED" }), child(303, { state: "CLOSED" })]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "implemented",
       childNumber: 303,
-      branch: "sandcastle/prd-226",
+      branch: "sandcastle/spec-226",
       pullRequestUrl: "https://example.test/pr/401",
       continuation: "final-review",
     });
@@ -217,7 +217,7 @@ describe("PRD implementation automation command", () => {
       child(303),
     ]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "refused",
       reason: "Sub-issue #302 cannot start while 2 blocker(s) remain open",
     });
@@ -228,13 +228,13 @@ describe("PRD implementation automation command", () => {
     expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses a PRD whose children are all closed without blocking it", async () => {
+  it("refuses a Spec whose children are all closed without blocking it", async () => {
     const ports = portsFor({
-      github: { readPrd: vi.fn().mockResolvedValue(prd({ subIssueCount: 2 })) },
+      github: { readSpec: vi.fn().mockResolvedValue(spec({ subIssueCount: 2 })) },
     });
     ports.github.listChildren.mockResolvedValue([child(301, { state: "CLOSED" }), child(302, { state: "CLOSED" })]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "refused",
       reason: "Issue #226 has no open sub-issues to implement",
     });
@@ -244,14 +244,14 @@ describe("PRD implementation automation command", () => {
     expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses an Issue without sub-issues as not a PRD", async () => {
+  it("refuses an Issue without sub-issues as not a Spec", async () => {
     const ports = portsFor({
-      github: { readPrd: vi.fn().mockResolvedValue(prd({ subIssueCount: 0 })) },
+      github: { readSpec: vi.fn().mockResolvedValue(spec({ subIssueCount: 0 })) },
     });
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "refused",
-      reason: "Issue #226 has no sub-issues and is not a PRD",
+      reason: "Issue #226 has no sub-issues and is not a Spec",
     });
 
     expect(ports.github.listChildren).not.toHaveBeenCalled();
@@ -259,25 +259,25 @@ describe("PRD implementation automation command", () => {
     expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses a nested PRD without blocking it", async () => {
+  it("refuses a nested Spec without blocking it", async () => {
     const ports = portsFor({
-      github: { readPrd: vi.fn().mockResolvedValue(prd({ parentNumber: 219 })) },
+      github: { readSpec: vi.fn().mockResolvedValue(spec({ parentNumber: 219 })) },
     });
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "refused",
-      reason: "Issue #226 has sub-issues but is itself a sub-issue of #219; nested PRDs are not supported",
+      reason: "Issue #226 has sub-issues but is itself a sub-issue of #219; nested Specs are not supported",
     });
 
     expect(ports.github.listChildren).not.toHaveBeenCalled();
     expect(ports.github.addIssueLabel).not.toHaveBeenCalled();
   });
 
-  it("refuses a PRD whose child has its own sub-issues without blocking it", async () => {
+  it("refuses a Spec whose child has its own sub-issues without blocking it", async () => {
     const ports = portsFor();
     ports.github.listChildren.mockResolvedValue([child(301, { subIssueCount: 1 }), child(302)]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "refused",
       reason: "Sub-issue #301 itself has sub-issues; nested sub-issues are not supported",
     });
@@ -293,19 +293,19 @@ describe("PRD implementation automation command", () => {
     });
     ports.github.listChildren.mockResolvedValue([child(301), child(302)]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "blocked",
-      reason: "prd-implementation-execution",
+      reason: "spec-implementation-execution",
       jobId: "job-226",
     });
 
-    expect(ports.github.addPrdImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, {
-      reason: "prd-implementation-execution",
+    expect(ports.github.addSpecImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, {
+      reason: "spec-implementation-execution",
       jobId: "job-226",
       summary: "push failed",
       childNumber: 301,
     });
-    expect(ports.github.addChildFailureDiagnostic).toHaveBeenCalledWith(301, expect.objectContaining({ prdNumber: 226 }));
+    expect(ports.github.addChildFailureDiagnostic).toHaveBeenCalledWith(301, expect.objectContaining({ specNumber: 226 }));
     expect(ports.events).toEqual([
       "add:226:agent:in-progress",
       "remove:226:agent:implement",
@@ -319,23 +319,23 @@ describe("PRD implementation automation command", () => {
     expect(ports.pullRequests.addPullRequestLabel).not.toHaveBeenCalled();
   });
 
-  it("blocks the PRD and retains the local job diagnostic when the child implementation job times out", async () => {
+  it("blocks the Spec and retains the local job diagnostic when the child implementation job times out", async () => {
     const ports = portsFor({
-      implementer: { implement: vi.fn().mockRejectedValue(new Error("PRD implementation execution timed out")) },
+      implementer: { implement: vi.fn().mockRejectedValue(new Error("Spec implementation execution timed out")) },
       createJobId: () => "job-226",
     });
     ports.github.listChildren.mockResolvedValue([child(301), child(302)]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "blocked",
-      reason: "prd-implementation-execution",
+      reason: "spec-implementation-execution",
       jobId: "job-226",
     });
 
-    expect(ports.github.addPrdImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, {
-      reason: "prd-implementation-execution",
+    expect(ports.github.addSpecImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, {
+      reason: "spec-implementation-execution",
       jobId: "job-226",
-      summary: "PRD implementation execution timed out",
+      summary: "Spec implementation execution timed out",
       childNumber: 301,
     });
     expect(ports.events).toEqual([
@@ -362,17 +362,17 @@ describe("PRD implementation automation command", () => {
       if (label === "agent:implement") throw new Error("label publication failed");
     });
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "blocked",
-      reason: "prd-implementation-publication",
+      reason: "spec-implementation-publication",
       jobId: "job-226",
     });
 
     expect(ports.implementer.implement).toHaveBeenCalledTimes(1);
     expect(ports.github.closeImplementedChild).toHaveBeenCalledTimes(1);
     expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
-    expect(ports.github.addPrdImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, expect.objectContaining({
-      reason: "prd-implementation-publication",
+    expect(ports.github.addSpecImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, expect.objectContaining({
+      reason: "spec-implementation-publication",
       childNumber: 301,
     }));
     expect(ports.events.at(-1)).toBe("remove:226:agent:in-progress");
@@ -381,7 +381,7 @@ describe("PRD implementation automation command", () => {
   it("turns a final review request failure into Blocked Automation", async () => {
     const ports = portsFor({
       pullRequests: {
-        ensurePrdDraftPullRequest: vi.fn().mockResolvedValue({ number: 401, url: "https://example.test/pr/401" }),
+        ensureSpecDraftPullRequest: vi.fn().mockResolvedValue({ number: 401, url: "https://example.test/pr/401" }),
         addPullRequestLabel: vi.fn().mockRejectedValue(new Error("review label failed")),
       },
       createJobId: () => "job-226",
@@ -390,16 +390,16 @@ describe("PRD implementation automation command", () => {
       .mockResolvedValueOnce([child(303)])
       .mockResolvedValueOnce([child(303, { state: "CLOSED" })]);
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "blocked",
-      reason: "prd-implementation-publication",
+      reason: "spec-implementation-publication",
       jobId: "job-226",
     });
 
     expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
   });
 
-  it("refuses a concurrent command for the same PRD before another Agent can run", async () => {
+  it("refuses a concurrent command for the same Spec before another Agent can run", async () => {
     let releaseImplementation!: () => void;
     const implementationFinished = new Promise<void>((resolve) => { releaseImplementation = resolve; });
     const ports = portsFor({
@@ -415,22 +415,22 @@ describe("PRD implementation automation command", () => {
       .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302)])
       .mockResolvedValue([child(301), child(302)]);
 
-    const first = runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports);
+    const first = runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports);
     await vi.waitFor(() => expect(ports.implementer.implement).toHaveBeenCalledOnce());
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports))
-      .resolves.toEqual({ status: "refused", reason: "PRD #226 is already being implemented" });
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports))
+      .resolves.toEqual({ status: "refused", reason: "Spec #226 is already being implemented" });
     releaseImplementation();
     await first;
 
     expect(ports.implementer.implement).toHaveBeenCalledOnce();
   });
 
-  it("refuses a PRD that is not queued for implementation without blocking it", async () => {
+  it("refuses a Spec that is not queued for implementation without blocking it", async () => {
     const ports = portsFor({
-      github: { readPrd: vi.fn().mockResolvedValue(prd({ labels: [] })) },
+      github: { readSpec: vi.fn().mockResolvedValue(spec({ labels: [] })) },
     });
 
-    await expect(runPrdImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
       status: "refused",
       reason: "Issue #226 is not queued for implementation",
     });

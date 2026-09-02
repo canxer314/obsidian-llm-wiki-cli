@@ -3,7 +3,7 @@
 
 该目录存放本仓库的生产自动化代码，包括一个精简的本地 WSL Dispatcher 及一组固定操作。旧的 claim/watch/repair 流程已经移除。GitHub Issue、Pull Request、分支、标签和评论是唯一的持久业务状态。`CONTEXT.md` 定义了 Automation Command、Automation Work Item、Blocked Automation、Dispatcher、Target Checkout 和 Legacy Run State 等规范术语。
 
-贡献者指南位于 `docs/operations/sandcastle-automation-guide.md`，内容包括标签选择、Issue/PRD/Pull Request 工作流、进度查看和阻塞任务重试。
+贡献者指南位于 `docs/operations/sandcastle-automation-guide.md`，内容包括标签选择、Issue/Spec/Pull Request 工作流、进度查看和阻塞任务重试。
 
 运维手册位于 `docs/operations/sandcastle-local-dispatcher-runbook.md`，内容包括部署、受保护配置、检查、canary 顺序和单写入者切换保护。
 
@@ -17,7 +17,7 @@ npm run sandcastle -- setup-labels
 npm run sandcastle -- inspect
 npm run sandcastle -- dispatch [--concurrency <1-8>]
 npm run sandcastle -- run implement <issue-number>
-npm run sandcastle -- run implement-prd <issue-number>
+npm run sandcastle -- run implement-spec <issue-number>
 npm run sandcastle -- run split <issue-number>
 npm run sandcastle -- run review <pr-number>
 npm run sandcastle -- run feedback <pr-number>

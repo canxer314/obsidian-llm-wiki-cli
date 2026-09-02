@@ -2,11 +2,11 @@ import type { FeedbackReconcileAuthorization } from "./feedback-implementation-a
 
 export type TargetOperationIdentity =
   | "implement-issue"
-  | "implement-prd"
+  | "implement-spec"
   | "implement-feedback"
   | "review"
   | "update-branch"
-  | "split-prd"
+  | "split-spec"
   | "architecture-review";
 
 export type LabelTriggeredTargetOperationIdentity = Exclude<
@@ -16,8 +16,8 @@ export type LabelTriggeredTargetOperationIdentity = Exclude<
 
 type IssueTargetOperationIdentity =
   | "implement-issue"
-  | "implement-prd"
-  | "split-prd";
+  | "implement-spec"
+  | "split-spec";
 
 type PullRequestTargetOperationIdentity = "review" | "update-branch";
 
@@ -78,11 +78,11 @@ const POSITIVE_INTEGER = /^[1-9]\d*$/u;
 const ACCESSOR_PROPERTY = Symbol("accessor-property");
 const targetOperations = new Set<TargetOperationIdentity>([
   "implement-issue",
-  "implement-prd",
+  "implement-spec",
   "implement-feedback",
   "review",
   "update-branch",
-  "split-prd",
+  "split-spec",
   "architecture-review",
 ]);
 

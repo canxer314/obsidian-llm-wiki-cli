@@ -58,8 +58,8 @@ export function createManagedOperationGithub<TResult extends Record<string, unkn
       ? { ...issue, labels: labelsFor(issue.labels as readonly string[]), baseRevision: invocation.revision }
       : issue;
   };
-  const readPrd = async (workItemNumber: number) => {
-    const issue = await invoke("readPrd", workItemNumber) as Record<string, unknown>;
+  const readSpec = async (workItemNumber: number) => {
+    const issue = await invoke("readSpec", workItemNumber) as Record<string, unknown>;
     return workItemNumber === number
       ? { ...issue, labels: labelsFor(issue.labels as readonly string[]), baseRevision: invocation.revision }
       : issue;
@@ -104,7 +104,7 @@ export function createManagedOperationGithub<TResult extends Record<string, unkn
   return {
     ...github,
     readIssue,
-    readPrd,
+    readSpec,
     readPullRequest,
     addIssueLabel: (workItemNumber: number, label: string) => mutate("issue", "add", workItemNumber, label),
     removeIssueLabel: (workItemNumber: number, label: string) => mutate("issue", "remove", workItemNumber, label),

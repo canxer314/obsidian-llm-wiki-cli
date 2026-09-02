@@ -10,14 +10,14 @@ function workerSource(name: string): string {
 }
 
 // Agent roles whose contract can invoke the GitHub CLI inside the container.
-// Each prompt either calls gh directly (planner, implementer, PRD splitter)
+// Each prompt either calls gh directly (planner, implementer, Spec splitter)
 // or must inspect the Pull Request discussion (feedback implementer, reviewer).
 const GITHUB_CAPABLE_WORKERS = [
   "implementation-worker.ts",
-  "prd-implementation-worker.ts",
+  "spec-implementation-worker.ts",
   "feedback-worker.ts",
   "review-worker.ts",
-  "prd-split-worker.ts",
+  "spec-split-worker.ts",
 ] as const;
 
 // Agent roles that never call gh inside the container: the architecture

@@ -33,7 +33,7 @@ export const architectureReviewSchema = z.discriminatedUnion("status", [
 ]);
 
 const producePrompt = (revision: string, priorProposals: readonly ArchitectureReviewProposal[]) => `
-You are running the unattended architecture-review pass for this repository at exact revision ${revision}. Find ONE fresh deepening opportunity in this codebase and prepare it as a PRD proposal.
+You are running the unattended architecture-review pass for this repository at exact revision ${revision}. Find ONE fresh deepening opportunity in this codebase and prepare it as a Spec proposal.
 
 Read CONTEXT.md and any relevant ADRs under docs/adr/ first — treat ADRs as binding. Then explore the codebase for deepening opportunities: shallow modules whose interface is nearly as complex as their implementation, pass-throughs that fail the deletion test (deleting the module would make the complexity vanish), friction spread across callers that a deeper module would concentrate in one place (locality), and interfaces whose leverage does not justify their complexity. Do not delegate exploration to subagents or launch Agent tasks; use this session's tools directly. Inspect at most twelve focused files after reading CONTEXT.md and the relevant ADRs. Stop exploring as soon as you can rank three credible candidates, or skip when the available evidence does not support a fresh proposal.
 
@@ -43,13 +43,13 @@ Prior architecture-review proposals are listed below as JSON (number, title, sta
 ${JSON.stringify(priorProposals)}
 </prior-proposals>
 
-Internally generate three to five candidates, rank them on leverage, locality gain, test-surface improvement, and cost-to-value, and pick the single top candidate. Prepare its PRD with the standard sections (Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope, Further Notes), preceded by an Architecture review section naming the files involved, the problem and the solution in CONTEXT.md and deepening vocabulary, the benefits in terms of locality and leverage, a fenced mermaid before/after diagram of the shallow-to-deep transition, and a recommendation strength of Strong, Worth exploring, or Speculative.
+Internally generate three to five candidates, rank them on leverage, locality gain, test-surface improvement, and cost-to-value, and pick the single top candidate. Prepare its Spec with the standard sections (Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope, Further Notes), preceded by an Architecture review section naming the files involved, the problem and the solution in CONTEXT.md and deepening vocabulary, the benefits in terms of locality and leverage, a fenced mermaid before/after diagram of the shallow-to-deep transition, and a recommendation strength of Strong, Worth exploring, or Speculative.
 
-Rules: this pass is read-only — do not modify files, commit, push, or create or edit any GitHub Issue or label; the command publishes an accepted proposal itself. Propose at most one PRD. If every reasonable candidate is already covered by a prior proposal, decide to skip instead. Keep your chosen title, full PRD body, one-line summary, and considered candidates — or your skip reason — in this session for a subsequent formatting request.
+Rules: this pass is read-only — do not modify files, commit, push, or create or edit any GitHub Issue or label; the command publishes an accepted proposal itself. Propose at most one Spec. If every reasonable candidate is already covered by a prior proposal, decide to skip instead. Keep your chosen title, full Spec body, one-line summary, and considered candidates — or your skip reason — in this session for a subsequent formatting request.
 `;
 
 const extractionPrompt = `
-Now emit the outcome of the architecture-review pass as one JSON object inside <output> tags. It has exactly one of two shapes. When you prepared a proposal: {"status":"proposed","title":"...","body":"...","oneLineSummary":"...","candidatesConsidered":["..."]} with a title of at most 256 characters, the full PRD body, a one-line summary, and a non-empty candidatesConsidered array. When you decided to skip: {"status":"skipped","reason":"..."} naming the candidates considered and the prior proposals that already cover them. Emit no fields beyond those listed.
+Now emit the outcome of the architecture-review pass as one JSON object inside <output> tags. It has exactly one of two shapes. When you prepared a proposal: {"status":"proposed","title":"...","body":"...","oneLineSummary":"...","candidatesConsidered":["..."]} with a title of at most 256 characters, the full Spec body, a one-line summary, and a non-empty candidatesConsidered array. When you decided to skip: {"status":"skipped","reason":"..."} naming the candidates considered and the prior proposals that already cover them. Emit no fields beyond those listed.
 `;
 
 // Upstream architecture-review jobs time out after twenty minutes.

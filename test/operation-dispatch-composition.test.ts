@@ -6,8 +6,8 @@ import { dispatchAutomationCommands } from "../.sandcastle/automation-dispatch.j
 import { runBranchUpdateAutomationCommand } from "../.sandcastle/branch-update-automation.js";
 import { runFeedbackImplementation } from "../.sandcastle/feedback-implementation-automation.js";
 import { runImplementationAutomationCommand } from "../.sandcastle/implementation-automation.js";
-import { runPrdImplementationAutomationCommand } from "../.sandcastle/prd-implementation-automation.js";
-import { runPrdSplitAutomationCommand } from "../.sandcastle/prd-split-automation.js";
+import { runSpecImplementationAutomationCommand } from "../.sandcastle/spec-implementation-automation.js";
+import { runSpecSplitAutomationCommand } from "../.sandcastle/spec-split-automation.js";
 import { runQueuePromotionScan } from "../.sandcastle/queue-promotion-automation.js";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
 import { runSerializedAutomationCommand } from "../.sandcastle/serialized-automation-command.js";
@@ -28,11 +28,11 @@ const feedbackRoot = "PRRC_root";
 type OrdinaryBehaviorCase = {
   readonly family:
     | "Issue implementation"
-    | "PRD implementation"
+    | "Spec implementation"
     | "Pull Request feedback implementation"
     | "Pull Request review"
     | "branch update"
-    | "PRD split";
+    | "Spec split";
   readonly kind: "ordinary";
   readonly operation: Exclude<AutomationOperation, "unknown">;
   readonly targetOperation: Exclude<TargetOperationIdentity, "architecture-review">;
@@ -66,13 +66,13 @@ const behaviorCases: readonly BehaviorCase[] = [
     successStatus: "implemented",
   },
   {
-    family: "PRD implementation",
+    family: "Spec implementation",
     kind: "ordinary",
-    operation: "implement-prd",
-    targetOperation: "implement-prd",
+    operation: "implement-spec",
+    targetOperation: "implement-spec",
     number: 226,
     trigger: "agent:implement",
-    identity: "prd:226",
+    identity: "spec:226",
     workItem: "issue",
     subIssueCount: 2,
     successStatus: "implemented",
@@ -111,13 +111,13 @@ const behaviorCases: readonly BehaviorCase[] = [
     successStatus: "updated",
   },
   {
-    family: "PRD split",
+    family: "Spec split",
     kind: "ordinary",
-    operation: "split-prd",
-    targetOperation: "split-prd",
+    operation: "split-spec",
+    targetOperation: "split-spec",
     number: 223,
-    trigger: "agent:to-issues",
-    identity: "prd:223",
+    trigger: "agent:to-tickets",
+    identity: "spec:223",
     workItem: "issue",
     subIssueCount: 0,
     successStatus: "split",
@@ -171,7 +171,7 @@ function issueShape(
     state: "OPEN",
     labels: [...labels],
     baseRevision: revision,
-    subIssueCount: entry.targetOperation === "split-prd" && scenario === "preflight"
+    subIssueCount: entry.targetOperation === "split-spec" && scenario === "preflight"
       ? 1
       : entry.subIssueCount ?? 0,
     parentNumber: undefined,
@@ -241,21 +241,21 @@ async function executeOrdinaryBusinessOperation(options: {
         lease,
         createJobId: () => `${entry.targetOperation}-job`,
       });
-    case "implement-prd": {
+    case "implement-spec": {
       let childClosed = false;
       const child = {
         number: 301,
-        title: "First PRD child",
+        title: "First Spec child",
         state: "OPEN",
         openBlockerCount: scenario === "preflight" ? 1 : 0,
         subIssueCount: 0,
       };
-      return runPrdImplementationAutomationCommand({ issueNumber: entry.number }, {
+      return runSpecImplementationAutomationCommand({ issueNumber: entry.number }, {
         github: {
           ...github,
           listChildren: async () => [
             { ...child, state: childClosed ? "CLOSED" : "OPEN" },
-            { ...child, number: 302, title: "Second PRD child" },
+            { ...child, number: 302, title: "Second Spec child" },
           ],
           closeImplementedChild: async (request) => {
             childClosed = true;
@@ -263,15 +263,15 @@ async function executeOrdinaryBusinessOperation(options: {
           },
         },
         pullRequests: {
-          ensurePrdDraftPullRequest: async (request) => {
-            events.push(`publish:prd-pr:${request.headSha}`);
+          ensureSpecDraftPullRequest: async (request) => {
+            events.push(`publish:spec-pr:${request.headSha}`);
             return {
               number: 401,
               url: "https://github.com/owner/repository/pull/401",
             };
           },
           addPullRequestLabel: async (_number, label) => {
-            events.push(`publish:prd-pr-label:${label}`);
+            events.push(`publish:spec-pr-label:${label}`);
           },
         },
         checkout,
@@ -279,7 +279,7 @@ async function executeOrdinaryBusinessOperation(options: {
           implement: async () => {
             fail();
             return {
-              branch: `sandcastle/prd-${entry.number}`,
+              branch: `sandcastle/spec-${entry.number}`,
               headSha: publishedRevision,
             };
           },
@@ -288,8 +288,8 @@ async function executeOrdinaryBusinessOperation(options: {
         createJobId: () => `${entry.targetOperation}-job`,
       });
     }
-    case "split-prd":
-      return runPrdSplitAutomationCommand({ issueNumber: entry.number }, {
+    case "split-spec":
+      return runSpecSplitAutomationCommand({ issueNumber: entry.number }, {
         github,
         checkout,
         splitter: {
@@ -303,7 +303,7 @@ async function executeOrdinaryBusinessOperation(options: {
           },
         },
         publisher: {
-          publishPrdSplit: async (request) => {
+          publishSpecSplit: async (request) => {
             events.push(`publish:child-issues:${request.slices.length}`);
             return [301];
           },
@@ -404,7 +404,7 @@ function createOrdinaryGithub(
         ? "CLOSED"
         : "OPEN",
     }),
-    readPrd: async () => issueShape(entry, labels, scenario),
+    readSpec: async () => issueShape(entry, labels, scenario),
     readPullRequest: async () => ({
       ...pullRequestShape(entry, labels, head, scenario),
       state: (entry.targetOperation === "implement-feedback" ||
@@ -421,7 +421,7 @@ function createOrdinaryGithub(
       events.push(`refusal:${reason}`);
     },
     addImplementationBlockedDiagnostic: async () => undefined,
-    addPrdImplementationBlockedDiagnostic: async () => undefined,
+    addSpecImplementationBlockedDiagnostic: async () => undefined,
     addChildFailureDiagnostic: async () => undefined,
     addSplitBlockedDiagnostic: async () => undefined,
     addBranchUpdateBlockedDiagnostic: async () => undefined,
@@ -455,7 +455,7 @@ function createOrdinaryGithub(
       events.push("publish:pull-request-ready");
     },
     closeImplementedChild: async () => undefined,
-    ensurePrdDraftPullRequest: async () => ({
+    ensureSpecDraftPullRequest: async () => ({
       number: 401,
       url: "https://github.com/owner/repository/pull/401",
     }),
@@ -646,7 +646,7 @@ async function verifyArchitectureReviewBehavior(): Promise<void> {
     const commandScheduler = scheduler(events);
     const github = {
       readBaseRevision: async () => revision,
-      readPrd: async () => { throw new Error("architecture review has no Work Item"); },
+      readSpec: async () => { throw new Error("architecture review has no Work Item"); },
       readPullRequest: async () => { throw new Error("architecture review has no Work Item"); },
       addIssueLabel: async () => { throw new Error("architecture review has no labels"); },
       removeIssueLabel: async () => { throw new Error("architecture review has no labels"); },

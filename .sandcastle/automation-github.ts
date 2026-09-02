@@ -15,9 +15,9 @@ import type { BranchUpdateAutomationPorts } from "./branch-update-automation.ts"
 import type { FeedbackImplementationResources } from "./feedback-implementation-automation.ts";
 import type { FeedbackThreadReply, FeedbackReviewState } from "./feedback-reconciliation.ts";
 import type { ImplementationAutomationPorts } from "./implementation-automation.ts";
-import type { PrdImplementationAutomationPorts } from "./prd-implementation-automation.ts";
-import type { PrdSplitAutomationPorts } from "./prd-split-automation.ts";
-import type { PrdSlice } from "./prd-split-extraction.ts";
+import type { SpecImplementationAutomationPorts } from "./spec-implementation-automation.ts";
+import type { SpecSplitAutomationPorts } from "./spec-split-automation.ts";
+import type { SpecSlice } from "./spec-split-extraction.ts";
 import type { QueuePromotionPorts } from "./queue-promotion-automation.ts";
 import type {
   PublishedReview,
@@ -131,8 +131,8 @@ function inlineComments(
   });
 }
 
-function splitBody(prdNumber: number, slice: PrdSlice): string {
-  return `## Parent PRD\n\n#${prdNumber}\n\n## What to build\n\n${slice.whatToBuild}\n\n## Acceptance criteria\n\n${slice.acceptanceCriteria.map((criterion) => `- [ ] ${criterion}`).join("\n")}\n`;
+function splitBody(specNumber: number, slice: SpecSlice): string {
+  return `## Parent Spec\n\n#${specNumber}\n\n## What to build\n\n${slice.whatToBuild}\n\n## Acceptance criteria\n\n${slice.acceptanceCriteria.map((criterion) => `- [ ] ${criterion}`).join("\n")}\n`;
 }
 
 const lifecycleLabels = ["agent:in-progress", "agent:blocked"] as const;
@@ -247,7 +247,7 @@ export function createAutomationDispatchGithubPort(options: {
     async addSubIssueRefusalDiagnostic(issueNumber, parentNumber) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent PRD instead. Cleared \`agent:queued\`.`,
+        `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent Spec instead. Cleared \`agent:queued\`.`,
       ], options.environment);
     },
     async listCommands() {
@@ -307,7 +307,7 @@ export function createAutomationDispatchGithubPort(options: {
       });
       // Issue-side triggers are only meaningful on top-level Work Items, so
       // shape reads happen before routing: sub-issues are driven by their
-      // parent PRD and never become dispatch commands themselves. State-only
+      // parent Spec and never become dispatch commands themselves. State-only
       // Work Items are retained for read-only inspection, but remain
       // ineligible for dispatch.
       const relevantLabels = (labels: readonly string[]) =>
@@ -338,7 +338,7 @@ export function createAutomationDispatchGithubPort(options: {
         const commands: import("./automation-command.ts").AutomationCommand[] = [];
         if (labels.includes("agent:implement")) {
           if (shape.subIssues.totalCount > 0) {
-            const route = resolveAutomationCommandRoute("implement-prd", number);
+            const route = resolveAutomationCommandRoute("implement-spec", number);
             commands.push({ number, operation: route.operation, identity: route.identity, labels });
           } else if (!candidate.hasOpenImplementationPullRequest) {
             const route = resolveAutomationCommandRoute("implement-issue", number);
@@ -348,7 +348,7 @@ export function createAutomationDispatchGithubPort(options: {
         // When both triggers are present, only the higher-priority
         // implementation command runs (#219); the split trigger stays for a
         // later round so one Work Item never runs two operations at once.
-        const splitRoute = resolveAutomationCommandRoute("split-prd", number);
+        const splitRoute = resolveAutomationCommandRoute("split-spec", number);
         if (labels.includes(splitRoute.trigger) && !labels.includes("agent:implement")) {
           commands.push({ number, operation: splitRoute.operation, identity: splitRoute.identity, labels });
         }
@@ -374,7 +374,7 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
-}): ReviewAutomationPorts["github"] & ImplementationAutomationPorts["github"] & FeedbackImplementationResources["github"] & BranchUpdateAutomationPorts["github"] & PrdSplitAutomationPorts["github"] & PrdSplitAutomationPorts["publisher"] & PrdImplementationAutomationPorts["github"] & PrdImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
+}): ReviewAutomationPorts["github"] & ImplementationAutomationPorts["github"] & FeedbackImplementationResources["github"] & BranchUpdateAutomationPorts["github"] & SpecSplitAutomationPorts["github"] & SpecSplitAutomationPorts["publisher"] & SpecImplementationAutomationPorts["github"] & SpecImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
     return { stdout: result.stdout, stderr: result.stderr };
@@ -476,7 +476,7 @@ export function createAutomationGithubPort(options: {
       // Idempotent provenance-label creation, as in the upstream publish step.
       await execute("gh", [
         "label", "create", "source:architecture-review", "--color", "5319E7",
-        "--description", "PRDs proposed by the automated architecture-review workflow",
+        "--description", "Specs proposed by the automated architecture-review workflow",
       ], options.environment).catch(() => undefined);
       const { stdout } = await execute("gh", [
         "issue", "create", "--title", request.title, "--body", request.body,
@@ -511,7 +511,7 @@ export function createAutomationGithubPort(options: {
         baseRevision,
       };
     },
-    async readPrd(issueNumber) {
+    async readSpec(issueNumber) {
       const [{ stdout: issueOutput }, baseRevision, { stdout: subIssuesOutput }, { stdout: parentOutput }] = await Promise.all([
         execute("gh", [
           "api", `repos/{owner}/{repo}/issues/${issueNumber}`,
@@ -620,12 +620,12 @@ export function createAutomationGithubPort(options: {
     async addSplitBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Automation PRD splitting is blocked (job ${diagnostic.jobId}). Remove agent:blocked, restore agent:to-issues, then retry.`,
+        `Automation Spec splitting is blocked (job ${diagnostic.jobId}). Remove agent:blocked, restore agent:to-tickets, then retry.`,
       ], options.environment);
     },
-    async listChildren(prdNumber) {
+    async listChildren(specNumber) {
       const { stdout } = await execute("gh", [
-        "api", `repos/{owner}/{repo}/issues/${prdNumber}/sub_issues`, "--paginate",
+        "api", `repos/{owner}/{repo}/issues/${specNumber}/sub_issues`, "--paginate",
         "--jq", ".[] | {number, title, state}",
       ], options.environment);
       const children = stdout
@@ -650,22 +650,22 @@ export function createAutomationGithubPort(options: {
     async closeImplementedChild(request) {
       await execute("gh", [
         "issue", "close", String(request.childNumber), "--comment",
-        `Implemented in ${request.revision}. Part of #${request.prdNumber}.`,
+        `Implemented in ${request.revision}. Part of #${request.specNumber}.`,
       ], options.environment);
     },
-    async addPrdImplementationBlockedDiagnostic(issueNumber, diagnostic) {
+    async addSpecImplementationBlockedDiagnostic(issueNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
-        `Automation PRD implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}) while implementing sub-issue #${diagnostic.childNumber}. Remove agent:blocked, restore agent:implement, then retry.`,
+        `Automation Spec implementation is blocked (${diagnostic.reason}; job ${diagnostic.jobId}) while implementing sub-issue #${diagnostic.childNumber}. Remove agent:blocked, restore agent:implement, then retry.`,
       ], options.environment);
     },
     async addChildFailureDiagnostic(childNumber, diagnostic) {
       await execute("gh", [
         "issue", "comment", String(childNumber), "--body",
-        `Implementation attempt failed (job ${diagnostic.jobId}). See PRD #${diagnostic.prdNumber} for status.`,
+        `Implementation attempt failed (job ${diagnostic.jobId}). See Spec #${diagnostic.specNumber} for status.`,
       ], options.environment);
     },
-    async ensurePrdDraftPullRequest(request) {
+    async ensureSpecDraftPullRequest(request) {
       const [{ stdout: repositoryOutput }, { stdout: pullRequestsOutput }] = await Promise.all([
         execute("gh", ["repo", "view", "--json", "defaultBranchRef"], options.environment),
         execute("gh", [
@@ -703,8 +703,8 @@ export function createAutomationGithubPort(options: {
       }
       const { stdout: createOutput } = await execute("gh", [
         "pr", "create", "--draft", "--head", request.branch,
-        "--title", `Implement #${request.prdNumber}`,
-        "--body", `Part of #${request.prdNumber}`,
+        "--title", `Implement #${request.specNumber}`,
+        "--body", `Part of #${request.specNumber}`,
       ], options.environment);
       const url = createOutput.trim();
       const match = /\/pull\/(\d+)$/u.exec(url);
@@ -718,12 +718,12 @@ export function createAutomationGithubPort(options: {
       }
       return { number, url };
     },
-    async publishPrdSplit(request) {
+    async publishSpecSplit(request) {
       const created: number[] = [];
       let previousIssueId: string | undefined;
       for (const slice of request.slices) {
         const { stdout: createOutput } = await execute("gh", [
-          "issue", "create", "--title", slice.title, "--body", splitBody(request.prdNumber, slice),
+          "issue", "create", "--title", slice.title, "--body", splitBody(request.specNumber, slice),
         ], options.environment);
         const match = /\/issues\/(\d+)\s*$/u.exec(createOutput);
         if (match === null) throw new Error("Could not parse created child Issue number");
@@ -734,7 +734,7 @@ export function createAutomationGithubPort(options: {
         ], options.environment);
         const childIssueId = childIssueIdOutput.trim();
         await execute("gh", [
-          "api", "-X", "POST", `repos/{owner}/{repo}/issues/${request.prdNumber}/sub_issues`,
+          "api", "-X", "POST", `repos/{owner}/{repo}/issues/${request.specNumber}/sub_issues`,
           "-F", `sub_issue_id=${childIssueId}`,
         ], options.environment);
         if (previousIssueId !== undefined) {

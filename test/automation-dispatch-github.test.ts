@@ -4,7 +4,7 @@ import { createAutomationDispatchGithubPort } from "../.sandcastle/automation-gi
 import { inspectAutomationCommands } from "../.sandcastle/automation-inspector.js";
 
 describe("Automation Command GitHub discovery", () => {
-  const emptyIssueListings = ["agent:implement", "agent:to-issues", "agent:in-progress", "agent:blocked"]
+  const emptyIssueListings = ["agent:implement", "agent:to-tickets", "agent:in-progress", "agent:blocked"]
     .map(() => ({ stdout: "[]", stderr: "" }));
 
   it("mutates queue labels through stable REST endpoints", async () => {
@@ -46,7 +46,7 @@ describe("Automation Command GitHub discovery", () => {
     expect(execute).toHaveBeenNthCalledWith(4, "gh", ["pr", "list", "--state", "open", "--label", "agent:in-progress", "--json", "number,labels", "--limit", "100"], undefined);
     expect(execute).toHaveBeenNthCalledWith(5, "gh", ["pr", "list", "--state", "open", "--label", "agent:blocked", "--json", "number,labels", "--limit", "100"], undefined);
     expect(execute).toHaveBeenNthCalledWith(6, "gh", ["issue", "list", "--state", "open", "--label", "agent:implement", "--json", "number,labels", "--limit", "100"], undefined);
-    expect(execute).toHaveBeenNthCalledWith(7, "gh", ["issue", "list", "--state", "open", "--label", "agent:to-issues", "--json", "number,labels", "--limit", "100"], undefined);
+    expect(execute).toHaveBeenNthCalledWith(7, "gh", ["issue", "list", "--state", "open", "--label", "agent:to-tickets", "--json", "number,labels", "--limit", "100"], undefined);
     expect(execute).toHaveBeenNthCalledWith(8, "gh", ["issue", "list", "--state", "open", "--label", "agent:in-progress", "--json", "number,labels", "--limit", "100"], undefined);
     expect(execute).toHaveBeenNthCalledWith(9, "gh", ["issue", "list", "--state", "open", "--label", "agent:blocked", "--json", "number,labels", "--limit", "100"], undefined);
   });
@@ -63,7 +63,7 @@ describe("Automation Command GitHub discovery", () => {
     };
   }
 
-  it("surfaces standalone blocked and stale Issue and PRD states to read-only inspection", async () => {
+  it("surfaces standalone blocked and stale Issue and Spec states to read-only inspection", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
       .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
@@ -106,11 +106,11 @@ describe("Automation Command GitHub discovery", () => {
     expect(execute.mock.calls.every(([, arguments_]) => !arguments_.includes("--method"))).toBe(true);
   });
 
-  it("discovers Issue implementation, PRD implementation, and PRD split commands with per-Work-Item identities", async () => {
+  it("discovers Issue implementation, Spec implementation, and Spec split commands with per-Work-Item identities", async () => {
     const execute = vi.fn();
     for (const listing of emptyPullRequestListings()) execute.mockResolvedValueOnce(listing);
     execute
-      // agent:implement Issues: plain, PRD, sub-issue, and one with an open Pull Request
+      // agent:implement Issues: plain, Spec, sub-issue, and one with an open Pull Request
       .mockResolvedValueOnce({
         stdout: JSON.stringify([
           { number: 31, labels: [{ name: "agent:implement" }] },
@@ -120,8 +120,8 @@ describe("Automation Command GitHub discovery", () => {
         ]),
         stderr: "",
       })
-      // agent:to-issues Issues
-      .mockResolvedValueOnce({ stdout: JSON.stringify([{ number: 35, labels: [{ name: "agent:to-issues" }] }]), stderr: "" })
+      // agent:to-tickets Issues
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{ number: 35, labels: [{ name: "agent:to-tickets" }] }]), stderr: "" })
       .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
       .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
       // shape reads in ascending Issue order
@@ -137,8 +137,8 @@ describe("Automation Command GitHub discovery", () => {
 
     await expect(port.listCommands()).resolves.toEqual([
       { number: 31, operation: "implement-issue", identity: "issue:31", labels: ["agent:implement"] },
-      { number: 32, operation: "implement-prd", identity: "prd:32", labels: ["agent:implement"] },
-      { number: 35, operation: "split-prd", identity: "prd:35", labels: ["agent:to-issues"] },
+      { number: 32, operation: "implement-spec", identity: "spec:32", labels: ["agent:implement"] },
+      { number: 35, operation: "split-spec", identity: "spec:35", labels: ["agent:to-tickets"] },
     ]);
     expect(execute).toHaveBeenCalledTimes(16);
     // Sub-issues and Issues with an open Pull Request are not discovered.
@@ -178,11 +178,11 @@ describe("Automation Command GitHub discovery", () => {
     for (const listing of emptyPullRequestListings()) execute.mockResolvedValueOnce(listing);
     execute
       .mockResolvedValueOnce({
-        stdout: JSON.stringify([{ number: 36, labels: [{ name: "agent:implement" }, { name: "agent:to-issues" }] }]),
+        stdout: JSON.stringify([{ number: 36, labels: [{ name: "agent:implement" }, { name: "agent:to-tickets" }] }]),
         stderr: "",
       })
       .mockResolvedValueOnce({
-        stdout: JSON.stringify([{ number: 36, labels: [{ name: "agent:implement" }, { name: "agent:to-issues" }] }]),
+        stdout: JSON.stringify([{ number: 36, labels: [{ name: "agent:implement" }, { name: "agent:to-tickets" }] }]),
         stderr: "",
       })
       .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
@@ -194,7 +194,7 @@ describe("Automation Command GitHub discovery", () => {
     // Implementation has the higher priority (#219); the split trigger stays
     // for a later round once implementation has consumed its own trigger.
     await expect(port.listCommands()).resolves.toEqual([
-      { number: 36, operation: "implement-issue", identity: "issue:36", labels: ["agent:implement", "agent:to-issues"] },
+      { number: 36, operation: "implement-issue", identity: "issue:36", labels: ["agent:implement", "agent:to-tickets"] },
     ]);
   });
 
@@ -214,7 +214,7 @@ describe("Automation Command GitHub discovery", () => {
 
   it("fails closed when the agent:queued label is missing and sets it up idempotently", async () => {
     const missing = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked", "agent:to-issues"].map((name) => ({ name }))),
+      stdout: JSON.stringify(["agent:update-branch", "agent:implement", "agent:review", "agent:in-progress", "agent:blocked", "agent:to-tickets"].map((name) => ({ name }))),
       stderr: "",
     });
     await expect(createAutomationDispatchGithubPort({ execute: missing }).verifyLabels())
@@ -225,11 +225,11 @@ describe("Automation Command GitHub discovery", () => {
       .mockResolvedValueOnce({ stdout: JSON.stringify(baseLabels.map((name) => ({ name }))), stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
-      .mockResolvedValueOnce({ stdout: JSON.stringify([...baseLabels, "agent:queued", "agent:to-issues"].map((name) => ({ name }))), stderr: "" });
+      .mockResolvedValueOnce({ stdout: JSON.stringify([...baseLabels, "agent:queued", "agent:to-tickets"].map((name) => ({ name }))), stderr: "" });
     const port = createAutomationDispatchGithubPort({ execute: setup });
     await port.ensureLabels();
     expect(setup).toHaveBeenCalledWith("gh", ["label", "create", "agent:queued", "--color", "0E8A16"], undefined);
-    expect(setup).toHaveBeenCalledWith("gh", ["label", "create", "agent:to-issues", "--color", "0E8A16"], undefined);
+    expect(setup).toHaveBeenCalledWith("gh", ["label", "create", "agent:to-tickets", "--color", "0E8A16"], undefined);
     await port.ensureLabels();
     expect(setup).toHaveBeenCalledTimes(4);
   });

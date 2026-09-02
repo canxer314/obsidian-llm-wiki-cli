@@ -4,9 +4,9 @@ import { createSandcastlePlannerSession } from "./planner-session.ts";
 import { sandboxHooksFor } from "./sandbox.ts";
 import { readTargetWorkerStartup } from "./target-operation-startup.ts";
 
-const [prdNumber, childNumber, branch, baseRevision, checkoutPath, plannerModel, implementerModel] = process.argv.slice(2);
+const [specNumber, childNumber, branch, baseRevision, checkoutPath, plannerModel, implementerModel] = process.argv.slice(2);
 if (
-  prdNumber === undefined ||
+  specNumber === undefined ||
   childNumber === undefined ||
   branch === undefined ||
   baseRevision === undefined ||
@@ -14,7 +14,7 @@ if (
   plannerModel === undefined ||
   implementerModel === undefined
 ) {
-  throw new Error("Expected PRD implementation worker arguments");
+  throw new Error("Expected Spec implementation worker arguments");
 }
 
 const startup = await readTargetWorkerStartup();
@@ -22,7 +22,7 @@ const plannerSession = createSandcastlePlannerSession({
   sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
   checkoutPath,
-  prdContext: { parentPrd: Number(prdNumber), branch },
+  specContext: { parentSpec: Number(specNumber), branch },
 });
 const plan = await planIssue({
   issueNumber: Number(childNumber),
@@ -39,7 +39,7 @@ const result = await implementerSession.run({
   branch,
   plan,
   checkoutPath,
-  parentPrd: { number: Number(prdNumber) },
+  parentSpec: { number: Number(specNumber) },
 });
 if (result.branch !== branch) {
   throw new Error(`Implementer used branch ${result.branch}; expected ${branch}`);

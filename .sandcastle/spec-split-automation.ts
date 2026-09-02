@@ -1,6 +1,6 @@
-import type { PrdSlice } from "./prd-split-extraction.ts";
+import type { SpecSlice } from "./spec-split-extraction.ts";
 
-export interface PrdAutomationIssue {
+export interface SpecAutomationIssue {
   readonly number: number;
   readonly title: string;
   readonly state: string;
@@ -10,9 +10,9 @@ export interface PrdAutomationIssue {
   readonly parentNumber?: number;
 }
 
-export interface PrdSplitAutomationPorts {
+export interface SpecSplitAutomationPorts {
   readonly github: {
-    readPrd(issueNumber: number): Promise<PrdAutomationIssue>;
+    readSpec(issueNumber: number): Promise<SpecAutomationIssue>;
     addIssueLabel(issueNumber: number, label: string): Promise<void>;
     removeIssueLabel(issueNumber: number, label: string): Promise<void>;
     addRefusalDiagnostic?(issueNumber: number, reason: string): Promise<void>;
@@ -26,25 +26,25 @@ export interface PrdSplitAutomationPorts {
   };
   readonly splitter: {
     split(request: {
-      readonly prdNumber: number;
+      readonly specNumber: number;
       readonly title: string;
       readonly checkoutPath: string;
-    }): Promise<readonly PrdSlice[]>;
+    }): Promise<readonly SpecSlice[]>;
   };
   readonly publisher: {
-    publishPrdSplit(request: { readonly prdNumber: number; readonly slices: readonly PrdSlice[] }): Promise<readonly number[]>;
+    publishSpecSplit(request: { readonly specNumber: number; readonly slices: readonly SpecSlice[] }): Promise<readonly number[]>;
   };
   readonly createJobId?: () => string;
 }
 
-export type PrdSplitAutomationResult =
+export type SpecSplitAutomationResult =
   | { readonly status: "split"; readonly childIssueNumbers: readonly number[] }
   | { readonly status: "refused"; readonly reason: string }
-  | { readonly status: "blocked"; readonly reason: "prd-split-execution"; readonly jobId: string };
+  | { readonly status: "blocked"; readonly reason: "spec-split-execution"; readonly jobId: string };
 
-function refusal(issue: PrdAutomationIssue): string | undefined {
+function refusal(issue: SpecAutomationIssue): string | undefined {
   if (issue.state !== "OPEN") return `Issue #${issue.number} is not open`;
-  if (!issue.labels.includes("agent:to-issues")) return `Issue #${issue.number} is not queued for PRD splitting`;
+  if (!issue.labels.includes("agent:to-tickets")) return `Issue #${issue.number} is not queued for Spec splitting`;
   if (issue.labels.includes("agent:in-progress")) return `Issue #${issue.number} is already in progress`;
   if (issue.labels.includes("agent:blocked")) return `Issue #${issue.number} is blocked`;
   if (issue.subIssueCount > 0) return `Issue #${issue.number} already has ${issue.subIssueCount} sub-issue(s)`;
@@ -53,48 +53,48 @@ function refusal(issue: PrdAutomationIssue): string | undefined {
   return undefined;
 }
 
-export async function runPrdSplitAutomationCommand(
+export async function runSpecSplitAutomationCommand(
   request: { readonly issueNumber: number },
-  ports: PrdSplitAutomationPorts,
-): Promise<PrdSplitAutomationResult> {
-  const issue = await ports.github.readPrd(request.issueNumber);
+  ports: SpecSplitAutomationPorts,
+): Promise<SpecSplitAutomationResult> {
+  const issue = await ports.github.readSpec(request.issueNumber);
   const reason = refusal(issue);
   if (reason !== undefined) {
-    await ports.github.removeIssueLabel(issue.number, "agent:to-issues");
+    await ports.github.removeIssueLabel(issue.number, "agent:to-tickets");
     await ports.github.addRefusalDiagnostic?.(issue.number, reason);
     return { status: "refused", reason };
   }
 
   await ports.github.addIssueLabel(issue.number, "agent:in-progress");
   try {
-    await ports.github.removeIssueLabel(issue.number, "agent:to-issues");
-    const claimed = await ports.github.readPrd(issue.number);
+    await ports.github.removeIssueLabel(issue.number, "agent:to-tickets");
+    const claimed = await ports.github.readSpec(issue.number);
     if (
       claimed.state !== "OPEN" ||
       claimed.baseRevision !== issue.baseRevision ||
       claimed.subIssueCount !== 0 ||
       claimed.parentNumber !== undefined ||
       !claimed.labels.includes("agent:in-progress") ||
-      claimed.labels.includes("agent:to-issues") ||
+      claimed.labels.includes("agent:to-tickets") ||
       claimed.labels.includes("agent:blocked")
     ) {
-      throw new Error(`Issue #${issue.number} changed while PRD split was being acquired`);
+      throw new Error(`Issue #${issue.number} changed while Spec split was being acquired`);
     }
     const childIssueNumbers = await ports.checkout.withCheckout({
       pullRequestNumber: issue.number,
       revision: issue.baseRevision,
     }, async (checkoutPath) => {
-      const slices = await ports.splitter.split({ prdNumber: issue.number, title: issue.title, checkoutPath });
-      return ports.publisher.publishPrdSplit({ prdNumber: issue.number, slices });
+      const slices = await ports.splitter.split({ specNumber: issue.number, title: issue.title, checkoutPath });
+      return ports.publisher.publishSpecSplit({ specNumber: issue.number, slices });
     });
     return { status: "split", childIssueNumbers };
   } catch {
-    const jobId = ports.createJobId?.() ?? "local-prd-split-job";
+    const jobId = ports.createJobId?.() ?? "local-spec-split-job";
     await Promise.allSettled([
       ports.github.addIssueLabel(issue.number, "agent:blocked"),
       ports.github.addSplitBlockedDiagnostic?.(issue.number, { jobId }),
     ]);
-    return { status: "blocked", reason: "prd-split-execution", jobId };
+    return { status: "blocked", reason: "spec-split-execution", jobId };
   } finally {
     await ports.github.removeIssueLabel(issue.number, "agent:in-progress").catch(() => undefined);
   }
