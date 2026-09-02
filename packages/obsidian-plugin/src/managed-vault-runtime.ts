@@ -75,6 +75,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
       dataSource: ChangeSetPreflightDataSource;
       execution?: ChangeSetExecutionAdapter;
       vaultId?: string;
+      crashInjector?: (point: string) => void | Promise<void>;
     };
     incompatibleState?: boolean;
   }): BridgeInstance;
@@ -86,6 +87,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
   createVaultId?: () => string;
   selectInitialPort?: () => number;
   successBarrierTimeoutMs?: number;
+  crashInjector?: (point: string) => void | Promise<void>;
 }
 
 function emptyChangeSetState(): ChangeSetRegistryState {
@@ -530,6 +532,9 @@ export class ManagedVaultBridgeRuntime {
                     ),
               execution: this.#options.changeSetExecution,
               vaultId: settings.vaultId,
+              ...(this.#options.crashInjector === undefined
+                ? {}
+                : { crashInjector: this.#options.crashInjector }),
             },
       incompatibleState: restricted,
     });
