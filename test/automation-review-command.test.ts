@@ -7,6 +7,7 @@ import { createReviewPublisher } from "../.sandcastle/review-publisher.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const improvedRevision = "abcdef0123456789abcdef0123456789abcdef01";
+const publicationRemote = "https://github.com/example/repository.git";
 
 function pullRequest(labels = ["agent:review"]) {
   return {
@@ -98,6 +99,7 @@ describe("review automation command", () => {
         checkoutRevision = arguments_[5];
       }
       if (arguments_[2] === "rev-parse") return { stdout: `${checkoutRevision}\n`, stderr: "" };
+      if (arguments_[2] === "remote") return { stdout: `${publicationRemote}\n`, stderr: "" };
       return { stdout: "", stderr: "" };
     });
     const extractor = createSameSessionReviewExtractor({
@@ -127,7 +129,10 @@ describe("review automation command", () => {
       "-C", "/safe/disposable-checkout", "checkout", "-B", "feature/review", revision,
     ]);
     expect(execute).toHaveBeenCalledWith("git", [
-      "-C", "/safe/disposable-checkout", "push", "origin",
+      "-C", "/safe/disposable-checkout", "remote", "get-url", "origin",
+    ]);
+    expect(execute).toHaveBeenCalledWith("git", [
+      "-C", "/safe/disposable-checkout", "push", publicationRemote,
       `--force-with-lease=refs/heads/feature/review:${revision}`,
       "HEAD:refs/heads/feature/review",
     ]);
