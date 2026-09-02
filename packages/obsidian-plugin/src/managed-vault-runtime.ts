@@ -9,12 +9,19 @@ import {
   type MoveSnapshotBarrier,
   type SearchSnapshotTargetEvidence,
 } from "./change-set.js";
-import type {
-  BridgeDiscoverService,
-  BridgeHealthState,
-  BridgeInstance,
-  BridgeMaintenanceOperation,
+import {
+  projectObservedHealth,
+  type BridgeDiscoverService,
+  type BridgeHealthState,
+  type BridgeInstance,
+  type BridgeMaintenanceOperation,
 } from "./bridge-instance.js";
+import {
+  createStandardDiagnosticBundle,
+  type StandardDiagnosticBundle,
+  type StandardDiagnosticEvidence,
+} from "./diagnostic-bundle.js";
+import type { FileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
 import { withMoveReferenceProjection } from "./move-reference-projection.js";
 import {
   SearchSnapshotManager,
@@ -81,7 +88,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
   readDataSource?: VaultReadDataSource;
   searchDataSource?: SearchSnapshotDataSource;
   changeSetDataSource?: ChangeSetPreflightDataSource;
-  changeSetExecution?: ChangeSetExecutionAdapter;
+  changeSetExecution?: FileSystemChangeSetExecutionAdapter;
   incompatibleState?: boolean;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
@@ -194,6 +201,7 @@ export class ManagedVaultBridgeRuntime {
   readonly #options: ManagedVaultBridgeRuntimeOptions;
   #bridge: BridgeInstance | undefined;
   #settings: PersistedBridgeSettings | undefined;
+  #health: BridgeHealthState | undefined;
   #pendingPathChange: PathChangeEvidence | undefined;
   #snapshots: SearchSnapshotManager | undefined;
   #snapshotRefresh: SearchSnapshotRefreshCoordinator | undefined;
@@ -440,78 +448,80 @@ export class ManagedVaultBridgeRuntime {
     const maintenanceFailed = persistedWriteMode === "maintenance_failed";
     const maintenancePending =
       persistedWriteMode === "maintenance_pending" || maintenanceFailed;
+    const health: BridgeHealthState = {
+      vault: {
+        id: settings.vaultId,
+        name: this.#options.vault.name,
+        path: settings.diagnosticPath,
+      },
+      readiness: {
+        searchSnapshot: snapshots?.readiness ?? "unavailable",
+        cache: "unavailable",
+        index: snapshots?.readiness === "ready" ? "ready" : "unavailable",
+      },
+      recovery: { state: "none" },
+      write:
+        writeUnavailable || persistedPaused
+          ? {
+              gate: writeUnavailable || maintenanceFailed ? "blocked" : "open",
+              state: "paused",
+              pauseSource:
+                writeUnavailable || maintenancePaused || maintenancePending
+                  ? "maintenance"
+                  : "manual",
+            }
+          : { gate: "open", state: "writable", pauseSource: null },
+      queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
+      lifecycle: {
+        startup: "ready",
+        upgrade: persistedLifecycle?.upgrade ?? "not_run",
+        migration: persistedLifecycle?.migration ?? "not_run",
+        recovery: "not_run",
+      },
+      effectiveGate:
+        writeUnavailable || persistedPaused
+          ? { code: maintenancePending ? "upgrade_in_progress" : "writes_paused" }
+          : null,
+      overall:
+        writeUnavailable || maintenancePending
+          ? "blocked"
+          : persistedPaused
+            ? "degraded"
+            : snapshots?.readiness === "ready" &&
+                this.#options.changeSetExecution !== undefined
+              ? "healthy"
+              : "degraded",
+      reasonCodes:
+        maintenanceFailed
+          ? ["upgrade_failed"]
+          : snapshots?.readiness !== "ready"
+            ? ["content_tools_not_ready"]
+            : writeUnavailable
+              ? ["writes_paused"]
+              : maintenancePending
+                ? ["upgrade_in_progress"]
+                : persistedPaused
+                  ? ["writes_paused"]
+                  : this.#options.changeSetExecution === undefined
+                    ? ["mutation_executor_not_ready"]
+                    : [],
+      operatorAction:
+        maintenanceFailed
+          ? "finish_upgrade"
+          : snapshots?.readiness !== "ready"
+            ? "finish_initialization"
+            : writeUnavailable || persistedPaused
+              ? maintenancePending
+                ? "finish_upgrade"
+                : "resume_writes"
+              : this.#options.changeSetExecution === undefined
+                ? "wait_for_readiness"
+                : "none",
+    };
+    this.#health = health;
     const bridge = this.#options.createBridge({
       port: settings.port,
-      health: {
-        vault: {
-          id: settings.vaultId,
-          name: this.#options.vault.name,
-          path: settings.diagnosticPath,
-        },
-        readiness: {
-          searchSnapshot: snapshots?.readiness ?? "unavailable",
-          cache: "unavailable",
-          index: snapshots?.readiness === "ready" ? "ready" : "unavailable",
-        },
-        recovery: { state: "none" },
-        write:
-          writeUnavailable || persistedPaused
-            ? {
-                gate: writeUnavailable || maintenanceFailed ? "blocked" : "open",
-                state: "paused",
-                pauseSource:
-                  writeUnavailable || maintenancePaused || maintenancePending
-                    ? "maintenance"
-                    : "manual",
-              }
-            : { gate: "open", state: "writable", pauseSource: null },
-        queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
-        lifecycle: {
-          startup: "ready",
-          upgrade: persistedLifecycle?.upgrade ?? "not_run",
-          migration: persistedLifecycle?.migration ?? "not_run",
-          recovery: "not_run",
-        },
-        effectiveGate:
-          writeUnavailable || persistedPaused
-            ? { code: maintenancePending ? "upgrade_in_progress" : "writes_paused" }
-            : null,
-        overall:
-          writeUnavailable || maintenancePending
-            ? "blocked"
-            : persistedPaused
-              ? "degraded"
-              : snapshots?.readiness === "ready" &&
-                  this.#options.changeSetExecution !== undefined
-                ? "healthy"
-                : "degraded",
-        reasonCodes:
-          maintenanceFailed
-            ? ["upgrade_failed"]
-            : snapshots?.readiness !== "ready"
-              ? ["content_tools_not_ready"]
-              : writeUnavailable
-                ? ["writes_paused"]
-                : maintenancePending
-                  ? ["upgrade_in_progress"]
-                  : persistedPaused
-                    ? ["writes_paused"]
-                    : this.#options.changeSetExecution === undefined
-                      ? ["mutation_executor_not_ready"]
-                      : [],
-        operatorAction:
-          maintenanceFailed
-            ? "finish_upgrade"
-            : snapshots?.readiness !== "ready"
-              ? "finish_initialization"
-              : writeUnavailable || persistedPaused
-                ? maintenancePending
-                  ? "finish_upgrade"
-                  : "resume_writes"
-                : this.#options.changeSetExecution === undefined
-                  ? "wait_for_readiness"
-                  : "none",
-      },
+      health,
       readDataSource: restricted ? undefined : this.#options.readDataSource,
       discoverService: snapshots === undefined ? undefined : new VaultDiscoverService(snapshots),
       searchSnapshotReadiness:
@@ -603,5 +613,61 @@ export class ManagedVaultBridgeRuntime {
   registrationCommand(serverName?: string): string {
     if (this.#bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
     return this.#bridge.registrationCommand(serverName);
+  }
+
+  /**
+   * Generates one closed standard diagnostic bundle from this Managed Vault's
+   * current operational evidence (spec §9.4). The bundle is produced only
+   * through the local interactive Primary Operator entry point; no Agent
+   * Session route can reach it.
+   */
+  async createStandardDiagnosticBundle(): Promise<StandardDiagnosticBundle> {
+    const bridge = this.#bridge;
+    const health = this.#health;
+    const settings = this.#settings;
+    if (bridge === undefined || health === undefined || settings === undefined) {
+      throw new Error("Managed Vault Bridge is not loaded");
+    }
+    const projected = projectObservedHealth(
+      health,
+      bridge.port,
+      this.#snapshots === undefined
+        ? undefined
+        : () => this.#snapshots?.readiness ?? "unavailable",
+    );
+    if (projected.outcome !== "observed") {
+      throw new Error("Standard diagnostic evidence is unavailable from this runtime");
+    }
+    const execution = this.#options.changeSetExecution;
+    const journal = execution === undefined
+      ? { availability: "unavailable" as const, frames: [] as const }
+      : await execution.diagnosticJournalFacts();
+    const registry = settings.changeSets ?? emptyChangeSetState();
+    const evidence: StandardDiagnosticEvidence = {
+      vaultId: settings.vaultId,
+      versions: projected.versions,
+      health: {
+        readiness: projected.readiness,
+        recovery: projected.recovery.state,
+        write: projected.write,
+        effectiveGate: projected.effectiveGate?.code ?? null,
+        overall: projected.overall,
+        reasonCodes: projected.reasonCodes as StandardDiagnosticEvidence["health"]["reasonCodes"],
+        operatorAction: projected.operatorAction,
+      },
+      listener: { address: "127.0.0.1", port: projected.listener.port },
+      queue: projected.queue,
+      lifecycle: projected.lifecycle,
+      journal,
+      changeSets: registry.entries.map((entry) => ({
+        changeSetId: entry.changeSetId,
+        submissionKey: entry.submissionKey,
+        enqueueSeq: entry.enqueueSeq,
+        state: entry.changeSet.state,
+        executionPhase: entry.execution?.phase ?? null,
+      })),
+      machineEvents: [],
+    };
+    return createStandardDiagnosticBundle(evidence);
   }
 }

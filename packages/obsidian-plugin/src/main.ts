@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import {
   FileSystemAdapter,
+  Notice,
   Plugin,
   TFile,
   getAllTags,
@@ -343,6 +344,26 @@ export default class VaultOperationBridgePlugin extends Plugin {
           void navigator.clipboard.writeText(runtime.registrationCommand());
         }
         return true;
+      },
+    });
+    // Spec §9.4: only the Primary Operator, through this local interactive
+    // management entry point, may generate a standard diagnostic bundle.
+    this.addCommand({
+      id: "copy-standard-diagnostic-bundle",
+      name: "Copy standard diagnostic bundle",
+      callback: () => {
+        void runtime
+          .createStandardDiagnosticBundle()
+          .then(async (bundle) => {
+            await navigator.clipboard.writeText(JSON.stringify(bundle));
+          })
+          .catch((error: unknown) => {
+            new Notice(
+              error instanceof Error
+                ? error.message
+                : "Standard diagnostic bundle generation failed",
+            );
+          });
       },
     });
   }
