@@ -17,6 +17,10 @@ import {
   type BridgeMaintenanceOperation,
 } from "./bridge-instance.js";
 import {
+  createContentInclusiveDiagnosticBundle,
+  type ContentInclusiveDiagnosticBundle,
+} from "./content-inclusive-diagnostic-bundle.js";
+import {
   createStandardDiagnosticBundle,
   type StandardDiagnosticBundle,
   type StandardDiagnosticEvidence,
@@ -616,12 +620,12 @@ export class ManagedVaultBridgeRuntime {
   }
 
   /**
-   * Generates one closed standard diagnostic bundle from this Managed Vault's
-   * current operational evidence (spec §9.4). The bundle is produced only
-   * through the local interactive Primary Operator entry point; no Agent
-   * Session route can reach it.
+   * Collects this Managed Vault's current operational evidence (spec §9.4).
+   * Both local diagnostic producers consume the same closed evidence seam so
+   * each emits only what its own format permits and fails closed on any
+   * unknown or content-bearing source field.
    */
-  async createStandardDiagnosticBundle(): Promise<StandardDiagnosticBundle> {
+  async #collectDiagnosticEvidence(): Promise<StandardDiagnosticEvidence> {
     const bridge = this.#bridge;
     const health = this.#health;
     const settings = this.#settings;
@@ -636,14 +640,14 @@ export class ManagedVaultBridgeRuntime {
         : () => this.#snapshots?.readiness ?? "unavailable",
     );
     if (projected.outcome !== "observed") {
-      throw new Error("Standard diagnostic evidence is unavailable from this runtime");
+      throw new Error("Diagnostic evidence is unavailable from this runtime");
     }
     const execution = this.#options.changeSetExecution;
     const journal = execution === undefined
       ? { availability: "unavailable" as const, frames: [] as const }
       : await execution.diagnosticJournalFacts();
     const registry = settings.changeSets ?? emptyChangeSetState();
-    const evidence: StandardDiagnosticEvidence = {
+    return {
       vaultId: settings.vaultId,
       versions: projected.versions,
       health: {
@@ -668,6 +672,29 @@ export class ManagedVaultBridgeRuntime {
       })),
       machineEvents: [],
     };
-    return createStandardDiagnosticBundle(evidence);
+  }
+
+  /**
+   * Generates one closed standard diagnostic bundle from this Managed Vault's
+   * current operational evidence (spec §9.4). The bundle is produced only
+   * through the local interactive Primary Operator entry point; no Agent
+   * Session route can reach it.
+   */
+  async createStandardDiagnosticBundle(): Promise<StandardDiagnosticBundle> {
+    return createStandardDiagnosticBundle(await this.#collectDiagnosticEvidence());
+  }
+
+  /**
+   * Generates one content-inclusive diagnostic bundle that carries exactly the
+   * explicitly selected content plus a minimal trace of local operational
+   * context (spec §9.4). The selected content bytes are isolated so no
+   * implicit surrounding note or Vault content leaks in; generation happens
+   * only through the confirmed local Primary Operator command.
+   */
+  async createContentInclusiveDiagnosticBundle(
+    selectedContent: string,
+  ): Promise<ContentInclusiveDiagnosticBundle> {
+    const evidence = await this.#collectDiagnosticEvidence();
+    return createContentInclusiveDiagnosticBundle(evidence, selectedContent);
   }
 }

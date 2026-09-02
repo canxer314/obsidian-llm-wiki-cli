@@ -9,6 +9,9 @@ import {
   createBridgeInstance,
   type BridgeInstance,
 } from "../src/bridge-instance.js";
+import {
+  verifyContentInclusiveDiagnosticBundle,
+} from "../src/content-inclusive-diagnostic-bundle.js";
 import { verifyStandardDiagnosticBundle } from "../src/diagnostic-bundle.js";
 import { assertValidatedInstalledBundle } from "../src/maintenance-operation.js";
 import {
@@ -1639,5 +1642,105 @@ describe("Managed Vault standard diagnostic bundle", () => {
       await alpha.unload();
       await beta.unload();
     }
+  });
+});
+
+describe("Managed Vault content-inclusive diagnostic bundle", () => {
+  it("wraps exactly the explicitly selected content from one loaded runtime", async () => {
+    const submissionKey = "runtime-content-submission-key-raw";
+    const changeSetId = "runtime-content-change-set-raw";
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () =>
+          persistedDiagnosticSettings(
+            "runtime-content-vault-id-raw",
+            27123,
+            "D:/Vaults/Alpha",
+            submissionKey,
+            changeSetId,
+          ),
+        save: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "must-not-regenerate",
+      selectInitialPort: () => 29999,
+    });
+    await runtime.load();
+
+    const selected = "chosen first line\n# Selected heading\nchosen third line";
+    const bundle = await runtime.createContentInclusiveDiagnosticBundle(selected);
+    expect(bundle.schemaVersion).toBe(1);
+    expect(bundle.bundleVersion).toBe("1.0");
+    expect(bundle.purpose).toBe("selected_content_diagnostic");
+    expect(bundle.selection.tracer).toBe("active_editor_selection");
+    expect(bundle.selection.content).toBe(selected);
+    expect(verifyContentInclusiveDiagnosticBundle(bundle)).toBe(true);
+
+    const text = JSON.stringify(bundle);
+    expect(text).toContain("chosen first line");
+    expect(text).toContain("# Selected heading");
+    expect(text).toContain("chosen third line");
+    expect(text).not.toContain("runtime-content-vault-id-raw");
+    expect(text).not.toContain(submissionKey);
+    expect(text).not.toContain(changeSetId);
+    await runtime.unload();
+  });
+
+  it("keeps the selected content isolated from the standard bundle from the same runtime", async () => {
+    const submissionKey = "runtime-content-isolation-key-raw";
+    const changeSetId = "runtime-content-isolation-change-set-raw";
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () =>
+          persistedDiagnosticSettings(
+            "runtime-content-isolation-vault-id-raw",
+            27123,
+            "D:/Vaults/Alpha",
+            submissionKey,
+            changeSetId,
+          ),
+        save: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+    await runtime.load();
+
+    try {
+      const selected = "isolated selection only";
+      const contentInclusive = await runtime.createContentInclusiveDiagnosticBundle(selected);
+      const standard = await runtime.createStandardDiagnosticBundle();
+
+      expect(verifyContentInclusiveDiagnosticBundle(contentInclusive)).toBe(true);
+      expect(verifyStandardDiagnosticBundle(standard)).toBe(true);
+      expect(contentInclusive.selection.content).toBe(selected);
+      expect((standard as unknown as Record<string, unknown>)).not.toHaveProperty("selection");
+      expect((standard as unknown as Record<string, unknown>)).not.toHaveProperty("content");
+      expect((contentInclusive as unknown as Record<string, unknown>)).not.toHaveProperty(
+        "changeSetOutcomes",
+      );
+      expect((contentInclusive as unknown as Record<string, unknown>)).not.toHaveProperty(
+        "machineEvents",
+      );
+    } finally {
+      await runtime.unload();
+    }
+  });
+
+  it("requires a loaded bridge and non-empty selected content", async () => {
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+    await expect(runtime.createContentInclusiveDiagnosticBundle("x")).rejects.toThrow(
+      "Managed Vault Bridge is not loaded",
+    );
+    await runtime.load();
+    await expect(runtime.createContentInclusiveDiagnosticBundle("")).rejects.toThrow(
+      "Explicitly selected content is required",
+    );
+    await runtime.unload();
   });
 });

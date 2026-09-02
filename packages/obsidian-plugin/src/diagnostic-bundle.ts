@@ -96,7 +96,8 @@ interface HealthField {
   readonly operatorAction: OperatorAction;
 }
 
-interface VersionField {
+/** Runtime and protocol versions shared by the standard evidence seam. */
+export interface VersionField {
   readonly bridge: string;
   readonly plugin: string;
   readonly protocol: string;
@@ -516,7 +517,13 @@ function parseMachineEvents(value: unknown, location: string): MachineEvent[] {
   });
 }
 
-function parseEvidence(value: unknown): StandardDiagnosticEvidence {
+/**
+ * Strictly parses one standard evidence object against the closed grammar.
+ * The content-inclusive diagnostic producer reuses this same evidence seam so
+ * both producers accept only the same narrow operational evidence and fail
+ * closed on any unknown or content-bearing source field.
+ */
+export function parseEvidence(value: unknown): StandardDiagnosticEvidence {
   const root = requireExactRecord(
     value,
     [

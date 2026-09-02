@@ -1985,4 +1985,89 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
       await bridge.stop();
     }
   });
+
+  it("gives the Agent Session and six MCP tools no content-inclusive route and keeps vault_health unchanged", async () => {
+    const bridge = createBridgeInstance({
+      port: 0,
+      health: healthState("vault-a", "Alpha"),
+      discoverService: {
+        execute: async () => {
+          throw new Error("surface test must not execute discovery");
+        },
+        releaseClient: () => undefined,
+      },
+      readDataSource: {
+        readBinary: async () => null,
+        parseFrontmatter: () => null,
+        headings: () => [],
+      },
+      changeSets: {
+        store: { load: async () => undefined, save: async () => undefined },
+        dataSource: {
+          readBinary: async () => null,
+          pathKind: async () => null,
+          isContained: async () => true,
+        },
+        createChangeSetId: () => "surface-change-set",
+      },
+    });
+    await bridge.start();
+
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const tools = await client.listTools();
+      const names = tools.tools.map(({ name }) => name);
+      // Content-inclusive generation is reachable only through the confirmed
+      // local command; no Agent Session tool or authorization parameter exists.
+      expect(names.some((name) => /content/i.test(name))).toBe(false);
+      expect(names.some((name) => /diagnostic/i.test(name))).toBe(false);
+      for (const tool of tools.tools) {
+        const schema = tool.inputSchema as Record<string, unknown>;
+        const properties = (schema.properties ?? {}) as Record<string, unknown>;
+        for (const forbidden of [
+          "authorization",
+          "selection",
+          "content",
+          "download",
+          "confirm",
+          "copy",
+        ]) {
+          expect(Object.keys(properties)).not.toContain(forbidden);
+        }
+      }
+      const healthTool = tools.tools.find(({ name }) => name === "vault_health");
+      expect(healthTool).toBeDefined();
+      expect(healthTool?.inputSchema).toEqual({
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      });
+      const health = await client.callTool({ name: "vault_health", arguments: {} });
+      expect(health.isError).toBe(false);
+      expect(health.structuredContent).toMatchObject({
+        outcome: "observed",
+        vault: { id: "vault-a", name: "Alpha" },
+      });
+      const content = health.structuredContent as Record<string, unknown>;
+      for (const absent of [
+        "purpose",
+        "trace",
+        "selection",
+        "content",
+        "checksum",
+        "changeSetOutcomes",
+        "listenerTimeline",
+        "queueTimeline",
+        "lifecycleOutcomes",
+        "journal",
+        "machineEvents",
+        "alias",
+      ]) {
+        expect(content).not.toHaveProperty(absent);
+      }
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
 });
