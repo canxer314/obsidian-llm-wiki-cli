@@ -127,6 +127,19 @@ describe("same-session architecture review extraction", () => {
     })).rejects.toThrow("Architecture review session must not create commits");
   });
 
+  it("fails closed when the resumed extraction creates commits", async () => {
+    const extraction = vi.fn().mockResolvedValue({ commits: [{ sha: revision }], output: proposedOutcome });
+    const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.review({
+      revision,
+      checkoutPath: "/safe/disposable-checkout",
+      priorProposals,
+      model: "planner-model",
+    })).rejects.toThrow("Architecture review session must not create commits");
+  });
+
   it("fails closed when the produce pass does not expose a resumable session", async () => {
     const runAgent = vi.fn().mockResolvedValue({ commits: [] });
     const extractor = createExtractor(runAgent);
