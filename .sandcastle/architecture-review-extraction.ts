@@ -1,7 +1,6 @@
 import { join } from "node:path";
 
 import {
-  Output,
   claudeCode,
   run,
   type SandboxHooks,
@@ -10,6 +9,7 @@ import {
 import { z } from "zod";
 
 import { agentLogging } from "./agent-logging.ts";
+import { createSameSessionStructuredExtractor } from "./same-session-structured-extraction.ts";
 import type {
   ArchitectureReviewOutcome,
   ArchitectureReviewProposal,
@@ -68,8 +68,12 @@ export function createSameSessionArchitectureReviewExtractor(options: {
   readonly createAgent?: typeof claudeCode;
   readonly timeoutMilliseconds?: number;
 }) {
-  const runAgent = options.runAgent ?? run;
-  const createAgent = options.createAgent ?? claudeCode;
+  const extractor = createSameSessionStructuredExtractor({
+    sandbox: options.sandbox,
+    hooks: options.hooks,
+    ...(options.runAgent === undefined ? {} : { runAgent: options.runAgent }),
+    ...(options.createAgent === undefined ? {} : { createAgent: options.createAgent }),
+  });
   return {
     async review(request: {
       readonly revision: string;
@@ -78,46 +82,32 @@ export function createSameSessionArchitectureReviewExtractor(options: {
       readonly model: string;
       readonly artifactDirectory?: string;
     }): Promise<ArchitectureReviewOutcome> {
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(new Error("Architecture review execution timed out")),
-        options.timeoutMilliseconds ?? ARCHITECTURE_REVIEW_TIMEOUT_MILLISECONDS,
+      const logging = agentLogging(
+        request.artifactDirectory === undefined
+          ? undefined
+          : join(request.artifactDirectory, "architecture-review.log"),
       );
-      try {
-        const logging = agentLogging(
-          request.artifactDirectory === undefined
-            ? undefined
-            : join(request.artifactDirectory, "architecture-review.log"),
-        );
-        const produced = await runAgent({
-        agent: createAgent(request.model),
-        sandbox: options.sandbox,
-        hooks: options.hooks,
-        cwd: request.checkoutPath,
+      return extractor.extract({
+        model: request.model,
+        checkoutPath: request.checkoutPath,
+        initialPrompt: producePrompt(request.revision, request.priorProposals),
+        resumedPrompt: extractionPrompt,
+        timeoutMilliseconds: options.timeoutMilliseconds ?? ARCHITECTURE_REVIEW_TIMEOUT_MILLISECONDS,
+        timeoutError: new Error("Architecture review execution timed out"),
         ...(logging === undefined ? {} : { logging }),
-        signal: controller.signal,
-        branchStrategy: { type: "head" },
-        maxIterations: 1,
-        prompt: producePrompt(request.revision, request.priorProposals),
+        output: { tag: "output", schema: architectureReviewSchema },
+        missingResumeMessage: "Architecture review session identity is unavailable",
+        observeInitial: ({ commits }) => {
+          if (commits.length > 0) {
+            throw new Error("Architecture review session must not create commits");
+          }
+        },
+        observeResumed: ({ commits }) => {
+          if (commits.length > 0) {
+            throw new Error("Architecture review session must not create commits");
+          }
+        },
       });
-      if (produced.commits.length > 0) {
-        throw new Error("Architecture review session must not create commits");
-      }
-      if (produced.resume === undefined) {
-        throw new Error("Architecture review session identity is unavailable");
-      }
-      const extracted = await produced.resume(extractionPrompt, {
-        ...(logging === undefined ? {} : { logging }),
-        signal: controller.signal,
-        output: Output.object({ tag: "output", schema: architectureReviewSchema, maxRetries: 2 }),
-      }) as unknown as { readonly commits: readonly unknown[]; readonly output: ArchitectureReviewOutcome };
-      if (extracted.commits.length > 0) {
-        throw new Error("Architecture review session must not create commits");
-      }
-      return extracted.output;
-      } finally {
-        clearTimeout(timeout);
-      }
     },
   };
 }

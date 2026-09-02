@@ -38,7 +38,7 @@ describe("same-session review extraction", () => {
     expect(produceRequest).not.toHaveProperty("output");
     expect(extraction).toHaveBeenCalledWith(expect.stringContaining("<review>"), {
       signal: expect.any(AbortSignal),
-      output: expect.objectContaining({ _tag: "object", tag: "review", maxRetries: 2 }),
+      output: expect.objectContaining({ _tag: "object", tag: "review", maxRetries: undefined }),
     });
   });
 
@@ -76,7 +76,7 @@ describe("same-session review extraction", () => {
     expect(runAgent).toHaveBeenCalledTimes(1);
     expect(extraction).toHaveBeenCalledTimes(1);
     expect(extraction).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
-      output: expect.objectContaining({ maxRetries: 2 }),
+      output: expect.objectContaining({ maxRetries: undefined }),
     }));
   });
 
