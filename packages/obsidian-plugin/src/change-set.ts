@@ -78,6 +78,10 @@ export interface ChangeSetRegistryState {
   tombstones: ChangeSetRegistryTombstone[];
   writeMode?: ChangeSetWriteMode;
   lifecycle?: PersistedChangeSetLifecycle;
+  recovery?:
+    | { state: "blocked"; changeSetId: string }
+    | { state: "baseline_accepted"; changeSetId: string }
+    | { state: "none" };
 }
 
 export interface ChangeSetRegistryStore {
@@ -258,6 +262,7 @@ export interface SearchSnapshotTargetEvidence {
 export interface ChangeSetExecutionAdapter {
   loadRecoveryFrame(): Promise<RecoveryJournalFrame | null>;
   persistRecoveryFrame(frame: RecoveryJournalFrame): Promise<void>;
+  clearRecoveryFrame?(): Promise<void>;
   pathKind(path: string): Promise<ChangeSetPathKind | null>;
   directoryIdentity(path: string): Promise<string | null>;
   prepareDirectory(stageId: string): Promise<string>;
@@ -553,6 +558,19 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
   ) {
     throw new Error("Change Set registry is corrupt or incompatible");
   }
+  const recovery = state.recovery;
+  const validRecovery =
+    recovery === undefined ||
+    (typeof recovery === "object" &&
+      recovery !== null &&
+      (recovery.state === "none"
+        ? Object.keys(recovery).join(",") === "state"
+        : ["blocked", "baseline_accepted"].includes(recovery.state) &&
+          isNonEmptyString(recovery.changeSetId) &&
+          Object.keys(recovery).sort().join(",") === "changeSetId,state"));
+  if ((isLegacy && recovery !== undefined) || !validRecovery) {
+    throw new Error("Change Set registry is corrupt or incompatible");
+  }
   return {
     schemaVersion: CHANGE_SET_REGISTRY_SCHEMA_VERSION,
     nextEnqueueSeq: state.nextEnqueueSeq!,
@@ -560,6 +578,7 @@ export function parseChangeSetRegistryState(value: unknown): ChangeSetRegistrySt
     tombstones,
     ...(writeMode === undefined ? {} : { writeMode }),
     ...(lifecycle === undefined ? {} : { lifecycle }),
+    ...(recovery === undefined ? {} : { recovery }),
   };
 }
 
@@ -1655,16 +1674,25 @@ export class ChangeSetService {
       createChangeSetId: options.createChangeSetId ?? randomUUID,
     };
     this.#state = state;
-    this.#dequeuePaused = state.writeMode !== undefined;
-    this.#admissionGate = gateForWriteMode(state.writeMode);
+    this.#recoveryBlocked =
+      state.recovery?.state !== "none" && state.recovery !== undefined;
+    this.#dequeuePaused = state.writeMode !== undefined || this.#recoveryBlocked;
+    this.#admissionGate = this.#recoveryBlocked
+      ? { code: "recovery_blocked" }
+      : gateForWriteMode(state.writeMode);
+  }
+
+  get recoveryBlocked(): boolean {
+    return this.#recoveryBlocked;
   }
 
   static async open(options: ChangeSetServiceOptions): Promise<ChangeSetService> {
     const state = parseChangeSetRegistryState(await options.store.load());
     const service = new ChangeSetService(options, state);
-    let recoveryBlocked = false;
+    let recoveryBlocked = service.#recoveryBlocked;
     try {
       await service.#recover();
+      recoveryBlocked = service.#recoveryBlocked;
     } catch (error) {
       if (error instanceof InjectedChangeSetCrash) throw error;
       recoveryBlocked = true;
@@ -1755,7 +1783,12 @@ export class ChangeSetService {
 
   async #markUnproven(entry: ChangeSetRegistryEntry): Promise<void> {
     this.#recoveryBlocked = true;
-    await this.#updateEntry(entry.changeSetId, (current) => {
+    await this.#serialize(async () => {
+      const nextState = structuredClone(this.#state);
+      const current = nextState.entries.find(
+        (candidate) => candidate.changeSetId === entry.changeSetId,
+      );
+      if (current === undefined) throw new Error("Change Set registry entry disappeared");
       current.changeSet = {
         changeSetId: current.changeSetId,
         state: "result_unproven",
@@ -1764,6 +1797,10 @@ export class ChangeSetService {
           : {}),
       };
       if (current.execution !== undefined) current.execution.phase = "terminal";
+      nextState.recovery = { state: "blocked", changeSetId: current.changeSetId };
+      await this.#save(nextState);
+      this.#dequeuePaused = true;
+      this.#admissionGate = { code: "recovery_blocked" };
     });
     await this.#options.runtimeState?.blockWritesForUnproven(entry.changeSetId);
   }
@@ -1997,11 +2034,40 @@ export class ChangeSetService {
     }
   }
 
+  #recoveryFrameMatchesEntry(
+    frame: RecoveryJournalFrame,
+    entry: ChangeSetRegistryEntry,
+  ): boolean {
+    return (
+      frame.enqueueSeq === entry.enqueueSeq &&
+      entry.execution !== undefined &&
+      frame.input.submissionKey === entry.submissionKey &&
+      fingerprintChangeSetRequest(frame.input) === entry.fingerprint &&
+      recoveryPlanMatchesFrame(frame) &&
+      (entry.changeSet.state !== "in_progress" ||
+        entry.changeSet.preview === undefined ||
+        JSON.stringify(canonicalize(frame.preview)) ===
+          JSON.stringify(canonicalize(entry.changeSet.preview)))
+    );
+  }
+
   async #recover(): Promise<void> {
     const execution = this.#options.execution;
     if (execution === undefined) return;
     const frame = await execution.loadRecoveryFrame();
-    if (frame === null) return;
+    if (frame === null) {
+      if (this.#state.recovery?.state === "baseline_accepted") {
+        await this.#serialize(async () => {
+          const nextState = structuredClone(this.#state);
+          nextState.recovery = { state: "none" };
+          await this.#save(nextState);
+          this.#recoveryBlocked = false;
+          this.#dequeuePaused = true;
+          this.#admissionGate = { code: "writes_paused" };
+        });
+      }
+      return;
+    }
     const entry = this.#state.entries.find(
       (candidate) => candidate.changeSetId === frame.changeSetId,
     );
@@ -2012,21 +2078,16 @@ export class ChangeSetService {
       if (expired && frame.phase !== "PREPARED") return;
       throw new Error("Recovery Journal does not match the Change Set registry");
     }
-    if (
-      frame.enqueueSeq !== entry.enqueueSeq ||
-      entry.execution === undefined ||
-      frame.input.submissionKey !== entry.submissionKey ||
-      fingerprintChangeSetRequest(frame.input) !== entry.fingerprint ||
-      !recoveryPlanMatchesFrame(frame) ||
-      entry.changeSet.state === "in_progress" &&
-        entry.changeSet.preview !== undefined &&
-        JSON.stringify(canonicalize(frame.preview)) !==
-          JSON.stringify(canonicalize(entry.changeSet.preview))
-    ) {
+    if (!this.#recoveryFrameMatchesEntry(frame, entry)) {
       await this.#markUnproven(entry);
       return;
     }
     if (frame.vaultId !== (this.#options.vaultId ?? "vault")) {
+      await this.#markUnproven(entry);
+      return;
+    }
+    if (this.#state.recovery?.state === "baseline_accepted") {
+      if (frame.phase === "FAILED") return;
       await this.#markUnproven(entry);
       return;
     }
@@ -2174,6 +2235,107 @@ export class ChangeSetService {
     });
   }
 
+  async acceptTrustedRecoveryBaseline(
+    recheckTrustedBaseline: () => void | Promise<void>,
+  ): Promise<void> {
+    await this.#withControlLease(() =>
+      this.#withWriteLease(async () => {
+        const execution = this.#options.execution;
+        if (execution === undefined) {
+          throw new Error("Recovery Journal access is unavailable");
+        }
+        const recovery = this.#state.recovery;
+        if (recovery?.state === "baseline_accepted") {
+          if (execution.clearRecoveryFrame === undefined) {
+            throw new Error("Recovery Journal clearing is unavailable");
+          }
+          const frame = await execution.loadRecoveryFrame();
+          const entry = this.#state.entries.find(
+            (candidate) => candidate.changeSetId === recovery.changeSetId,
+          );
+          if (
+            frame === null ||
+            frame.phase !== "FAILED" ||
+            entry === undefined ||
+            entry.changeSet.state !== "result_unproven" ||
+            entry.execution?.phase !== "terminal" ||
+            !this.#recoveryFrameMatchesEntry(frame, entry) ||
+            frame.vaultId !== (this.#options.vaultId ?? "vault") ||
+            frame.changeSetId !== recovery.changeSetId
+          ) {
+            throw new Error("Recovery Journal does not match the accepted baseline");
+          }
+          await execution.clearRecoveryFrame();
+          await this.#serialize(async () => {
+            const nextState = structuredClone(this.#state);
+            nextState.recovery = { state: "none" };
+            await this.#save(nextState);
+            this.#recoveryBlocked = false;
+            this.#dequeuePaused = true;
+            this.#admissionGate = gateForWriteMode(this.#state.writeMode);
+          });
+          return;
+        }
+        if (!this.#recoveryBlocked || recovery?.state !== "blocked") {
+          throw new Error("No recovery-blocked state awaits a trusted baseline");
+        }
+        const unresolved = this.#state.entries.filter(
+          ({ changeSet, execution }) =>
+            changeSet.state === "result_unproven" && execution?.phase === "terminal",
+        );
+        if (
+          unresolved.length !== 1 ||
+          unresolved[0]?.changeSetId !== recovery.changeSetId ||
+          this.#currentExecutionId !== null
+        ) {
+          throw new Error("Recovery proof state does not permit baseline acceptance");
+        }
+        const frame = await execution.loadRecoveryFrame();
+        if (frame === null || frame.phase !== "FAILED") {
+          throw new Error("Recovery Journal is not eligible for baseline acceptance");
+        }
+        if (
+          !this.#recoveryFrameMatchesEntry(frame, unresolved[0]!) ||
+          frame.vaultId !== (this.#options.vaultId ?? "vault") ||
+          frame.changeSetId !== recovery.changeSetId
+        ) {
+          throw new Error("Recovery Journal does not match the blocked proof state");
+        }
+        if (execution.clearRecoveryFrame === undefined) {
+          throw new Error("Recovery Journal clearing is unavailable");
+        }
+
+        await recheckTrustedBaseline();
+        await this.#serialize(async () => {
+          const nextState = structuredClone(this.#state);
+          nextState.recovery = {
+            state: "baseline_accepted",
+            changeSetId: recovery.changeSetId,
+          };
+          if (nextState.writeMode === undefined) nextState.writeMode = "manual_paused";
+          await this.#save(nextState);
+        });
+        try {
+          await execution.clearRecoveryFrame();
+          await this.#crash("after_baseline_journal_cleared");
+        } catch (error) {
+          if (error instanceof InjectedChangeSetCrash) throw error;
+          throw new Error("Trusted baseline was accepted but Recovery Journal clearing failed", {
+            cause: error,
+          });
+        }
+        await this.#serialize(async () => {
+          const nextState = structuredClone(this.#state);
+          nextState.recovery = { state: "none" };
+          await this.#save(nextState);
+          this.#recoveryBlocked = false;
+          this.#dequeuePaused = true;
+          this.#admissionGate = { code: "writes_paused" };
+        });
+      }),
+    );
+  }
+
   async resume(
     assertSafe?: () => void,
     onAdmissionOpened?: () => void,
@@ -2181,6 +2343,12 @@ export class ChangeSetService {
     await this.#withControlLease(() =>
       this.#withWriteLease(async () => {
         assertSafe?.();
+        if (
+          this.#recoveryBlocked ||
+          (this.#state.recovery !== undefined && this.#state.recovery.state !== "none")
+        ) {
+          throw new Error("Recovery must be resolved before writes can resume");
+        }
         await this.#serialize(async () => {
           if (this.#admissionGate?.code === "upgrade_in_progress") {
             throw new Error("Maintenance has not completed and writes remain blocked");

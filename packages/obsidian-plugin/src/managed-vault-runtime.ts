@@ -433,6 +433,14 @@ export class ManagedVaultBridgeRuntime {
       },
     };
     const persistedWriteMode = restricted ? undefined : settings.changeSets?.writeMode;
+    // `baseline_accepted` is deliberately durable before clearing the Journal.
+    // Keep its health projection recovery-blocked until ChangeSetService confirms
+    // that the Journal is gone during startup; otherwise a failed clear could
+    // advertise a manual pause while the service still blocks recovery.
+    const recoveryPending =
+      !restricted &&
+      settings.changeSets?.recovery !== undefined &&
+      settings.changeSets.recovery.state !== "none";
     const writeUnavailable = this.#options.changeSetDataSource === undefined;
     const persistedPaused = persistedWriteMode !== undefined;
     const persistedLifecycle = restricted ? undefined : settings.changeSets?.lifecycle;
@@ -453,14 +461,14 @@ export class ManagedVaultBridgeRuntime {
           cache: "unavailable",
           index: snapshots?.readiness === "ready" ? "ready" : "unavailable",
         },
-        recovery: { state: "none" },
+        recovery: recoveryPending ? { state: "blocked" } : { state: "none" },
         write:
-          writeUnavailable || persistedPaused
+          recoveryPending || writeUnavailable || persistedPaused
             ? {
-                gate: writeUnavailable || maintenanceFailed ? "blocked" : "open",
+                gate: recoveryPending || writeUnavailable || maintenanceFailed ? "blocked" : "open",
                 state: "paused",
                 pauseSource:
-                  writeUnavailable || maintenancePaused || maintenancePending
+                  recoveryPending || writeUnavailable || maintenancePaused || maintenancePending
                     ? "maintenance"
                     : "manual",
               }
@@ -473,11 +481,13 @@ export class ManagedVaultBridgeRuntime {
           recovery: "not_run",
         },
         effectiveGate:
-          writeUnavailable || persistedPaused
-            ? { code: maintenancePending ? "upgrade_in_progress" : "writes_paused" }
-            : null,
+          recoveryPending
+            ? { code: "recovery_blocked" }
+            : writeUnavailable || persistedPaused
+              ? { code: maintenancePending ? "upgrade_in_progress" : "writes_paused" }
+              : null,
         overall:
-          writeUnavailable || maintenancePending
+          recoveryPending || writeUnavailable || maintenancePending
             ? "blocked"
             : persistedPaused
               ? "degraded"
@@ -486,8 +496,10 @@ export class ManagedVaultBridgeRuntime {
                 ? "healthy"
                 : "degraded",
         reasonCodes:
-          maintenanceFailed
-            ? ["upgrade_failed"]
+          recoveryPending
+            ? ["recovery_blocked"]
+            : maintenanceFailed
+              ? ["upgrade_failed"]
             : snapshots?.readiness !== "ready"
               ? ["content_tools_not_ready"]
               : writeUnavailable
@@ -500,8 +512,10 @@ export class ManagedVaultBridgeRuntime {
                       ? ["mutation_executor_not_ready"]
                       : [],
         operatorAction:
-          maintenanceFailed
-            ? "finish_upgrade"
+          recoveryPending
+            ? "review_recovery"
+            : maintenanceFailed
+              ? "finish_upgrade"
             : snapshots?.readiness !== "ready"
               ? "finish_initialization"
               : writeUnavailable || persistedPaused
@@ -577,6 +591,12 @@ export class ManagedVaultBridgeRuntime {
       },
       recheckHealth: () => this.refreshSearchSnapshot(),
     });
+  }
+
+  async acceptTrustedRecoveryBaseline(): Promise<void> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    await bridge.acceptTrustedRecoveryBaseline(() => this.refreshSearchSnapshot());
   }
 
   async resumeWrites(): Promise<void> {
