@@ -376,8 +376,16 @@ export async function createNodeFileSystemChangeSetHost(
       }
       await rename(source, destination);
     },
-    discardPreparedFile: async (stageId) =>
-      rm(await assertPrivateContained(stagePath(stageId)), { force: true }),
+    discardPreparedFile: async (stageId) => {
+      const path = await assertPrivateContained(stagePath(stageId));
+      // A rollback restore stages under `${stageId}/rollback` and then publishes
+      // that file away, leaving the base stage path as an empty directory. When
+      // recovery re-runs a rollback after a crash mid-rollback, the base stage
+      // path is a directory rather than a file; `rm` without `recursive` would
+      // fail closed (EISDIR) and block writes. Recursing keeps discard
+      // idempotent so a repeated rollback attempt can converge to ROLLED_BACK.
+      await rm(path, { force: true, recursive: true });
+    },
     moveFile: async (sourcePath, destinationPath) => {
       const source = await assertContained(sourcePath, "existing");
       const destination = await assertContained(destinationPath, "destination");

@@ -6,18 +6,24 @@
  * directories (`after_mutation:0` / `after_mutation:1`) and the staged
  * Markdown file publish (`after_file_mutation:0`), followed by raw
  * verification, the successor-snapshot success barrier, and the durable
- * `COMMITTED` write.
+ * `COMMITTED` write. The fixture declares no original bytes (the Change Set
+ * creates the file) and the committed bytes it must leave behind.
  */
 
 import type {
   MutationCorpusBoundary,
   MutationCorpusCrashPoint,
+  MutationCorpusFileFixture,
   MutationCorpusProfile,
+  MutationCorpusProofState,
 } from "./crash-corpus-runner.js";
+
+const textEncoder = new TextEncoder();
 
 export const CREATE_NOTE_LABEL = "create-note";
 export const CREATE_NOTE_PATH = "Corpus/Notes/Alpha.md";
 export const CREATE_NOTE_CONTENT = "# Corpus Alpha\n\n你好，世界 🚀\ncreated by the crash corpus\n";
+export const CREATE_NOTE_BYTES = textEncoder.encode(CREATE_NOTE_CONTENT);
 
 export const createNoteCrashPoints: readonly MutationCorpusCrashPoint[] = [
   { point: "before_prepared", phase: "apply" },
@@ -39,11 +45,17 @@ export const createNoteCrashPoints: readonly MutationCorpusCrashPoint[] = [
 
 export const CREATE_NOTE_ROLLBACK_LEAD_IN = "after_snapshot";
 
+const createNoteFixture: MutationCorpusFileFixture = {
+  path: CREATE_NOTE_PATH,
+  originalBytes: null,
+  committedBytes: CREATE_NOTE_BYTES,
+};
+
 function crashPointName(crashPoint: MutationCorpusCrashPoint): string {
   return crashPoint.point.replace(/[^A-Za-z0-9_-]/gu, "_");
 }
 
-function proofStateFor(crashPoint: MutationCorpusCrashPoint): "intent_applied" | "intent_not_applied" {
+function proofStateFor(crashPoint: MutationCorpusCrashPoint): MutationCorpusProofState {
   if (crashPoint.point === "before_prepared" || crashPoint.point === "after_committed") {
     return "intent_applied";
   }
@@ -54,31 +66,32 @@ function boundaryFor(crashPoint: MutationCorpusCrashPoint): MutationCorpusBounda
   // The boundary is the on-disk state observed while the real process is
   // parked at the crash point (before the supervisor terminates it), not the
   // post-recovery terminal state.
+  const fileState =
+    crashPoint.point === "before_prepared" ||
+    crashPoint.point === "after_prepared" ||
+    crashPoint.point === "after_mutation:0" ||
+    crashPoint.point === "after_mutation:1" ||
+    crashPoint.point === "after_rollback_mutation:0" ||
+    crashPoint.point === "after_rollback_verification" ||
+    crashPoint.point === "after_rollback_evidence" ||
+    crashPoint.point === "before_rolled_back" ||
+    crashPoint.point === "after_rolled_back"
+      ? "absent"
+      : "committed";
   switch (crashPoint.point) {
     case "before_prepared":
       // No durable frame yet and no filesystem mutation has happened.
-      return { journalPhase: null, notePresent: false };
-    case "after_prepared":
-    case "after_mutation:0":
-    case "after_mutation:1":
-      return { journalPhase: "PREPARED", notePresent: false };
-    case "after_file_mutation:0":
-    case "after_raw_verification":
-    case "during_success_barrier":
-    case "after_snapshot":
-      return { journalPhase: "PREPARED", notePresent: true };
+      return { journalPhase: null, files: [{ path: CREATE_NOTE_PATH, state: "absent" }] };
     case "after_committed":
-      return { journalPhase: "COMMITTED", notePresent: true };
+      return { journalPhase: "COMMITTED", files: [{ path: CREATE_NOTE_PATH, state: fileState }] };
+    case "after_rolled_back":
+      return { journalPhase: "ROLLED_BACK", files: [{ path: CREATE_NOTE_PATH, state: "absent" }] };
     case "before_rollback":
       // Rollback has not started yet; the lead-in (after_snapshot) fully
       // applied the note and its parent directories.
-      return { journalPhase: "PREPARED", notePresent: true };
-    case "after_rolled_back":
-      return { journalPhase: "ROLLED_BACK", notePresent: false };
+      return { journalPhase: "PREPARED", files: [{ path: CREATE_NOTE_PATH, state: "committed" }] };
     default:
-      // after_rollback_mutation:0 / verification / evidence happen once the
-      // created note has been removed but before the terminal frame.
-      return { journalPhase: "PREPARED", notePresent: false };
+      return { journalPhase: "PREPARED", files: [{ path: CREATE_NOTE_PATH, state: fileState }] };
   }
 }
 
@@ -90,8 +103,8 @@ export function createNoteCorpusProfile(): MutationCorpusProfile {
   return {
     kind: "create_note",
     label: CREATE_NOTE_LABEL,
-    notePath: CREATE_NOTE_PATH,
-    content: CREATE_NOTE_CONTENT,
+    files: [createNoteFixture],
+    primaryPath: CREATE_NOTE_PATH,
     submissionKey: (seed) => `submission-${seed}`,
     buildSubmitInput: (seed) => ({
       submissionKey: `submission-${seed}`,
@@ -109,7 +122,6 @@ export function createNoteCorpusProfile(): MutationCorpusProfile {
     rollbackLeadInPoint: CREATE_NOTE_ROLLBACK_LEAD_IN,
     expectedBoundary: (crashPoint) => boundaryFor(crashPoint),
     expectedProofState: (crashPoint) => proofStateFor(crashPoint),
-    expectedNotePresence: (crashPoint) => proofStateFor(crashPoint) === "intent_applied",
     timeoutMs: 60_000,
   };
 }
