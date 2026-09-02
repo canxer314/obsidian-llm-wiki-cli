@@ -1,0 +1,16 @@
+{
+  "name": "cache-causality-probe",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PROTOTYPE ONLY: installed-runtime Obsidian cache causality probe",
+  "scripts": {
+    "build": "esbuild main.ts --bundle --external:obsidian --platform=node --format=cjs --target=es2022 --outfile=main.js",
+    "probe": "pwsh -NoProfile -File ./run-probe.ps1"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "esbuild": "latest",
+    "obsidian": "latest",
+    "typescript": "latest"
+  }
+}
