@@ -128,7 +128,7 @@ describe("systemd Dispatcher templates", () => {
     const runbook = await readFile(runbookPath, "utf8");
     const build = runbook.indexOf("npm run sandcastle -- build-image");
     const verify = runbook.indexOf('"imageReadiness":"ready"');
-    const canaries = runbook.indexOf("## Canary sequence");
+    const canaries = runbook.indexOf('id="canary-sequence"');
     const enableDispatch = runbook.indexOf("systemctl --user enable --now sandcastle-dispatch.timer");
     const enableArchitecture = runbook.indexOf("systemctl --user enable --now sandcastle-architecture-review.timer");
 
