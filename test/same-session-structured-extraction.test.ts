@@ -1,3 +1,4 @@
+import { StructuredOutputError } from "@ai-hero/sandcastle";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -54,7 +55,7 @@ describe("same-session structured extraction", () => {
     expect(resume).toHaveBeenCalledWith("emit <result> JSON now", expect.objectContaining({
       signal: initial.signal,
       logging,
-      output: expect.objectContaining({ _tag: "object", tag: "result", schema: outputSchema, maxRetries: 2 }),
+      output: expect.objectContaining({ _tag: "object", tag: "result", schema: outputSchema, maxRetries: undefined }),
     }));
   });
 
@@ -110,6 +111,33 @@ describe("same-session structured extraction", () => {
     }))).resolves.toEqual({ value: "validated" });
 
     expect(events).toEqual(["initial observation", "resume", "resumed observation"]);
+  });
+
+  it("observes every malformed extraction attempt before retrying the same session", async () => {
+    const observations: string[][] = [];
+    const malformed = new StructuredOutputError("Structured output tag <result> contains invalid JSON", {
+      tag: "result",
+      rawMatched: "not JSON",
+      commits: [{ sha: "malformed-extraction" }],
+      branch: "spec-402",
+      sessionId: "session-1",
+    });
+    const resume = vi.fn().mockRejectedValueOnce(malformed);
+    const runAgent = vi.fn()
+      .mockResolvedValueOnce({ commits: [], resume })
+      .mockResolvedValueOnce({ commits: [], output: { value: "validated" } });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.extract(plan({
+      observeResumed: ({ commits }) => { observations.push(commits.map(({ sha }) => sha)); },
+    }))).resolves.toEqual({ value: "validated" });
+
+    expect(observations).toEqual([["malformed-extraction"], []]);
+    expect(runAgent).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      prompt: expect.stringContaining("Emit only a corrected <result> block"),
+      resumeSession: "session-1",
+      output: expect.objectContaining({ _tag: "object", tag: "result", maxRetries: undefined }),
+    }));
   });
 
   it("does not impose business observations when none are declared", async () => {

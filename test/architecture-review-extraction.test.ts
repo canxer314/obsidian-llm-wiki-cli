@@ -1,3 +1,4 @@
+import { StructuredOutputError } from "@ai-hero/sandcastle";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -76,7 +77,7 @@ describe("same-session architecture review extraction", () => {
     expect(produceRequest.output).toBeUndefined();
     expect(extraction).toHaveBeenCalledWith(expect.stringContaining("<output>"), {
       signal: expect.any(AbortSignal),
-      output: expect.objectContaining({ _tag: "object", tag: "output", maxRetries: 2 }),
+      output: expect.objectContaining({ _tag: "object", tag: "output", maxRetries: undefined }),
     });
   });
 
@@ -138,6 +139,27 @@ describe("same-session architecture review extraction", () => {
       priorProposals,
       model: "planner-model",
     })).rejects.toThrow("Architecture review session must not create commits");
+  });
+
+  it("fails closed when a malformed extraction attempt creates commits", async () => {
+    const malformed = new StructuredOutputError("Structured output tag <output> contains invalid JSON", {
+      tag: "output",
+      rawMatched: "not JSON",
+      commits: [{ sha: revision }],
+      branch: "spec-402",
+      sessionId: "architecture-review-session",
+    });
+    const extraction = vi.fn().mockRejectedValue(malformed);
+    const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.review({
+      revision,
+      checkoutPath: "/safe/disposable-checkout",
+      priorProposals,
+      model: "planner-model",
+    })).rejects.toThrow("Architecture review session must not create commits");
+    expect(runAgent).toHaveBeenCalledOnce();
   });
 
   it("fails closed when the produce pass does not expose a resumable session", async () => {
