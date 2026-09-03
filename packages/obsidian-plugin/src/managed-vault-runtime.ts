@@ -632,6 +632,14 @@ export class ManagedVaultBridgeRuntime {
     if (bridge === undefined || health === undefined || settings === undefined) {
       throw new Error("Managed Vault Bridge is not loaded");
     }
+    const execution = this.#options.changeSetExecution;
+    const journal = execution === undefined
+      ? { availability: "unavailable" as const, frames: [] as const }
+      : await execution.diagnosticJournalFacts();
+    // Health/queue, the journal facts, and the registry are all sampled only
+    // after the journal read and then without any intervening await, so one
+    // bundle never mixes a pre-read queue snapshot with post-read registry
+    // state (or vice versa) for the same running Change Set.
     const projected = projectObservedHealth(
       health,
       bridge.port,
@@ -642,10 +650,6 @@ export class ManagedVaultBridgeRuntime {
     if (projected.outcome !== "observed") {
       throw new Error("Diagnostic evidence is unavailable from this runtime");
     }
-    const execution = this.#options.changeSetExecution;
-    const journal = execution === undefined
-      ? { availability: "unavailable" as const, frames: [] as const }
-      : await execution.diagnosticJournalFacts();
     const registry = settings.changeSets ?? emptyChangeSetState();
     return {
       vaultId: settings.vaultId,

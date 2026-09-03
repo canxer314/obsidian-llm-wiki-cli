@@ -292,7 +292,15 @@ class FileRecoveryJournal implements RecoveryJournal {
   }
 
   async diagnosticFacts(): Promise<RecoveryJournalDiagnosticFacts> {
-    await this.#tail;
+    const operation = this.#tail.then(() => this.#readDiagnosticFacts());
+    this.#tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  async #readDiagnosticFacts(): Promise<RecoveryJournalDiagnosticFacts> {
     const slots = await Promise.all(
       this.#layout.offsets.map(async (offset, slot) => {
         const bytes = await readExactly(this.#handle, this.#layout.capacity, offset);
