@@ -11,6 +11,7 @@ import {
   rmdir,
   stat,
   unlink,
+  type FileHandle,
 } from "node:fs/promises";
 import {
   dirname,
@@ -214,6 +215,17 @@ export interface NodeFileSystemChangeSetHostOptions {
    * production host leaves it unset and these hooks are no-ops.
    */
   crashInjector?(point: string): void | Promise<void>;
+  /**
+   * Optional test-only storage/permission fault seam inside the host's public
+   * mutating operations. Returned errors fail the declared operation before any
+   * bytes change. The process-crash fault corpus (issue #192) uses it to prove
+   * that a permission failure during rollback preserves current state and fails
+   * closed; production leaves it unset and it is a no-op.
+   */
+  operationFault?(
+    operation: string,
+    context: { path?: string; stageId?: string },
+  ): Error | null | Promise<Error | null>;
   /** Optional observer of public-path mutations, used to synthesize the host semantic events a real Obsidian metadata-cache watcher would emit (process-crash corpus, issue #189). */
   recordEvent?(event: ChangeSetSemanticEvent): void;
   publishFile?(stageId: string, path: string): Promise<void>;
@@ -279,6 +291,15 @@ export async function createNodeFileSystemChangeSetHost(
     }
     return path;
   };
+  const fault = async (
+    operation: string,
+    context: { path?: string; stageId?: string },
+  ): Promise<void> => {
+    const error = options.operationFault === undefined
+      ? null
+      : await options.operationFault(operation, context);
+    if (error !== null && error !== undefined) throw error;
+  };
   const assertContained = async (
     path: string,
     mode: "existing" | "destination",
@@ -335,17 +356,22 @@ export async function createNodeFileSystemChangeSetHost(
       return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
     },
     publishDirectory: async (stageId, path) => {
+      await fault("publishDirectory", { stageId, path });
       await rename(
         await assertPrivateContained(stagePath(stageId)),
         await assertContained(path, "destination"),
       );
     },
     discardPreparedDirectory: async (stageId) => {
+      await fault("discardPreparedDirectory", { stageId });
       await rmdir(await assertPrivateContained(stagePath(stageId))).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
       });
     },
-    removeDirectory: async (path) => rmdir(await assertContained(path, "existing")),
+    removeDirectory: async (path) => {
+      await fault("removeDirectory", { path });
+      await rmdir(await assertContained(path, "existing"));
+    },
     readBinary: async (path) => {
       try {
         return await readFile(await assertContained(path, "existing"));
@@ -364,6 +390,7 @@ export async function createNodeFileSystemChangeSetHost(
       }
     },
     prepareFile: async (stageId, bytes) => {
+      await fault("prepareFile", { stageId });
       const path = await assertPrivateContained(stagePath(stageId));
       await mkdir(dirname(path), { recursive: true });
       const handle = await open(path, "wx");
@@ -377,6 +404,7 @@ export async function createNodeFileSystemChangeSetHost(
       return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
     },
     publishFile: async (stageId, path) => {
+      await fault("publishFile", { stageId, path });
       const source = await assertPrivateContained(stagePath(stageId));
       const destination = await assertContained(path, "destination");
       if (options.publishFile !== undefined) {
@@ -387,6 +415,7 @@ export async function createNodeFileSystemChangeSetHost(
       options.recordEvent?.({ kind: "create", path });
     },
     discardPreparedFile: async (stageId) => {
+      await fault("discardPreparedFile", { stageId });
       const path = await assertPrivateContained(stagePath(stageId));
       // A rollback restore stages under `${stageId}/rollback` and then publishes
       // that file away, leaving the base stage path as an empty directory. When
@@ -397,6 +426,7 @@ export async function createNodeFileSystemChangeSetHost(
       await rm(path, { force: true, recursive: true });
     },
     moveFile: async (sourcePath, destinationPath) => {
+      await fault("moveFile", { path: sourcePath });
       const source = await assertContained(sourcePath, "existing");
       const destination = await assertContained(destinationPath, "destination");
       if (options.moveFile !== undefined) {
@@ -412,6 +442,7 @@ export async function createNodeFileSystemChangeSetHost(
       options.recordEvent?.({ kind: "rename", oldPath: sourcePath, path: destinationPath });
     },
     removeFile: async (path) => {
+      await fault("removeFile", { path });
       const source = await assertContained(path, "existing");
       if (options.removeFile !== undefined) {
         await options.removeFile(path);
@@ -420,6 +451,7 @@ export async function createNodeFileSystemChangeSetHost(
       await unlink(source);
     },
     moveToTrash: async (path, trashId) => {
+      await fault("moveToTrash", { path });
       const source = await assertContained(path, "existing");
       const destination = await assertPrivateContained(trashPath(trashId));
       await mkdir(dirname(destination), { recursive: true });
@@ -437,6 +469,7 @@ export async function createNodeFileSystemChangeSetHost(
       }
     },
     restoreFromTrash: async (trashId, path) => {
+      await fault("restoreFromTrash", { path });
       const source = await assertPrivateContained(trashPath(trashId));
       const destination = await assertContained(path, "destination");
       if (options.restoreFromTrash !== undefined) {
@@ -476,6 +509,13 @@ export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
   host: ChangeSetExecutionHost;
   slotCapacity?: number;
+  /**
+   * Optional test-only seam that wraps the journal `FileHandle` after it is
+   * opened so a storage fault can strike exactly one declared durable frame
+   * write (issue #192). Production leaves it unset; the owning process corpus
+   * uses it to inject disk-full/short-write/no-progress/sync failures.
+   */
+  wrapJournalHandle?(handle: FileHandle): FileHandle;
 }
 
 function isPrivateId(value: unknown): value is string {
@@ -676,13 +716,15 @@ export async function createFileSystemChangeSetExecutionAdapter(
       return open(options.journalPath, "w+");
     },
   );
+  const journalHandle =
+    options.wrapJournalHandle === undefined ? handle : options.wrapJournalHandle(handle);
   let journal: RecoveryJournal;
   try {
-    journal = await openRecoveryJournal(handle, {
+    journal = await openRecoveryJournal(journalHandle, {
       slotCapacity: options.slotCapacity ?? DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
     });
   } catch (error) {
-    await handle.close();
+    await journalHandle.close();
     throw error;
   }
   try {
@@ -690,7 +732,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
     if (recovered !== undefined) parseFrame(recovered.payload);
   } catch (error) {
     if (error instanceof RecoveryJournalIncompatibleError) {
-      await handle.close();
+      await journalHandle.close();
       throw error;
     }
   }
@@ -746,6 +788,6 @@ export async function createFileSystemChangeSetExecutionAdapter(
       ? {}
       : { semanticEvidencePublishesSnapshot: options.host.semanticEvidencePublishesSnapshot }),
     publishSearchSnapshot: options.host.publishSearchSnapshot,
-    close: () => handle.close(),
+    close: () => journalHandle.close(),
   };
 }

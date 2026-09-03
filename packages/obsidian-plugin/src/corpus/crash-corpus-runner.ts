@@ -40,6 +40,14 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 import { BRIDGE_STATE_DIRECTORY_NAME } from "../change-set.js";
 import { openRecoveryJournal } from "../recovery-journal.js";
+import {
+  corruptJournalFile,
+  observeJournalFile,
+  rewriteJournalFrameVaultId,
+  type JournalCorruption,
+  type JournalObservation,
+  type JournalWriteFault,
+} from "./journal-faults.js";
 
 const BRIDGE_STATE_DIRECTORY = BRIDGE_STATE_DIRECTORY_NAME;
 const BRIDGE_JOURNAL_FILE = "recovery-journal.bin";
@@ -200,6 +208,27 @@ export interface CorpusScenarioEvidence {
   readonly verdict: "pass" | "fail";
   readonly failures: readonly string[];
   readonly reportPath: string;
+  /** Issue #192 fault evidence; present only on the dedicated fault scenarios. */
+  readonly fault?: CorpusFaultEvidence;
+}
+
+/** Fault-corpus evidence added by the issue #192 scenario runners. */
+export interface CorpusFaultEvidence {
+  /** Fault family: `journal_state`, `journal_write`, `host_operation`, `capacity`. */
+  readonly kind: string;
+  /** Stable scenario identity, e.g. `corrupt_newest_frame_checksum`. */
+  readonly identity: string;
+  /** Redacted fault declaration (no payload/before-image content). */
+  readonly declaration: Record<string, unknown>;
+  /** Strict-ordering observation: exactly one firing at the declared operation. */
+  readonly fired: { readonly fired: boolean; readonly at: Record<string, unknown> | null };
+  /** Durable frame/sequence/checksum observations without payload content. */
+  readonly journal: {
+    readonly before: JournalObservation | null;
+    readonly after: JournalObservation | null;
+  };
+  /** Public state preserved across the fault when recovery must not mutate. */
+  readonly publicStatePreserved?: boolean;
 }
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
@@ -286,6 +315,8 @@ function spawnOwningProcess(options: {
   port: number;
   controlDir: string;
   crashPoint?: string;
+  fault?: string;
+  journalSlotCapacity?: number;
 }): OwnedChild {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -295,6 +326,10 @@ function spawnOwningProcess(options: {
     CORPUS_CONTROL_DIR: options.controlDir,
   };
   if (options.crashPoint !== undefined) env.CORPUS_CRASH_POINT = options.crashPoint;
+  if (options.fault !== undefined) env.CORPUS_FAULT = options.fault;
+  if (options.journalSlotCapacity !== undefined) {
+    env.CORPUS_JOURNAL_SLOT_CAPACITY = String(options.journalSlotCapacity);
+  }
   const child = spawn(process.execPath, [options.bundle], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1557,6 +1592,1241 @@ export async function runMutationCorpusResidueScenario(
     const message = error instanceof Error ? error.message : String(error);
     if (!failures.includes(message)) failures.push(message);
   } finally {
+    try {
+      await rm(root, { recursive: true, force: true });
+      evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+    } catch (error) {
+      evidence.cleanup = { success: false, message: String(error) };
+    }
+    await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+    if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.verdict = failures.length === 0 ? "pass" : "fail";
+    await writeEvidence();
+  }
+  return evidence as CorpusScenarioEvidence;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #192: Recovery-Journal and storage-fault corpus scenarios.
+//
+// These scenarios give the Primary Operator deterministic evidence that journal
+// corruption and storage faults fail closed: the restart either selects the
+// newest trustworthy frame, or it blocks writes behind the recovery gate; a
+// failed PREPARED/COMMITTED/ROLLED_BACK/FAILED persistence step never advances
+// public proof beyond durable evidence and never replaces the last recoverable
+// frame with an unusable one; and wrong-Vault/incompatible journal data is never
+// interpreted as a Change Set for the current Managed Vault.
+// ---------------------------------------------------------------------------
+
+export interface JournalFaultScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  /**
+   * Apply crash point where generation 1 parks before the supervisor applies
+   * the fault. Omit to only create a journal header (boot-and-terminate).
+   */
+  readonly parkPoint?: string;
+  /** Supervisor-side journal-state corruption applied between generations. */
+  readonly corruption?: JournalCorruption;
+  /** Rewrite the newest trustworthy frame to a foreign Vault identity. */
+  readonly wrongVault?: boolean;
+  /** Boot generation 2 with this journal slot capacity (incompatible-capacity). */
+  readonly gen2JournalSlotCapacity?: number;
+  readonly expectedRecovery:
+    | "applied"
+    | "rolled_back"
+    | "blocked_unproven"
+    | "boot_refused";
+}
+
+export type MutationCorpusFaultRecovery = JournalFaultScenarioOptions["expectedRecovery"];
+
+function expectedProofForRecovery(
+  recovery: Exclude<MutationCorpusFaultRecovery, "boot_refused">,
+): MutationCorpusProofState {
+  switch (recovery) {
+    case "applied":
+      return "intent_applied";
+    case "rolled_back":
+      return "intent_not_applied";
+    case "blocked_unproven":
+      return "result_unproven";
+  }
+}
+
+function journalFilePath(root: string): string {
+  return join(root, BRIDGE_STATE_DIRECTORY, BRIDGE_JOURNAL_FILE);
+}
+
+async function observeJournal(root: string): Promise<JournalObservation | null> {
+  try {
+    return await observeJournalFile(journalFilePath(root));
+  } catch {
+    // A truncated or unparseable journal cannot be observed structurally; the
+    // report records `null` and the fault evidence states the boot outcome.
+    return null;
+  }
+}
+
+function inventoriesMatch(
+  left: readonly CorpusInventoryEntry[],
+  right: readonly CorpusInventoryEntry[],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a === undefined || b === undefined) return false;
+    if (a.path !== b.path || a.kind !== b.kind || a.bytes !== b.bytes || a.sha256 !== b.sha256) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function terminateChildIfRunning(owned: OwnedChild): Promise<void> {
+  if (owned.child.exitCode === null) {
+    try {
+      await terminateChild(owned);
+    } catch {
+      // The child may have already exited.
+    }
+  }
+}
+
+/**
+ * Journal-state fault scenario (issue #192): generation 1 submits the profile's
+ * Change Set and parks at a declared apply crash point leaving a durable
+ * journal; the supervisor applies one deterministic journal corruption (or a
+ * wrong-Vault rewrite / incompatible-capacity boot); generation 2 restarts and
+ * must either select the newest trustworthy recoverable frame, fail closed with
+ * a blocked gate, or refuse to boot -- never mutating from untrusted data.
+ */
+export async function runMutationCorpusJournalFaultScenario(
+  options: JournalFaultScenarioOptions,
+): Promise<CorpusScenarioEvidence> {
+  const { profile, seed, expectedRecovery } = options;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const logPhase = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-fault-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-fault-control-"));
+  const evidence = createEvidence(
+    {
+      profile,
+      crashPoint: {
+        point: options.parkPoint ?? "journal_fault",
+        phase: "apply",
+      },
+      seed,
+      root,
+      vaultId,
+      port,
+      reportPath,
+    },
+    failures,
+  );
+  const log = (message: string): void => {
+    logPhase(message);
+  };
+  const writeEvidence = async (): Promise<void> => {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  };
+
+  const journalBefore: JournalObservation | null = null;
+  const faultEvidence: Writable<CorpusFaultEvidence> = {
+    kind: options.corruption !== undefined
+      ? "journal_state"
+      : options.wrongVault === true
+        ? "journal_state"
+        : "journal_incompatible",
+    identity: options.corruption?.kind ??
+      (options.wrongVault === true
+        ? "wrong_vault"
+        : options.gen2JournalSlotCapacity !== undefined
+          ? "incompatible_capacity"
+          : "journal_fault"),
+    declaration: {
+      ...(options.corruption === undefined ? {} : { corruption: options.corruption }),
+      ...(options.wrongVault === true ? { wrongVault: true } : {}),
+      ...(options.gen2JournalSlotCapacity === undefined
+        ? {}
+        : { gen2JournalSlotCapacity: options.gen2JournalSlotCapacity }),
+      expectedRecovery,
+    },
+    fired: { fired: false, at: null },
+    journal: { before: journalBefore, after: null },
+  };
+  let journalObservedBefore: JournalObservation | null = journalBefore;
+  let journalObservedAfter: JournalObservation | null = null;
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    await writeEvidence();
+    return evidence as CorpusScenarioEvidence;
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+    log(`before inventory recorded (${evidence.before.length} public entries)`);
+
+    const parkPoint = options.parkPoint;
+    if (parkPoint !== undefined) {
+      const crashPoint = profile.crashPoints.find(
+        (candidate) => candidate.phase === "apply" && candidate.point === parkPoint,
+      );
+      if (crashPoint === undefined) {
+        throw new Error(`profile ${profile.label} has no apply crash point ${parkPoint}`);
+      }
+      log(`generation 1: submit and park at ${parkPoint}`);
+      const gen1 = spawnOwningProcess({
+        bundle,
+        root,
+        vaultId,
+        port,
+        controlDir: join(controlBase, "gen1"),
+        crashPoint: parkPoint,
+      });
+      const bootMarker = await waitForControlMarker(
+        gen1,
+        ["ready", "parked", "failed"],
+        profile.timeoutMs,
+      );
+      if (bootMarker === null || bootMarker.kind === "failed") {
+        failures.push(
+          `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+        );
+        await terminateChildIfRunning(gen1);
+        throw new Error("generation 1 failed to boot");
+      }
+      if (bootMarker.kind === "parked") {
+        failures.push("generation 1 parked before the Change Set was submitted");
+      }
+      if (bootMarker.kind === "ready") {
+        const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+        const submitPromise = submitChangeSet(client, profile.buildSubmitInput(seed));
+        const parkRace = await Promise.race([
+          waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs).then((marker) => ({
+            kind: "parked-or-failed" as const,
+            marker,
+          })),
+          submitPromise.then(() => ({ kind: "submit-settled" as const, marker: null })),
+        ]);
+        if (parkRace.kind !== "parked-or-failed" || parkRace.marker === null) {
+          failures.push(`crash point ${parkPoint} was never reached during submission`);
+          await terminateChildIfRunning(gen1);
+          await client.close().catch(() => undefined);
+          throw new Error("declared crash point was never reached");
+        }
+        if (parkRace.marker.kind === "failed") {
+          failures.push(`child failed during submission: ${JSON.stringify(parkRace.marker.value)}`);
+          await terminateChildIfRunning(gen1);
+          await client.close().catch(() => undefined);
+          throw new Error("child failed during submission");
+        }
+        await client.close().catch(() => undefined);
+      }
+      evidence.boundary = await observeBoundary(root, profile);
+      log(`generation 1 parked at ${parkPoint}; journal-phase ${evidence.boundary.journalPhase}`);
+      await terminateChildIfRunning(gen1);
+      log("generation 1 terminated by supervisor");
+    } else {
+      log("generation 1: boot to create a journal header, then terminate");
+      const gen1 = spawnOwningProcess({
+        bundle,
+        root,
+        vaultId,
+        port,
+        controlDir: join(controlBase, "gen1"),
+      });
+      const bootMarker = await waitForControlMarker(
+        gen1,
+        ["ready", "failed"],
+        profile.timeoutMs,
+      );
+      if (bootMarker === null || bootMarker.kind !== "ready") {
+        failures.push(
+          `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+        );
+        await terminateChildIfRunning(gen1);
+        throw new Error("generation 1 failed to boot");
+      }
+      await terminateChildIfRunning(gen1);
+      log("generation 1 terminated by supervisor");
+    }
+
+    journalObservedBefore = await observeJournal(root);
+
+    if (options.corruption !== undefined) {
+      const applied = await corruptJournalFile(journalFilePath(root), options.corruption);
+      faultEvidence.identity = applied.kind;
+      journalObservedAfter = applied.after;
+      log(`applied journal corruption ${applied.kind}`);
+    } else if (options.wrongVault === true) {
+      const newVaultId = `${vaultId.slice(0, -1)}${vaultId.endsWith("Z") ? "Y" : "Z"}`;
+      faultEvidence.identity = "wrong_vault";
+      journalObservedAfter = await rewriteJournalFrameVaultId(
+        journalFilePath(root),
+        vaultId,
+        newVaultId,
+        "newest",
+      );
+      log(`rewrote the newest journal frame to Vault identity ${newVaultId}`);
+    } else {
+      journalObservedAfter = await observeJournal(root);
+    }
+    faultEvidence.journal = { before: journalObservedBefore, after: journalObservedAfter };
+
+    // ---- Generation 2: restart over the faulted journal ---------------------
+    log("generation 2: startup recovery over the faulted journal");
+    const gen2 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen2"),
+      ...(options.gen2JournalSlotCapacity === undefined
+        ? {}
+        : { journalSlotCapacity: options.gen2JournalSlotCapacity }),
+    });
+    const gen2Marker = await waitForControlMarker(
+      gen2,
+      ["ready", "failed"],
+      profile.timeoutMs,
+    );
+
+    if (expectedRecovery === "boot_refused") {
+      if (gen2Marker !== null && gen2Marker.kind === "ready") {
+        failures.push("generation 2 became ready despite an incompatible journal");
+        await terminateChildIfRunning(gen2);
+      } else {
+        log(
+          `generation 2 refused to boot over the faulted journal (${JSON.stringify(gen2Marker)}); stderr: ${gen2.stderr.join("\n")}`,
+        );
+      }
+      await terminateChildIfRunning(gen2);
+      evidence.after = await inventoryCorpus(root);
+      evidence.fileFinal = await observeFinalFiles(root, profile);
+      evidence.hidden = await observeHiddenSnapshot(root);
+      if (!inventoriesMatch(evidence.before, evidence.after)) {
+        failures.push(
+          "public inventory changed across a refused boot; no recovery mutation may begin",
+        );
+      }
+      if (evidence.fileFinal.some((file) => !file.present && file.state !== "absent")) {
+        failures.push("a refused boot left an unexpected public path state");
+      }
+      evidence.fault = faultEvidence;
+      return evidence as CorpusScenarioEvidence;
+    }
+
+    if (gen2Marker === null || gen2Marker.kind !== "ready") {
+      failures.push(
+        `generation 2 did not become ready after the journal fault: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChildIfRunning(gen2);
+      throw new Error("generation 2 did not become ready");
+    }
+    log("generation 2 ready after startup recovery");
+
+    const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    evidence.gate = await healthSnapshot(client);
+    evidence.proofState = await statusProofState(client, profile.submissionKey(seed));
+    log(
+      `proof state ${String(evidence.proofState)}; effective gate ${String(evidence.gate.effectiveGate)}; recovery ${String(evidence.gate.recoveryState)}`,
+    );
+
+    const expectedProof = expectedProofForRecovery(expectedRecovery);
+    if (expectedRecovery === "blocked_unproven") {
+      if (evidence.proofState !== "result_unproven") {
+        failures.push(
+          `expected result_unproven after an untrustworthy journal but observed ${String(evidence.proofState)}`,
+        );
+      }
+      if (evidence.gate.effectiveGate === null && evidence.gate.recoveryState !== "blocked") {
+        failures.push("expected writes to be blocked after an untrustworthy journal");
+      }
+    } else {
+      if (evidence.proofState !== expectedProof) {
+        failures.push(
+          `expected proof ${expectedProof} after journal recovery but observed ${String(evidence.proofState)}`,
+        );
+      }
+      if (
+        evidence.gate.recoveryState !== "none" &&
+        evidence.gate.recoveryState !== null
+      ) {
+        failures.push(`unexpected recovery state ${String(evidence.gate.recoveryState)} after journal recovery`);
+      }
+    }
+
+    log("submitting sentinel Change Set");
+    const sentinelNote = `CorpusSentinel-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`;
+    evidence.sentinel = await submitChangeSet(client, {
+      submissionKey: profile.submissionKey(`${seed}-sentinel`),
+      operations: [
+        {
+          operationId: `sentinel-${seed}`,
+          kind: "create_note",
+          path: sentinelNote,
+          content: `# Sentinel ${seed}\n`,
+          ifExists: "reject",
+        },
+      ],
+    });
+    if (expectedRecovery === "blocked_unproven") {
+      if (evidence.sentinel.applied) {
+        failures.push("sentinel Change Set was admissible despite an untrustworthy journal");
+      }
+    } else if (!evidence.sentinel.applied) {
+      failures.push("sentinel Change Set was not admissible after journal recovery");
+    }
+    await client.close().catch(() => undefined);
+
+    await terminateChildIfRunning(gen2);
+    await rm(join(root, sentinelNote), { force: true });
+    evidence.after = await inventoryCorpus(root);
+    evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
+
+    if (expectedRecovery !== "blocked_unproven") {
+      const finalFailures = finalFileFailures(evidence.fileFinal, expectedProof, profile);
+      if (finalFailures.length > 0) failures.push(...finalFailures);
+      const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+        profile.files.map((file) => [file.path, terminalStateForFile(expectedProof, file)]),
+      );
+      const expectedPresent = expectedPaths(profile, expectedTerminal);
+      const privateResiduals = await privateAreaResidualPaths(
+        root,
+        redactsManagedTrashResiduals(profile),
+      );
+      evidence.residualPaths = [
+        ...residualPaths(evidence.after, expectedPresent),
+        ...privateResiduals,
+      ].sort();
+      if (evidence.residualPaths.length > 0) {
+        failures.push(`residual paths remain after journal recovery: ${evidence.residualPaths.join(", ")}`);
+      }
+    } else {
+      const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+        profile.files.map((file) => [file.path, terminalStateForFile("result_unproven", file)]),
+      );
+      const expectedPresent = expectedPaths(profile, expectedTerminal);
+      const privateResiduals = await privateAreaResidualPaths(
+        root,
+        redactsManagedTrashResiduals(profile),
+      );
+      evidence.residualPaths = [
+        ...residualPaths(evidence.after, expectedPresent),
+        ...privateResiduals,
+      ].sort();
+      if (evidence.residualPaths.length === 0) {
+        failures.push("expected an unproven residue to be surfaced but no residual path was reported");
+      }
+    }
+    const expectedHidden = profile.expectedHiddenState?.(
+      expectedRecovery === "blocked_unproven" ? "result_unproven" : expectedProof,
+    );
+    if (
+      expectedHidden !== undefined &&
+      expectedRecovery !== "blocked_unproven" &&
+      evidence.hidden !== null
+    ) {
+      failures.push(
+        ...hiddenStateFailures("hidden state after journal recovery", expectedHidden, evidence.hidden),
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  } finally {
+    evidence.fault = faultEvidence;
+    try {
+      await rm(root, { recursive: true, force: true });
+      evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+    } catch (error) {
+      evidence.cleanup = { success: false, message: String(error) };
+    }
+    await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+    if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.verdict = failures.length === 0 ? "pass" : "fail";
+    await writeEvidence();
+  }
+  return evidence as CorpusScenarioEvidence;
+}
+
+async function readFaultFired(controlDir: string): Promise<{
+  readonly fired: boolean;
+  readonly at: Record<string, unknown> | null;
+}> {
+  const value = await readOptionalJson<Record<string, unknown>>(join(controlDir, "fault.json"));
+  if (value === undefined || value.fired !== true) {
+    return { fired: false, at: null };
+  }
+  const { fired: _fired, ...at } = value;
+  return { fired: true, at };
+}
+
+/**
+ * Storage-fault scenario over a declared journal-write step (issue #192). The
+ * supervisor arms exactly one `CORPUS_FAULT` in a child generation; the fault
+ * fires at the declared frame phase/occurrence. The scenario asserts strict
+ * ordering (fired exactly once, at the declared operation) and that a failed
+ * durable-persistence step never advances public proof beyond durable evidence.
+ *
+ * - `generation: "apply"` faults the live apply of generation 1 (the fault
+ *   fires during the MCP submit while the COMMITTED/prepared frame is persisted).
+ * - `generation: "recovery"` leaves a durable PREPARED in generation 1 and
+ *   faults the durable ROLLED_BACK/FAILED persistence of generation 2 recovery.
+ */
+export interface JournalWriteFaultScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  readonly fault: JournalWriteFault;
+  readonly generation: "apply" | "recovery";
+  readonly expectedProof: MutationCorpusProofState;
+  readonly expectedGate: "open" | "blocked";
+}
+
+export async function runMutationCorpusJournalWriteFaultScenario(
+  options: JournalWriteFaultScenarioOptions,
+): Promise<CorpusScenarioEvidence> {
+  const { profile, seed } = options;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const logPhase = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-writefault-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-writefault-control-"));
+  const crashPoint: MutationCorpusCrashPoint = {
+    point: options.generation === "apply"
+      ? "journal_write_fault_apply"
+      : profile.rollbackLeadInPoint,
+    phase: options.generation === "apply" ? "apply" : "rollback",
+  };
+  const evidence = createEvidence(
+    { profile, crashPoint, seed, root, vaultId, port, reportPath },
+    failures,
+  );
+  const log = (message: string): void => {
+    logPhase(message);
+  };
+  const writeEvidence = async (): Promise<void> => {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  };
+  const faultJson = JSON.stringify({
+    kind: "journal_write",
+    fault: options.fault,
+  });
+  let journalObservedBefore: JournalObservation | null = null;
+  let journalObservedAfter: JournalObservation | null = null;
+  let faultControlDir: string | null = null;
+  let liveChild: OwnedChild | null = null;
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    await writeEvidence();
+    return evidence as CorpusScenarioEvidence;
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+
+    if (options.generation === "recovery") {
+      // Generation 1: submit and park at the rollback lead-in leaving a durable
+      // PREPARED frame with the profile fully applied.
+      log(`generation 1: park at rollback lead-in ${profile.rollbackLeadInPoint}`);
+      const gen1 = spawnOwningProcess({
+        bundle,
+        root,
+        vaultId,
+        port,
+        controlDir: join(controlBase, "gen1"),
+        crashPoint: profile.rollbackLeadInPoint,
+      });
+      const bootMarker = await waitForControlMarker(
+        gen1,
+        ["ready", "parked", "failed"],
+        profile.timeoutMs,
+      );
+      if (bootMarker === null || bootMarker.kind === "failed") {
+        failures.push(
+          `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+        );
+        await terminateChildIfRunning(gen1);
+        throw new Error("generation 1 failed to boot");
+      }
+      const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+      const submitPromise = submitChangeSet(client, profile.buildSubmitInput(seed));
+      const parkRace = await Promise.race([
+        waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs).then((marker) => ({
+          kind: "parked-or-failed" as const,
+          marker,
+        })),
+        submitPromise.then(() => ({ kind: "submit-settled" as const, marker: null })),
+      ]);
+      if (parkRace.kind !== "parked-or-failed" || parkRace.marker === null) {
+        failures.push(`rollback lead-in ${profile.rollbackLeadInPoint} was never reached`);
+        await terminateChildIfRunning(gen1);
+        await client.close().catch(() => undefined);
+        throw new Error("rollback lead-in was never reached");
+      }
+      if (parkRace.marker.kind === "failed") {
+        failures.push(`child failed during submission: ${JSON.stringify(parkRace.marker.value)}`);
+        await terminateChildIfRunning(gen1);
+        await client.close().catch(() => undefined);
+        throw new Error("child failed during submission");
+      }
+      evidence.boundary = await observeBoundary(root, profile);
+      await client.close().catch(() => undefined);
+      await terminateChildIfRunning(gen1);
+      log("generation 1 terminated by supervisor");
+      journalObservedBefore = await observeJournal(root);
+
+      // Generation 2: startup recovery armed with the declared storage fault.
+      log(`generation 2: armed journal-write fault on ${options.fault.phase}`);
+      const gen2Control = join(controlBase, "gen2");
+      faultControlDir = gen2Control;
+      const gen2 = spawnOwningProcess({
+        bundle,
+        root,
+        vaultId,
+        port,
+        controlDir: gen2Control,
+        fault: faultJson,
+      });
+      const gen2Marker = await waitForControlMarker(
+        gen2,
+        ["ready", "failed"],
+        profile.timeoutMs,
+      );
+      if (gen2Marker === null || gen2Marker.kind !== "ready") {
+        failures.push(
+          `generation 2 did not become ready: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+        );
+        await terminateChildIfRunning(gen2);
+        throw new Error("generation 2 did not become ready");
+      }
+      log("generation 2 ready after faulted recovery");
+      const gen2Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+      evidence.gate = await healthSnapshot(gen2Client);
+      evidence.proofState = await statusProofState(gen2Client, profile.submissionKey(seed));
+      await gen2Client.close().catch(() => undefined);
+      liveChild = gen2;
+    } else {
+      // Generation 1 apply with the fault armed on a live durable-persistence
+      // step (COMMITTED). The submit call executes the Change Set; the fault
+      // fires mid-apply and the durable executor rolls back.
+      log(`generation 1 apply: armed journal-write fault on ${options.fault.phase}`);
+      const gen1Control = join(controlBase, "gen1");
+      faultControlDir = gen1Control;
+      const gen1 = spawnOwningProcess({
+        bundle,
+        root,
+        vaultId,
+        port,
+        controlDir: gen1Control,
+        fault: faultJson,
+      });
+      const bootMarker = await waitForControlMarker(
+        gen1,
+        ["ready", "failed"],
+        profile.timeoutMs,
+      );
+      if (bootMarker === null || bootMarker.kind !== "ready") {
+        failures.push(
+          `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+        );
+        await terminateChildIfRunning(gen1);
+        throw new Error("generation 1 failed to boot");
+      }
+      const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+      await submitChangeSet(client, profile.buildSubmitInput(seed));
+      evidence.gate = await healthSnapshot(client);
+      evidence.proofState = await statusProofState(client, profile.submissionKey(seed));
+      log(
+        `proof state after faulted apply ${String(evidence.proofState)}; gate ${String(evidence.gate.effectiveGate)}`,
+      );
+      await client.close().catch(() => undefined);
+      liveChild = gen1;
+    }
+
+    // ---- Strict-ordering and fail-closed assertions -------------------------
+    const fired = await readFaultFired(faultControlDir ?? "");
+    if (!fired.fired) {
+      failures.push(
+        `requested storage fault (${options.fault.phase}@${options.fault.occurrence}) was bypassed`,
+      );
+    } else if (fired.at?.phase !== options.fault.phase) {
+      failures.push(
+        `requested storage fault fired at an unintended operation: ${JSON.stringify(fired.at)}`,
+      );
+    }
+
+    if (evidence.proofState !== options.expectedProof) {
+      failures.push(
+        `expected proof ${options.expectedProof} after the storage fault but observed ${String(evidence.proofState)}`,
+      );
+    }
+    const gateBlocked = evidence.gate.effectiveGate !== null || evidence.gate.recoveryState === "blocked";
+    if (options.expectedGate === "open" && gateBlocked) {
+      failures.push("expected the write gate to stay open after the storage fault");
+    }
+    if (options.expectedGate === "blocked" && !gateBlocked) {
+      failures.push("expected writes to be blocked after the storage fault");
+    }
+
+    // ---- Sentinel write against the post-fault gate ------------------------
+    const sentinelNote = `CorpusSentinel-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`;
+    const sentinelClient = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    evidence.sentinel = await submitChangeSet(sentinelClient, {
+      submissionKey: profile.submissionKey(`${seed}-sentinel`),
+      operations: [
+        {
+          operationId: `sentinel-${seed}`,
+          kind: "create_note",
+          path: sentinelNote,
+          content: `# Sentinel ${seed}\n`,
+          ifExists: "reject",
+        },
+      ],
+    });
+    await sentinelClient.close().catch(() => undefined);
+    if (options.expectedGate === "open" && !evidence.sentinel.applied) {
+      failures.push("sentinel Change Set was not admissible after the storage fault");
+    }
+    if (options.expectedGate === "blocked" && evidence.sentinel.applied) {
+      failures.push("sentinel Change Set was admissible despite a blocked gate after the storage fault");
+    }
+    await rm(join(root, sentinelNote), { force: true });
+
+    if (liveChild !== null) {
+      await terminateChildIfRunning(liveChild);
+      liveChild = null;
+    }
+
+    evidence.after = await inventoryCorpus(root);
+    evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
+
+    if (options.expectedProof !== "result_unproven") {
+      const finalFailures = finalFileFailures(evidence.fileFinal, options.expectedProof, profile);
+      if (finalFailures.length > 0) failures.push(...finalFailures);
+    }
+    const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+      profile.files.map((file) => [
+        file.path,
+        terminalStateForFile(options.expectedProof, file),
+      ]),
+    );
+    const expectedPresent = expectedPaths(profile, expectedTerminal);
+    const privateResiduals = await privateAreaResidualPaths(
+      root,
+      redactsManagedTrashResiduals(profile),
+    );
+    evidence.residualPaths = [
+      ...residualPaths(evidence.after, expectedPresent),
+      ...privateResiduals,
+    ].sort();
+    if (options.expectedProof !== "result_unproven" && evidence.residualPaths.length > 0) {
+      failures.push(`residual paths remain after the storage fault: ${evidence.residualPaths.join(", ")}`);
+    }
+
+    // A failed persistence step must never leave an unusable journal: at least
+    // one trustworthy frame must remain recoverable (spec §7.3 ordering).
+    journalObservedAfter = await observeJournal(root);
+    if (
+      options.expectedGate === "open" &&
+      journalObservedAfter !== null &&
+      journalObservedAfter.recoverable === null
+    ) {
+      failures.push("no trustworthy journal frame remained recoverable after the storage fault");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  } finally {
+    const fired = await readFaultFired(faultControlDir ?? "").catch(() => ({ fired: false, at: null }));
+    evidence.fault = {
+      kind: "journal_write",
+      identity: `${options.fault.phase.toLowerCase()}_${options.fault.step}`,
+      declaration: {
+        fault: options.fault,
+        generation: options.generation,
+        expectedProof: options.expectedProof,
+        expectedGate: options.expectedGate,
+      },
+      fired: { fired: fired.fired, at: fired.at },
+      journal: { before: journalObservedBefore, after: journalObservedAfter },
+    };
+    if (liveChild !== null) {
+      await terminateChildIfRunning(liveChild).catch(() => undefined);
+      liveChild = null;
+    }
+    try {
+      await rm(root, { recursive: true, force: true });
+      evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+    } catch (error) {
+      evidence.cleanup = { success: false, message: String(error) };
+    }
+    await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+    if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.verdict = failures.length === 0 ? "pass" : "fail";
+    await writeEvidence();
+  }
+  return evidence as CorpusScenarioEvidence;
+}
+
+/**
+ * Slot-capacity-exhaustion scenario (issue #192). Generation 1 opens the
+ * Recovery Journal with a slot capacity too small for the Change Set frame, so
+ * the real `RecoveryJournalCapacityError` fires at the first durable `PREPARED`
+ * persistence step -- before any public mutation and before any frame is
+ * written. The scenario proves a failed PREPARED step never advances public
+ * proof beyond durable evidence, never overwrites a recoverable frame (there is
+ * none), and that a clean restart re-executes the unchanged intent from scratch
+ * to a durable `COMMITTED`.
+ */
+export interface CapacityFaultScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  readonly slotCapacity: number;
+}
+
+export async function runMutationCorpusCapacityFaultScenario(
+  options: CapacityFaultScenarioOptions,
+): Promise<CorpusScenarioEvidence> {
+  const { profile, seed } = options;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const logPhase = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-capacity-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-capacity-control-"));
+  const crashPoint: MutationCorpusCrashPoint = {
+    point: "before_prepared",
+    phase: "apply",
+  };
+  const evidence = createEvidence(
+    { profile, crashPoint, seed, root, vaultId, port, reportPath },
+    failures,
+  );
+  const log = (message: string): void => {
+    logPhase(message);
+  };
+  const writeEvidence = async (): Promise<void> => {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  };
+  let journalBefore: JournalObservation | null = null;
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    await writeEvidence();
+    return evidence as CorpusScenarioEvidence;
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+    log(`generation 1: boot with slot capacity ${options.slotCapacity}`);
+    const gen1 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen1"),
+      journalSlotCapacity: options.slotCapacity,
+    });
+    const bootMarker = await waitForControlMarker(
+      gen1,
+      ["ready", "failed"],
+      profile.timeoutMs,
+    );
+    if (bootMarker === null || bootMarker.kind !== "ready") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChildIfRunning(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+    const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const submitted = await submitChangeSet(client, profile.buildSubmitInput(seed));
+    evidence.proofState = await statusProofState(client, profile.submissionKey(seed));
+    evidence.gate = await healthSnapshot(client);
+    log(
+      `generation 1 submit applied=${submitted.applied} submitted=${submitted.submitted}; proof ${String(evidence.proofState)}`,
+    );
+    if (submitted.applied) {
+      failures.push("generation 1 applied a Change Set whose PREPARED frame could not be persisted");
+    }
+    await client.close().catch(() => undefined);
+    await terminateChildIfRunning(gen1);
+
+    journalBefore = await observeJournal(root);
+    log(`generation 1 journal capacity ${journalBefore?.capacity ?? "n/a"} recoverable ${JSON.stringify(journalBefore?.recoverable)}`);
+
+    // No durable frame was ever written, so removing the empty journal file is
+    // a safe operator action; a fresh restart re-executes the unchanged intent.
+    await rm(journalFilePath(root), { force: true });
+
+    log("generation 2: clean restart with the default journal capacity");
+    const gen2 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen2"),
+    });
+    const gen2Marker = await waitForControlMarker(
+      gen2,
+      ["ready", "failed"],
+      profile.timeoutMs,
+    );
+    if (gen2Marker === null || gen2Marker.kind !== "ready") {
+      failures.push(
+        `generation 2 did not become ready: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChildIfRunning(gen2);
+      throw new Error("generation 2 did not become ready");
+    }
+    const gen2Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    evidence.proofState = await statusProofState(gen2Client, profile.submissionKey(seed));
+    evidence.gate = await healthSnapshot(gen2Client);
+    log(`generation 2 proof ${String(evidence.proofState)}`);
+    if (evidence.proofState !== "intent_applied") {
+      failures.push(
+        `expected the unchanged Change Set to reach intent_applied after a clean restart but observed ${String(evidence.proofState)}`,
+      );
+    }
+    const sentinelNote = `CorpusSentinel-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`;
+    evidence.sentinel = await submitChangeSet(gen2Client, {
+      submissionKey: profile.submissionKey(`${seed}-sentinel`),
+      operations: [
+        {
+          operationId: `sentinel-${seed}`,
+          kind: "create_note",
+          path: sentinelNote,
+          content: `# Sentinel ${seed}\n`,
+          ifExists: "reject",
+        },
+      ],
+    });
+    if (!evidence.sentinel.applied) {
+      failures.push("sentinel Change Set was not admissible after the capacity-fault restart");
+    }
+    await gen2Client.close().catch(() => undefined);
+    await terminateChildIfRunning(gen2);
+    await rm(join(root, sentinelNote), { force: true });
+
+    evidence.after = await inventoryCorpus(root);
+    evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
+    const finalFailures = finalFileFailures(evidence.fileFinal, "intent_applied", profile);
+    if (finalFailures.length > 0) failures.push(...finalFailures);
+    const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+      profile.files.map((file) => [file.path, terminalStateForFile("intent_applied", file)]),
+    );
+    evidence.residualPaths = residualPaths(
+      evidence.after,
+      expectedPaths(profile, expectedTerminal),
+    );
+    if (evidence.residualPaths.length > 0) {
+      failures.push(`residual paths remain after the capacity-fault restart: ${evidence.residualPaths.join(", ")}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  } finally {
+    evidence.fault = {
+      kind: "capacity",
+      identity: "slot_capacity_exhaustion",
+      declaration: { slotCapacity: options.slotCapacity },
+      fired: { fired: true, at: { phase: "PREPARED", occurrence: 1 } },
+      journal: { before: journalBefore, after: null },
+    };
+    try {
+      await rm(root, { recursive: true, force: true });
+      evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+    } catch (error) {
+      evidence.cleanup = { success: false, message: String(error) };
+    }
+    await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+    if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.verdict = failures.length === 0 ? "pass" : "fail";
+    await writeEvidence();
+  }
+  return evidence as CorpusScenarioEvidence;
+}
+
+/**
+ * Host-operation fault scenario for Managed Trash (issue #192 AC5): generation
+ * 1 fully trashes a public note/attachment and parks at the rollback lead-in
+ * with a durable PREPARED frame; generation 2 recovery is armed with a
+ * permission-denial fault on `restoreFromTrash`. The rollback cannot restore the
+ * public path, so complete restoration cannot be proven: the Change Set reports
+ * `result_unproven`, the write gate is blocked, the hidden trash copy is
+ * preserved (never destroyed by the failed restore), and no private trash path
+ * is surfaced.
+ */
+export interface HostOperationFaultScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  readonly operation: string;
+  readonly code: string;
+  readonly expectedHiddenTrashCount: number;
+}
+
+export async function runMutationCorpusHostOperationFaultScenario(
+  options: HostOperationFaultScenarioOptions,
+): Promise<CorpusScenarioEvidence> {
+  const { profile, seed } = options;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const logPhase = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-hostfault-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-hostfault-control-"));
+  const crashPoint: MutationCorpusCrashPoint = {
+    point: profile.rollbackLeadInPoint,
+    phase: "rollback",
+  };
+  const evidence = createEvidence(
+    { profile, crashPoint, seed, root, vaultId, port, reportPath },
+    failures,
+  );
+  const log = (message: string): void => {
+    logPhase(message);
+  };
+  const writeEvidence = async (): Promise<void> => {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  };
+  const faultJson = JSON.stringify({
+    kind: "host_operation",
+    operation: options.operation,
+    occurrence: 1,
+    code: options.code,
+    message: `${options.code} injected on ${options.operation}`,
+  });
+  let journalBefore: JournalObservation | null = null;
+  let journalAfter: JournalObservation | null = null;
+  let gen2Control: string | null = null;
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    await writeEvidence();
+    return evidence as CorpusScenarioEvidence;
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+
+    // Generation 1: trash the public note/attachment and park at the rollback
+    // lead-in with a durable PREPARED frame.
+    log(`generation 1: park at ${profile.rollbackLeadInPoint}`);
+    const gen1 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen1"),
+      crashPoint: profile.rollbackLeadInPoint,
+    });
+    const bootMarker = await waitForControlMarker(
+      gen1,
+      ["ready", "parked", "failed"],
+      profile.timeoutMs,
+    );
+    if (bootMarker === null || bootMarker.kind === "failed") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChildIfRunning(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+    const gen1Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const submitPromise = submitChangeSet(gen1Client, profile.buildSubmitInput(seed));
+    const parkRace = await Promise.race([
+      waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs).then((marker) => ({
+        kind: "parked-or-failed" as const,
+        marker,
+      })),
+      submitPromise.then(() => ({ kind: "submit-settled" as const, marker: null })),
+    ]);
+    if (parkRace.kind !== "parked-or-failed" || parkRace.marker === null) {
+      failures.push(`rollback lead-in ${profile.rollbackLeadInPoint} was never reached`);
+      await terminateChildIfRunning(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("rollback lead-in was never reached");
+    }
+    if (parkRace.marker.kind === "failed") {
+      failures.push(`child failed during submission: ${JSON.stringify(parkRace.marker.value)}`);
+      await terminateChildIfRunning(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("child failed during submission");
+    }
+    evidence.boundary = await observeBoundary(root, profile);
+    await gen1Client.close().catch(() => undefined);
+    await terminateChildIfRunning(gen1);
+    log("generation 1 terminated by supervisor");
+    journalBefore = await observeJournal(root);
+
+    // Generation 2: recovery with the armed permission fault on restore.
+    log(`generation 2: armed host-operation fault on ${options.operation}`);
+    const gen2ControlDir = join(controlBase, "gen2");
+    gen2Control = gen2ControlDir;
+    const gen2 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: gen2ControlDir,
+      fault: faultJson,
+    });
+    const gen2Marker = await waitForControlMarker(
+      gen2,
+      ["ready", "failed"],
+      profile.timeoutMs,
+    );
+    if (gen2Marker === null || gen2Marker.kind !== "ready") {
+      failures.push(
+        `generation 2 did not become ready: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChildIfRunning(gen2);
+      throw new Error("generation 2 did not become ready");
+    }
+    log("generation 2 ready after faulted recovery");
+    const firedEvidence = await readFaultFired(gen2ControlDir);
+    if (!firedEvidence.fired) {
+      failures.push(
+        `requested host-operation fault on ${options.operation} was bypassed during recovery`,
+      );
+    }
+    const gen2Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    evidence.gate = await healthSnapshot(gen2Client);
+    evidence.proofState = await statusProofState(gen2Client, profile.submissionKey(seed));
+    log(
+      `proof state ${String(evidence.proofState)}; gate ${String(evidence.gate.effectiveGate)}; recovery ${String(evidence.gate.recoveryState)}`,
+    );
+    if (evidence.proofState !== "result_unproven") {
+      failures.push(
+        `expected result_unproven after a failed trash restore but observed ${String(evidence.proofState)}`,
+      );
+    }
+    const gateBlocked = evidence.gate.effectiveGate !== null || evidence.gate.recoveryState === "blocked";
+    if (!gateBlocked) {
+      failures.push("expected writes to be blocked after a failed trash restore");
+    }
+
+    const sentinelNote = `CorpusSentinel-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`;
+    evidence.sentinel = await submitChangeSet(gen2Client, {
+      submissionKey: profile.submissionKey(`${seed}-sentinel`),
+      operations: [
+        {
+          operationId: `sentinel-${seed}`,
+          kind: "create_note",
+          path: sentinelNote,
+          content: `# Sentinel ${seed}\n`,
+          ifExists: "reject",
+        },
+      ],
+    });
+    if (evidence.sentinel.applied) {
+      failures.push("sentinel Change Set was admissible despite a failed trash restore");
+    }
+    await gen2Client.close().catch(() => undefined);
+    await terminateChildIfRunning(gen2);
+    await rm(join(root, sentinelNote), { force: true });
+
+    evidence.after = await inventoryCorpus(root);
+    evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
+    journalAfter = await observeJournal(root);
+
+    // The hidden trash copy must be preserved: a failed restore never destroys
+    // the private copy, and current (public-absent) state is preserved.
+    if (evidence.hidden === null || evidence.hidden.trashCount !== options.expectedHiddenTrashCount) {
+      failures.push(
+        `expected ${options.expectedHiddenTrashCount} preserved managed-trash entr${options.expectedHiddenTrashCount === 1 ? "y" : "ies"} but observed ${evidence.hidden?.trashCount ?? "none"}`,
+      );
+    }
+    const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+      profile.files.map((file) => [file.path, terminalStateForFile("result_unproven", file)]),
+    );
+    const expectedPresent = expectedPaths(profile, expectedTerminal);
+    const privateResiduals = await privateAreaResidualPaths(root, true);
+    evidence.residualPaths = [
+      ...residualPaths(evidence.after, expectedPresent),
+      ...privateResiduals,
+    ].sort();
+    if (evidence.residualPaths.some((entry) => entry.startsWith("trash:"))) {
+      failures.push("a private Managed-Trash path was surfaced as a residual path");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  } finally {
+    const fired = gen2Control === null
+      ? { fired: false, at: null }
+      : await readFaultFired(gen2Control);
+    evidence.fault = {
+      kind: "host_operation",
+      identity: `${options.operation}_${options.code.toLowerCase()}`,
+      declaration: {
+        operation: options.operation,
+        code: options.code,
+        occurrence: 1,
+      },
+      fired: { fired: fired.fired, at: fired.at },
+      journal: { before: journalBefore, after: journalAfter },
+    };
     try {
       await rm(root, { recursive: true, force: true });
       evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };

@@ -46,6 +46,13 @@ import {
   createFileSystemChangeSetExecutionAdapter,
   createNodeFileSystemChangeSetHost,
 } from "../file-system-change-set-execution.js";
+import {
+  createFaultableJournalHandle,
+  isHostOperationFault,
+  isJournalWriteFault,
+  type CorpusChildFault,
+  type FaultedWriteObservation,
+} from "./journal-faults.js";
 import { ManagedVaultBridgeRuntime } from "../managed-vault-runtime.js";
 import {
   enumerateDecodedReferenceTargets,
@@ -71,6 +78,8 @@ interface CorpusProcessEnvironment {
   CORPUS_PORT: string;
   CORPUS_CONTROL_DIR: string;
   CORPUS_CRASH_POINT?: string;
+  CORPUS_FAULT?: string;
+  CORPUS_JOURNAL_SLOT_CAPACITY?: string;
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -331,6 +340,12 @@ function parseEnvironment(): CorpusProcessEnvironment {
     ...(record.CORPUS_CRASH_POINT === undefined
       ? {}
       : { CORPUS_CRASH_POINT: record.CORPUS_CRASH_POINT }),
+    ...(record.CORPUS_FAULT === undefined
+      ? {}
+      : { CORPUS_FAULT: record.CORPUS_FAULT }),
+    ...(record.CORPUS_JOURNAL_SLOT_CAPACITY === undefined
+      ? {}
+      : { CORPUS_JOURNAL_SLOT_CAPACITY: record.CORPUS_JOURNAL_SLOT_CAPACITY }),
   };
 }
 
@@ -353,6 +368,78 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
     env.CORPUS_CRASH_POINT === undefined || env.CORPUS_CRASH_POINT === ""
       ? undefined
       : env.CORPUS_CRASH_POINT;
+
+  // Supervisor-armed fault control (issue #192). The supervisor passes at most
+  // one declared fault; the child fires it at exactly the declared operation and
+  // records strict-ordering evidence in `fault.json`. A fault that is bypassed
+  // (never fires) is a scenario failure, so every storage-fault scenario ends
+  // with an observable firing record and never a silent no-op.
+  const armedFault: CorpusChildFault | null = (() => {
+    if (env.CORPUS_FAULT === undefined || env.CORPUS_FAULT === "") return null;
+    try {
+      const parsed: unknown = JSON.parse(env.CORPUS_FAULT);
+      if (isJournalWriteFault(parsed) || isHostOperationFault(parsed)) return parsed;
+    } catch {
+      // Fall through to a boot failure below so a malformed arm is never silent.
+    }
+    throw new Error("CORPUS_FAULT is not a recognized corpus fault declaration");
+  })();
+  const reportFaultFired = async (observation: Record<string, unknown>): Promise<void> => {
+    await report("fault.json", { fired: true, ...observation });
+  };
+
+  // -------------------------------------------------------------------------
+  // Journal storage faults (disk-full / short-write / no-progress / sync).
+  // The wrapper inspects the write buffer itself (FRM1 layout) so the fault
+  // strikes exactly the declared phase/occurrence frame write.
+  // -------------------------------------------------------------------------
+  const wrapJournalHandle =
+    armedFault !== null && isJournalWriteFault(armedFault)
+      ? (handle: import("node:fs/promises").FileHandle) =>
+          createFaultableJournalHandle(
+            handle,
+            armedFault.fault,
+            (observation: FaultedWriteObservation) =>
+              reportFaultFired({
+                kind: "journal_write",
+                operation: "journal_write",
+                ...observation,
+              }),
+          )
+      : undefined;
+
+  // -------------------------------------------------------------------------
+  // Host-operation faults (permission denial on a declared public/private
+  // mutation, e.g. Managed-Trash restore during rollback).
+  // -------------------------------------------------------------------------
+  let hostOperationCalls = 0;
+  const hostOperationFault = async (
+    operation: string,
+    context: { path?: string; stageId?: string },
+  ): Promise<Error | null> => {
+    if (
+      armedFault === null ||
+      !isHostOperationFault(armedFault) ||
+      operation !== armedFault.operation
+    ) {
+      return null;
+    }
+    hostOperationCalls += 1;
+    if (hostOperationCalls !== armedFault.occurrence) return null;
+    await reportFaultFired({
+      kind: "host_operation",
+      operation,
+      occurrence: armedFault.occurrence,
+      path: context.path ?? null,
+    });
+    const error = new Error(armedFault.message) as NodeJS.ErrnoException;
+    error.code = armedFault.code;
+    return error;
+  };
+  const journalSlotCapacity =
+    env.CORPUS_JOURNAL_SLOT_CAPACITY === undefined
+      ? undefined
+      : Number(env.CORPUS_JOURNAL_SLOT_CAPACITY);
 
   // Corpus reference graph: the fixtures never author an inbound link to a
   // trashed path, so every path is unreferenced before and after the Change
@@ -408,6 +495,7 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
       basePath: root,
       stateDirectory,
       crashInjector,
+      operationFault: hostOperationFault,
       referenced,
       // No Obsidian metadata-cache watcher runs in the headless owning process,
       // so the node-fs host reports the public renames it performs; the Change
@@ -428,6 +516,10 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
     const changeSetExecution = await createFileSystemChangeSetExecutionAdapter({
       journalPath: recoveryJournalPath,
       host,
+      ...(wrapJournalHandle === undefined ? {} : { wrapJournalHandle }),
+      ...(journalSlotCapacity === undefined
+        ? {}
+        : { slotCapacity: journalSlotCapacity }),
     });
     runtime = new ManagedVaultBridgeRuntime({
       vault: { name: "Corpus Vault", path: root },
