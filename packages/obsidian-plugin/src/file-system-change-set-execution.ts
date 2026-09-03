@@ -26,6 +26,7 @@ import { RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION } from "./change-set.js";
 import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
+  ChangeSetSemanticEvent,
   ChangeSetSemanticEvidenceRequest,
   MoveSnapshotBarrier,
   RecoveryJournalFrame,
@@ -207,6 +208,8 @@ export type DirectoryExecutionHost = ChangeSetExecutionHost;
 export interface NodeFileSystemChangeSetHostOptions {
   basePath: string;
   stateDirectory: string;
+  /** Optional observer of public-path mutations, used to synthesize the host semantic events a real Obsidian metadata-cache watcher would emit (process-crash corpus, issue #189). */
+  recordEvent?(event: ChangeSetSemanticEvent): void;
   publishFile?(stageId: string, path: string): Promise<void>;
   moveFile?(sourcePath: string, destinationPath: string): Promise<void>;
   removeFile?(path: string): Promise<void>;
@@ -391,10 +394,15 @@ export async function createNodeFileSystemChangeSetHost(
       const destination = await assertContained(destinationPath, "destination");
       if (options.moveFile !== undefined) {
         await options.moveFile(sourcePath, destinationPath);
+        options.recordEvent?.({ kind: "rename", oldPath: sourcePath, path: destinationPath });
         return;
       }
       await link(source, destination);
       await unlink(source);
+      // The corpus host has no Obsidian metadata-cache watcher to emit the
+      // rename event the Change Set semantic barrier waits for, so the node-fs
+      // host itself reports the public rename it just made (issue #189).
+      options.recordEvent?.({ kind: "rename", oldPath: sourcePath, path: destinationPath });
     },
     removeFile: async (path) => {
       const source = await assertContained(path, "existing");

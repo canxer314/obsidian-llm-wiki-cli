@@ -26,6 +26,11 @@ import {
   seedForMultiMarkdown,
 } from "../src/corpus/multi-operation-corpus.js";
 import {
+  MOVE_DESTINATION_PATH,
+  moveNoteCorpusProfile,
+  seedForMoveNote,
+} from "../src/corpus/move-note-corpus.js";
+import {
   runMutationCorpusResidueScenario,
   runMutationCorpusScenario,
   terminalStateForFile,
@@ -54,6 +59,7 @@ const CORPUS_SCENARIOS: readonly CorpusScenarioCase[] = [
   { profile: editFrontmatterCorpusProfile(), seedFor: seedForEditFrontmatter },
   { profile: multiMarkdownCorpusProfile(), seedFor: seedForMultiMarkdown },
   { profile: multiFrontmatterCorpusProfile(), seedFor: seedForMultiFrontmatter },
+  { profile: moveNoteCorpusProfile(), seedFor: seedForMoveNote },
 ];
 
 function assertCleanRecoveryOutcome(
@@ -157,6 +163,38 @@ describe("edit_frontmatter third-party residue", () => {
       expect(evidence.gate.effectiveGate).not.toBeNull();
       expect(evidence.sentinel.applied).toBe(false);
       expect(evidence.residualPaths).toContain(`file:${fixture.path}`);
+      expect(evidence.cleanup.success).toBe(true);
+    },
+    120_000,
+  );
+});
+
+describe("move_note third-party residue", () => {
+  const profile = moveNoteCorpusProfile();
+
+  it(
+    "fails closed with result_unproven, a blocked sentinel, and a surfaced residual path",
+    async () => {
+      const reportDir = await mkdtemp(join(tmpdir(), "corpus-reports-"));
+      temporaryReportRoots.push(reportDir);
+      const seed = "move-note-residue";
+      const residueBytes = new TextEncoder().encode(
+        "# Beta (third-party)\n\nContent no Change Set wrote.\n你好 🚀\n",
+      );
+      const evidence = await runMutationCorpusResidueScenario({
+        profile,
+        seed,
+        reportDir,
+        residuePath: MOVE_DESTINATION_PATH,
+        residueBytes,
+      });
+
+      expect(evidence.failures, JSON.stringify(evidence, null, 2)).toEqual([]);
+      expect(evidence.verdict).toBe("pass");
+      expect(evidence.proofState).toBe("result_unproven");
+      expect(evidence.gate.effectiveGate).not.toBeNull();
+      expect(evidence.sentinel.applied).toBe(false);
+      expect(evidence.residualPaths).toContain(`file:${MOVE_DESTINATION_PATH}`);
       expect(evidence.cleanup.success).toBe(true);
     },
     120_000,
