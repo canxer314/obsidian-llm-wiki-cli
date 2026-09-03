@@ -11,6 +11,7 @@ import {
   rmdir,
   stat,
   unlink,
+  type FileHandle,
 } from "node:fs/promises";
 import {
   dirname,
@@ -26,6 +27,7 @@ import { RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION } from "./change-set.js";
 import type {
   ChangeSetExecutionAdapter,
   ChangeSetPathKind,
+  ChangeSetSemanticEvent,
   ChangeSetSemanticEvidenceRequest,
   MoveSnapshotBarrier,
   RecoveryJournalFrame,
@@ -208,6 +210,25 @@ export type DirectoryExecutionHost = ChangeSetExecutionHost;
 export interface NodeFileSystemChangeSetHostOptions {
   basePath: string;
   stateDirectory: string;
+  /**
+   * Optional test-only crash seam inside the host's private file operations.
+   * Only the process-crash corpus (issue #191) passes a crash injector; the
+   * production host leaves it unset and these hooks are no-ops.
+   */
+  crashInjector?(point: string): void | Promise<void>;
+  /**
+   * Optional test-only storage/permission fault seam inside the host's public
+   * mutating operations. Returned errors fail the declared operation before any
+   * bytes change. The process-crash fault corpus (issue #192) uses it to prove
+   * that a permission failure during rollback preserves current state and fails
+   * closed; production leaves it unset and it is a no-op.
+   */
+  operationFault?(
+    operation: string,
+    context: { path?: string; stageId?: string },
+  ): Error | null | Promise<Error | null>;
+  /** Optional observer of public-path mutations, used to synthesize the host semantic events a real Obsidian metadata-cache watcher would emit (process-crash corpus, issue #189). */
+  recordEvent?(event: ChangeSetSemanticEvent): void;
   publishFile?(stageId: string, path: string): Promise<void>;
   moveFile?(sourcePath: string, destinationPath: string): Promise<void>;
   removeFile?(path: string): Promise<void>;
@@ -271,6 +292,15 @@ export async function createNodeFileSystemChangeSetHost(
     }
     return path;
   };
+  const fault = async (
+    operation: string,
+    context: { path?: string; stageId?: string },
+  ): Promise<void> => {
+    const error = options.operationFault === undefined
+      ? null
+      : await options.operationFault(operation, context);
+    if (error !== null && error !== undefined) throw error;
+  };
   const assertContained = async (
     path: string,
     mode: "existing" | "destination",
@@ -327,17 +357,22 @@ export async function createNodeFileSystemChangeSetHost(
       return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
     },
     publishDirectory: async (stageId, path) => {
+      await fault("publishDirectory", { stageId, path });
       await rename(
         await assertPrivateContained(stagePath(stageId)),
         await assertContained(path, "destination"),
       );
     },
     discardPreparedDirectory: async (stageId) => {
+      await fault("discardPreparedDirectory", { stageId });
       await rmdir(await assertPrivateContained(stagePath(stageId))).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
       });
     },
-    removeDirectory: async (path) => rmdir(await assertContained(path, "existing")),
+    removeDirectory: async (path) => {
+      await fault("removeDirectory", { path });
+      await rmdir(await assertContained(path, "existing"));
+    },
     readBinary: async (path) => {
       try {
         return await readFile(await assertContained(path, "existing"));
@@ -356,6 +391,7 @@ export async function createNodeFileSystemChangeSetHost(
       }
     },
     prepareFile: async (stageId, bytes) => {
+      await fault("prepareFile", { stageId });
       const path = await assertPrivateContained(stagePath(stageId));
       await mkdir(dirname(path), { recursive: true });
       const handle = await open(path, "wx");
@@ -369,6 +405,7 @@ export async function createNodeFileSystemChangeSetHost(
       return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
     },
     publishFile: async (stageId, path) => {
+      await fault("publishFile", { stageId, path });
       const source = await assertPrivateContained(stagePath(stageId));
       const destination = await assertContained(path, "destination");
       if (options.publishFile !== undefined) {
@@ -376,20 +413,37 @@ export async function createNodeFileSystemChangeSetHost(
         return;
       }
       await rename(source, destination);
+      options.recordEvent?.({ kind: "create", path });
     },
-    discardPreparedFile: async (stageId) =>
-      rm(await assertPrivateContained(stagePath(stageId)), { force: true }),
+    discardPreparedFile: async (stageId) => {
+      await fault("discardPreparedFile", { stageId });
+      const path = await assertPrivateContained(stagePath(stageId));
+      // A rollback restore stages under `${stageId}/rollback` and then publishes
+      // that file away, leaving the base stage path as an empty directory. When
+      // recovery re-runs a rollback after a crash mid-rollback, the base stage
+      // path is a directory rather than a file; `rm` without `recursive` would
+      // fail closed (EISDIR) and block writes. Recursing keeps discard
+      // idempotent so a repeated rollback attempt can converge to ROLLED_BACK.
+      await rm(path, { force: true, recursive: true });
+    },
     moveFile: async (sourcePath, destinationPath) => {
+      await fault("moveFile", { path: sourcePath });
       const source = await assertContained(sourcePath, "existing");
       const destination = await assertContained(destinationPath, "destination");
       if (options.moveFile !== undefined) {
         await options.moveFile(sourcePath, destinationPath);
+        options.recordEvent?.({ kind: "rename", oldPath: sourcePath, path: destinationPath });
         return;
       }
       await link(source, destination);
       await unlink(source);
+      // The corpus host has no Obsidian metadata-cache watcher to emit the
+      // rename event the Change Set semantic barrier waits for, so the node-fs
+      // host itself reports the public rename it just made (issue #189).
+      options.recordEvent?.({ kind: "rename", oldPath: sourcePath, path: destinationPath });
     },
     removeFile: async (path) => {
+      await fault("removeFile", { path });
       const source = await assertContained(path, "existing");
       if (options.removeFile !== undefined) {
         await options.removeFile(path);
@@ -398,10 +452,15 @@ export async function createNodeFileSystemChangeSetHost(
       await unlink(source);
     },
     moveToTrash: async (path, trashId) => {
+      await fault("moveToTrash", { path });
       const source = await assertContained(path, "existing");
       const destination = await assertPrivateContained(trashPath(trashId));
       await mkdir(dirname(destination), { recursive: true });
       await link(source, destination);
+      // Test-only crash seam: the Bridge-owned private copy is durable and the
+      // public path still exists. A termination here must recover without losing
+      // bytes or duplicating public content (issue #191 AC5). No-op in production.
+      await options.crashInjector?.("after_trash_hidden_copy");
       if (options.moveToTrash !== undefined) {
         await options.moveToTrash(path, trashId);
       } else if (options.removeFile !== undefined) {
@@ -411,15 +470,22 @@ export async function createNodeFileSystemChangeSetHost(
       }
     },
     restoreFromTrash: async (trashId, path) => {
+      await fault("restoreFromTrash", { path });
       const source = await assertPrivateContained(trashPath(trashId));
       const destination = await assertContained(path, "destination");
       if (options.restoreFromTrash !== undefined) {
         const bytes = Uint8Array.from(await readFile(source));
         await options.restoreFromTrash(trashId, path, bytes);
+        // Test-only crash seam between public restore and private cleanup.
+        await options.crashInjector?.("after_trash_restore_public");
         await rm(source, { force: true });
         return;
       }
       await link(source, destination);
+      // Test-only crash seam: the public bytes are restored but the private
+      // trash entry is not yet removed; recovery must discard the private copy
+      // rather than duplicate the public content (issue #191 AC5).
+      await options.crashInjector?.("after_trash_restore_public");
       await unlink(source);
     },
     discardTrash: async (trashId) =>
@@ -444,6 +510,13 @@ export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
   host: ChangeSetExecutionHost;
   slotCapacity?: number;
+  /**
+   * Optional test-only seam that wraps the journal `FileHandle` after it is
+   * opened so a storage fault can strike exactly one declared durable frame
+   * write (issue #192). Production leaves it unset; the owning process corpus
+   * uses it to inject disk-full/short-write/no-progress/sync failures.
+   */
+  wrapJournalHandle?(handle: FileHandle): FileHandle;
 }
 
 /**
@@ -653,13 +726,15 @@ export async function createFileSystemChangeSetExecutionAdapter(
       return open(options.journalPath, "w+");
     },
   );
+  const journalHandle =
+    options.wrapJournalHandle === undefined ? handle : options.wrapJournalHandle(handle);
   let journal: RecoveryJournal;
   try {
-    journal = await openRecoveryJournal(handle, {
+    journal = await openRecoveryJournal(journalHandle, {
       slotCapacity: options.slotCapacity ?? DEFAULT_RECOVERY_JOURNAL_SLOT_CAPACITY,
     });
   } catch (error) {
-    await handle.close();
+    await journalHandle.close();
     throw error;
   }
   try {
@@ -667,7 +742,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
     if (recovered !== undefined) parseFrame(recovered.payload);
   } catch (error) {
     if (error instanceof RecoveryJournalIncompatibleError) {
-      await handle.close();
+      await journalHandle.close();
       throw error;
     }
   }
@@ -724,6 +799,6 @@ export async function createFileSystemChangeSetExecutionAdapter(
       ? {}
       : { semanticEvidencePublishesSnapshot: options.host.semanticEvidencePublishesSnapshot }),
     publishSearchSnapshot: options.host.publishSearchSnapshot,
-    close: () => handle.close(),
+    close: () => journalHandle.close(),
   };
 }
