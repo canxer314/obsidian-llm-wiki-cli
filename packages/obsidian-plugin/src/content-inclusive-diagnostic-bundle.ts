@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { parseEvidence, type VersionField } from "./diagnostic-bundle.js";
+import {
+  parseDiagnosticVersionField,
+  parseEvidence,
+  type VersionField,
+} from "./diagnostic-bundle.js";
 
 /**
  * Versioned, structurally separate content-inclusive diagnostic bundle
@@ -81,45 +85,8 @@ function requireString(value: unknown, location: string): string {
   return value;
 }
 
-function requireInteger(
-  value: unknown,
-  location: string,
-  minimum = 0,
-  maximum = Number.MAX_SAFE_INTEGER,
-): number {
-  if (
-    !Number.isSafeInteger(value) ||
-    (value as number) < minimum ||
-    (value as number) > maximum
-  ) {
-    throw incompatible(location);
-  }
-  return value as number;
-}
-
 function parseVersionField(value: unknown, location: string): VersionField {
-  const record = requireExactRecord(
-    value,
-    ["bridge", "plugin", "protocol", "persistentStateSchema", "recoveryJournalSchema"],
-    location,
-  );
-  const protocol = requireString(record.protocol, `${location}.protocol`);
-  if (!/^\d+\.\d+$/u.test(protocol)) throw incompatible(`${location}.protocol`);
-  return {
-    bridge: requireString(record.bridge, `${location}.bridge`),
-    plugin: requireString(record.plugin, `${location}.plugin`),
-    protocol,
-    persistentStateSchema: requireInteger(
-      record.persistentStateSchema,
-      `${location}.persistentStateSchema`,
-      1,
-    ),
-    recoveryJournalSchema: requireInteger(
-      record.recoveryJournalSchema,
-      `${location}.recoveryJournalSchema`,
-      1,
-    ),
-  };
+  return parseDiagnosticVersionField(value, location);
 }
 
 function canonicalize(value: unknown): unknown {

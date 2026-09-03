@@ -153,6 +153,17 @@ describe("standard diagnostic bundle", () => {
     expect(() => createStandardDiagnosticBundle(stackWithVaultRelativePath)).toThrow(TypeError);
   });
 
+  it("fails closed when versions are not recognized semantic versions", () => {
+    const withContentBearingVersion = {
+      ...baseEvidence(),
+      versions: {
+        ...baseEvidence().versions,
+        plugin: "Private.md\nwhole note body must never enter diagnostics",
+      },
+    } as unknown;
+    expect(() => createStandardDiagnosticBundle(withContentBearingVersion)).toThrow(TypeError);
+  });
+
   it("never emits raw identifiers, keys, credentials, paths, usernames, or environment", () => {
     const evidence = baseEvidence({
       queue: {

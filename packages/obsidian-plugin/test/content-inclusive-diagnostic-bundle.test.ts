@@ -155,6 +155,19 @@ describe("content-inclusive diagnostic bundle", () => {
     expect(() => createContentInclusiveDiagnosticBundle(withPath, "selected")).toThrow(TypeError);
   });
 
+  it("fails closed on content-bearing version evidence through the shared seam", () => {
+    const withContentBearingVersion = {
+      ...baseEvidence(),
+      versions: {
+        ...baseEvidence().versions,
+        bridge: "Private.md\nwhole note body must never enter diagnostics",
+      },
+    } as unknown;
+    expect(() => createContentInclusiveDiagnosticBundle(withContentBearingVersion, "selected")).toThrow(
+      TypeError,
+    );
+  });
+
   it("is visibly and structurally separate from the standard diagnostic bundle", () => {
     const evidence = baseEvidence();
     const standard = createStandardDiagnosticBundle(evidence);

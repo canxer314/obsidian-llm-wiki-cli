@@ -25,7 +25,7 @@ import {
   type StandardDiagnosticBundle,
   type StandardDiagnosticEvidence,
 } from "./diagnostic-bundle.js";
-import type { FileSystemChangeSetExecutionAdapter } from "./file-system-change-set-execution.js";
+import type { RecoveryJournalDiagnosticFacts } from "./recovery-journal.js";
 import { withMoveReferenceProjection } from "./move-reference-projection.js";
 import {
   SearchSnapshotManager,
@@ -92,7 +92,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
   readDataSource?: VaultReadDataSource;
   searchDataSource?: SearchSnapshotDataSource;
   changeSetDataSource?: ChangeSetPreflightDataSource;
-  changeSetExecution?: FileSystemChangeSetExecutionAdapter;
+  changeSetExecution?: ChangeSetExecutionAdapter;
   incompatibleState?: boolean;
   createVaultId?: () => string;
   selectInitialPort?: () => number;
@@ -192,6 +192,15 @@ function parsePersistedEnvelope(
     diagnosticPath: settings.diagnosticPath,
     changeSets: emptyChangeSetState(),
   };
+}
+
+function isDiagnosticJournalSource(
+  execution: ChangeSetExecutionAdapter,
+): execution is ChangeSetExecutionAdapter & {
+  diagnosticJournalFacts(): Promise<RecoveryJournalDiagnosticFacts>;
+} {
+  return "diagnosticJournalFacts" in execution &&
+    typeof execution.diagnosticJournalFacts === "function";
 }
 
 export class VaultPathChangeRequiredError extends Error {
@@ -633,7 +642,7 @@ export class ManagedVaultBridgeRuntime {
       throw new Error("Managed Vault Bridge is not loaded");
     }
     const execution = this.#options.changeSetExecution;
-    const journal = execution === undefined
+    const journal = execution === undefined || !isDiagnosticJournalSource(execution)
       ? { availability: "unavailable" as const, frames: [] as const }
       : await execution.diagnosticJournalFacts();
     // Health/queue, the journal facts, and the registry are all sampled only

@@ -284,7 +284,19 @@ function isPathFreeStackSymbol(value: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*(?:[.#][A-Za-z_$][A-Za-z0-9_$]*)*$/u.test(value);
 }
 
-function parseVersionField(value: unknown, location: string): VersionField {
+function requireVersion(value: unknown, location: string): string {
+  const version = requireString(value, location);
+  if (
+    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(
+      version,
+    )
+  ) {
+    throw incompatible(location);
+  }
+  return version;
+}
+
+export function parseDiagnosticVersionField(value: unknown, location: string): VersionField {
   const record = requireExactRecord(
     value,
     ["bridge", "plugin", "protocol", "persistentStateSchema", "recoveryJournalSchema"],
@@ -293,8 +305,8 @@ function parseVersionField(value: unknown, location: string): VersionField {
   const protocol = requireString(record.protocol, `${location}.protocol`);
   if (!/^\d+\.\d+$/u.test(protocol)) throw incompatible(`${location}.protocol`);
   return {
-    bridge: requireString(record.bridge, `${location}.bridge`),
-    plugin: requireString(record.plugin, `${location}.plugin`),
+    bridge: requireVersion(record.bridge, `${location}.bridge`),
+    plugin: requireVersion(record.plugin, `${location}.plugin`),
     protocol,
     persistentStateSchema: requireInteger(
       record.persistentStateSchema,
@@ -548,7 +560,7 @@ export function parseEvidence(value: unknown): StandardDiagnosticEvidence {
   );
   return {
     vaultId: requireString(root.vaultId, "vaultId"),
-    versions: parseVersionField(root.versions, "versions"),
+    versions: parseDiagnosticVersionField(root.versions, "versions"),
     health: parseHealthField(root.health, "health"),
     listener: {
       address: "127.0.0.1",
@@ -954,7 +966,7 @@ function parseRedactedBundle(value: unknown): StandardDiagnosticBundleContent {
     schemaVersion: STANDARD_DIAGNOSTIC_BUNDLE_SCHEMA_VERSION,
     bundleVersion: STANDARD_DIAGNOSTIC_BUNDLE_VERSION,
     vault: { alias },
-    versions: parseVersionField(root.versions, "versions"),
+    versions: parseDiagnosticVersionField(root.versions, "versions"),
     health: parseHealthField(root.health, "health"),
     listenerTimeline: [
       {

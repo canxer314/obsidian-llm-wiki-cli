@@ -19,6 +19,7 @@ import {
   type ManagedVaultBridgeRuntimeOptions,
   type PersistedBridgeSettings,
 } from "../src/managed-vault-runtime.js";
+import type { ChangeSetExecutionAdapter } from "../src/change-set.js";
 
 function fakeBridge(port: number): BridgeInstance {
   return {
@@ -1576,6 +1577,42 @@ describe("Managed Vault standard diagnostic bundle", () => {
     expect(text).not.toContain(changeSetId);
     expect(verifyStandardDiagnosticBundle(bundle)).toBe(true);
     await runtime.unload();
+  });
+
+  it("marks the journal unavailable when execution lacks diagnostic facts", async () => {
+    const execution: ChangeSetExecutionAdapter = {
+      loadRecoveryFrame: async () => null,
+      persistRecoveryFrame: async () => undefined,
+      pathKind: async () => null,
+      directoryIdentity: async () => null,
+      prepareDirectory: async () => "directory",
+      publishDirectory: async () => undefined,
+      discardPreparedDirectory: async () => undefined,
+      removeDirectory: async () => undefined,
+      publishSearchSnapshot: async () => undefined,
+    };
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      changeSetExecution: execution,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    try {
+      const bundle = await runtime.createStandardDiagnosticBundle();
+      expect(bundle.journal).toEqual({ availability: "unavailable", frames: [] });
+      expect(verifyStandardDiagnosticBundle(bundle)).toBe(true);
+    } finally {
+      await runtime.unload();
+    }
   });
 
   it("keeps two Managed Vaults fully isolated in evidence and correlation", async () => {
