@@ -2,8 +2,13 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  type App,
   FileSystemAdapter,
+  MarkdownView,
+  Modal,
+  Notice,
   Plugin,
+  Setting,
   TFile,
   getAllTags,
   getFrontMatterInfo,
@@ -14,6 +19,10 @@ import {
 } from "obsidian";
 
 import { createBridgeInstance } from "./bridge-instance.js";
+import {
+  hasContentInclusiveSelection,
+  performContentInclusiveDiagnosticCopy,
+} from "./content-inclusive-diagnostic-copy.js";
 import { BRIDGE_STATE_DIRECTORY_NAME } from "./change-set.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import {
@@ -38,6 +47,55 @@ import {
   VaultPathChangeRequiredError,
   type PathChangeClassification,
 } from "./managed-vault-runtime.js";
+
+/**
+ * Fresh local interactive Primary Operator confirmation for one
+ * content-inclusive diagnostic generation (spec §9.4). Nothing is generated or
+ * copied unless the Primary Operator explicitly chooses "Copy selection";
+ * cancel, dismiss, or Escape resolves to `false`.
+ */
+class ContentInclusiveDiagnosticsConfirmationModal extends Modal {
+  readonly #resolve: (confirmed: boolean) => void;
+
+  constructor(app: App, resolve: (confirmed: boolean) => void) {
+    super(app);
+    this.#resolve = resolve;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", {
+      text: "Copy selected content-inclusive diagnostics?",
+    });
+    contentEl.createEl("p", {
+      text: "This copies only the explicitly selected Vault content in a separate content-inclusive diagnostic format.",
+    });
+    new Setting(contentEl)
+      .addButton((button) =>
+        button
+          .setButtonText("Cancel")
+          .onClick(() => {
+            this.#resolve(false);
+            this.close();
+          }),
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Copy selection")
+          .setCta()
+          .onClick(() => {
+            this.#resolve(true);
+            this.close();
+          }),
+      );
+  }
+
+  override onClose(): void {
+    this.#resolve(false);
+    this.contentEl.empty();
+  }
+}
 
 export default class VaultOperationBridgePlugin extends Plugin {
   #runtime: ManagedVaultBridgeRuntime | undefined;
@@ -342,6 +400,67 @@ export default class VaultOperationBridgePlugin extends Plugin {
         if (!checking) {
           void navigator.clipboard.writeText(runtime.registrationCommand());
         }
+        return true;
+      },
+    });
+    // Spec §9.4: only the Primary Operator, through this local interactive
+    // management entry point, may generate a standard diagnostic bundle.
+    this.addCommand({
+      id: "copy-standard-diagnostic-bundle",
+      name: "Copy standard diagnostic bundle",
+      callback: () => {
+        void runtime
+          .createStandardDiagnosticBundle()
+          .then(async (bundle) => {
+            await navigator.clipboard.writeText(JSON.stringify(bundle));
+          })
+          .catch((error: unknown) => {
+            new Notice(
+              error instanceof Error
+                ? error.message
+                : "Standard diagnostic bundle generation failed",
+            );
+          });
+      },
+    });
+    // Spec §9.4: only the Primary Operator may request selected
+    // content-inclusive diagnostic data, and only after a fresh local
+    // interactive confirmation for that generation. The command is available
+    // only while the active editor has a non-empty selection; cancel, reject,
+    // or a missing selection produces and copies no content-inclusive output.
+    this.addCommand({
+      id: "copy-selected-content-inclusive-diagnostics",
+      name: "Copy selected content-inclusive diagnostics",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        const editor = view?.editor;
+        const selection = editor?.getSelection() ?? "";
+        if (!hasContentInclusiveSelection(selection)) return false;
+        if (checking) return true;
+        void performContentInclusiveDiagnosticCopy({
+          selection,
+          confirm: () =>
+            new Promise<boolean>((resolve) => {
+              new ContentInclusiveDiagnosticsConfirmationModal(this.app, resolve).open();
+            }),
+          generate: (selected) =>
+            runtime.createContentInclusiveDiagnosticBundle(selected),
+          write: (text) => navigator.clipboard.writeText(text),
+        })
+          .then((outcome) => {
+            if (outcome.outcome === "copied") {
+              new Notice(
+                "Selected content-inclusive diagnostics copied to the clipboard",
+              );
+            }
+          })
+          .catch((error: unknown) => {
+            new Notice(
+              error instanceof Error
+                ? error.message
+                : "Selected content-inclusive diagnostic copy failed",
+            );
+          });
         return true;
       },
     });

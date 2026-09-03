@@ -119,4 +119,76 @@ describe("recovery journal", () => {
     });
     await handle.close();
   });
+
+  it("reports two empty closed slots before the journal is first written", async () => {
+    const { handle } = await journalFile();
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 1024 });
+
+    await expect(journal.diagnosticFacts()).resolves.toEqual({
+      availability: "available",
+      journalVersion: 1,
+      headerChecksum: "valid",
+      frames: [
+        { slot: 0, state: "empty", checksum: "not_present" },
+        { slot: 1, state: "empty", checksum: "not_present" },
+      ],
+    });
+    await handle.close();
+  });
+
+  it("exposes only closed slot facts and never the payload before-images", async () => {
+    const { handle } = await journalFile();
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 4096 });
+    const secretBeforeImage =
+      "whole before-image body and note preview that must never surface";
+    await journal.write({
+      phase: "PREPARED",
+      payload: {
+        schemaVersion: 3,
+        changeSetId: "change-set-diagnostic",
+        before: { path: "Notes/Private.md", content: secretBeforeImage },
+        input: { operations: [{ operationId: "op-1", path: "Notes/Private.md" }] },
+      },
+    });
+    await journal.write({
+      phase: "COMMITTED",
+      payload: {
+        schemaVersion: 3,
+        changeSetId: "change-set-diagnostic",
+        before: { path: "Notes/Private.md", content: secretBeforeImage },
+      },
+    });
+
+    const facts = await journal.diagnosticFacts();
+    expect(facts).toEqual({
+      availability: "available",
+      journalVersion: 1,
+      headerChecksum: "valid",
+      frames: [
+        {
+          slot: 0,
+          state: "valid",
+          checksum: "valid",
+          sequence: 1,
+          phase: "PREPARED",
+          frameSchemaVersion: 3,
+          changeSetId: "change-set-diagnostic",
+        },
+        {
+          slot: 1,
+          state: "valid",
+          checksum: "valid",
+          sequence: 2,
+          phase: "COMMITTED",
+          frameSchemaVersion: 3,
+          changeSetId: "change-set-diagnostic",
+        },
+      ],
+    });
+    const text = JSON.stringify(facts);
+    expect(text).not.toContain(secretBeforeImage);
+    expect(text).not.toContain("Notes/Private.md");
+    expect(text).not.toContain("op-1");
+    await handle.close();
+  });
 });

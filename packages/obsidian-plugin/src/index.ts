@@ -50,9 +50,20 @@ export {
   type ChangeSetSemanticEvidenceTrackerOptions,
   type ChangeSetSemanticProbes,
   type DirectoryExecutionHost,
+  type FileSystemChangeSetExecutionAdapter,
   type FileSystemChangeSetExecutionOptions,
   type NodeFileSystemChangeSetHostOptions,
 } from "./file-system-change-set-execution.js";
+export {
+  STANDARD_DIAGNOSTIC_BUNDLE_SCHEMA_VERSION,
+  STANDARD_DIAGNOSTIC_BUNDLE_VERSION,
+  canonicalizeDiagnosticPayload,
+  createStandardDiagnosticBundle,
+  verifyStandardDiagnosticBundle,
+  type StandardDiagnosticBundle,
+  type StandardDiagnosticBundleContent,
+  type StandardDiagnosticEvidence,
+} from "./diagnostic-bundle.js";
 export { createRegistrationCommand } from "./registration-command.js";
 export {
   createMoveReferenceProjector,

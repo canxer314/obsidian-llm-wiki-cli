@@ -35,8 +35,32 @@ export interface RecoveryJournalWrite {
   readonly payload: RecoveryJournalJson;
 }
 
+/**
+ * Closed Recovery Journal facts admissible to the standard diagnostic bundle
+ * (spec §9.4). Facts describe slot health, frame checksums, sequence, phase,
+ * and schema version, plus the opaque Change Set identity needed to correlate
+ * a frame with other evidence inside one bundle. They never include before
+ * images, mutations, paths, input, or preview content.
+ */
+export interface RecoveryJournalDiagnosticFacts {
+  readonly availability: "unavailable" | "available";
+  readonly journalVersion?: number;
+  readonly headerChecksum?: "valid";
+  readonly frames: readonly {
+    readonly slot: 0 | 1;
+    readonly state: "empty" | "invalid" | "valid";
+    readonly checksum: "not_present" | "invalid" | "valid";
+    readonly sequence?: number;
+    readonly phase?: RecoveryJournalPhase;
+    readonly frameSchemaVersion?: number;
+    /** Opaque to the journal; only the diagnostic producer correlates it. */
+    readonly changeSetId?: string;
+  }[];
+}
+
 export interface RecoveryJournal {
   recover(): Promise<RecoveryJournalRecord | undefined>;
+  diagnosticFacts(): Promise<RecoveryJournalDiagnosticFacts>;
   write(record: RecoveryJournalWrite): Promise<RecoveryJournalRecord>;
 }
 
@@ -265,6 +289,54 @@ class FileRecoveryJournal implements RecoveryJournal {
   async recover(): Promise<RecoveryJournalRecord | undefined> {
     await this.#tail;
     return this.#readLatest();
+  }
+
+  async diagnosticFacts(): Promise<RecoveryJournalDiagnosticFacts> {
+    const operation = this.#tail.then(() => this.#readDiagnosticFacts());
+    this.#tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  async #readDiagnosticFacts(): Promise<RecoveryJournalDiagnosticFacts> {
+    const slots = await Promise.all(
+      this.#layout.offsets.map(async (offset, slot) => {
+        const bytes = await readExactly(this.#handle, this.#layout.capacity, offset);
+        const decoded = bytes === undefined ? ({ state: "invalid" } as Slot) : decodeSlot(bytes);
+        if (decoded.state === "empty") {
+          return { slot: slot as 0 | 1, state: "empty" as const, checksum: "not_present" as const };
+        }
+        if (decoded.state === "invalid") {
+          return { slot: slot as 0 | 1, state: "invalid" as const, checksum: "invalid" as const };
+        }
+        const payload = decoded.record.payload;
+        const frame =
+          typeof payload === "object" && payload !== null && !Array.isArray(payload)
+            ? (payload as Record<string, RecoveryJournalJson>)
+            : undefined;
+        const frameSchemaVersion = frame?.schemaVersion;
+        const changeSetId = frame?.changeSetId;
+        return {
+          slot: slot as 0 | 1,
+          state: "valid" as const,
+          checksum: "valid" as const,
+          sequence: decoded.record.sequence,
+          phase: decoded.record.phase,
+          ...(typeof frameSchemaVersion === "number" && Number.isSafeInteger(frameSchemaVersion)
+            ? { frameSchemaVersion }
+            : {}),
+          ...(typeof changeSetId === "string" && changeSetId.length > 0 ? { changeSetId } : {}),
+        };
+      }),
+    );
+    return {
+      availability: "available",
+      journalVersion: JOURNAL_VERSION,
+      headerChecksum: "valid",
+      frames: slots,
+    };
   }
 
   write(record: RecoveryJournalWrite): Promise<RecoveryJournalRecord> {

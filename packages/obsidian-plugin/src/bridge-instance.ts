@@ -127,7 +127,7 @@ export interface BridgeInstance {
   registrationCommand(serverName?: string): string;
 }
 
-function projectObservedHealth(
+export function projectObservedHealth(
   state: BridgeHealthState,
   port: number,
   searchSnapshotReadiness?: () => "ready" | "building" | "unavailable",

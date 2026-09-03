@@ -9,12 +9,17 @@ import {
   createBridgeInstance,
   type BridgeInstance,
 } from "../src/bridge-instance.js";
+import {
+  verifyContentInclusiveDiagnosticBundle,
+} from "../src/content-inclusive-diagnostic-bundle.js";
+import { verifyStandardDiagnosticBundle } from "../src/diagnostic-bundle.js";
 import { assertValidatedInstalledBundle } from "../src/maintenance-operation.js";
 import {
   ManagedVaultBridgeRuntime,
   type ManagedVaultBridgeRuntimeOptions,
   type PersistedBridgeSettings,
 } from "../src/managed-vault-runtime.js";
+import type { ChangeSetExecutionAdapter } from "../src/change-set.js";
 
 function fakeBridge(port: number): BridgeInstance {
   return {
@@ -822,6 +827,8 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
       },
     };
     const execution = {
+      diagnosticJournalFacts: async () =>
+        ({ availability: "unavailable" as const, frames: [] as const }),
       loadRecoveryFrame: async () => {
         throw new Error("corrupt recovery journal");
       },
@@ -957,6 +964,8 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
   it("reports healthy readiness when snapshots and durable mutation execution are ready", async () => {
     let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
     const execution = {
+      diagnosticJournalFacts: async () =>
+        ({ availability: "unavailable" as const, frames: [] as const }),
       loadRecoveryFrame: async () => null,
       persistRecoveryFrame: async () => undefined,
       pathKind: async () => null,
@@ -1504,6 +1513,271 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
       runtime.runOperatorMaintenance(async () => undefined),
     ).rejects.toThrow("disk full");
     expect(bridge.resumeWrites).not.toHaveBeenCalled();
+    await runtime.unload();
+  });
+});
+
+function persistedDiagnosticSettings(
+  vaultId: string,
+  port: number,
+  path: string,
+  submissionKey: string,
+  changeSetId: string,
+): PersistedBridgeSettings {
+  const changeSets: PersistedBridgeSettings["changeSets"] = {
+    schemaVersion: 2,
+    nextEnqueueSeq: 2,
+    entries: [
+      {
+        submissionKey,
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        changeSetId,
+        enqueueSeq: 1,
+        acceptedAt: 0,
+        expiresAt: 7 * 24 * 60 * 60 * 1_000,
+        changeSet: { changeSetId, state: "intent_not_applied" },
+      },
+    ],
+    tombstones: [],
+  };
+  return { schemaVersion: 2, vaultId, port, diagnosticPath: path, changeSets };
+}
+
+describe("Managed Vault standard diagnostic bundle", () => {
+  it("generates a closed bundle from one loaded runtime's own evidence", async () => {
+    const submissionKey = "runtime-only-submission-key-raw";
+    const changeSetId = "runtime-only-change-set-raw";
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () =>
+          persistedDiagnosticSettings(
+            "runtime-vault-id-raw",
+            27123,
+            "D:/Vaults/Alpha",
+            submissionKey,
+            changeSetId,
+          ),
+        save: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "must-not-regenerate",
+      selectInitialPort: () => 29999,
+    });
+    await runtime.load();
+
+    const bundle = await runtime.createStandardDiagnosticBundle();
+    expect(bundle.schemaVersion).toBe(1);
+    expect(bundle.bundleVersion).toBe("1.0");
+    expect(bundle.changeSetOutcomes).toHaveLength(1);
+    expect(bundle.changeSetOutcomes[0]!.submissionKeyDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    const text = JSON.stringify(bundle);
+    expect(text).not.toContain("runtime-vault-id-raw");
+    expect(text).not.toContain(submissionKey);
+    expect(text).not.toContain(changeSetId);
+    expect(verifyStandardDiagnosticBundle(bundle)).toBe(true);
+    await runtime.unload();
+  });
+
+  it("marks the journal unavailable when execution lacks diagnostic facts", async () => {
+    const execution: ChangeSetExecutionAdapter = {
+      loadRecoveryFrame: async () => null,
+      persistRecoveryFrame: async () => undefined,
+      pathKind: async () => null,
+      directoryIdentity: async () => null,
+      prepareDirectory: async () => "directory",
+      publishDirectory: async () => undefined,
+      discardPreparedDirectory: async () => undefined,
+      removeDirectory: async () => undefined,
+      publishSearchSnapshot: async () => undefined,
+    };
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      changeSetExecution: execution,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    try {
+      const bundle = await runtime.createStandardDiagnosticBundle();
+      expect(bundle.journal).toEqual({ availability: "unavailable", frames: [] });
+      expect(verifyStandardDiagnosticBundle(bundle)).toBe(true);
+    } finally {
+      await runtime.unload();
+    }
+  });
+
+  it("keeps two Managed Vaults fully isolated in evidence and correlation", async () => {
+    const alphaKey = "alpha-vault-submission-key-raw";
+    const alphaChangeSet = "alpha-vault-change-set-raw";
+    const betaKey = "beta-vault-submission-key-raw";
+    const betaChangeSet = "beta-vault-change-set-raw";
+    const alpha = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () =>
+          persistedDiagnosticSettings(
+            "alpha-vault-id-raw",
+            27123,
+            "D:/Vaults/Alpha",
+            alphaKey,
+            alphaChangeSet,
+          ),
+        save: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+    const beta = new ManagedVaultBridgeRuntime({
+      vault: { name: "Beta", path: "E:/Vaults/Beta" },
+      settings: {
+        load: async () =>
+          persistedDiagnosticSettings(
+            "beta-vault-id-raw",
+            28123,
+            "E:/Vaults/Beta",
+            betaKey,
+            betaChangeSet,
+          ),
+        save: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+    await alpha.load();
+    await beta.load();
+
+    try {
+      const alphaBundle = await alpha.createStandardDiagnosticBundle();
+      const betaBundle = await beta.createStandardDiagnosticBundle();
+      const alphaText = JSON.stringify(alphaBundle);
+      const betaText = JSON.stringify(betaBundle);
+
+      expect(alphaText).not.toContain(betaKey);
+      expect(alphaText).not.toContain(betaChangeSet);
+      expect(alphaText).not.toContain("beta-vault-id-raw");
+      expect(betaText).not.toContain(alphaKey);
+      expect(betaText).not.toContain(alphaChangeSet);
+      expect(betaText).not.toContain("alpha-vault-id-raw");
+
+      expect(alphaBundle.vault.alias).not.toBe(betaBundle.vault.alias);
+      expect(alphaBundle.changeSetOutcomes[0]!.changeSetAlias).not.toBe(
+        betaBundle.changeSetOutcomes[0]!.changeSetAlias,
+      );
+      expect(alphaBundle.changeSetOutcomes[0]!.submissionKeyDigest).not.toBe(
+        betaBundle.changeSetOutcomes[0]!.submissionKeyDigest,
+      );
+      expect(verifyStandardDiagnosticBundle(alphaBundle)).toBe(true);
+      expect(verifyStandardDiagnosticBundle(betaBundle)).toBe(true);
+    } finally {
+      await alpha.unload();
+      await beta.unload();
+    }
+  });
+});
+
+describe("Managed Vault content-inclusive diagnostic bundle", () => {
+  it("wraps exactly the explicitly selected content from one loaded runtime", async () => {
+    const submissionKey = "runtime-content-submission-key-raw";
+    const changeSetId = "runtime-content-change-set-raw";
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () =>
+          persistedDiagnosticSettings(
+            "runtime-content-vault-id-raw",
+            27123,
+            "D:/Vaults/Alpha",
+            submissionKey,
+            changeSetId,
+          ),
+        save: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "must-not-regenerate",
+      selectInitialPort: () => 29999,
+    });
+    await runtime.load();
+
+    const selected = "chosen first line\n# Selected heading\nchosen third line";
+    const bundle = await runtime.createContentInclusiveDiagnosticBundle(selected);
+    expect(bundle.schemaVersion).toBe(1);
+    expect(bundle.bundleVersion).toBe("1.0");
+    expect(bundle.purpose).toBe("selected_content_diagnostic");
+    expect(bundle.selection.tracer).toBe("active_editor_selection");
+    expect(bundle.selection.content).toBe(selected);
+    expect(verifyContentInclusiveDiagnosticBundle(bundle)).toBe(true);
+
+    const text = JSON.stringify(bundle);
+    expect(text).toContain("chosen first line");
+    expect(text).toContain("# Selected heading");
+    expect(text).toContain("chosen third line");
+    expect(text).not.toContain("runtime-content-vault-id-raw");
+    expect(text).not.toContain(submissionKey);
+    expect(text).not.toContain(changeSetId);
+    await runtime.unload();
+  });
+
+  it("keeps the selected content isolated from the standard bundle from the same runtime", async () => {
+    const submissionKey = "runtime-content-isolation-key-raw";
+    const changeSetId = "runtime-content-isolation-change-set-raw";
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: {
+        load: async () =>
+          persistedDiagnosticSettings(
+            "runtime-content-isolation-vault-id-raw",
+            27123,
+            "D:/Vaults/Alpha",
+            submissionKey,
+            changeSetId,
+          ),
+        save: async () => undefined,
+      },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+    await runtime.load();
+
+    try {
+      const selected = "isolated selection only";
+      const contentInclusive = await runtime.createContentInclusiveDiagnosticBundle(selected);
+      const standard = await runtime.createStandardDiagnosticBundle();
+
+      expect(verifyContentInclusiveDiagnosticBundle(contentInclusive)).toBe(true);
+      expect(verifyStandardDiagnosticBundle(standard)).toBe(true);
+      expect(contentInclusive.selection.content).toBe(selected);
+      expect((standard as unknown as Record<string, unknown>)).not.toHaveProperty("selection");
+      expect((standard as unknown as Record<string, unknown>)).not.toHaveProperty("content");
+      expect((contentInclusive as unknown as Record<string, unknown>)).not.toHaveProperty(
+        "changeSetOutcomes",
+      );
+      expect((contentInclusive as unknown as Record<string, unknown>)).not.toHaveProperty(
+        "machineEvents",
+      );
+    } finally {
+      await runtime.unload();
+    }
+  });
+
+  it("requires a loaded bridge and non-empty selected content", async () => {
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      createBridge: ({ port }) => fakeBridge(port),
+    });
+    await expect(runtime.createContentInclusiveDiagnosticBundle("x")).rejects.toThrow(
+      "Managed Vault Bridge is not loaded",
+    );
+    await runtime.load();
+    await expect(runtime.createContentInclusiveDiagnosticBundle("")).rejects.toThrow(
+      "Explicitly selected content is required",
+    );
     await runtime.unload();
   });
 });
