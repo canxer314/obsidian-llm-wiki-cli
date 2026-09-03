@@ -301,6 +301,50 @@ describe("recovery-journal storage-fault corpus (issue #192)", () => {
   );
 
   it(
+    "a failed FAILED persistence step during recovery over a third-party residue fails closed and preserves the residue",
+    async () => {
+      const seed = "failed-persist-residue";
+      const fixture = profile.files[0]!;
+      const residueBytes = new TextEncoder().encode(
+        "# Foreign\n\nBytes a Change Set never wrote 你好 🚀\n",
+      );
+      expect(
+        Buffer.from(residueBytes).equals(Buffer.from(fixture.originalBytes!)) ||
+          Buffer.from(residueBytes).equals(Buffer.from(fixture.committedBytes!)),
+      ).toBe(false);
+      const fault: JournalWriteFault = {
+        phase: "FAILED",
+        occurrence: 1,
+        step: "before_write",
+        code: "EIO",
+        message: "injected failure on FAILED persistence",
+      };
+      const evidence = await runMutationCorpusJournalWriteFaultScenario({
+        profile,
+        seed,
+        reportDir: await reportDir(seed),
+        fault,
+        generation: "recovery",
+        residue: { path: fixture.path, bytes: residueBytes },
+        expectedProof: "result_unproven",
+        expectedGate: "blocked",
+      });
+      assertPass(evidence);
+      expect(evidence.fault?.fired.fired).toBe(true);
+      expect(evidence.fault?.fired.at?.phase).toBe("FAILED");
+      expect(evidence.proofState).toBe("result_unproven");
+      expect(evidence.gate.effectiveGate).not.toBeNull();
+      expect(evidence.sentinel.applied).toBe(false);
+      // The third-party residue is preserved and surfaced for local diagnosis.
+      const final = evidence.fileFinal.find((file) => file.path === fixture.path);
+      expect(final?.bytesMatchOriginal).toBe(false);
+      expect(final?.bytesMatchCommitted).toBe(false);
+      expect(evidence.residualPaths).toContain(`file:${fixture.path}`);
+    },
+    120_000,
+  );
+
+  it(
     "a real slot-capacity error at the first PREPARED persistence never advances proof and a clean restart commits",
     async () => {
       const seed = "slot-capacity-exhaustion";

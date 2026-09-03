@@ -2100,6 +2100,13 @@ export interface JournalWriteFaultScenarioOptions {
   readonly generation: "apply" | "recovery";
   readonly expectedProof: MutationCorpusProofState;
   readonly expectedGate: "open" | "blocked";
+  /**
+   * Optional third-party bytes the supervisor writes over a public file between
+   * generation 1 and a `recovery` generation. This makes compare-before-restore
+   * fail closed (spec A-22) so the durable executor reaches the FAILED
+   * persistence step deterministically without a second injected fault.
+   */
+  readonly residue?: { readonly path: string; readonly bytes: Uint8Array } | null;
 }
 
 export async function runMutationCorpusJournalWriteFaultScenario(
@@ -2207,6 +2214,13 @@ export async function runMutationCorpusJournalWriteFaultScenario(
       await terminateChildIfRunning(gen1);
       log("generation 1 terminated by supervisor");
       journalObservedBefore = await observeJournal(root);
+
+      if (options.residue !== null && options.residue !== undefined) {
+        const residueAbsolute = join(root, ...options.residue.path.split("/"));
+        await mkdir(dirname(residueAbsolute), { recursive: true });
+        await writeFile(residueAbsolute, options.residue.bytes);
+        log(`supervisor wrote third-party bytes over ${options.residue.path}`);
+      }
 
       // Generation 2: startup recovery armed with the declared storage fault.
       log(`generation 2: armed journal-write fault on ${options.fault.phase}`);
@@ -2380,6 +2394,9 @@ export async function runMutationCorpusJournalWriteFaultScenario(
         generation: options.generation,
         expectedProof: options.expectedProof,
         expectedGate: options.expectedGate,
+        ...(options.residue === null || options.residue === undefined
+          ? {}
+          : { residuePath: options.residue.path }),
       },
       fired: { fired: fired.fired, at: fired.at },
       journal: { before: journalObservedBefore, after: journalObservedAfter },
