@@ -41,6 +41,14 @@ import {
   seedForMoveNote,
 } from "../src/corpus/move-note-corpus.js";
 import {
+  multiTrashCorpusProfile,
+  seedForMultiTrash,
+  seedForTrashAttachment,
+  seedForTrashNote,
+  trashAttachmentCorpusProfile,
+  trashNoteCorpusProfile,
+} from "../src/corpus/managed-trash-corpus.js";
+import {
   runMutationCorpusCollisionScenario,
   runMutationCorpusResidueScenario,
   runMutationCorpusScenario,
@@ -74,6 +82,9 @@ const CORPUS_SCENARIOS: readonly CorpusScenarioCase[] = [
   { profile: copyAttachmentCorpusProfile(), seedFor: seedForCopyAttachment },
   { profile: moveAttachmentCorpusProfile(), seedFor: seedForMoveAttachment },
   { profile: multiAttachmentCorpusProfile(), seedFor: seedForMultiAttachment },
+  { profile: trashNoteCorpusProfile(), seedFor: seedForTrashNote },
+  { profile: trashAttachmentCorpusProfile(), seedFor: seedForTrashAttachment },
+  { profile: multiTrashCorpusProfile(), seedFor: seedForMultiTrash },
 ];
 
 function assertCleanRecoveryOutcome(
@@ -130,6 +141,24 @@ function assertCleanRecoveryOutcome(
   expect(evidence.sentinel.applied).toBe(true);
   expect(evidence.residualPaths).toEqual([]);
   expect(evidence.cleanup.success).toBe(true);
+
+  // Managed-Trash profiles must end at the exact redacted hidden state their
+  // proof implies: committed runs retain exactly the Bridge-owned trash entries
+  // they wrote; rolled-back runs eliminate every private trash/staging residue.
+  const expectedHidden = profile.expectedHiddenState?.(expectedProof);
+  if (expectedHidden !== undefined && expectedProof !== "result_unproven") {
+    expect(evidence.hidden, "no hidden-state snapshot was recorded").not.toBeNull();
+    expect(evidence.hidden!.trashCount).toBe(expectedHidden.trashCount);
+    expect([...evidence.hidden!.trashSha256s].sort()).toEqual(
+      [...expectedHidden.trashSha256s].sort(),
+    );
+    expect(evidence.hidden!.stagingCount).toBe(expectedHidden.stagingCount);
+    expect(evidence.hidden!.stagingSha256s).toEqual([]);
+    expect(
+      evidence.residualPaths.some((entry) => entry.startsWith("trash:")),
+      "reports must never leak a private Managed-Trash path",
+    ).toBe(false);
+  }
 }
 
 describe("process-crash corpus", () => {
@@ -299,6 +328,51 @@ describe("attachment third-party residue", () => {
     );
   }
 });
+describe("managed-trash third-party residue", () => {
+  for (const [label, profile, residueBytes] of [
+    [
+      "trash_note",
+      trashNoteCorpusProfile(),
+      new TextEncoder().encode("# Third-party note\n\nForeign content 你好.\n"),
+    ],
+    [
+      "trash_attachment",
+      trashAttachmentCorpusProfile(),
+      Uint8Array.from([0xde, 0xad, 0x00, 0xff, 0x13, 0x37, 0x80, 0x42]),
+    ],
+  ] as const) {
+    it(
+      `${label} fails closed, blocks the sentinel, surfaces the public residue, and never leaks a private trash path`,
+      async () => {
+        const reportDir = await mkdtemp(join(tmpdir(), "corpus-reports-"));
+        temporaryReportRoots.push(reportDir);
+        const fixture = profile.files[0]!;
+        const evidence = await runMutationCorpusResidueScenario({
+          profile,
+          seed: `${label}-residue`,
+          reportDir,
+          residuePath: fixture.path,
+          residueBytes,
+        });
+
+        expect(evidence.failures, JSON.stringify(evidence, null, 2)).toEqual([]);
+        expect(evidence.verdict).toBe("pass");
+        expect(evidence.proofState).toBe("result_unproven");
+        expect(evidence.gate.effectiveGate).not.toBeNull();
+        expect(evidence.sentinel.applied).toBe(false);
+        expect(evidence.residualPaths).toContain(`file:${fixture.path}`);
+        expect(
+          evidence.residualPaths.some((entry) => entry.startsWith("trash:")),
+          "a private Managed-Trash path must never be surfaced as a residual path",
+        ).toBe(false);
+        expect(evidence.hidden).not.toBeNull();
+        expect(evidence.cleanup.success).toBe(true);
+      },
+      120_000,
+    );
+  }
+});
+
 describe("corpus fixture guarantees", () => {
   it("keeps every fixture byte-different between original and committed states", () => {
     for (const scenario of CORPUS_SCENARIOS) {

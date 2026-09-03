@@ -208,6 +208,12 @@ export type DirectoryExecutionHost = ChangeSetExecutionHost;
 export interface NodeFileSystemChangeSetHostOptions {
   basePath: string;
   stateDirectory: string;
+  /**
+   * Optional test-only crash seam inside the host's private file operations.
+   * Only the process-crash corpus (issue #191) passes a crash injector; the
+   * production host leaves it unset and these hooks are no-ops.
+   */
+  crashInjector?(point: string): void | Promise<void>;
   /** Optional observer of public-path mutations, used to synthesize the host semantic events a real Obsidian metadata-cache watcher would emit (process-crash corpus, issue #189). */
   recordEvent?(event: ChangeSetSemanticEvent): void;
   publishFile?(stageId: string, path: string): Promise<void>;
@@ -418,6 +424,10 @@ export async function createNodeFileSystemChangeSetHost(
       const destination = await assertPrivateContained(trashPath(trashId));
       await mkdir(dirname(destination), { recursive: true });
       await link(source, destination);
+      // Test-only crash seam: the Bridge-owned private copy is durable and the
+      // public path still exists. A termination here must recover without losing
+      // bytes or duplicating public content (issue #191 AC5). No-op in production.
+      await options.crashInjector?.("after_trash_hidden_copy");
       if (options.moveToTrash !== undefined) {
         await options.moveToTrash(path, trashId);
       } else if (options.removeFile !== undefined) {
@@ -432,10 +442,16 @@ export async function createNodeFileSystemChangeSetHost(
       if (options.restoreFromTrash !== undefined) {
         const bytes = Uint8Array.from(await readFile(source));
         await options.restoreFromTrash(trashId, path, bytes);
+        // Test-only crash seam between public restore and private cleanup.
+        await options.crashInjector?.("after_trash_restore_public");
         await rm(source, { force: true });
         return;
       }
       await link(source, destination);
+      // Test-only crash seam: the public bytes are restored but the private
+      // trash entry is not yet removed; recovery must discard the private copy
+      // rather than duplicate the public content (issue #191 AC5).
+      await options.crashInjector?.("after_trash_restore_public");
       await unlink(source);
     },
     discardTrash: async (trashId) =>

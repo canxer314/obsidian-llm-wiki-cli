@@ -80,10 +80,32 @@ export interface MutationCorpusBoundaryFile {
   readonly state: MutationCorpusBoundaryFileState;
 }
 
+/** Redacted Bridge-private hidden-state snapshot (no trash/staging paths or identifiers). */
+export interface CorpusHiddenAreaSnapshot {
+  /** Number of files currently under the private managed-trash area. */
+  readonly trashCount: number;
+  /** SHA-256 digests (`sha256:<hex>`) of the private managed-trash files. */
+  readonly trashSha256s: readonly string[];
+  /** Number of files currently under the private staging area. */
+  readonly stagingCount: number;
+  /** SHA-256 digests (`sha256:<hex>`) of the private staging files. */
+  readonly stagingSha256s: readonly string[];
+}
+
+/** Expected Bridge-private hidden-state at a boundary or terminal proof state. */
+export interface MutationCorpusHiddenStateExpectation {
+  readonly trashCount: number;
+  readonly trashSha256s: readonly string[];
+  readonly stagingCount: number;
+  readonly stagingSha256s: readonly string[];
+}
+
 /** Expected on-disk state observed while the child is parked at a crash point. */
 export interface MutationCorpusBoundary {
   readonly journalPhase: "PREPARED" | "COMMITTED" | "ROLLED_BACK" | "FAILED" | null;
   readonly files: readonly MutationCorpusBoundaryFile[];
+  /** Expected redacted private hidden-state at the crash point (Managed-Trash profiles). */
+  readonly hidden?: MutationCorpusHiddenStateExpectation;
 }
 
 export interface MutationCorpusProfile {
@@ -103,6 +125,13 @@ export interface MutationCorpusProfile {
   /** On-disk boundary while parked at a crash point (before the supervisor terminates the child). */
   expectedBoundary(crashPoint: MutationCorpusCrashPoint): MutationCorpusBoundary;
   expectedProofState(crashPoint: MutationCorpusCrashPoint): MutationCorpusProofState;
+  /**
+   * Expected redacted Bridge-private hidden-state after a fully recovered
+   * terminal proof state. Declared by Managed-Trash profiles so committed runs
+   * may retain exactly the Bridge-owned trash entries they wrote, and rolled
+   * back runs must eliminate every trash/staging residue.
+   */
+  expectedHiddenState?(proofState: MutationCorpusProofState): MutationCorpusHiddenStateExpectation;
   readonly timeoutMs: number;
 }
 
@@ -124,6 +153,7 @@ export interface CorpusBoundaryFileObservation {
 export interface CorpusBoundaryObservation {
   readonly journalPhase: string | null;
   readonly files: readonly CorpusBoundaryFileObservation[];
+  readonly hidden?: CorpusHiddenAreaSnapshot;
   readonly observed: boolean;
 }
 
@@ -165,6 +195,7 @@ export interface CorpusScenarioEvidence {
   };
   readonly sentinel: { readonly submitted: boolean; readonly applied: boolean };
   readonly residualPaths: readonly string[];
+  readonly hidden: CorpusHiddenAreaSnapshot | null;
   readonly cleanup: { readonly success: boolean; readonly message: string };
   readonly verdict: "pass" | "fail";
   readonly failures: readonly string[];
@@ -368,6 +399,73 @@ async function listPrivateAreaFiles(root: string, area: "staging" | "trash"): Pr
   return files.sort();
 }
 
+/** Read a private-area file's digest without exposing its path/identifier. */
+async function readPrivateFileDigest(
+  root: string,
+  area: "staging" | "trash",
+  relativePath: string,
+): Promise<string> {
+  const directory = join(root, BRIDGE_STATE_DIRECTORY, area);
+  const bytes = await readFile(join(directory, ...relativePath.split("/")));
+  return sha256(new Uint8Array(bytes));
+}
+
+/**
+ * Redacted snapshot of the Bridge-private staging/trash areas: counts and
+ * digests only, never the private paths or trash identifiers. This is the only
+ * way Managed-Trash hidden state is reported (spec A-37 / issue #191).
+ */
+async function observeHiddenSnapshot(root: string): Promise<CorpusHiddenAreaSnapshot> {
+  const trashFiles = await listPrivateAreaFiles(root, "trash");
+  const stagingFiles = await listPrivateAreaFiles(root, "staging");
+  const trashSha256s = await Promise.all(
+    trashFiles.map((relativePath) => readPrivateFileDigest(root, "trash", relativePath)),
+  );
+  const stagingSha256s = await Promise.all(
+    stagingFiles.map((relativePath) => readPrivateFileDigest(root, "staging", relativePath)),
+  );
+  return {
+    trashCount: trashFiles.length,
+    trashSha256s: trashSha256s.sort(),
+    stagingCount: stagingFiles.length,
+    stagingSha256s: stagingSha256s.sort(),
+  };
+}
+
+function digestSetMatches(
+  observed: readonly string[],
+  expected: readonly string[],
+): boolean {
+  if (observed.length !== expected.length) return false;
+  const observedSorted = [...observed].sort();
+  const expectedSorted = [...expected].sort();
+  return observedSorted.every((digest, index) => digest === expectedSorted[index]);
+}
+
+/** Failures when a redacted hidden-state snapshot differs from its expectation. */
+function hiddenStateFailures(
+  label: string,
+  expected: MutationCorpusHiddenStateExpectation,
+  observed: CorpusHiddenAreaSnapshot,
+): string[] {
+  const failures: string[] = [];
+  if (observed.trashCount !== expected.trashCount) {
+    failures.push(
+      `${label}: expected ${expected.trashCount} managed-trash entr${expected.trashCount === 1 ? "y" : "ies"} but observed ${observed.trashCount}`,
+    );
+  } else if (!digestSetMatches(observed.trashSha256s, expected.trashSha256s)) {
+    failures.push(`${label}: managed-trash digests do not match the expected hidden state`);
+  }
+  if (observed.stagingCount !== expected.stagingCount) {
+    failures.push(
+      `${label}: expected ${expected.stagingCount} staging entr${expected.stagingCount === 1 ? "y" : "ies"} but observed ${observed.stagingCount}`,
+    );
+  } else if (!digestSetMatches(observed.stagingSha256s, expected.stagingSha256s)) {
+    failures.push(`${label}: staging digests do not match the expected hidden state`);
+  }
+  return failures;
+}
+
 async function readJournalPhase(root: string): Promise<string | null> {
   const journalPath = join(root, BRIDGE_STATE_DIRECTORY, BRIDGE_JOURNAL_FILE);
   let handle;
@@ -555,7 +653,7 @@ async function observeBoundary(
       contentVersion: kind === "markdown" && bytes !== null ? await sha256(bytes) : null,
     });
   }
-  return { journalPhase, files, observed: true };
+  return { journalPhase, files, hidden: await observeHiddenSnapshot(root), observed: true };
 }
 
 function describeBoundary(boundary: CorpusBoundaryObservation): string {
@@ -601,6 +699,19 @@ async function boundaryFailures(
     if (expectedBytes !== null && bytes !== null && !bytesEqual(bytes, expectedBytes)) {
       failures.push(
         `boundary file ${expectedFile.path} bytes do not match the expected ${expectedFile.state} state at the crash point`,
+      );
+    }
+  }
+  if (expected.hidden !== undefined) {
+    if (observed.hidden === undefined) {
+      failures.push("hidden-state boundary evidence was not observed");
+    } else {
+      failures.push(
+        ...hiddenStateFailures(
+          `hidden-state boundary at the crash point`,
+          expected.hidden,
+          observed.hidden,
+        ),
       );
     }
   }
@@ -740,11 +851,34 @@ function createEvidence(
     },
     sentinel: { submitted: false, applied: false },
     residualPaths: [],
+    hidden: null,
     cleanup: { success: false, message: "not attempted" },
     verdict: "fail",
     failures,
     reportPath: options.reportPath,
   };
+}
+
+/** Redacted trash-area residual policy: Managed-Trash profiles never leak private trash paths. */
+function redactsManagedTrashResiduals(profile: MutationCorpusProfile): boolean {
+  return profile.expectedHiddenState !== undefined;
+}
+
+async function privateAreaResidualPaths(
+  root: string,
+  redactTrash: boolean,
+): Promise<string[]> {
+  const residuals = (await listPrivateAreaFiles(root, "staging")).map(
+    (relativePath) => `staging:${relativePath}`,
+  );
+  if (!redactTrash) {
+    residuals.push(
+      ...(await listPrivateAreaFiles(root, "trash")).map(
+        (relativePath) => `trash:${relativePath}`,
+      ),
+    );
+  }
+  return residuals.sort();
 }
 
 export async function runMutationCorpusScenario(
@@ -1000,6 +1134,7 @@ export async function runMutationCorpusScenario(
     await rm(join(root, sentinelNote), { force: true });
     evidence.after = await inventoryCorpus(root);
     evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
 
     const finalFailures = finalFileFailures(evidence.fileFinal, expectedProof, profile);
     if (finalFailures.length > 0) {
@@ -1008,7 +1143,9 @@ export async function runMutationCorpusScenario(
 
     // Residual paths are leftover content that recovery failed to clean: files
     // under the public Vault that are not expected in the terminal state, plus
-    // leftover files under the private staging/trash areas.
+    // leftover files under the private staging/trash areas. Managed-Trash
+    // profiles redact the private trash area (counts/checksums only) so the
+    // report never leaks a private trash path or identifier (spec A-37).
     const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
       profile.files.map((file) => [
         file.path,
@@ -1016,10 +1153,10 @@ export async function runMutationCorpusScenario(
       ]),
     );
     const expectedPresent = expectedPaths(profile, expectedTerminal);
-    const privateResiduals = [
-      ...(await listPrivateAreaFiles(root, "staging")).map((path) => `staging:${path}`),
-      ...(await listPrivateAreaFiles(root, "trash")).map((path) => `trash:${path}`),
-    ];
+    const privateResiduals = await privateAreaResidualPaths(
+      root,
+      redactsManagedTrashResiduals(profile),
+    );
     evidence.residualPaths = [
       ...residualPaths(evidence.after, expectedPresent),
       ...privateResiduals,
@@ -1029,6 +1166,16 @@ export async function runMutationCorpusScenario(
     }
     if (expectedProof === "result_unproven" && evidence.residualPaths.length === 0) {
       failures.push("expected an unproven residue to be surfaced but no residual path was reported");
+    }
+    const expectedHidden = profile.expectedHiddenState?.(expectedProof);
+    if (
+      expectedHidden !== undefined &&
+      expectedProof !== "result_unproven" &&
+      evidence.hidden !== null
+    ) {
+      failures.push(
+        ...hiddenStateFailures("hidden state after recovery", expectedHidden, evidence.hidden),
+      );
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1149,6 +1296,7 @@ export async function runMutationCorpusCollisionScenario(
     await rm(join(root, sentinelNote), { force: true });
     evidence.after = await inventoryCorpus(root);
     evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
     const collision = evidence.fileFinal.find(({ path }) => path === options.collisionPath);
     if (collision?.sha256 !== (await sha256(options.collisionBytes))) {
       failures.push(`destination collision bytes were overwritten at ${options.collisionPath}`);
@@ -1385,15 +1533,16 @@ export async function runMutationCorpusResidueScenario(
     await rm(join(root, sentinelNote), { force: true });
     evidence.after = await inventoryCorpus(root);
     evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
 
     const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
       profile.files.map((file) => [file.path, terminalStateForFile("result_unproven", file)]),
     );
     const expectedPresent = expectedPaths(profile, expectedTerminal);
-    const privateResiduals = [
-      ...(await listPrivateAreaFiles(root, "staging")).map((path) => `staging:${path}`),
-      ...(await listPrivateAreaFiles(root, "trash")).map((path) => `trash:${path}`),
-    ];
+    const privateResiduals = await privateAreaResidualPaths(
+      root,
+      redactsManagedTrashResiduals(profile),
+    );
     evidence.residualPaths = [
       ...residualPaths(evidence.after, expectedPresent),
       ...privateResiduals,

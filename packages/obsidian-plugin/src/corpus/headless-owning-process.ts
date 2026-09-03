@@ -354,6 +354,19 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
       ? undefined
       : env.CORPUS_CRASH_POINT;
 
+  // Corpus reference graph: the fixtures never author an inbound link to a
+  // trashed path, so every path is unreferenced before and after the Change
+  // Set. This satisfies the targeted reference probe the managed-trash success
+  // barrier polls without requiring Obsidian's resolved-link cache.
+  const referenced = async (): Promise<boolean> => false;
+  // There is no Obsidian metadata cache in the headless owning process, so the
+  // targeted cache-visibility probe observes the raw public path state the
+  // cache is a view over: a trashed Markdown note stops being cache-visible
+  // once its public path is removed, and a restored note becomes cache-visible
+  // again when its public bytes return (issue #191 AC4).
+  const cacheVisible = async (path: string): Promise<boolean> =>
+    pathExists(join(root, ...path.split("/")));
+
   // The crash seam is always present so every reached crash point is recorded
   // in the monotonic child event log; when an armed crash point is reached the
   // process writes `parked.json` and then parks until the supervisor terminates
@@ -386,11 +399,16 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
       publishSuccessorSearchSnapshot: async () => {
         await runtime.publishSuccessorSearchSnapshot();
       },
+      probes: {
+        cacheVisible,
+        referenced,
+      },
     });
     const host = await createNodeFileSystemChangeSetHost({
       basePath: root,
       stateDirectory,
-      referenced: async () => false,
+      crashInjector,
+      referenced,
       // No Obsidian metadata-cache watcher runs in the headless owning process,
       // so the node-fs host reports the public renames it performs; the Change
       // Set semantic evidence tracker needs that rename event before the move
