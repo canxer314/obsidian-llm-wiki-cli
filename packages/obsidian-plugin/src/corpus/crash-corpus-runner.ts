@@ -60,6 +60,8 @@ export type MutationCorpusProofState =
 export interface MutationCorpusFileFixture {
   /** Vault-relative canonical path. */
   readonly path: string;
+  /** Files are Markdown unless an attachment profile explicitly identifies binary bytes. */
+  readonly kind?: "markdown" | "attachment";
   /** Exact bytes on disk before generation 1, or null when the Change Set creates the file. */
   readonly originalBytes: Uint8Array | null;
   /** Exact bytes a committed Change Set leaves on disk, or null when the Change Set removes the file. */
@@ -113,6 +115,7 @@ export interface CorpusInventoryEntry {
 
 export interface CorpusBoundaryFileObservation {
   readonly path: string;
+  readonly kind: "markdown" | "attachment";
   readonly present: boolean;
   readonly sha256: string | null;
   readonly contentVersion: string | null;
@@ -126,6 +129,7 @@ export interface CorpusBoundaryObservation {
 
 export interface CorpusFileFinal {
   readonly path: string;
+  readonly kind: "markdown" | "attachment";
   readonly present: boolean;
   readonly sha256: string | null;
   readonly contentVersion: string | null;
@@ -542,11 +546,13 @@ async function observeBoundary(
   const files: CorpusBoundaryFileObservation[] = [];
   for (const file of profile.files) {
     const bytes = await readPathBytes(root, file.path);
+    const kind = file.kind ?? "markdown";
     files.push({
       path: file.path,
+      kind,
       present: bytes !== null,
       sha256: bytes === null ? null : await sha256(bytes),
-      contentVersion: bytes === null ? null : await sha256(bytes),
+      contentVersion: kind === "markdown" && bytes !== null ? await sha256(bytes) : null,
     });
   }
   return { journalPhase, files, observed: true };
@@ -624,9 +630,11 @@ async function observeFinalFiles(
     else state = "other";
     finals.push({
       path: file.path,
+      kind: file.kind ?? "markdown",
       present: bytes !== null,
       sha256: bytes === null ? null : await sha256(bytes),
-      contentVersion: bytes === null ? null : await sha256(bytes),
+      contentVersion:
+        file.kind !== "attachment" && bytes !== null ? await sha256(bytes) : null,
       bytesMatchOriginal,
       bytesMatchCommitted,
       state,
@@ -1040,6 +1048,138 @@ export async function runMutationCorpusScenario(
   return evidence as CorpusScenarioEvidence;
 }
 
+export interface RunCollisionScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  /** Public destination path (must be a profile fixture that starts absent). */
+  readonly collisionPath: string;
+  /** Pre-existing third-party bytes that the rejected Change Set must not overwrite. */
+  readonly collisionBytes: Uint8Array;
+}
+
+/**
+ * Destination-collision scenario: the supervisor seeds a pre-existing public
+ * file at a would-be attachment destination before the owning process starts.
+ * The real MCP submission must reject before any mutation, retain those exact
+ * foreign bytes, and leave the write gate open for a subsequent sentinel.
+ */
+export async function runMutationCorpusCollisionScenario(
+  options: RunCollisionScenarioOptions,
+): Promise<CorpusScenarioEvidence> {
+  const { profile, seed } = options;
+  const failures: string[] = [];
+  const crashPoint: MutationCorpusCrashPoint = { point: "destination_collision", phase: "apply" };
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-control-"));
+  const evidence = createEvidence(
+    { profile, crashPoint, seed, root, vaultId, port, reportPath },
+    failures,
+  );
+  const writeEvidence = async (): Promise<void> => {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  };
+
+  try {
+    const fixture = profile.files.find(({ path }) => path === options.collisionPath);
+    if (fixture === undefined || fixture.originalBytes !== null) {
+      throw new Error(`collision path ${options.collisionPath} must be an initially absent profile file`);
+    }
+    if (fixture.committedBytes !== null && bytesEqual(options.collisionBytes, fixture.committedBytes)) {
+      throw new Error("collision bytes must differ from the intended attachment bytes");
+    }
+    await seedCorpusRoot(root, profile);
+    const collisionAbsolute = join(root, ...options.collisionPath.split("/"));
+    await mkdir(dirname(collisionAbsolute), { recursive: true });
+    await writeFile(collisionAbsolute, options.collisionBytes);
+    evidence.before = await inventoryCorpus(root);
+
+    const bundle = await buildOwningProcessBundle();
+    const child = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen1"),
+    });
+    const marker = await waitForControlMarker(child, ["ready", "parked", "failed"], profile.timeoutMs);
+    if (marker === null || marker.kind !== "ready") {
+      failures.push(
+        `collision scenario did not boot: ${JSON.stringify(marker)}; stderr: ${child.stderr.join("\n")}`,
+      );
+      await terminateChild(child);
+      throw new Error("collision scenario did not boot");
+    }
+
+    const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const submitted = await submitChangeSet(client, profile.buildSubmitInput(seed));
+    if (submitted.applied) failures.push("collision Change Set reported intent_applied");
+    evidence.gate = await healthSnapshot(client);
+    evidence.proofState = await statusProofState(client, profile.submissionKey(seed));
+    if (evidence.proofState !== "intent_not_applied") {
+      failures.push(
+        `expected intent_not_applied for destination collision but observed ${String(evidence.proofState)}`,
+      );
+    }
+    if (evidence.gate.effectiveGate !== null) {
+      failures.push("destination collision unexpectedly blocked the write gate");
+    }
+
+    const sentinelNote = `CorpusSentinel-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`;
+    evidence.sentinel = await submitChangeSet(client, {
+      submissionKey: profile.submissionKey(`${seed}-sentinel`),
+      operations: [{
+        operationId: `sentinel-${seed}`,
+        kind: "create_note",
+        path: sentinelNote,
+        content: `# Sentinel ${seed}\n`,
+        ifExists: "reject",
+      }],
+    });
+    if (!evidence.sentinel.applied) {
+      failures.push("sentinel Change Set was not admissible after a rejected destination collision");
+    }
+    await client.close().catch(() => undefined);
+    await terminateChild(child);
+    await rm(join(root, sentinelNote), { force: true });
+    evidence.after = await inventoryCorpus(root);
+    evidence.fileFinal = await observeFinalFiles(root, profile);
+    const collision = evidence.fileFinal.find(({ path }) => path === options.collisionPath);
+    if (collision?.sha256 !== (await sha256(options.collisionBytes))) {
+      failures.push(`destination collision bytes were overwritten at ${options.collisionPath}`);
+    }
+    if (collision?.bytesMatchOriginal !== false || collision?.bytesMatchCommitted !== false) {
+      failures.push(`destination collision was not reported as foreign state at ${options.collisionPath}`);
+    }
+    const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+      profile.files.map((file) => [file.path, terminalStateForFile("intent_not_applied", file)]),
+    );
+    evidence.residualPaths = residualPaths(evidence.after, expectedPaths(profile, expectedTerminal));
+    if (!evidence.residualPaths.includes(`file:${options.collisionPath}`)) {
+      failures.push(`destination collision was not surfaced at ${options.collisionPath}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  } finally {
+    try {
+      await rm(root, { recursive: true, force: true });
+      evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+    } catch (error) {
+      evidence.cleanup = { success: false, message: String(error) };
+    }
+    await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+    if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.verdict = failures.length === 0 ? "pass" : "fail";
+    await writeEvidence();
+  }
+  return evidence as CorpusScenarioEvidence;
+}
 export interface RunResidueScenarioOptions {
   readonly profile: MutationCorpusProfile;
   readonly seed: string;

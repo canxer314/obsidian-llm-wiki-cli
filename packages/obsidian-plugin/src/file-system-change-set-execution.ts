@@ -378,6 +378,7 @@ export async function createNodeFileSystemChangeSetHost(
         return;
       }
       await rename(source, destination);
+      options.recordEvent?.({ kind: "create", path });
     },
     discardPreparedFile: async (stageId) => {
       const path = await assertPrivateContained(stagePath(stageId));

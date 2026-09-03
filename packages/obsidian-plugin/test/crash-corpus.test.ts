@@ -6,6 +6,16 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  COPY_ATTACHMENT_DESTINATION_PATH,
+  copyAttachmentCorpusProfile,
+  MOVE_ATTACHMENT_DESTINATION_PATH,
+  moveAttachmentCorpusProfile,
+  multiAttachmentCorpusProfile,
+  seedForCopyAttachment,
+  seedForMoveAttachment,
+  seedForMultiAttachment,
+} from "../src/corpus/attachment-corpus.js";
+import {
   createNoteCorpusProfile,
   seedForCreateNote,
 } from "../src/corpus/create-note-corpus.js";
@@ -31,6 +41,7 @@ import {
   seedForMoveNote,
 } from "../src/corpus/move-note-corpus.js";
 import {
+  runMutationCorpusCollisionScenario,
   runMutationCorpusResidueScenario,
   runMutationCorpusScenario,
   terminalStateForFile,
@@ -60,6 +71,9 @@ const CORPUS_SCENARIOS: readonly CorpusScenarioCase[] = [
   { profile: multiMarkdownCorpusProfile(), seedFor: seedForMultiMarkdown },
   { profile: multiFrontmatterCorpusProfile(), seedFor: seedForMultiFrontmatter },
   { profile: moveNoteCorpusProfile(), seedFor: seedForMoveNote },
+  { profile: copyAttachmentCorpusProfile(), seedFor: seedForCopyAttachment },
+  { profile: moveAttachmentCorpusProfile(), seedFor: seedForMoveAttachment },
+  { profile: multiAttachmentCorpusProfile(), seedFor: seedForMultiAttachment },
 ];
 
 function assertCleanRecoveryOutcome(
@@ -84,17 +98,31 @@ function assertCleanRecoveryOutcome(
     } else if (expected === "original") {
       expect(final!.present, `${file.path} should be present`).toBe(true);
       expect(final!.bytesMatchOriginal, `${file.path} must hold exact original bytes`).toBe(true);
-      expect(
-        final!.contentVersion,
-        `${file.path} must hold the original Content Version`,
-      ).toBe(hashBytes(file.originalBytes!));
+      if (file.kind === "attachment") {
+        expect(final!.sha256, `${file.path} must hold the original attachment SHA-256`).toBe(
+          hashBytes(file.originalBytes!),
+        );
+        expect(final!.contentVersion, `${file.path} must not report Markdown Content Version`).toBeNull();
+      } else {
+        expect(
+          final!.contentVersion,
+          `${file.path} must hold the original Content Version`,
+        ).toBe(hashBytes(file.originalBytes!));
+      }
     } else if (expected === "committed") {
       expect(final!.present, `${file.path} should be present`).toBe(true);
       expect(final!.bytesMatchCommitted, `${file.path} must hold exact intended bytes`).toBe(true);
-      expect(
-        final!.contentVersion,
-        `${file.path} must hold the intended Content Version`,
-      ).toBe(hashBytes(file.committedBytes!));
+      if (file.kind === "attachment") {
+        expect(final!.sha256, `${file.path} must hold the intended attachment SHA-256`).toBe(
+          hashBytes(file.committedBytes!),
+        );
+        expect(final!.contentVersion, `${file.path} must not report Markdown Content Version`).toBeNull();
+      } else {
+        expect(
+          final!.contentVersion,
+          `${file.path} must hold the intended Content Version`,
+        ).toBe(hashBytes(file.committedBytes!));
+      }
     }
   }
 
@@ -201,11 +229,85 @@ describe("move_note third-party residue", () => {
   );
 });
 
+describe("attachment destination collisions", () => {
+  for (const [label, profile, collisionPath] of [
+    ["copy_attachment", copyAttachmentCorpusProfile(), COPY_ATTACHMENT_DESTINATION_PATH],
+    ["move_attachment", moveAttachmentCorpusProfile(), MOVE_ATTACHMENT_DESTINATION_PATH],
+  ] as const) {
+    it(
+      `${label} retains pre-existing destination bytes and rejects the Change Set`,
+      async () => {
+        const reportDir = await mkdtemp(join(tmpdir(), "corpus-reports-"));
+        temporaryReportRoots.push(reportDir);
+        const collisionBytes = Uint8Array.from([0x63, 0x6f, 0x6c, 0x6c, 0x69, 0x64, 0x65, 0x00, 0xff]);
+        const evidence = await runMutationCorpusCollisionScenario({
+          profile,
+          seed: `${label}-collision`,
+          reportDir,
+          collisionPath,
+          collisionBytes,
+        });
+
+        expect(evidence.failures, JSON.stringify(evidence, null, 2)).toEqual([]);
+        expect(evidence.verdict).toBe("pass");
+        expect(evidence.proofState).toBe("intent_not_applied");
+        expect(evidence.gate.effectiveGate).toBeNull();
+        expect(evidence.sentinel.applied).toBe(true);
+        expect(evidence.residualPaths).toContain(`file:${collisionPath}`);
+        const final = evidence.fileFinal.find((file) => file.path === collisionPath);
+        expect(final?.sha256).toBe(hashBytes(collisionBytes));
+        expect(final?.bytesMatchOriginal).toBe(false);
+        expect(final?.bytesMatchCommitted).toBe(false);
+        expect(evidence.cleanup.success).toBe(true);
+      },
+      120_000,
+    );
+  }
+});
+describe("attachment third-party residue", () => {
+  for (const [label, profile, residuePath] of [
+    ["copy_attachment", copyAttachmentCorpusProfile(), COPY_ATTACHMENT_DESTINATION_PATH],
+    ["move_attachment", moveAttachmentCorpusProfile(), MOVE_ATTACHMENT_DESTINATION_PATH],
+  ] as const) {
+    it(
+      `${label} preserves foreign destination bytes, fails closed, and surfaces the residue`,
+      async () => {
+        const reportDir = await mkdtemp(join(tmpdir(), "corpus-reports-"));
+        temporaryReportRoots.push(reportDir);
+        const residueBytes = Uint8Array.from([0xde, 0xad, 0x00, 0xff, 0x13, 0x37, 0x80]);
+        const evidence = await runMutationCorpusResidueScenario({
+          profile,
+          seed: `${label}-residue`,
+          reportDir,
+          residuePath,
+          residueBytes,
+        });
+
+        expect(evidence.failures, JSON.stringify(evidence, null, 2)).toEqual([]);
+        expect(evidence.verdict).toBe("pass");
+        expect(evidence.proofState).toBe("result_unproven");
+        expect(evidence.gate.effectiveGate).not.toBeNull();
+        expect(evidence.sentinel.applied).toBe(false);
+        expect(evidence.residualPaths).toContain(`file:${residuePath}`);
+        const final = evidence.fileFinal.find((file) => file.path === residuePath);
+        expect(final?.sha256).toBe(hashBytes(residueBytes));
+        expect(final?.bytesMatchOriginal).toBe(false);
+        expect(final?.bytesMatchCommitted).toBe(false);
+        expect(evidence.cleanup.success).toBe(true);
+      },
+      120_000,
+    );
+  }
+});
 describe("corpus fixture guarantees", () => {
   it("keeps every fixture byte-different between original and committed states", () => {
     for (const scenario of CORPUS_SCENARIOS) {
       for (const file of scenario.profile.files) {
-        if (file.originalBytes === null || file.committedBytes === null) continue;
+        if (
+          file.kind === "attachment" ||
+          file.originalBytes === null ||
+          file.committedBytes === null
+        ) continue;
         expect(
           Buffer.from(file.originalBytes).equals(Buffer.from(file.committedBytes)),
           `${scenario.profile.kind} fixture ${file.path} must actually change bytes`,
