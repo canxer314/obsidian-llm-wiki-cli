@@ -68,6 +68,10 @@ _Avoid_: Ticket database row, local work record
 An operation failure (execution, timeout, push, or publication) marked with `agent:blocked` that requires operator inspection and deliberate manual retry. It never terminalizes the Automation Work Item and is never retried automatically. Feedback failures are typed by stage (`feedback-execution`, `feedback-publication`, `feedback-convergence`, `feedback-head-conflict`, `feedback-reply`, `feedback-reconciliation`, `feedback-finalization`) and carry the published revision when publication already occurred, so an operator can classify safe action without guessing.
 _Avoid_: Terminal failure, dead letter, automatic retry
 
+**Interrupted Automation**:
+An Automation Work Item whose owned Target job ended before settlement because its process was terminated — typically by a host or WSL shutdown — leaving `agent:in-progress` and no `agent:blocked` label, with the trigger removed or still present. The Dispatcher may clear `agent:in-progress`, restore the trigger when absent, and re-dispatch it, but only after proving the owning job is dead.
+_Avoid_: Blocked Automation, crash loop, orphaned job
+
 **Canonical Implementation Reply**:
 The single orchestrator-owned review-thread reply for a feedback implementation, carrying a bounded machine-readable marker (`feedback-reconcile op=feedback pr=<n> pre=<PRE> post=<POST> root=<root>`) embedded in an otherwise human-readable body. Its encoded root must equal the reply's linked root and the immutable current feedback intent selected before Agent execution. All nested replies remain attributable to their root; malformed, conflicting, or follow-up evidence fails closed. After a successful or uncertain reply write, the orchestrator performs bounded read-only convergence against complete reply evidence, including resolved threads; the Agent never writes to GitHub.
 _Avoid_: Agent-owned reply, duplicate reply, machine-only ledger comment
@@ -79,6 +83,10 @@ _Avoid_: Whole-job retry, heuristic pick, second publication
 **Dispatcher**:
 The thin trusted local scheduler that runs directly from the trusted local `master` checkout. It owns discovery, acquisition labels, bounded concurrency, Target Checkout creation, job time limits, and read-only inspection — never operation-specific business behavior.
 _Avoid_: Workflow engine, claim service, orchestrator
+
+**Dispatch Session**:
+The Dispatcher's one continuous scheduling lifetime: it takes the scheduling lock, keeps its bounded workers refilled as Automation Commands become eligible and running jobs settle, and releases the lock only when a clean discovery finds no eligible command and no worker is running.
+_Avoid_: One-shot round, frozen frontier, long-lived daemon
 
 **Target Checkout**:
 A disposable, independent local Git repository created for one Agent job at the exact authorized revision. It is never a registered worktree of the Primary Operator's checkout, and its cleanup cannot affect the source repository.
