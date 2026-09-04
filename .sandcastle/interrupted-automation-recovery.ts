@@ -207,9 +207,13 @@ export function createInterruptedAutomationRecovery(
     if (liveIdentities.has(command.identity) || liveIdentities.has(route.identity)) {
       return undefined;
     }
-    await ports.github.removeIssueLabel(command.number, "agent:in-progress");
     const triggerRestored = !command.labels.includes(route.trigger);
+    // Restore the trigger before clearing agent:in-progress so an interruption
+    // (or failed call) between the two leaves the Work Item inconsistent —
+    // still a recovery candidate on the next round — rather than label-less and
+    // invisible. This mirrors acquisition and promotion label ordering.
     if (triggerRestored) await ports.github.addIssueLabel(command.number, route.trigger);
+    await ports.github.removeIssueLabel(command.number, "agent:in-progress");
     await ports.github.addRecoveryDiagnostic(command.number, {
       jobId: record.jobId,
       // The diagnostic names the recorded Target operation (for example

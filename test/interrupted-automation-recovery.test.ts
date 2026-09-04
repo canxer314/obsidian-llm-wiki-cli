@@ -101,8 +101,8 @@ describe("Interrupted Automation recovery", () => {
     // Recovery runs on the discovery snapshot before the frontier executes.
     expect(events).toEqual([
       "discover",
-      "remove:41:agent:in-progress",
       "add:41:agent:implement",
+      "remove:41:agent:in-progress",
       "diagnostic:41:dead-job-1:implement-issue:agent:implement:true",
       "run",
     ]);
@@ -147,8 +147,8 @@ describe("Interrupted Automation recovery", () => {
 
     expect(events).toEqual([
       "discover",
-      "remove:43:agent:in-progress",
       "add:43:agent:implement",
+      "remove:43:agent:in-progress",
       "diagnostic:43:dead-job-1:implement-spec:agent:implement:true",
     ]);
     expect(labels.get(43)).toEqual(new Set(["agent:implement"]));
@@ -296,8 +296,8 @@ describe("Interrupted Automation recovery", () => {
 
     expect(events).toEqual([
       "discover",
-      "remove:46:agent:in-progress",
       "add:46:agent:to-tickets",
+      "remove:46:agent:in-progress",
       "diagnostic:46:dead-job-1:split-spec:agent:to-tickets:true",
     ]);
     expect(run).not.toHaveBeenCalled();
@@ -485,8 +485,8 @@ describe("Interrupted Automation recovery", () => {
 
     expect(events).toEqual([
       "discover",
-      "remove:60:agent:in-progress",
       "add:60:agent:update-branch",
+      "remove:60:agent:in-progress",
       "diagnostic:60:dead-job-1:update-branch:agent:update-branch:true",
     ]);
     expect(run).not.toHaveBeenCalled();
@@ -509,8 +509,8 @@ describe("Interrupted Automation recovery", () => {
 
     expect(events).toEqual([
       "discover",
-      "remove:61:agent:in-progress",
       "add:61:agent:implement",
+      "remove:61:agent:in-progress",
       "diagnostic:61:dead-job-1:implement-feedback:agent:implement:true",
     ]);
     expect(run).not.toHaveBeenCalled();
@@ -530,8 +530,8 @@ describe("Interrupted Automation recovery", () => {
 
     expect(events).toEqual([
       "discover",
-      "remove:62:agent:in-progress",
       "add:62:agent:review",
+      "remove:62:agent:in-progress",
       "diagnostic:62:dead-job-1:review:agent:review:true",
     ]);
     expect(run).not.toHaveBeenCalled();
@@ -791,6 +791,59 @@ describe("Interrupted Automation recovery", () => {
     await expect(second.dispatch()).resolves.toEqual({ status: "dispatched", selected: [rediscovered] });
     expect(second.run).toHaveBeenCalledOnce();
     expect(second.run).toHaveBeenCalledWith(rediscovered);
+  });
+
+  it("restores the trigger before clearing in-progress so an interrupted recovery stays recoverable", async () => {
+    // Mirror acquisition and promotion ordering: the restored trigger lands
+    // first, so a failure or crash between the two label mutations leaves the
+    // Work Item inconsistent — still a candidate next round — never label-less.
+    const stale: AutomationCommand = {
+      number: 41, operation: "implement-issue", identity: "issue:41", labels: ["agent:in-progress"],
+    };
+    const events: string[] = [];
+    const labels = new Map([[41, new Set(stale.labels)]]);
+    const recovery = createInterruptedAutomationRecovery({
+      scheduler: { activeJobs: async () => [] },
+      evidence: { scan: async () => ({ records: [runningRecord()], unreadable: [] }) },
+      github: {
+        addIssueLabel: async (issueNumber, label) => {
+          labels.get(issueNumber)?.add(label);
+          events.push(`add:${issueNumber}:${label}`);
+        },
+        removeIssueLabel: async (issueNumber, label) => {
+          events.push(`remove:${issueNumber}:${label}`);
+          throw new Error("label removal failed");
+        },
+        addRecoveryDiagnostic: async () => {},
+      },
+      now: () => NOW,
+    });
+    const run = vi.fn(async () => { events.push("run"); });
+    const dispatch = () => dispatchAutomationCommands({ concurrency: 1 }, {
+      scheduler: {
+        acquire: async () => ({ release: async () => {} }),
+        prepare: async () => {},
+        track: async (_identity, action) => action(),
+      },
+      github: {
+        verifyLabels: async () => {},
+        listCommands: async () => { events.push("discover"); return [stale]; },
+      },
+      recovery,
+      readiness: { verifyGithubAgentAuthentication: async () => {} },
+      promotion: { scan: async () => ({ status: "scanned" as const, promoted: [], refused: [] }) },
+      run,
+    });
+
+    await expect(dispatch()).rejects.toThrow("label removal failed");
+
+    expect(events).toEqual([
+      "discover",
+      "add:41:agent:implement",
+      "remove:41:agent:in-progress",
+    ]);
+    expect(labels.get(41)).toEqual(new Set(["agent:in-progress", "agent:implement"]));
+    expect(run).not.toHaveBeenCalled();
   });
 });
 
