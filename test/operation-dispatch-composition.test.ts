@@ -502,18 +502,22 @@ async function runOrdinaryScenario(
   };
   const dispatchScheduler = scheduler(events);
 
+  // Dispatching consumes the trigger, so later refill discoveries no longer
+  // return the command — exactly how the real acquisition removes the label.
+  let consumed = false;
   await expect(dispatchAutomationCommands({ concurrency: 1 }, {
     scheduler: dispatchScheduler,
     readiness: { verifyGithubAgentAuthentication: async () => undefined },
     github: {
       verifyLabels: async () => undefined,
-      listCommands: async () => [command],
+      listCommands: async () => (consumed ? [] : [command]),
     },
     promotion: {
       scan: async () => ({ status: "scanned", promoted: [], refused: [] }),
     },
     recovery: { recoverInterrupted: async () => [] },
-    run: async (selected) => { await operation.runCommand(selected); },
+    wait: () => new Promise<void>(() => {}),
+    run: async (selected) => { consumed = true; await operation.runCommand(selected); },
   })).resolves.toEqual({ status: "dispatched", selected: [command] });
 
   expect(dispatchScheduler.track).toHaveBeenCalledWith(

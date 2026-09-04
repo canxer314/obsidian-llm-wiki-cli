@@ -37,6 +37,7 @@ function harness(options: {
 }) {
   const events: string[] = [];
   const labels = new Map(options.commands.map((command) => [command.number, new Set(command.labels)]));
+  const pending = [...options.commands];
   const recovery = createInterruptedAutomationRecovery({
     scheduler: { activeJobs: async () => options.activeJobs ?? [] },
     evidence: {
@@ -59,7 +60,13 @@ function harness(options: {
     },
     now: () => NOW,
   });
-  const run = vi.fn(async () => { events.push("run"); });
+  const run = vi.fn(async (selected: AutomationCommand) => {
+    events.push("run");
+    // Dispatching consumes the trigger, so later refill discoveries no longer
+    // return the command — exactly how the real acquisition removes the label.
+    const index = pending.findIndex((entry) => entry.identity === selected.identity);
+    if (index >= 0) pending.splice(index, 1);
+  });
   const dispatch = () => dispatchAutomationCommands({ concurrency: 1 }, {
     scheduler: {
       acquire: async () => ({ release: async () => {} }),
@@ -68,7 +75,7 @@ function harness(options: {
     },
     github: {
       verifyLabels: async () => {},
-      listCommands: async () => { events.push("discover"); return options.commands; },
+      listCommands: async () => { events.push("discover"); return pending.slice(); },
     },
     recovery,
     readiness: { verifyGithubAgentAuthentication: async () => {} },
@@ -98,13 +105,16 @@ describe("Interrupted Automation recovery", () => {
 
     await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [eligible] });
 
-    // Recovery runs on the discovery snapshot before the frontier executes.
+    // Recovery runs on the session-start discovery snapshot before the
+    // frontier executes; the completion then triggers a refill whose clean
+    // discovery drains the session.
     expect(events).toEqual([
       "discover",
       "add:41:agent:implement",
       "remove:41:agent:in-progress",
       "diagnostic:41:dead-job-1:implement-issue:agent:implement:true",
       "run",
+      "discover",
     ]);
     expect(run).toHaveBeenCalledOnce();
     expect(run).toHaveBeenCalledWith(eligible);
@@ -129,6 +139,7 @@ describe("Interrupted Automation recovery", () => {
       "discover",
       "remove:42:agent:in-progress",
       "diagnostic:42:dead-job-1:implement-spec:agent:implement:false",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(42)).toEqual(new Set(["agent:implement"]));
@@ -150,6 +161,7 @@ describe("Interrupted Automation recovery", () => {
       "add:43:agent:implement",
       "remove:43:agent:in-progress",
       "diagnostic:43:dead-job-1:implement-spec:agent:implement:true",
+      "discover",
     ]);
     expect(labels.get(43)).toEqual(new Set(["agent:implement"]));
   });
@@ -254,6 +266,7 @@ describe("Interrupted Automation recovery", () => {
       "add:81:agent:implement",
       "remove:81:agent:in-progress",
       "diagnostic:81:dead-job-2:implement-issue:agent:implement:true",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(80)).toEqual(new Set(["agent:in-progress"]));
@@ -354,6 +367,7 @@ describe("Interrupted Automation recovery", () => {
       "add:46:agent:to-tickets",
       "remove:46:agent:in-progress",
       "diagnostic:46:dead-job-1:split-spec:agent:to-tickets:true",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(46)).toEqual(new Set(["agent:to-tickets"]));
@@ -377,6 +391,7 @@ describe("Interrupted Automation recovery", () => {
       "discover",
       "remove:47:agent:in-progress",
       "diagnostic:47:dead-job-1:split-spec:agent:to-tickets:false",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(47)).toEqual(new Set(["agent:to-tickets"]));
@@ -543,6 +558,7 @@ describe("Interrupted Automation recovery", () => {
       "add:60:agent:update-branch",
       "remove:60:agent:in-progress",
       "diagnostic:60:dead-job-1:update-branch:agent:update-branch:true",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(60)).toEqual(new Set(["agent:update-branch"]));
@@ -567,6 +583,7 @@ describe("Interrupted Automation recovery", () => {
       "add:61:agent:implement",
       "remove:61:agent:in-progress",
       "diagnostic:61:dead-job-1:implement-feedback:agent:implement:true",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(61)).toEqual(new Set(["agent:implement"]));
@@ -588,6 +605,7 @@ describe("Interrupted Automation recovery", () => {
       "add:62:agent:review",
       "remove:62:agent:in-progress",
       "diagnostic:62:dead-job-1:review:agent:review:true",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(62)).toEqual(new Set(["agent:review"]));
@@ -611,6 +629,7 @@ describe("Interrupted Automation recovery", () => {
       "discover",
       "remove:63:agent:in-progress",
       "diagnostic:63:dead-job-1:update-branch:agent:update-branch:false",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(63)).toEqual(new Set(["agent:update-branch"]));
@@ -636,6 +655,7 @@ describe("Interrupted Automation recovery", () => {
       "discover",
       "remove:64:agent:in-progress",
       "diagnostic:64:dead-job-1:implement-feedback:agent:implement:false",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(64)).toEqual(new Set(["agent:implement"]));
@@ -659,6 +679,7 @@ describe("Interrupted Automation recovery", () => {
       "discover",
       "remove:65:agent:in-progress",
       "diagnostic:65:dead-job-1:review:agent:review:false",
+      "discover",
     ]);
     expect(run).not.toHaveBeenCalled();
     expect(labels.get(65)).toEqual(new Set(["agent:review"]));
