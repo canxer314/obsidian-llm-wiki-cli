@@ -1,3 +1,5 @@
+import { diagnosticSummary } from "./redaction.ts";
+
 export interface ReviewAutomationPullRequest {
   readonly number: number;
   readonly state: string;
@@ -156,8 +158,13 @@ export async function runReviewAutomationCommand(
         revision,
         verdict: revision === pullRequest.headSha ? "clean" : "improved",
       };
-    } catch {
+    } catch (error) {
       const jobId = ports.createJobId?.() ?? "local-review-job";
+      // The public blocked diagnostic stays classification-only (#219 evidence
+      // boundary), but the cause must still survive somewhere local: twice in
+      // #428 the review agent and publisher both succeeded and only the final
+      // publication failed, and this catch was the sole record of the error.
+      console.error(`Review automation failed (job ${jobId}): ${diagnosticSummary(error instanceof Error ? (error.stack ?? error.message) : String(error))}`);
       await Promise.allSettled([
         ports.github.addPullRequestLabel(pullRequest.number, "agent:blocked"),
         ports.github.addBlockedDiagnostic?.(pullRequest.number, { reason: "review-execution", jobId }),

@@ -156,6 +156,27 @@ describe("review automation command", () => {
     ]);
   });
 
+  it("records the redacted failure cause on the job log while the public diagnostic stays classification-only", async () => {
+    const events: string[] = [];
+    const reviewer = vi.fn().mockRejectedValue(new Error("pulls/220/reviews: unexpected EOF"));
+    const dependencies = ports(events, reviewer);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, { ...dependencies, createJobId: () => "job-220" }))
+        .resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
+
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("pulls/220/reviews: unexpected EOF"));
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("job-220"));
+      expect(dependencies.github.addBlockedDiagnostic).toHaveBeenCalledWith(220, {
+        reason: "review-execution",
+        jobId: "job-220",
+      });
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("later reviews the same Draft PR at its current full head after an execution failure", async () => {
     const events: string[] = [];
     const failedDependencies = ports(events, vi.fn().mockRejectedValue(new Error("reviewer execution failed")));
