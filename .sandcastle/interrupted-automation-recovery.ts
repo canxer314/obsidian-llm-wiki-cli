@@ -8,21 +8,31 @@ import {
 import {
   canonicalAutomationTriggerLabels,
   resolveAutomationCommandRoute,
+  resolveTargetOperationRoute,
 } from "./automation-command-route.ts";
 
 // ADR-0004: an interrupted job is provably dead only once its recorded start
 // is at least five minutes old, bounding the risk of adopting a live job.
 export const INTERRUPTED_AUTOMATION_GRACE_MILLISECONDS = 5 * 60 * 1000;
 
-// #423 establishes recovery for the Issue and Spec implementation families;
-// #424 extends it to Spec splitting. Later command-family tickets extend this
-// set; those that share an identity namespace while routing to different
-// triggers (implement-spec/split-spec on spec:<number>, the pull-request:
-// families of #425) rely on the operation-equality guard in attempt().
+// #423 establishes recovery for the Issue and Spec implementation families,
+// #424 extends it to Spec splitting, and #425 completes it for the Pull
+// Request command families (branch update, feedback implementation, and
+// review). The set holds the recorded Target operations recovery can prove
+// dead; update-branch, review, and implement-feedback are what the Pull
+// Request families record in their job logs (implement-feedback is the
+// feedback implementation family's recorded operation for a typed
+// "implement" command). Families that share an identity namespace while
+// routing to different triggers (implement-spec/split-spec on spec:<number>,
+// the update-branch/implement/review families on pull-request:<number>) rely
+// on the operation-equality guard in attempt().
 const recoverableOperations: ReadonlySet<string> = new Set([
   "implement-issue",
   "implement-spec",
   "split-spec",
+  "update-branch",
+  "review",
+  "implement-feedback",
 ]);
 
 export interface InterruptedAutomationJobRecord {
@@ -76,11 +86,19 @@ export interface InterruptedAutomationRecovery {
 function recoveryCandidate(command: AutomationCommand): boolean {
   const eligibility = commandEligibility(command);
   if (eligibility !== "stale-in-progress" && eligibility !== "inconsistent") return false;
-  if (recoverableOperations.has(command.operation)) return true;
-  // A state-only Work Item has consumed its trigger; it is a candidate only
-  // when a single running record can reconstruct the operation below.
-  return command.operation === "unknown" &&
-    (command.identity.startsWith("issue:") || command.identity.startsWith("spec:"));
+  if (command.operation === "unknown") {
+    // A state-only Work Item has consumed its trigger; it is a candidate only
+    // when a single running record can reconstruct the operation below.
+    return command.identity.startsWith("issue:") ||
+      command.identity.startsWith("spec:") ||
+      command.identity.startsWith("pull-request:");
+  }
+  // A typed command records its route's Target operation in the job log, so
+  // candidacy is judged on that recorded operation rather than on the command
+  // operation alone: the feedback implementation family types a "implement"
+  // command whose recorded operation is implement-feedback.
+  const route = resolveAutomationCommandRoute(command.operation, command.number);
+  return recoverableOperations.has(route.targetOperation);
 }
 
 function parseJobRecord(value: unknown): InterruptedAutomationJobRecord | undefined {
@@ -166,8 +184,11 @@ export function createInterruptedAutomationRecovery(
     if (matches.length !== 1) return undefined;
     const record = matches[0]!;
     // The trigger and Work Item kind come from the recorded Target operation,
-    // never from the current labels.
-    const route = resolveAutomationCommandRoute(record.operation, record.number);
+    // never from the current labels. The recorded operation is the job log's
+    // Target operation, so it resolves through the target-operation route: a
+    // recorded implement-feedback operation routes to the agent:implement
+    // command trigger on pull-request:<number>.
+    const route = resolveTargetOperationRoute(record.operation, record.number);
     if (command.operation !== "unknown") {
       // A typed entry whose present labels routed to a different operation
       // than the one the recorded job was running contradicts the evidence.
@@ -191,7 +212,10 @@ export function createInterruptedAutomationRecovery(
     if (triggerRestored) await ports.github.addIssueLabel(command.number, route.trigger);
     await ports.github.addRecoveryDiagnostic(command.number, {
       jobId: record.jobId,
-      operation: route.operation,
+      // The diagnostic names the recorded Target operation (for example
+      // implement-feedback) so the bounded message identifies the interrupted
+      // job precisely rather than its generic command operation.
+      operation: record.operation,
       trigger: route.trigger,
       triggerRestored,
     });
