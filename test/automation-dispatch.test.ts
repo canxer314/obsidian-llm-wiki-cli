@@ -36,6 +36,10 @@ function command(overrides: Partial<{
 
 const promotion = { scan: async () => ({ status: "scanned" as const, promoted: [], refused: [] }) };
 const readiness = { verifyGithubAgentAuthentication: async () => {} };
+// Recovery is always on in production; these scenarios stub it as a no-op so
+// they stay focused on frontier behavior (recovery itself is covered by
+// interrupted-automation-recovery.test.ts).
+const recovery = { recoverInterrupted: async () => [] };
 
 describe("Automation Command dispatch", () => {
   it("selects one bounded deterministic compatible frontier and waits for it", async () => {
@@ -54,6 +58,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [first, second, conflicting] },
       run,
     });
@@ -72,6 +77,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track },
       promotion,
       readiness,
+      recovery,
       github: {
         verifyLabels: async () => {},
         listCommands: async () => [command({ number: 220, operation: "review", identity: "issue:220" })],
@@ -101,6 +107,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => commands },
       run,
     });
@@ -153,6 +160,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [splitSpec, implementSpec] },
       run,
     });
@@ -169,6 +177,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [implementIssue, implementSpec] },
       run,
     });
@@ -196,6 +205,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion: { scan },
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [failing, slow] },
       run,
     });
@@ -219,6 +229,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => undefined, prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness: { verifyGithubAgentAuthentication },
+      recovery,
       github: { verifyLabels: async () => {}, listCommands },
       run: vi.fn(),
     })).resolves.toEqual({ status: "locked" });
@@ -232,6 +243,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands },
       run: vi.fn(),
     })).rejects.toThrow("Dispatch concurrency must be between 1 and 8");
@@ -246,6 +258,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [inconsistent, blocked] },
       run,
     });
@@ -271,6 +284,7 @@ describe("Automation Command dispatch", () => {
         },
       },
       readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
+      recovery,
       run,
     });
     expect(result).toEqual({ status: "dispatched", selected: [splitSpec] });
@@ -287,6 +301,7 @@ describe("Automation Command dispatch", () => {
       github: { verifyLabels: async () => {}, listCommands },
       promotion: { scan: async () => { throw new Error("GitHub dependency state is unavailable"); } },
       readiness,
+      recovery,
       run,
     })).rejects.toThrow("GitHub dependency state is unavailable");
     expect(listCommands).toHaveBeenCalledOnce();
@@ -315,6 +330,7 @@ describe("Automation Command dispatch", () => {
       github: { verifyLabels, listCommands },
       promotion: { scan },
       readiness: { verifyGithubAgentAuthentication: async () => { events.push("probe"); throw readinessError; } },
+      recovery,
       run,
     })).rejects.toBe(readinessError);
 
@@ -338,6 +354,7 @@ describe("Automation Command dispatch", () => {
       },
       promotion: { scan: async () => { order.push("promote"); } },
       readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
+      recovery,
       run: vi.fn(),
     })).resolves.toEqual({ status: "dispatched", selected: [] });
     expect(order).toEqual(["probe", "discover", "promote"]);

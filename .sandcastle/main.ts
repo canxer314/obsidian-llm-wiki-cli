@@ -19,6 +19,10 @@ import {
 import { runQueuePromotionScan } from "./queue-promotion-automation.ts";
 import { inspectAutomationCommands } from "./automation-inspector.ts";
 import { createAutomationScheduler } from "./automation-scheduler.ts";
+import {
+  createInterruptedAutomationRecovery,
+  createJobLogEvidenceScanner,
+} from "./interrupted-automation-recovery.ts";
 import { removeExpiredFailureCheckouts } from "./target-checkout.ts";
 import { runSerializedAutomationCommand } from "./serialized-automation-command.ts";
 import { createTargetOperationRunner } from "./target-operation.ts";
@@ -131,6 +135,11 @@ try {
       }, {
         scheduler,
         github: dispatchGithub,
+        recovery: createInterruptedAutomationRecovery({
+          scheduler,
+          evidence: createJobLogEvidenceScanner({ root: jobLogRoot }),
+          github: dispatchGithub,
+        }),
         readiness: {
           verifyGithubAgentAuthentication: () => requireGithubAgentReadiness({
             image: startup.imageName,

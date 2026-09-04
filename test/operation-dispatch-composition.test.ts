@@ -512,6 +512,7 @@ async function runOrdinaryScenario(
     promotion: {
       scan: async () => ({ status: "scanned", promoted: [], refused: [] }),
     },
+    recovery: { recoverInterrupted: async () => [] },
     run: async (selected) => { await operation.runCommand(selected); },
   })).resolves.toEqual({ status: "dispatched", selected: [command] });
 
@@ -614,6 +615,7 @@ async function verifyQueuePromotionBehavior(): Promise<void> {
         listCommands: async () => [],
       },
       promotion: { scan },
+      recovery: { recoverInterrupted: async () => [] },
       run: async () => { throw new Error("queue promotion has no Target operation"); },
     });
     if (scenario === "blocked") await expect(execution).rejects.toThrow("promotion publication failed");
