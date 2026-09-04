@@ -279,6 +279,198 @@ describe("Interrupted Automation recovery", () => {
     expectNoMutation(events);
     expect(run).not.toHaveBeenCalled();
   });
+
+  it("recovers a provably-dead Spec split whose trigger was consumed by restoring agent:to-tickets", async () => {
+    // A trigger-consumed top-level Spec carries only agent:in-progress, so
+    // discovery reports it state-only; the recorded split-spec operation
+    // reconstructs its agent:to-tickets trigger.
+    const staleSpec: AutomationCommand = {
+      number: 46, operation: "unknown", identity: "issue:46", labels: ["agent:in-progress"],
+    };
+    const { events, labels, run, dispatch } = harness({
+      commands: [staleSpec],
+      records: [runningRecord({ operation: "split-spec", number: 46 })],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expect(events).toEqual([
+      "discover",
+      "remove:46:agent:in-progress",
+      "add:46:agent:to-tickets",
+      "diagnostic:46:dead-job-1:split-spec:agent:to-tickets:true",
+    ]);
+    expect(run).not.toHaveBeenCalled();
+    expect(labels.get(46)).toEqual(new Set(["agent:to-tickets"]));
+  });
+
+  it("recovers a provably-dead Spec split without removing its surviving agent:to-tickets trigger", async () => {
+    const inconsistentSpec: AutomationCommand = {
+      number: 47,
+      operation: "split-spec",
+      identity: "spec:47",
+      labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const { events, labels, run, dispatch } = harness({
+      commands: [inconsistentSpec],
+      records: [runningRecord({ operation: "split-spec", number: 47 })],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expect(events).toEqual([
+      "discover",
+      "remove:47:agent:in-progress",
+      "diagnostic:47:dead-job-1:split-spec:agent:to-tickets:false",
+    ]);
+    expect(run).not.toHaveBeenCalled();
+    expect(labels.get(47)).toEqual(new Set(["agent:to-tickets"]));
+  });
+
+  it("fails closed when an implementation trigger contradicts a recorded Spec split", async () => {
+    // implement-spec and split-spec share the spec:<number> identity
+    // namespace, so identity equality alone cannot catch a Work Item whose
+    // present labels route it to a different operation than the recorded job.
+    const contradictory: AutomationCommand = {
+      number: 48, operation: "implement-spec", identity: "spec:48", labels: ["agent:implement", "agent:in-progress"],
+    };
+    const { events, labels, dispatch } = harness({
+      commands: [contradictory],
+      records: [runningRecord({ operation: "split-spec", number: 48 })],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+    expect(labels.get(48)).toEqual(new Set(["agent:implement", "agent:in-progress"]));
+  });
+
+  it("fails closed when a split trigger contradicts a recorded Spec implementation", async () => {
+    const contradictory: AutomationCommand = {
+      number: 49, operation: "split-spec", identity: "spec:49", labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const { events, labels, dispatch } = harness({
+      commands: [contradictory],
+      records: [runningRecord({ operation: "implement-spec", number: 49 })],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+    expect(labels.get(49)).toEqual(new Set(["agent:to-tickets", "agent:in-progress"]));
+  });
+
+  it("refuses to recover a Spec split owned by a live scheduler job", async () => {
+    const inconsistentSpec: AutomationCommand = {
+      number: 50, operation: "split-spec", identity: "spec:50", labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const { events, labels, dispatch } = harness({
+      commands: [inconsistentSpec],
+      records: [runningRecord({ operation: "split-spec", number: 50 })],
+      activeJobs: [{ identity: "spec:50", jobId: "local-dispatch-7-1" }],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+    expect(labels.get(50)).toEqual(new Set(["agent:to-tickets", "agent:in-progress"]));
+  });
+
+  it("refuses to recover a Spec split inside the five-minute grace period", async () => {
+    const inconsistentSpec: AutomationCommand = {
+      number: 51, operation: "split-spec", identity: "spec:51", labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const { events, dispatch } = harness({
+      commands: [inconsistentSpec],
+      records: [runningRecord({ operation: "split-spec", number: 51, startedAt: INSIDE_GRACE })],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+  });
+
+  it("refuses to recover a Spec split when no running record matches", async () => {
+    const inconsistentSpec: AutomationCommand = {
+      number: 52, operation: "split-spec", identity: "spec:52", labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const { events, dispatch } = harness({
+      commands: [inconsistentSpec],
+      records: [runningRecord({ operation: "split-spec", number: 52, status: "failed" })],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+  });
+
+  it("refuses to recover a Spec split when a second interruption left parallel records", async () => {
+    const inconsistentSpec: AutomationCommand = {
+      number: 53, operation: "split-spec", identity: "spec:53", labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const { events, dispatch } = harness({
+      commands: [inconsistentSpec],
+      records: [
+        runningRecord({ operation: "split-spec", number: 53 }),
+        runningRecord({ jobId: "dead-job-2", operation: "split-spec", number: 53 }),
+      ],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+  });
+
+  it("leaves Blocked Spec split untouched even with matching dead-job evidence", async () => {
+    const blockedSpec: AutomationCommand = {
+      number: 54, operation: "split-spec", identity: "spec:54", labels: ["agent:to-tickets", "agent:blocked"],
+    };
+    const { events, run, dispatch } = harness({
+      commands: [blockedSpec],
+      records: [runningRecord({ operation: "split-spec", number: 54 })],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("refuses the whole round for a Spec split when any job evidence is unreadable", async () => {
+    const inconsistentSpec: AutomationCommand = {
+      number: 55, operation: "split-spec", identity: "spec:55", labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const { events, dispatch } = harness({
+      commands: [inconsistentSpec],
+      records: [runningRecord({ operation: "split-spec", number: 55 })],
+      unreadable: ["mystery-job"],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+  });
+
+  it("keeps a recovered Spec split out of the current frontier and re-discovers it as eligible later", async () => {
+    const inconsistentSpec: AutomationCommand = {
+      number: 56, operation: "split-spec", identity: "spec:56", labels: ["agent:to-tickets", "agent:in-progress"],
+    };
+    const first = harness({
+      commands: [inconsistentSpec],
+      records: [runningRecord({ operation: "split-spec", number: 56 })],
+    });
+    await expect(first.dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    // A later dispatch sees the repaired labels through ordinary discovery and
+    // selects the Spec for splitting once more.
+    const rediscovered: AutomationCommand = {
+      number: 56, operation: "split-spec", identity: "spec:56", labels: [...first.labels.get(56)!],
+    };
+    const second = harness({ commands: [rediscovered], records: [] });
+    await expect(second.dispatch()).resolves.toEqual({ status: "dispatched", selected: [rediscovered] });
+    expect(second.run).toHaveBeenCalledOnce();
+    expect(second.run).toHaveBeenCalledWith(rediscovered);
+  });
 });
 
 describe("Interrupted Automation job-log evidence", () => {
@@ -293,6 +485,9 @@ describe("Interrupted Automation job-log evidence", () => {
         root, jobId: "finished-job", operation: "implement-spec", number: 42, revision: "r", now: OLD,
       });
       await completeJobLog(finished, { status: "failed", now: NOW });
+      await createJobLog({
+        root, jobId: "splitting-job", operation: "split-spec", number: 43, revision: "r", now: OLD,
+      });
       await writeFile(join(root, "stray-file"), "not a job directory");
       await mkdir(join(root, "corrupt-job"));
       await writeFile(join(root, "corrupt-job", "metadata.json"), "{ not json");
@@ -311,6 +506,13 @@ describe("Interrupted Automation job-log evidence", () => {
           jobId: "running-job",
           operation: "implement-issue",
           number: 41,
+          status: "running",
+          startedAt: OLD,
+        },
+        {
+          jobId: "splitting-job",
+          operation: "split-spec",
+          number: 43,
           status: "running",
           startedAt: OLD,
         },

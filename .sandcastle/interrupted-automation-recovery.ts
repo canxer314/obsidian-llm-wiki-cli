@@ -15,10 +15,14 @@ import {
 export const INTERRUPTED_AUTOMATION_GRACE_MILLISECONDS = 5 * 60 * 1000;
 
 // #423 establishes recovery for the Issue and Spec implementation families;
-// later command-family tickets extend this set.
+// #424 extends it to Spec splitting. Later command-family tickets extend this
+// set; those that share an identity namespace while routing to different
+// triggers (implement-spec/split-spec on spec:<number>, the pull-request:
+// families of #425) rely on the operation-equality guard in attempt().
 const recoverableOperations: ReadonlySet<string> = new Set([
   "implement-issue",
   "implement-spec",
+  "split-spec",
 ]);
 
 export interface InterruptedAutomationJobRecord {
@@ -165,13 +169,17 @@ export function createInterruptedAutomationRecovery(
     // never from the current labels.
     const route = resolveAutomationCommandRoute(record.operation, record.number);
     if (command.operation !== "unknown") {
-      // A typed discovery entry whose present labels routed to a different
-      // identity than the recorded operation contradicts the evidence.
-      if (route.identity !== command.identity) return undefined;
+      // A typed entry whose present labels routed to a different operation
+      // than the one the recorded job was running contradicts the evidence.
+      // Identity equality alone cannot detect this: implement-spec and
+      // split-spec share the spec:<number> namespace while routing to
+      // different triggers, and the pull-request: families (#425) share
+      // pull-request:<number> the same way.
+      if (command.operation !== route.operation) return undefined;
     } else if (command.labels.some((label) =>
       label !== route.trigger && canonicalAutomationTriggerLabels().includes(label))) {
       // A state-only entry carrying another family trigger contradicts the
-      // recorded implementation operation.
+      // recorded operation.
       return undefined;
     }
     if (now - record.startedAt < INTERRUPTED_AUTOMATION_GRACE_MILLISECONDS) return undefined;
