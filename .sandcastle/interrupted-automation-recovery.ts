@@ -177,11 +177,12 @@ export function createInterruptedAutomationRecovery(
   ): Promise<string | undefined> => {
     const owned = records.filter((record) => record.number === command.number);
     // The running record that can own the current agent:in-progress is the Work
-    // Item's most recent record. Recovery never tombstones a recovered job's
-    // log (the crash-loop guard depends on it staying "running"), so an older
-    // lingering running record must not be allowed to impersonate the owner of
-    // a later leftover: a terminal record newer than it means that in-progress
-    // is a settlement leftover from a completed job, not an interrupted one.
+    // Item's most recent record. Recovery never tombstones a repaired Work
+    // Item's job log (the crash-loop guard depends on it staying "running"),
+    // so an older lingering running record must not be allowed to impersonate
+    // the owner of a later leftover: a terminal record newer than it means
+    // that in-progress is a settlement leftover from a completed job, not an
+    // interrupted one.
     const latest = owned.reduce<InterruptedAutomationJobRecord | undefined>(
       (newest, record) =>
         newest === undefined || record.startedAt > newest.startedAt ? record : newest,
