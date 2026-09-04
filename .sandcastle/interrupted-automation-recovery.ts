@@ -175,14 +175,26 @@ export function createInterruptedAutomationRecovery(
     records: readonly InterruptedAutomationJobRecord[],
     now: number,
   ): Promise<string | undefined> => {
-    const matches = records.filter((record) =>
+    const owned = records.filter((record) => record.number === command.number);
+    // The running record that can own the current agent:in-progress is the Work
+    // Item's most recent record. Recovery never tombstones a recovered job's
+    // log (the crash-loop guard depends on it staying "running"), so an older
+    // lingering running record must not be allowed to impersonate the owner of
+    // a later leftover: a terminal record newer than it means that in-progress
+    // is a settlement leftover from a completed job, not an interrupted one.
+    const latest = owned.reduce<InterruptedAutomationJobRecord | undefined>(
+      (newest, record) =>
+        newest === undefined || record.startedAt > newest.startedAt ? record : newest,
+      undefined);
+    const running = owned.filter((record) =>
       record.status === "running" &&
-      record.number === command.number &&
       recoverableOperations.has(record.operation));
-    // Zero matches means the evidence is missing; multiple matches means a
-    // second interruption left parallel records. Both fail closed.
-    if (matches.length !== 1) return undefined;
-    const record = matches[0]!;
+    // Zero running records means the evidence is missing; multiple running
+    // records mean a second interruption left parallel records; a running
+    // record that is not the newest record means a completed job owns the
+    // current state. All fail closed.
+    if (running.length !== 1 || running[0]!.jobId !== latest?.jobId) return undefined;
+    const record = running[0]!;
     // The trigger and Work Item kind come from the recorded Target operation,
     // never from the current labels. The recorded operation is the job log's
     // Target operation, so it resolves through the target-operation route: a
