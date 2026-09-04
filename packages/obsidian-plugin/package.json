@@ -6,6 +6,7 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
+    "smoke:installed-runtime": "npm run build && node dist/installed-runtime-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run test"
   },
