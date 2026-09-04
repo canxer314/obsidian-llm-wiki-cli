@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -316,34 +318,46 @@ describe("automation GitHub port", () => {
   });
 
   it("re-reads PR labels and publishes a review pinned to its acquired commit", async () => {
-    const execute = vi.fn()
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          number: 220,
-          state: "open",
-          draft: true,
-          base: {
-            ref: "master",
-            repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
-          },
-          head: {
-            ref: "feedback-branch",
-            sha: revision,
-            repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
-          },
-          labels: [{ name: "agent:review" }],
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify([{
-          filename: ".sandcastle/review-automation.ts",
-          patch: "@@ -92,6 +92,10 @@\n export async function runReviewAutomationCommand(\n+  const review = await reviewer.review();",
-        }]),
-        stderr: "",
-      })
-      .mockResolvedValue({ stdout: "", stderr: "" });
+    let postedBody: unknown;
+    const execute = vi.fn(async (_file: string, args: readonly string[]) => {
+      const inputIndex = args.indexOf("--input");
+      if (inputIndex >= 0) {
+        postedBody = JSON.parse(await readFile(args[inputIndex + 1], "utf8"));
+      }
+      if (args[1] === "repos/{owner}/{repo}/pulls/220") {
+        return {
+          stdout: JSON.stringify({
+            number: 220,
+            state: "open",
+            draft: true,
+            base: {
+              ref: "master",
+              repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+            },
+            head: {
+              ref: "feedback-branch",
+              sha: revision,
+              repo: { full_name: "canxer314/obsidian-llm-wiki-cli" },
+            },
+            labels: [{ name: "agent:review" }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "repos/{owner}/{repo}/pulls/220/files") {
+        return {
+          stdout: JSON.stringify([{
+            filename: ".sandcastle/review-automation.ts",
+            patch: "@@ -92,6 +92,10 @@\n export async function runReviewAutomationCommand(\n+  const review = await reviewer.review();",
+          }]),
+          stderr: "",
+        };
+      }
+      if (args[1] === "repos/{owner}/{repo}/pulls/220/reviews") {
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: `${revision}\n`, stderr: "" };
+    });
     const github = createAutomationGithubPort({ execute });
 
     await expect(github.readPullRequest(220)).resolves.toEqual({
@@ -380,13 +394,19 @@ describe("automation GitHub port", () => {
     expect(execute).toHaveBeenLastCalledWith("gh", ["pr", "ready", "220"], undefined);
     expect(execute).toHaveBeenNthCalledWith(4, "gh", [
       "api", "repos/{owner}/{repo}/pulls/220/reviews", "--method", "POST",
-      "-f", `commit_id=${revision}`, "-f", "event=COMMENT",
-      "-f", "body=One problem.",
-      "-f", "comments[0][path]=.sandcastle/review-automation.ts",
-      "-f", "comments[0][line]=93",
-      "-f", "comments[0][side]=RIGHT",
-      "-f", "comments[0][body]=Incorrect boundary.",
+      "--input", expect.any(String),
     ], undefined);
+    expect(postedBody).toEqual({
+      commit_id: revision,
+      event: "COMMENT",
+      body: "One problem.",
+      comments: [{
+        path: ".sandcastle/review-automation.ts",
+        line: 93,
+        side: "RIGHT",
+        body: "Incorrect boundary.",
+      }],
+    });
   });
 
   it("preserves fork repository identity from the stable Pull Request REST shape", async () => {

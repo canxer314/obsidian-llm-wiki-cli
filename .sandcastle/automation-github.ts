@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -857,18 +860,26 @@ export function createAutomationGithubPort(options: {
       ], options.environment);
       const files = JSON.parse(stdout) as readonly PullRequestFile[];
       const comments = inlineComments(request.review, diffLocations(files));
-      await execute("gh", [
-        "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/reviews`, "--method", "POST",
-        "-f", `commit_id=${request.revision}`,
-        "-f", "event=COMMENT",
-        "-f", `body=${reviewBody(request.review)}`,
-        ...comments.flatMap((comment, index) => [
-          "-f", `comments[${index}][path]=${comment.path}`,
-          "-f", `comments[${index}][line]=${comment.line}`,
-          "-f", `comments[${index}][side]=${comment.side}`,
-          "-f", `comments[${index}][body]=${comment.body}`,
-        ]),
-      ], options.environment);
+      // gh form fields (-f comments[0][path]=...) serialize indexed keys as a
+      // JSON object, which GitHub rejects with HTTP 422 ("comments is not an
+      // array") whenever a review carries inline comments — every review on
+      // PR #428 with inline comments failed publication this way. Send an
+      // explicit JSON body so the comments array and numeric line survive.
+      const bodyPath = join(await mkdtemp(join(tmpdir(), "sandcastle-review-")), "body.json");
+      try {
+        await writeFile(bodyPath, JSON.stringify({
+          commit_id: request.revision,
+          event: "COMMENT",
+          body: reviewBody(request.review),
+          ...(comments.length === 0 ? {} : { comments }),
+        }), { mode: 0o600 });
+        await execute("gh", [
+          "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/reviews`,
+          "--method", "POST", "--input", bodyPath,
+        ], options.environment);
+      } finally {
+        await rm(bodyPath, { force: true });
+      }
     },
     async markPullRequestReady(pullRequestNumber) {
       await execute("gh", ["pr", "ready", String(pullRequestNumber)], options.environment);
