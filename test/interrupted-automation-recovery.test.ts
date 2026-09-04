@@ -230,6 +230,61 @@ describe("Interrupted Automation recovery", () => {
     expectNoMutation(events);
   });
 
+  it("still recovers a provably-dead candidate when another candidate fails closed in the same round", async () => {
+    // Fail-closed proof is per Work Item: a candidate inside the grace window
+    // is skipped without aborting recovery of a second, provably-dead one.
+    const recent: AutomationCommand = {
+      number: 80, operation: "implement-issue", identity: "issue:80", labels: ["agent:in-progress"],
+    };
+    const dead: AutomationCommand = {
+      number: 81, operation: "implement-issue", identity: "issue:81", labels: ["agent:in-progress"],
+    };
+    const { events, labels, run, dispatch } = harness({
+      commands: [recent, dead],
+      records: [
+        runningRecord({ jobId: "recent-job", number: 80, startedAt: INSIDE_GRACE }),
+        runningRecord({ jobId: "dead-job-2", number: 81 }),
+      ],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expect(events).toEqual([
+      "discover",
+      "add:81:agent:implement",
+      "remove:81:agent:in-progress",
+      "diagnostic:81:dead-job-2:implement-issue:agent:implement:true",
+    ]);
+    expect(run).not.toHaveBeenCalled();
+    expect(labels.get(80)).toEqual(new Set(["agent:in-progress"]));
+    expect(labels.get(81)).toEqual(new Set(["agent:implement"]));
+  });
+
+  it("refuses to let a stale running record own a newer leftover agent:in-progress", async () => {
+    // A recovered job's log is never tombstoned, so it stays "running" while a
+    // later job for the same Work Item completes. If that later job leaves a
+    // settlement leftover agent:in-progress, the older running record must not
+    // impersonate the owner: recovery fails closed instead of restoring the
+    // already-recovered operation's trigger.
+    const stale: AutomationCommand = {
+      number: 85, operation: "unknown", identity: "pull-request:85", labels: ["agent:in-progress"],
+    };
+    const { events, dispatch } = harness({
+      commands: [stale],
+      records: [
+        runningRecord({ jobId: "recovered-update-branch", operation: "update-branch", number: 85 }),
+        runningRecord({
+          jobId: "completed-review", operation: "review", number: 85,
+          status: "completed", startedAt: NOW - 60_000,
+        }),
+      ],
+    });
+
+    await expect(dispatch()).resolves.toEqual({ status: "dispatched", selected: [] });
+
+    expectNoMutation(events);
+  });
+
   it("refuses the whole round when any job evidence is unreadable", async () => {
     const stale: AutomationCommand = {
       number: 41, operation: "implement-issue", identity: "issue:41", labels: ["agent:in-progress"],

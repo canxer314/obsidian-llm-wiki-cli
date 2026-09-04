@@ -265,6 +265,24 @@ describe("Automation Command dispatch", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("keeps a Work Item whose identity recovery repaired out of the same round's frontier", async () => {
+    // ADR-0004 recovery returns the identities it repaired so the round built
+    // from the same discovery snapshot never re-runs them; the repaired Work
+    // Item re-enters only through ordinary discovery on a later dispatch.
+    const eligible = command({ number: 90, identity: "pull-request:90" });
+    const run = vi.fn(async () => {});
+    const result = await dispatchAutomationCommands({}, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      promotion,
+      readiness,
+      github: { verifyLabels: async () => {}, listCommands: async () => [eligible] },
+      recovery: { recoverInterrupted: async () => [eligible.identity] },
+      run,
+    });
+    expect(run).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: "dispatched", selected: [] });
+  });
+
   it("runs queue promotion after Spec split and defers promoted commands until the next bounded round", async () => {
     const order: string[] = [];
     const splitSpec = command({ number: 218, operation: "split-spec", identity: "spec:218" });
