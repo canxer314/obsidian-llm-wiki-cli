@@ -32,7 +32,12 @@ export async function inspectAutomationCommands(ports: {
             ? { retry: "inspect the Automation Work Item and restore the appropriate trigger manually before retrying" }
             : { retry: `remove agent:blocked, restore ${commandTriggerLabel(command)}, then retry` }
           : eligibility === "stale-in-progress" || eligibility === "inconsistent"
-            ? { retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }
+            // ADR-0004: the Dispatcher recovers provably dead Interrupted
+            // Automation on a later dispatch round (agent:in-progress cleared,
+            // trigger restored when absent); missing, ambiguous, conflicting,
+            // live, or too-recent evidence fails closed and stays an
+            // operator-inspection path.
+            ? { retry: "the Dispatcher automatically recovers this Interrupted Automation on a later dispatch round when the owning job is provably dead; if recovery evidence fails closed, inspect the Automation Work Item and resolve labels manually" }
             : {}),
       };
     }),

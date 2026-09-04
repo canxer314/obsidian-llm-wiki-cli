@@ -362,6 +362,16 @@ describe("Automation Command dispatch", () => {
 });
 
 describe("Automation Command inspection", () => {
+  // ADR-0004: stale-in-progress and inconsistent Work Items are Interrupted
+  // Automation, which the Dispatcher recovers automatically on a later
+  // dispatch round once the owning job is provably dead. Only evidence that
+  // fails closed keeps such a Work Item on the manual-inspection path; Blocked
+  // Automation stays manual-only and is never implied auto-recoverable.
+  const interruptedAutomationRetry =
+    "the Dispatcher automatically recovers this Interrupted Automation on a later dispatch round when the owning job is provably dead; if recovery evidence fails closed, inspect the Automation Work Item and resolve labels manually";
+  const blockedUnknownRetry =
+    "inspect the Automation Work Item and restore the appropriate trigger manually before retrying";
+
   it("reports eligibility, blocked and stale/inconsistent state without mutations", async () => {
     const addLabel = vi.fn();
     const result = await inspectAutomationCommands({
@@ -381,12 +391,42 @@ describe("Automation Command inspection", () => {
     expect(result.commands).toEqual([
       expect.objectContaining({ number: 10, eligibility: "eligible" }),
       expect.objectContaining({ number: 11, eligibility: "blocked", retry: "remove agent:blocked, restore agent:review, then retry" }),
-      expect.objectContaining({ number: 12, eligibility: "stale-in-progress", retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }),
-      expect.objectContaining({ number: 13, eligibility: "inconsistent", retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }),
+      expect.objectContaining({ number: 12, eligibility: "stale-in-progress", retry: interruptedAutomationRetry }),
+      expect.objectContaining({ number: 13, eligibility: "inconsistent", retry: interruptedAutomationRetry }),
       expect.objectContaining({ number: 14, eligibility: "blocked", retry: "remove agent:blocked, restore agent:implement, then retry" }),
       expect.objectContaining({ number: 15, eligibility: "blocked", retry: "remove agent:blocked, restore agent:to-tickets, then retry" }),
     ]);
     expect(result.activeJobs).toEqual([{ identity: "pull-request:10", jobId: "local-1" }]);
     expect(addLabel).not.toHaveBeenCalled();
+  });
+
+  it("keeps Blocked Automation manual-only and expresses both Interrupted Automation recovery paths", async () => {
+    const result = await inspectAutomationCommands({
+      github: {
+        listCommands: async () => [
+          command({ number: 20, labels: ["agent:review", "agent:blocked"] }),
+          command({ number: 21, labels: ["agent:in-progress"] }),
+          command({ number: 22, labels: ["agent:review", "agent:in-progress"] }),
+          command({ number: 23, operation: "unknown", identity: "pull-request:23", labels: ["agent:blocked"] }),
+          command({ number: 24, operation: "unknown", identity: "pull-request:24", labels: ["agent:in-progress"] }),
+        ],
+      },
+      scheduler: { activeJobs: async () => [] },
+    });
+
+    const byNumber = new Map(result.commands.map((entry) => [entry.number, entry]));
+    for (const number of [21, 22, 24]) {
+      const { eligibility, retry } = byNumber.get(number)!;
+      expect(["stale-in-progress", "inconsistent"]).toContain(eligibility);
+      expect(retry).toBe(interruptedAutomationRetry);
+      expect(retry).toContain("automatically recovers this Interrupted Automation");
+      expect(retry).toContain("if recovery evidence fails closed, inspect the Automation Work Item and resolve labels manually");
+    }
+    expect(byNumber.get(20)!.retry).toBe("remove agent:blocked, restore agent:review, then retry");
+    expect(byNumber.get(23)!.retry).toBe(blockedUnknownRetry);
+    for (const number of [20, 23]) {
+      expect(byNumber.get(number)!.retry).not.toContain("automatically recovers");
+      expect(byNumber.get(number)!.retry).not.toContain("provably dead");
+    }
   });
 });
