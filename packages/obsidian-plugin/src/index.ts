@@ -132,6 +132,84 @@ export {
   verifyRequestPolicy,
 } from "./request-policy.js";
 export {
+  CANDIDATE_CHECKSUM_MANIFEST,
+  CANDIDATE_OPTIONAL_FILES,
+  CANDIDATE_REQUIRED_FILES,
+  CandidateBundleError,
+  inspectCandidateBundle,
+  installCandidateBundle,
+  type CandidateBundleIdentity,
+  type CandidateFileDigest,
+  type CandidateManagedFile,
+  type InstalledCandidate,
+} from "./installed-runtime/candidate-bundle.js";
+export {
+  EvidencePrivacyError,
+  EvidenceWriteError,
+  installedRuntimeEvidenceSchema,
+  parseEvidence,
+  serializeEvidence,
+  writeEvidenceFile,
+  type InstalledRuntimeEvidence,
+  type InstalledRuntimeVerdict,
+} from "./installed-runtime/evidence.js";
+export {
+  runInstalledRuntimeHarness,
+  type HarnessFailure,
+  type HarnessFailureCode,
+  type HarnessStage,
+  type HarnessTimeouts,
+  type InstalledRuntimeHarnessOptions,
+  type InstalledRuntimeHarnessResult,
+} from "./installed-runtime/harness.js";
+export {
+  createLoopbackMcpClient,
+  HealthObservationError,
+  type BridgeHealthObservation,
+  type HealthObservationFailureCode,
+  type LoopbackMcpClient,
+  type LoopbackMcpClientOptions,
+  type ObservedHealth,
+} from "./installed-runtime/loopback-client.js";
+export {
+  BridgeIdentityError,
+  createWindowsObsidianProcessControl,
+  ObsidianProcessError,
+  ReadinessTimeoutError,
+  readPersistedBridgeIdentity,
+  waitForCondition,
+  type ObsidianLaunchRequest,
+  type ObsidianProcessControl,
+  type ObsidianProcessHandle,
+  type PersistedBridgeIdentity,
+  type ReadinessWaitOptions,
+} from "./installed-runtime/obsidian-process.js";
+export {
+  hostOsBuild,
+  lookupRegisteredRuntimeProfile,
+  MVP_PERF_REF_1,
+  preflightRuntimeProfile,
+  registeredRuntimeProfiles,
+  type ObservedRuntimeEnvironment,
+  type RegisteredRuntimeProfile,
+  type RuntimeEnvironmentProbe,
+  type RuntimePreflightMismatch,
+  type RuntimeVersionExpectation,
+} from "./installed-runtime/runtime-profile.js";
+export {
+  cleanupTestVault,
+  compareInventories,
+  provisionTestVault,
+  snapshotInventory,
+  TestVaultError,
+  TEST_PROFILE_DIRECTORY_PREFIX,
+  TEST_VAULT_DIRECTORY_PREFIX,
+  type CleanupReport,
+  type InventoryComparison,
+  type ProvisionedTestVault,
+  type VaultInventoryEntry,
+} from "./installed-runtime/test-vault.js";
+export {
   BRIDGE_VERSION,
   PLUGIN_VERSION,
   PROTOCOL_VERSION,
