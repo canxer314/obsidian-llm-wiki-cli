@@ -171,7 +171,7 @@ npm run sandcastle -- inspect
 
 readiness 为 `missing`、`invalid` 或 `unavailable` 时，命令返回 `commandInspection:"unavailable"` 并省略 `commands`。这表示没有查询远程队列，不表示队列为空。该命令不会修改 GitHub 或本地状态。
 
-一个 Work Item 同时带有触发标签和 `agent:in-progress`，说明标签只完成了部分修改。系统将它报告为 `inconsistent`，不会执行。在检查结果同时满足 `"imageReadiness":"ready"` 和 `"githubAgentReadiness":"ready"` 前，不得获取任何具备 GitHub 能力的命令，也不得运行或重试 canary。
+一个 Work Item 同时带有触发标签和 `agent:in-progress`，说明标签只完成了部分修改。系统将它报告为 `inconsistent`，不会按当前状态执行；如果所属 Target job provably dead，Dispatcher 会在后续某轮 dispatch 自动清除 `agent:in-progress`，让 Work Item 按既有触发标签恢复执行。在检查结果同时满足 `"imageReadiness":"ready"` 和 `"githubAgentReadiness":"ready"` 前，不得获取任何具备 GitHub 能力的命令，也不得运行或重试 canary。
 
 <a id="explicit-operation-execution"></a>
 ## 显式执行操作
@@ -221,7 +221,7 @@ readiness 失败会保留 Work Item 和触发标签，也没有需要移除的 `
 
 每次具备 GitHub 能力的重试都必须创建或复用现有的 `sandcastle/issue-<n>` 分支，并且只能产生一个 Draft Pull Request。如果重试将创建第二个 Draft Pull Request 或替代 Work Item，应判定为失败，不能把它当作规避方案。Canary 只能重试一次。记录并验证下文要求的证据后，才能开始后续 canary。
 
-`inspect` 会报告过期的 `agent:in-progress`，例如宿主机崩溃后残留的标签，但系统不会自动接管、恢复或清除它。只有通过 `inspect` 和 `journalctl` 确认没有匹配的活动任务后，才能手动移除。
+`inspect` 会把过期的 `agent:in-progress`（例如宿主机或 WSL 关闭后残留的标签）报告为 `stale-in-progress` 或 `inconsistent`。只要所属 Target job provably dead——没有活动 job、本地任务记录仍读取为 `running`、且其 `startedAt` 至少已过去五分钟——Dispatcher 就会在后续某轮 dispatch 自动清除 `agent:in-progress`，并在触发标签缺失时按记录恢复它，无需人工干预。只有恢复证据 fails closed（记录缺失、不可读、有歧义或相互冲突、任务仍存活，或启动时间尚未超过五分钟宽限期）时，才需要先通过 `inspect` 和 `journalctl` 确认没有匹配的活动任务，再手动移除或修正标签。带 `agent:blocked` 的 Blocked Automation 仍只能手动重试，绝不会被自动重试。
 
 <a id="job-retention"></a>
 ## 任务保留策略

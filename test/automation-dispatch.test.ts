@@ -36,6 +36,10 @@ function command(overrides: Partial<{
 
 const promotion = { scan: async () => ({ status: "scanned" as const, promoted: [], refused: [] }) };
 const readiness = { verifyGithubAgentAuthentication: async () => {} };
+// Recovery is always on in production; these scenarios stub it as a no-op so
+// they stay focused on frontier behavior (recovery itself is covered by
+// interrupted-automation-recovery.test.ts).
+const recovery = { recoverInterrupted: async () => [] };
 
 describe("Automation Command dispatch", () => {
   it("selects one bounded deterministic compatible frontier and waits for it", async () => {
@@ -54,6 +58,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [first, second, conflicting] },
       run,
     });
@@ -72,6 +77,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track },
       promotion,
       readiness,
+      recovery,
       github: {
         verifyLabels: async () => {},
         listCommands: async () => [command({ number: 220, operation: "review", identity: "issue:220" })],
@@ -101,6 +107,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => commands },
       run,
     });
@@ -153,6 +160,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [splitSpec, implementSpec] },
       run,
     });
@@ -169,6 +177,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [implementIssue, implementSpec] },
       run,
     });
@@ -196,6 +205,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion: { scan },
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [failing, slow] },
       run,
     });
@@ -219,6 +229,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => undefined, prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness: { verifyGithubAgentAuthentication },
+      recovery,
       github: { verifyLabels: async () => {}, listCommands },
       run: vi.fn(),
     })).resolves.toEqual({ status: "locked" });
@@ -232,6 +243,7 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands },
       run: vi.fn(),
     })).rejects.toThrow("Dispatch concurrency must be between 1 and 8");
@@ -246,10 +258,29 @@ describe("Automation Command dispatch", () => {
       scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
       promotion,
       readiness,
+      recovery,
       github: { verifyLabels: async () => {}, listCommands: async () => [inconsistent, blocked] },
       run,
     });
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("keeps a Work Item whose identity recovery repaired out of the same round's frontier", async () => {
+    // ADR-0004 recovery returns the identities it repaired so the round built
+    // from the same discovery snapshot never re-runs them; the repaired Work
+    // Item re-enters only through ordinary discovery on a later dispatch.
+    const eligible = command({ number: 90, identity: "pull-request:90" });
+    const run = vi.fn(async () => {});
+    const result = await dispatchAutomationCommands({}, {
+      scheduler: { acquire: async () => ({ release: async () => {} }), prepare: async () => {}, track: async (_identity, action) => action() },
+      promotion,
+      readiness,
+      github: { verifyLabels: async () => {}, listCommands: async () => [eligible] },
+      recovery: { recoverInterrupted: async () => [eligible.identity] },
+      run,
+    });
+    expect(run).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: "dispatched", selected: [] });
   });
 
   it("runs queue promotion after Spec split and defers promoted commands until the next bounded round", async () => {
@@ -271,6 +302,7 @@ describe("Automation Command dispatch", () => {
         },
       },
       readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
+      recovery,
       run,
     });
     expect(result).toEqual({ status: "dispatched", selected: [splitSpec] });
@@ -287,6 +319,7 @@ describe("Automation Command dispatch", () => {
       github: { verifyLabels: async () => {}, listCommands },
       promotion: { scan: async () => { throw new Error("GitHub dependency state is unavailable"); } },
       readiness,
+      recovery,
       run,
     })).rejects.toThrow("GitHub dependency state is unavailable");
     expect(listCommands).toHaveBeenCalledOnce();
@@ -315,6 +348,7 @@ describe("Automation Command dispatch", () => {
       github: { verifyLabels, listCommands },
       promotion: { scan },
       readiness: { verifyGithubAgentAuthentication: async () => { events.push("probe"); throw readinessError; } },
+      recovery,
       run,
     })).rejects.toBe(readinessError);
 
@@ -338,6 +372,7 @@ describe("Automation Command dispatch", () => {
       },
       promotion: { scan: async () => { order.push("promote"); } },
       readiness: { verifyGithubAgentAuthentication: async () => { order.push("probe"); } },
+      recovery,
       run: vi.fn(),
     })).resolves.toEqual({ status: "dispatched", selected: [] });
     expect(order).toEqual(["probe", "discover", "promote"]);
@@ -345,6 +380,16 @@ describe("Automation Command dispatch", () => {
 });
 
 describe("Automation Command inspection", () => {
+  // ADR-0004: stale-in-progress and inconsistent Work Items are Interrupted
+  // Automation, which the Dispatcher recovers automatically on a later
+  // dispatch round once the owning job is provably dead. Only evidence that
+  // fails closed keeps such a Work Item on the manual-inspection path; Blocked
+  // Automation stays manual-only and is never implied auto-recoverable.
+  const interruptedAutomationRetry =
+    "the Dispatcher automatically recovers this Interrupted Automation on a later dispatch round when the owning job is provably dead; if recovery evidence fails closed, inspect the Automation Work Item and resolve labels manually";
+  const blockedUnknownRetry =
+    "inspect the Automation Work Item and restore the appropriate trigger manually before retrying";
+
   it("reports eligibility, blocked and stale/inconsistent state without mutations", async () => {
     const addLabel = vi.fn();
     const result = await inspectAutomationCommands({
@@ -364,12 +409,42 @@ describe("Automation Command inspection", () => {
     expect(result.commands).toEqual([
       expect.objectContaining({ number: 10, eligibility: "eligible" }),
       expect.objectContaining({ number: 11, eligibility: "blocked", retry: "remove agent:blocked, restore agent:review, then retry" }),
-      expect.objectContaining({ number: 12, eligibility: "stale-in-progress", retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }),
-      expect.objectContaining({ number: 13, eligibility: "inconsistent", retry: "inspect the Automation Work Item and resolve labels manually; do not adopt or clear state automatically" }),
+      expect.objectContaining({ number: 12, eligibility: "stale-in-progress", retry: interruptedAutomationRetry }),
+      expect.objectContaining({ number: 13, eligibility: "inconsistent", retry: interruptedAutomationRetry }),
       expect.objectContaining({ number: 14, eligibility: "blocked", retry: "remove agent:blocked, restore agent:implement, then retry" }),
       expect.objectContaining({ number: 15, eligibility: "blocked", retry: "remove agent:blocked, restore agent:to-tickets, then retry" }),
     ]);
     expect(result.activeJobs).toEqual([{ identity: "pull-request:10", jobId: "local-1" }]);
     expect(addLabel).not.toHaveBeenCalled();
+  });
+
+  it("keeps Blocked Automation manual-only and expresses both Interrupted Automation recovery paths", async () => {
+    const result = await inspectAutomationCommands({
+      github: {
+        listCommands: async () => [
+          command({ number: 20, labels: ["agent:review", "agent:blocked"] }),
+          command({ number: 21, labels: ["agent:in-progress"] }),
+          command({ number: 22, labels: ["agent:review", "agent:in-progress"] }),
+          command({ number: 23, operation: "unknown", identity: "pull-request:23", labels: ["agent:blocked"] }),
+          command({ number: 24, operation: "unknown", identity: "pull-request:24", labels: ["agent:in-progress"] }),
+        ],
+      },
+      scheduler: { activeJobs: async () => [] },
+    });
+
+    const byNumber = new Map(result.commands.map((entry) => [entry.number, entry]));
+    for (const number of [21, 22, 24]) {
+      const { eligibility, retry } = byNumber.get(number)!;
+      expect(["stale-in-progress", "inconsistent"]).toContain(eligibility);
+      expect(retry).toBe(interruptedAutomationRetry);
+      expect(retry).toContain("automatically recovers this Interrupted Automation");
+      expect(retry).toContain("if recovery evidence fails closed, inspect the Automation Work Item and resolve labels manually");
+    }
+    expect(byNumber.get(20)!.retry).toBe("remove agent:blocked, restore agent:review, then retry");
+    expect(byNumber.get(23)!.retry).toBe(blockedUnknownRetry);
+    for (const number of [20, 23]) {
+      expect(byNumber.get(number)!.retry).not.toContain("automatically recovers");
+      expect(byNumber.get(number)!.retry).not.toContain("provably dead");
+    }
   });
 });

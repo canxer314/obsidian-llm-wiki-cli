@@ -162,9 +162,9 @@ npm run sandcastle -- inspect
 该命令报告本地镜像和 GitHub readiness、活动任务及发现的命令，并显示 `eligible`、`blocked`、`stale-in-progress`、`inconsistent` 等 eligibility。它不会修改 GitHub 或本地任务状态。
 
 <a id="recover-blocked-work"></a>
-## 恢复阻塞任务
+## 恢复阻塞任务与 Interrupted Automation
 
-Sandcastle 不会自动重试整个阻塞任务。
+带 `agent:blocked` 的 Blocked Automation（阻塞任务）永远不会被自动重试，必须由运维人员明确手动恢复：
 
 1. 阅读 Issue 或 Pull Request 上经过分类的诊断评论。
 2. 如果评论不足以定位问题，请运维人员检查本地任务。运维人员应按[运维手册](sandcastle-local-dispatcher-runbook.md#blocked-automation-diagnosis)使用 `npm run sandcastle -- inspect`、systemd journal 和保留产物。
@@ -181,7 +181,13 @@ Sandcastle 不会自动重试整个阻塞任务。
 
 不要创建替代 Issue、分支或 Pull Request 来绕过阻塞任务。重试必须复用现有 Work Item 和实现分支。
 
-如果 `agent:in-progress` 看起来已经过期，不要只根据经过的时间清除它。运维人员必须先通过检查和本地日志确认没有匹配的活动任务。一个 Work Item 同时带有触发标签和 `agent:in-progress` 时属于 `inconsistent`，人工修正前不会执行。
+### Interrupted Automation
+
+`agent:in-progress` 但没有 `agent:blocked` 的 Work Item 属于 Interrupted Automation。当所属 Target job provably dead 时——调度器没有活动 job、本地任务记录仍读取为 `running`、且其 `startedAt` 至少已过去五分钟——Dispatcher 会在后续某轮 dispatch 自动恢复该状态：清除 `agent:in-progress`，触发标签缺失时按记录的 Target operation 恢复它，并留下有界诊断评论。此时无需人工干预，也不要手动清除或恢复标签。
+
+如果恢复证据 fails closed——任务记录缺失、不可读、有歧义或相互冲突，存在仍存活的任务，或启动时间尚未超过五分钟宽限期——Dispatcher 不会改动状态，Work Item 留给运维人员检查。只有在这种情况下，才需要先通过 `npm run sandcastle -- inspect` 和本地日志确认没有匹配的活动任务，再手动修正标签。
+
+同时带有触发标签和 `agent:in-progress`（`inconsistent`）的 Work Item，以及只有 `agent:in-progress`（`stale-in-progress`）的 Work Item，都属于上述 Interrupted Automation，适用自动恢复。
 
 本地镜像或 GitHub 凭据 readiness 失败发生在获取之前。触发标签会保留，Sandcastle 不会添加 `agent:blocked`。运维人员恢复 readiness 后，下一轮扫描会获取未变化的命令。
 

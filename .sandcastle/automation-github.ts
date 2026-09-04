@@ -163,6 +163,10 @@ export function createAutomationDispatchGithubPort(options: {
   listCommands(): Promise<readonly import("./automation-command.ts").AutomationCommand[]>;
   verifyLabels(): Promise<void>;
   ensureLabels(): Promise<void>;
+  addRecoveryDiagnostic(
+    issueNumber: number,
+    diagnostic: import("./interrupted-automation-recovery.ts").InterruptedAutomationRecoveryDiagnostic,
+  ): Promise<void>;
 } {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
@@ -251,6 +255,14 @@ export function createAutomationDispatchGithubPort(options: {
       await execute("gh", [
         "issue", "comment", String(issueNumber), "--body",
         `Refused to promote: this is a sub-issue of #${parentNumber}. \`agent:queued\` is not meaningful on sub-issues — label the parent Spec instead. Cleared \`agent:queued\`.`,
+      ], options.environment);
+    },
+    async addRecoveryDiagnostic(issueNumber, diagnostic) {
+      await execute("gh", [
+        "issue", "comment", String(issueNumber), "--body",
+        diagnostic.triggerRestored
+          ? `Interrupted Automation recovery (job ${diagnostic.jobId}): the ${diagnostic.operation} job is provably dead, so \`agent:in-progress\` was cleared and \`${diagnostic.trigger}\` restored. A later dispatch will retry the Work Item.`
+          : `Interrupted Automation recovery (job ${diagnostic.jobId}): the ${diagnostic.operation} job is provably dead, so \`agent:in-progress\` was cleared; \`${diagnostic.trigger}\` was already present. A later dispatch will retry the Work Item.`,
       ], options.environment);
     },
     async listCommands() {

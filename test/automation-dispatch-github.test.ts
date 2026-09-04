@@ -23,6 +23,33 @@ describe("Automation Command GitHub discovery", () => {
     ], undefined);
   });
 
+  it("posts a bounded Interrupted Automation recovery diagnostic for restored and surviving triggers", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const port = createAutomationDispatchGithubPort({ execute });
+
+    await port.addRecoveryDiagnostic(5, {
+      jobId: "job-1",
+      operation: "implement-issue",
+      trigger: "agent:implement",
+      triggerRestored: true,
+    });
+    await port.addRecoveryDiagnostic(6, {
+      jobId: "job-2",
+      operation: "review",
+      trigger: "agent:review",
+      triggerRestored: false,
+    });
+
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "issue", "comment", "5", "--body",
+      "Interrupted Automation recovery (job job-1): the implement-issue job is provably dead, so `agent:in-progress` was cleared and `agent:implement` restored. A later dispatch will retry the Work Item.",
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "issue", "comment", "6", "--body",
+      "Interrupted Automation recovery (job job-2): the review job is provably dead, so `agent:in-progress` was cleared; `agent:review` was already present. A later dispatch will retry the Work Item.",
+    ], undefined);
+  });
+
   it("discovers trusted Pull Request trigger and state labels with one shared identity", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: JSON.stringify([{ number: 19, labels: [{ name: "agent:update-branch" }] }]), stderr: "" })

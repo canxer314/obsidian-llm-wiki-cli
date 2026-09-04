@@ -21,6 +21,12 @@ export interface AutomationDispatchPorts {
   readonly promotion: {
     scan(): Promise<QueuePromotionResult>;
   };
+  // ADR-0004: always-on proof-gated recovery of Interrupted Automation. Runs
+  // on the immutable discovery snapshot before frontier construction and
+  // returns the repaired Work Item identities so they stay out of this round.
+  readonly recovery: {
+    recoverInterrupted(commands: readonly AutomationCommand[]): Promise<readonly string[]>;
+  };
   readonly readiness: {
     // Read-only GitHub authentication probe inside the exact Agent image and
     // GitHub-capable environment; must fail closed before any acquisition,
@@ -45,6 +51,7 @@ export async function dispatchAutomationCommands(
       throw new Error("Dispatch concurrency must be between 1 and 8");
     }
     const commands = await ports.github.listCommands();
+    const repaired = new Set(await ports.recovery.recoverInterrupted(commands));
     const identities = new Set<string>();
     const frontier = commands
       .map((command) => {
@@ -52,6 +59,9 @@ export async function dispatchAutomationCommands(
         return command;
       })
       .filter((command) => commandEligibility(command) === "eligible")
+      // A repaired Work Item re-enters only through ordinary discovery on a
+      // later dispatch, never in the invocation that repaired it.
+      .filter((command) => !repaired.has(command.identity))
       .sort(compareCommands)
       .filter((command) => !identities.has(command.identity) && (identities.add(command.identity), true));
     let next = 0;
