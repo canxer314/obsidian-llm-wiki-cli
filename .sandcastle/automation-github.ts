@@ -663,9 +663,18 @@ export function createAutomationGithubPort(options: {
       }));
     },
     async closeImplementedChild(request) {
+      // `gh issue close` resolves the issue through a GraphQL query that still
+      // requests Projects (classic) cards; GitHub now answers that field with
+      // a hard deprecation error, so the command deterministically fails on
+      // this repository. Use the REST endpoints instead — the same channel
+      // every diagnostic comment already uses.
       await execute("gh", [
-        "issue", "close", String(request.childNumber), "--comment",
-        `Implemented in ${request.revision}. Part of #${request.specNumber}.`,
+        "api", `repos/{owner}/{repo}/issues/${request.childNumber}/comments`,
+        "-f", `body=Implemented in ${request.revision}. Part of #${request.specNumber}.`,
+      ], options.environment);
+      await execute("gh", [
+        "api", `repos/{owner}/{repo}/issues/${request.childNumber}`,
+        "--method", "PATCH", "-f", "state=closed",
       ], options.environment);
     },
     async addSpecImplementationBlockedDiagnostic(issueNumber, diagnostic) {

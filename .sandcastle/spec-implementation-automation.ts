@@ -1,4 +1,4 @@
-import { redact as redactFailureSummary } from "./redaction.ts";
+import { diagnosticSummary, redact as redactFailureSummary } from "./redaction.ts";
 import type { SpecAutomationIssue } from "./spec-split-automation.ts";
 
 export interface SpecChildIssue {
@@ -152,6 +152,11 @@ export async function runSpecImplementationAutomationCommand(
     ): Promise<SpecImplementationAutomationResult> => {
       const jobId = ports.createJobId?.() ?? "local-spec-implementation-job";
       const summary = redactFailureSummary(error instanceof Error ? error.message : String(error));
+      // The public blocked diagnostic stays classification-only (#219 evidence
+      // boundary); the redacted cause is recorded locally so a failed
+      // publication round is diagnosable from the job log (the #416 attempt
+      // that failed at review-publication left no local trace of why).
+      console.error(`Spec implementation failed (${blockedReason}; job ${jobId}): ${diagnosticSummary(summary)}`);
       await Promise.allSettled([
         ports.github.addIssueLabel(spec.number, "agent:blocked"),
         ports.github.addSpecImplementationBlockedDiagnostic?.(spec.number, {

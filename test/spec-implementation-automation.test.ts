@@ -292,12 +292,20 @@ describe("Spec implementation automation command", () => {
       createJobId: () => "job-226",
     });
     ports.github.listChildren.mockResolvedValue([child(301), child(302)]);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
-      status: "blocked",
-      reason: "spec-implementation-execution",
-      jobId: "job-226",
-    });
+    try {
+      await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+        status: "blocked",
+        reason: "spec-implementation-execution",
+        jobId: "job-226",
+      });
+
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("push failed"));
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("job-226"));
+    } finally {
+      errorLog.mockRestore();
+    }
 
     expect(ports.github.addSpecImplementationBlockedDiagnostic).toHaveBeenCalledWith(226, {
       reason: "spec-implementation-execution",

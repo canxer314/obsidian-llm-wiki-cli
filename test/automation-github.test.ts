@@ -169,8 +169,13 @@ describe("automation GitHub port", () => {
 
     await github.closeImplementedChild({ specNumber: 226, childNumber: 301, revision });
 
-    expect(execute).toHaveBeenCalledWith("gh", [
-      "issue", "close", "301", "--comment", `Implemented in ${revision}. Part of #226.`,
+    expect(execute).toHaveBeenNthCalledWith(1, "gh", [
+      "api", "repos/{owner}/{repo}/issues/301/comments",
+      "-f", `body=Implemented in ${revision}. Part of #226.`,
+    ], undefined);
+    expect(execute).toHaveBeenNthCalledWith(2, "gh", [
+      "api", "repos/{owner}/{repo}/issues/301",
+      "--method", "PATCH", "-f", "state=closed",
     ], undefined);
   });
 
