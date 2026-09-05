@@ -304,20 +304,33 @@ describe("Automation Command dispatch session", () => {
     const discovery = discoveryStore([running]);
     const gate = pollGate();
     const executed: number[] = [];
+    const order: string[] = [];
     const gates = new Map<number, () => void>();
     const run = vi.fn(async (selected: TestCommand) => {
       discovery.consume(selected);
       executed.push(selected.number);
+      order.push(`run:${selected.number}`);
       await new Promise<void>((resolve) => { gates.set(selected.number, resolve); });
     });
 
     const session = dispatchAutomationCommands({ concurrency: 2 }, {
       scheduler,
-      promotion,
+      promotion: {
+        scan: async () => {
+          order.push("promote");
+          return { status: "scanned" as const, promoted: [], refused: [] };
+        },
+      },
       readiness,
       recovery,
       wait: gate.wait,
-      github: { verifyLabels: async () => {}, listCommands: discovery.listCommands },
+      github: {
+        verifyLabels: async () => {},
+        listCommands: async () => {
+          order.push("discover");
+          return discovery.listCommands();
+        },
+      },
       run,
     });
 
@@ -332,6 +345,12 @@ describe("Automation Command dispatch session", () => {
     gates.get(2)!();
     await expect(session).resolves.toEqual({ status: "dispatched", selected: [running, appearing] });
     expect(run).toHaveBeenCalledTimes(2);
+    // The poll-triggered refill runs queue promotion before its fresh
+    // discovery, and the discovered command fills the free slot before the
+    // drain refill's own promotion and clean empty discovery.
+    expect(order).toEqual([
+      "discover", "run:1", "promote", "discover", "run:2", "promote", "discover",
+    ]);
   });
 
   it("runs queue promotion before each refill discovery so a promoted command dispatches in the same session", async () => {
