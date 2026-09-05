@@ -8,6 +8,7 @@ import {
 } from "../.sandcastle/automation-github.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
+const HEAD_SETTLE_ATTEMPTS = 3;
 
 describe("automation GitHub port", () => {
   it("mutates Issue and Pull Request labels through the shared REST endpoint", async () => {
@@ -571,8 +572,10 @@ describe("automation GitHub port", () => {
   });
 
   it("rejects publication if the acquired Pull Request head changed", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: `${"a".repeat(40)}\n`, stderr: "" });
     const github = createAutomationGithubPort({
-      execute: vi.fn().mockResolvedValue({ stdout: `${"a".repeat(40)}\n`, stderr: "" }),
+      execute,
+      headSettleMilliseconds: 0,
     });
 
     await expect(github.publishReview({
@@ -580,6 +583,24 @@ describe("automation GitHub port", () => {
       revision,
       review: { summary: "Looks good.", inlineComments: [], replies: [] },
     })).rejects.toThrow("Pull Request head changed before review publication");
+    expect(execute).toHaveBeenCalledTimes(HEAD_SETTLE_ATTEMPTS);
+  });
+
+  it("tolerates a briefly stale Pull Request head right after the publisher's push", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${"b".repeat(40)}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "[]", stderr: "" })
+      .mockResolvedValue({ stdout: "", stderr: "" });
+    const github = createAutomationGithubPort({ execute, headSettleMilliseconds: 0 });
+
+    await github.publishReview({
+      pullRequestNumber: 220,
+      revision,
+      review: { summary: "Looks good.", inlineComments: [], replies: [] },
+    });
+
+    expect(execute).toHaveBeenCalledTimes(4);
   });
 
   it("keeps a non-diff location in the review body without creating an inline comment", async () => {

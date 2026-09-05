@@ -29,6 +29,8 @@ import type {
 
 const executeFile = promisify(execFile);
 
+const HEAD_SETTLE_ATTEMPTS = 3;
+
 type Execute = (
   file: string,
   arguments_: readonly string[],
@@ -389,6 +391,7 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
+  readonly headSettleMilliseconds?: number;
 }): ReviewAutomationPorts["github"] & ImplementationAutomationPorts["github"] & FeedbackImplementationResources["github"] & BranchUpdateAutomationPorts["github"] & SpecSplitAutomationPorts["github"] & SpecSplitAutomationPorts["publisher"] & SpecImplementationAutomationPorts["github"] & SpecImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
   const execute = options.execute ?? (async (file, arguments_, environment) => {
     const result = await executeFile(file, [...arguments_], { env: environment });
@@ -870,11 +873,19 @@ export function createAutomationGithubPort(options: {
       ], options.environment);
     },
     async publishReview(request) {
-      const { stdout: headOutput } = await execute("gh", [
-        "pr", "view", String(request.pullRequestNumber), "--json", "headRefOid", "--jq", ".headRefOid",
-      ], options.environment);
-      if (headOutput.trim() !== request.revision) {
-        throw new Error("Pull Request head changed before review publication");
+      // GitHub's metadata API can lag the git backend by a moment right after
+      // the publisher's push; #429's first review failed publication on this
+      // race even though the pushed head had already landed. Re-read the head
+      // a couple of times before concluding it genuinely moved.
+      for (let attempt = 0; ; attempt += 1) {
+        const { stdout: headOutput } = await execute("gh", [
+          "pr", "view", String(request.pullRequestNumber), "--json", "headRefOid", "--jq", ".headRefOid",
+        ], options.environment);
+        if (headOutput.trim() === request.revision) break;
+        if (attempt === HEAD_SETTLE_ATTEMPTS - 1) {
+          throw new Error("Pull Request head changed before review publication");
+        }
+        await new Promise((resolve) => setTimeout(resolve, options.headSettleMilliseconds ?? 2_000));
       }
       const { stdout } = await execute("gh", [
         "api", `repos/{owner}/{repo}/pulls/${request.pullRequestNumber}/files`, "--method", "GET", "--paginate",
