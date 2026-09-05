@@ -502,18 +502,22 @@ async function runOrdinaryScenario(
   };
   const dispatchScheduler = scheduler(events);
 
+  // Dispatching consumes the trigger, so later refill discoveries no longer
+  // return the command — exactly how the real acquisition removes the label.
+  let consumed = false;
   await expect(dispatchAutomationCommands({ concurrency: 1 }, {
     scheduler: dispatchScheduler,
     readiness: { verifyGithubAgentAuthentication: async () => undefined },
     github: {
       verifyLabels: async () => undefined,
-      listCommands: async () => [command],
+      listCommands: async () => (consumed ? [] : [command]),
     },
     promotion: {
       scan: async () => ({ status: "scanned", promoted: [], refused: [] }),
     },
     recovery: { recoverInterrupted: async () => [] },
-    run: async (selected) => { await operation.runCommand(selected); },
+    wait: () => new Promise<void>(() => {}),
+    run: async (selected) => { consumed = true; await operation.runCommand(selected); },
   })).resolves.toEqual({ status: "dispatched", selected: [command] });
 
   expect(dispatchScheduler.track).toHaveBeenCalledWith(
@@ -575,15 +579,19 @@ async function verifyQueuePromotionBehavior(): Promise<void> {
     const events: string[] = [];
     const dispatchScheduler = scheduler(events);
     let scanResult: unknown;
+    let scans = 0;
     const state = {
       labels: ["agent:queued"],
       blockers: [],
       ...(scenario === "preflight" ? { parentNumber: 200 } : {}),
     };
     const scan = async () => {
+      scans += 1;
       scanResult = await runQueuePromotionScan({
         github: {
-          listQueuedIssues: async () => [{ number: 201, labels: ["agent:queued"] }],
+          // A failed refill is retried on the idle poll; by then nothing
+          // stays queued, so the retry's promotion succeeds.
+          listQueuedIssues: async () => (scans > 1 ? [] : [{ number: 201, labels: ["agent:queued"] }]),
           readPromotionState: async () => state,
           addIssueLabel: async (_number, label) => {
             if (scenario === "blocked" && label === "agent:implement") {
@@ -616,10 +624,23 @@ async function verifyQueuePromotionBehavior(): Promise<void> {
       },
       promotion: { scan },
       recovery: { recoverInterrupted: async () => [] },
+      // The retry-triggering idle poll fires immediately; the session never
+      // waits on a real timer.
+      wait: async () => {},
       run: async () => { throw new Error("queue promotion has no Target operation"); },
     });
-    if (scenario === "blocked") await expect(execution).rejects.toThrow("promotion publication failed");
-    else await expect(execution).resolves.toEqual({ status: "dispatched", selected: [] });
+    // A blocked promotion publication is recorded, not thrown, and the failed
+    // refill cannot drain the session: the idle-poll retry promotes nothing
+    // (the queue is empty by then), the clean empty discovery drains the
+    // session, and the result reports the recorded failure with the (empty)
+    // cumulative command list.
+    if (scenario === "blocked") {
+      await expect(execution).resolves.toEqual({
+        status: "failed",
+        selected: [],
+        failures: ["promotion publication failed"],
+      });
+    } else await expect(execution).resolves.toEqual({ status: "dispatched", selected: [] });
     return { events, scanResult, scheduler: dispatchScheduler };
   };
 

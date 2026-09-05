@@ -98,7 +98,8 @@ export async function runImplementationAutomationCommand(
   try {
     // Business preflight refusal (#219 story 17): remove the trigger and
     // explain on the Automation Work Item, without agent:blocked, so an
-    // inapplicable request does not re-refuse every dispatch round.
+    // inapplicable request does not re-refuse on every Dispatch Session
+    // discovery.
     const reason = refusal(issue);
     if (reason !== undefined) {
       await ports.github.removeIssueLabel(issue.number, "agent:implement");
@@ -113,8 +114,9 @@ export async function runImplementationAutomationCommand(
     }
     if (currentIssue.baseRevision !== issue.baseRevision) {
       // A moved base revision is a race, not a business refusal: keep the
-      // trigger (and stay silent) so the next dispatch round re-reads the
-      // authorized revision instead of spamming a comment every round.
+      // trigger (and stay silent) so the Dispatch Session's next discovery
+      // re-reads the authorized revision instead of spamming a comment on
+      // every refusal.
       return { status: "refused", reason: `Issue #${issue.number} changed its authorized base revision` };
     }
     const acquired = ports.github.claimIssue === undefined

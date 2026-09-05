@@ -8,7 +8,7 @@ Sandcastle 把 GitHub Issue 和 Pull Request 上的显式标签转换为本地�
 
 Issue、Spec、review thread 或 Pull Request 必须能够独立说明任务。请写清楚预期行为、相关约束和验收标准。标签只授权相应操作，不能代替任务说明。
 
-本地 Dispatcher 每分钟扫描一次 GitHub。一般只需添加标签并等待下一轮扫描，不需要在本地运行 Sandcastle 命令。
+本地 Dispatcher 由每分钟一次的 systemd timer 触发，每次触发开启一个 Dispatch Session（调度会话）：会话获取调度锁后，在 worker 完成和空闲轮询时持续发现新符合条件的命令并补充 worker，直到一次干净的发现确认没有可执行命令、也没有运行中的 worker 才释放锁并结束，且没有最长寿命（ADR-0005）。一般只需添加标签并等待调度会话获取，不需要在本地运行 Sandcastle 命令。
 
 > [!IMPORTANT]
 > Sandcastle 不会合并 Pull Request。自动 review 成功后，它会把 Draft Pull Request 标记为 Ready for Review。最终仍需人工核对 required checks 并合并。
@@ -141,7 +141,7 @@ Sandcastle 会更新现有 head branch。如果分支已经是最新状态，它
 gh issue edit <issue-number> --add-label agent:queued
 ```
 
-每轮 dispatch 都会读取当前 dependency 状态。所有 blocker 关闭后，Sandcastle 会把 `agent:queued` 改为 `agent:implement`，无需重放事件或手动提升。系统会拒绝排队的子 Issue，因为子 Issue 的推进由父 Spec 管理。
+调度会话在每次命令发现前都会读取当前 dependency 状态并执行队列提升。所有 blocker 关闭后，Sandcastle 会把 `agent:queued` 改为 `agent:implement`，无需重放事件或手动提升。系统会拒绝排队的子 Issue，因为子 Issue 的推进由父 Spec 管理。
 
 <a id="observe-progress"></a>
 ## 查看进度
@@ -183,13 +183,13 @@ npm run sandcastle -- inspect
 
 ### Interrupted Automation
 
-`agent:in-progress` 但没有 `agent:blocked` 的 Work Item 属于 Interrupted Automation。当所属 Target job provably dead 时——调度器没有活动 job、本地任务记录仍读取为 `running`、且其 `startedAt` 至少已过去五分钟——Dispatcher 会在后续某轮 dispatch 自动恢复该状态：清除 `agent:in-progress`，触发标签缺失时按记录的 Target operation 恢复它，并留下有界诊断评论。此时无需人工干预，也不要手动清除或恢复标签。
+`agent:in-progress` 但没有 `agent:blocked` 的 Work Item 属于 Interrupted Automation。当所属 Target job provably dead 时——调度器没有活动 job、本地任务记录仍读取为 `running`、且其 `startedAt` 至少已过去五分钟——Dispatcher 会在后续某个调度会话启动时自动恢复该状态：清除 `agent:in-progress`，触发标签缺失时按记录的 Target operation 恢复它，并留下有界诊断评论。此时无需人工干预，也不要手动清除或恢复标签。
 
 如果恢复证据 fails closed——任务记录缺失、不可读、有歧义或相互冲突，存在仍存活的任务，或启动时间尚未超过五分钟宽限期——Dispatcher 不会改动状态，Work Item 留给运维人员检查。只有在这种情况下，才需要先通过 `npm run sandcastle -- inspect` 和本地日志确认没有匹配的活动任务，再手动修正标签。
 
 同时带有触发标签和 `agent:in-progress`（`inconsistent`）的 Work Item，以及只有 `agent:in-progress`（`stale-in-progress`）的 Work Item，都属于上述 Interrupted Automation，适用自动恢复。
 
-本地镜像或 GitHub 凭据 readiness 失败发生在获取之前。触发标签会保留，Sandcastle 不会添加 `agent:blocked`。运维人员恢复 readiness 后，下一轮扫描会获取未变化的命令。
+本地镜像或 GitHub 凭据 readiness 失败发生在获取之前。触发标签会保留，Sandcastle 不会添加 `agent:blocked`。运维人员恢复 readiness 后，下一个调度会话会获取未变化的命令。
 
 <a id="what-sandcastle-does-not-infer"></a>
 ## Sandcastle 不会自行推断什么

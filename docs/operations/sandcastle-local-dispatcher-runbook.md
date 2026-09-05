@@ -1,7 +1,7 @@
 <a id="sandcastle-local-dispatcher-runbook"></a>
 # Sandcastle 本地 Dispatcher 运维手册
 
-本手册供运维人员部署、检查并对本地 WSL Dispatcher 进行 canary 验证。该 Dispatcher 取代了已停用的 Sandcastle claim/watch 流程。Automation Command、Automation Work Item、Blocked Automation、Dispatcher、Target Checkout 和 Legacy Run State 等规范术语在 `CONTEXT.md` 中定义。
+本手册供运维人员部署、检查并对本地 WSL Dispatcher 进行 canary 验证。该 Dispatcher 取代了已停用的 Sandcastle claim/watch 流程。Automation Command、Automation Work Item、Blocked Automation、Dispatcher、Dispatch Session、Target Checkout 和 Legacy Run State 等规范术语在 `CONTEXT.md` 中定义。
 
 Dispatcher 直接通过 Node 24 type stripping 从受信任的本地 `master` checkout 运行。系统没有 TypeScript build、安装器、release 目录、符号链接或回滚机制。Agent worker 使用下文准备的独立本地内容寻址 Docker 镜像。
 
@@ -55,7 +55,7 @@ npm run sandcastle -- inspect
 <a id="agent-container-github-readiness"></a>
 ## Agent 容器的 GitHub readiness
 
-具备 GitHub 能力的 Agent Session 只使用容器环境中的 `GH_TOKEN` 认证，见 #267。每轮定时 dispatch 获取任何 Automation Work Item 前，以及每个显式 GitHub 操作，也就是 `run review`、`run implement`、`run implement-spec`、`run split` 和 `run feedback`，Dispatcher 都会在精确内容寻址的 Agent 镜像中运行只读 `gh auth status` 探测。探测使用与 GitHub Agent 完全相同的环境，包括网络传输配置、Claude/API 白名单、`GH_TOKEN`，以及下文说明的 Git 身份变量。
+具备 GitHub 能力的 Agent Session 只使用容器环境中的 `GH_TOKEN` 认证，见 #267。定时 dispatch 的每个调度会话在获取任何 Automation Work Item 前，以及每个显式 GitHub 操作，也就是 `run review`、`run implement`、`run implement-spec`、`run split` 和 `run feedback`，Dispatcher 都会在精确内容寻址的 Agent 镜像中运行只读 `gh auth status` 探测。探测使用与 GitHub Agent 完全相同的环境，包括网络传输配置、Claude/API 白名单、`GH_TOKEN`，以及下文说明的 Git 身份变量。
 
 探测不会修改 GitHub。不得把 token 值或 readiness 命令的原始输出复制到日志、保留产物、GitHub 诊断或错误消息中。只能报告分类结果 `ready`、`missing`、`invalid` 或 `unavailable`。结果不是 `ready` 时，`inspect` 不会查询远程命令 frontier。此时 `commandInspection` 字段必须明确为 `"unavailable"`，不能返回空的 `commands` 列表。
 
@@ -63,11 +63,11 @@ npm run sandcastle -- inspect
 
 失败分类如下：
 
-- `missing`：私有环境变量文件中没有 `GH_TOKEN`。添加后重新运行操作，或等待下一轮 dispatch。
+- `missing`：私有环境变量文件中没有 `GH_TOKEN`。添加后重新运行操作，或等待下一个调度会话。
 - `invalid`：配置的 `GH_TOKEN` 无法通过认证。请在私有环境变量文件中更新它。
-- `unavailable`：探测本身无法运行，例如镜像不存在、镜像中没有 `gh`、容器网络失败或 Docker 不可用。请通过 `inspect` 和 dispatch 轮次日志诊断。
+- `unavailable`：探测本身无法运行，例如镜像不存在、镜像中没有 `gh`、容器网络失败或 Docker 不可用。请通过 `inspect` 和调度会话日志诊断。
 
-结果为 `missing` 或 `invalid` 时，该轮 dispatch 或显式操作会在获取 Work Item 前 fail closed。系统不会移除触发标签，不会添加 `agent:in-progress` 或 `agent:blocked`，也不会写入诊断评论。Automation Work Item 保持不变。凭据恢复后，下一轮 dispatch 或重试会再次获取它。
+结果为 `missing` 或 `invalid` 时，该调度会话或显式操作会在获取 Work Item 前 fail closed。系统不会移除触发标签，不会添加 `agent:in-progress` 或 `agent:blocked`，也不会写入诊断评论。Automation Work Item 保持不变。凭据恢复后，下一个调度会话或重试会再次获取它。
 
 使用只读检查命令验证 readiness。输出会同时报告探测结果和镜像 readiness：
 
@@ -125,7 +125,7 @@ npm run sandcastle -- setup-labels
 模板位于 `.sandcastle/systemd/`：
 
 ```text
-sandcastle-dispatch.service              一轮有界 dispatch
+sandcastle-dispatch.service              一次 Dispatch Session（调度会话）
 sandcastle-dispatch.timer                每分钟第 15 秒运行
 sandcastle-architecture-review.service   一次架构 review
 sandcastle-architecture-review.timer     周一至周五 09:00 UTC，上游计划时间
@@ -155,8 +155,9 @@ systemctl --user list-timers   # 确认两个 timer 都尚未启用
 
 运行行为说明：
 
-- 如果一轮 dispatch 发现 scheduler lock 已被占用，它会以 `status: "locked"` 退出，不执行任务。重叠轮次不会并发运行。
-- `.sandcastle/dispatcher.lock` 记录持有者的进程 ID。如果 lock 所属进程已经退出，例如宿主机崩溃后，下一轮会自动回收。仍需人工处理的一种情况是，进程在创建 lock 文件后、写入 PID 前遭到强制终止，导致文件中没有可读取的持有者 PID。系统不会自动回收这种 lock。先通过 `journalctl --user -u sandcastle-dispatch.service` 和 `inspect` 确认没有 Dispatcher 正在运行，再手动删除 `.sandcastle/dispatcher.lock`。
+- 一次 dispatch 执行构成一个 Dispatch Session（调度会话，ADR-0005）：获取调度锁后，会话在 worker 完成和短暂空闲轮询时重新发现新符合条件的命令并持续补充 worker，并在每次发现前执行队列提升。只有在一次干净的发现确认没有符合条件的命令、也没有运行中的 worker 时，会话才释放锁并结束；队列提升或命令发现失败的补充不算干净，会话会在下一个补充触发时重试而不是结束。会话没有最长寿命；单个任务或补充失败会被记录，但不会结束会话。
+- dispatch timer 保持每分钟一次的节奏不变。如果新的 timer 触发发现 scheduler lock 已被占用，也就是上一个调度会话尚未排空结束，它会以 `status: "locked"` 退出，不执行任务。重叠的 timer 触发对持有中的调度锁是 no-op，调度会话不会并发运行。
+- `.sandcastle/dispatcher.lock` 记录持有者的进程 ID。如果 lock 所属进程已经退出，例如宿主机崩溃后，下一个调度会话会自动回收。仍需人工处理的一种情况是，进程在创建 lock 文件后、写入 PID 前遭到强制终止，导致文件中没有可读取的持有者 PID。系统不会自动回收这种 lock。先通过 `journalctl --user -u sandcastle-dispatch.service` 和 `inspect` 确认没有 Dispatcher 正在运行，再手动删除 `.sandcastle/dispatcher.lock`。
 - architecture-review timer 使用 `Persistent=false`，错过的执行不会补跑。等待下一次计划时间或手动运行即可。
 - Dispatcher 自行限制任务运行时间，依次使用进程组 SIGTERM、grace period 和 SIGKILL，因此 unit 禁用了 oneshot 启动超时。
 
@@ -171,7 +172,7 @@ npm run sandcastle -- inspect
 
 readiness 为 `missing`、`invalid` 或 `unavailable` 时，命令返回 `commandInspection:"unavailable"` 并省略 `commands`。这表示没有查询远程队列，不表示队列为空。该命令不会修改 GitHub 或本地状态。
 
-一个 Work Item 同时带有触发标签和 `agent:in-progress`，说明标签只完成了部分修改。系统将它报告为 `inconsistent`，不会按当前状态执行；如果所属 Target job provably dead，Dispatcher 会在后续某轮 dispatch 自动清除 `agent:in-progress`，让 Work Item 按既有触发标签恢复执行。在检查结果同时满足 `"imageReadiness":"ready"` 和 `"githubAgentReadiness":"ready"` 前，不得获取任何具备 GitHub 能力的命令，也不得运行或重试 canary。
+一个 Work Item 同时带有触发标签和 `agent:in-progress`，说明标签只完成了部分修改。系统将它报告为 `inconsistent`，不会按当前状态执行；如果所属 Target job provably dead，Dispatcher 会在后续调度会话启动时自动清除 `agent:in-progress`，让 Work Item 按既有触发标签恢复执行。在检查结果同时满足 `"imageReadiness":"ready"` 和 `"githubAgentReadiness":"ready"` 前，不得获取任何具备 GitHub 能力的命令，也不得运行或重试 canary。
 
 <a id="explicit-operation-execution"></a>
 ## 显式执行操作
@@ -186,7 +187,7 @@ npm run sandcastle -- run review <pr-number>              # review Pull Request
 npm run sandcastle -- run feedback <pr-number>            # 实现 Pull Request feedback
 npm run sandcastle -- run update-branch <pr-number>       # rebase 或更新 Pull Request 分支
 npm run sandcastle -- architecture-review                 # 手动执行架构 review
-npm run sandcastle -- dispatch [--concurrency <1-8>]      # 执行一轮有界 dispatch，默认 2；环境变量：SANDCASTLE_DISPATCH_CONCURRENCY
+npm run sandcastle -- dispatch [--concurrency <1-8>]      # 执行一次 Dispatch Session（调度会话），worker 并发默认 2；环境变量：SANDCASTLE_DISPATCH_CONCURRENCY
 ```
 
 具备 GitHub 能力的操作，也就是 `run review`、`run implement`、`run implement-spec`、`run split` 和 `run feedback`，会在 preflight 中运行 Agent 容器 GitHub readiness 探测。探测发生在任何标签或诊断修改之前。`run update-branch` 和 `architecture-review` 不运行该探测。
@@ -200,10 +201,10 @@ Spec 实现会在完整的子 Issue 操作期间持有强制的跨进程 issue l
 
 1. 运行 `npm run sandcastle -- inspect`。如果 `commandInspection` 为 `"available"`，确认命令状态为 `blocked` 并阅读重试说明。如果为 `"unavailable"`，先恢复 GitHub readiness。这不表示没有命令。还要检查两个 readiness 字段。只要 `githubAgentReadiness` 或 `imageReadiness` 不是 `ready`，任何具备 GitHub 能力的命令随后重试时都会在获取前 fail closed，无论上次检查到的 frontier 是什么。
 2. 阅读 Issue 或 Pull Request 上经过分类的失败评论。
-3. 在本地读取 dispatch 轮次日志：`journalctl --user -u sandcastle-dispatch.service`。架构 review 使用 `-t sandcastle-architecture-review`。完整 Agent 输出只存在于本地日志，不会写入 GitHub 评论。
+3. 在本地读取调度会话日志：`journalctl --user -u sandcastle-dispatch.service`。架构 review 使用 `-t sandcastle-architecture-review`。完整 Agent 输出只存在于本地日志，不会写入 GitHub 评论。
 4. 检查 `.sandcastle/jobs/` 下保留的任务产物。失败或超时的 Target Checkout、metadata 和日志会保留七天。
 
-Agent 容器 GitHub readiness 失败不属于 Blocked Automation。它会让该轮 dispatch 或显式操作在获取 Work Item 前 fail closed，因此不会添加 `agent:blocked`，也不会写入诊断评论。如果具备 GitHub 能力的操作失败，但既没有分类评论也没有标签变化，应先怀疑 readiness。检查 `inspect` 和 dispatch 轮次日志，并严格按上文 Agent 容器 GitHub readiness 小节中的分类处理。不得把 token 值或 readiness 命令的原始输出复制到 GitHub 诊断、保留产物或错误消息中。
+Agent 容器 GitHub readiness 失败不属于 Blocked Automation。它会让该调度会话或显式操作在获取 Work Item 前 fail closed，因此不会添加 `agent:blocked`，也不会写入诊断评论。如果具备 GitHub 能力的操作失败，但既没有分类评论也没有标签变化，应先怀疑 readiness。检查 `inspect` 和调度会话日志，并严格按上文 Agent 容器 GitHub readiness 小节中的分类处理。不得把 token 值或 readiness 命令的原始输出复制到 GitHub 诊断、保留产物或错误消息中。
 
 <a id="manual-retry"></a>
 ## 手动重试
@@ -215,13 +216,13 @@ Agent 容器 GitHub readiness 失败不属于 Blocked Automation。它会让该�
 3. 重新添加对应的触发标签，例如 `agent:implement`、`agent:review`、`agent:update-branch` 或 `agent:to-tickets`。
 4. 验证 readiness。重试前，`npm run sandcastle -- inspect` 必须报告 `"imageReadiness":"ready"`。对于具备 GitHub 能力的命令，还必须报告 `"githubAgentReadiness":"ready"`。
 
-下一轮 dispatch 或显式 `run` 命令会获取该命令。Review 重试必须复用现有 Work Item。不要创建替代 Issue、分支或 Pull Request。
+下一个调度会话或显式 `run` 命令会获取该命令。Review 重试必须复用现有 Work Item。不要创建替代 Issue、分支或 Pull Request。
 
-readiness 失败会保留 Work Item 和触发标签，也没有需要移除的 `agent:blocked`。在本地恢复凭据或镜像，通过 `inspect` 重新验证，然后重新运行操作或等待下一轮 dispatch。不要修改标签。
+readiness 失败会保留 Work Item 和触发标签，也没有需要移除的 `agent:blocked`。在本地恢复凭据或镜像，通过 `inspect` 重新验证，然后重新运行操作或等待下一个调度会话。不要修改标签。
 
 每次具备 GitHub 能力的重试都必须创建或复用现有的 `sandcastle/issue-<n>` 分支，并且只能产生一个 Draft Pull Request。如果重试将创建第二个 Draft Pull Request 或替代 Work Item，应判定为失败，不能把它当作规避方案。Canary 只能重试一次。记录并验证下文要求的证据后，才能开始后续 canary。
 
-`inspect` 会把过期的 `agent:in-progress`（例如宿主机或 WSL 关闭后残留的标签）报告为 `stale-in-progress` 或 `inconsistent`。只要所属 Target job provably dead——没有活动 job、本地任务记录仍读取为 `running`、且其 `startedAt` 至少已过去五分钟——Dispatcher 就会在后续某轮 dispatch 自动清除 `agent:in-progress`，并在触发标签缺失时按记录恢复它，无需人工干预。只有恢复证据 fails closed（记录缺失、不可读、有歧义或相互冲突、任务仍存活，或启动时间尚未超过五分钟宽限期）时，才需要先通过 `inspect` 和 `journalctl` 确认没有匹配的活动任务，再手动移除或修正标签。带 `agent:blocked` 的 Blocked Automation 仍只能手动重试，绝不会被自动重试。
+`inspect` 会把过期的 `agent:in-progress`（例如宿主机或 WSL 关闭后残留的标签）报告为 `stale-in-progress` 或 `inconsistent`。只要所属 Target job provably dead——没有活动 job、本地任务记录仍读取为 `running`、且其 `startedAt` 至少已过去五分钟——Dispatcher 就会在后续调度会话启动时自动清除 `agent:in-progress`，并在触发标签缺失时按记录恢复它，无需人工干预。只有恢复证据 fails closed（记录缺失、不可读、有歧义或相互冲突、任务仍存活，或启动时间尚未超过五分钟宽限期）时，才需要先通过 `inspect` 和 `journalctl` 确认没有匹配的活动任务，再手动移除或修正标签。带 `agent:blocked` 的 Blocked Automation 仍只能手动重试，绝不会被自动重试。
 
 <a id="job-retention"></a>
 ## 任务保留策略
@@ -231,7 +232,7 @@ readiness 失败会保留 Work Item 和触发标签，也没有需要移除的 `
 - 成功：自动删除 Target Checkout，保留小型任务 metadata 和日志。
 - 失败或超时：在本地保留 Target Checkout、输出和日志，供诊断使用。
 - `.sandcastle/jobs/review-artifacts/` 下的 review 产物会在七天后自动过期，每次命令启动时执行清理。`.sandcastle/jobs/` 下失败或超时的 Target Checkout 及其他保留任务目录也采用相同的七天清理策略。只有结构状态 `review-artifacts/`、`pull-request-leases/` 和 `implementation-leases/` 不参与该目录清理。诊断完成后，运维人员可以提前删除保留目录。
-- dispatch 轮次日志写入 systemd journal，保留时间由 journald 配置决定。
+- 调度会话日志写入 systemd journal，保留时间由 journald 配置决定。
 
 <a id="safe-cleanup-boundaries"></a>
 ## 安全清理边界

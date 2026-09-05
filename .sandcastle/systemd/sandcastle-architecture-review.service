@@ -18,7 +18,7 @@ Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v24.19.0/bin:/usr/local/bin
 # No credentials here: GH_TOKEN, Claude routing/auth, and WSL proxy settings
 # come from ~/.claude/settings.json and the protected private environment file
 # (~/.config/sandcastle/env, mode 0600). Artifacts stay under .sandcastle/jobs/;
-# round output goes to the systemd journal.
+# operation output goes to the systemd journal.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sandcastle-architecture-review

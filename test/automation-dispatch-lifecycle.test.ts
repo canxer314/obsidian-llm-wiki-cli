@@ -26,19 +26,27 @@ describe("Automation Command dispatch lifecycle", () => {
     expect(listCommands).not.toHaveBeenCalled();
   });
 
-  it("uses one immutable discovery snapshot", async () => {
-    const commands = [command];
+  it("re-discovers after a worker finishes so a command that becomes eligible mid-session runs in the same session", async () => {
+    // ADR-0005: there is no frozen frontier anymore; a completion-triggered
+    // refill discovers the late command and dispatches it before draining.
     const late = { ...command, number: 221, identity: "pull-request:221" };
-    const run = vi.fn(async () => { commands.push(late); });
-    await dispatchAutomationCommands({}, {
+    const store = [command];
+    const run = vi.fn(async (selected: typeof command) => {
+      store.splice(store.findIndex((entry) => entry.identity === selected.identity), 1);
+      if (selected.number === 220) store.push(late);
+    });
+    const result = await dispatchAutomationCommands({}, {
       scheduler,
       promotion,
       readiness,
       recovery,
-      github: { verifyLabels: async () => {}, listCommands: async () => commands },
+      wait: () => new Promise<void>(() => {}),
+      github: { verifyLabels: async () => {}, listCommands: async () => store.slice() },
       run,
     });
-    expect(run).toHaveBeenCalledOnce();
-    expect(run).toHaveBeenCalledWith(command);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenNthCalledWith(1, command);
+    expect(run).toHaveBeenNthCalledWith(2, late);
+    expect(result).toEqual({ status: "dispatched", selected: [command, late] });
   });
 });

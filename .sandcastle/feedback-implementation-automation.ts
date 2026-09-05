@@ -421,7 +421,8 @@ export async function runFeedbackImplementation(
     }
     if (current.headSha !== pullRequest.headSha) {
       // A moved head is a race, not a business refusal: keep the trigger so
-      // the next dispatch round implements feedback on the new head.
+      // the Dispatch Session's next discovery implements feedback on the new
+      // head.
       return { status: "refused", reason: `Pull Request #${pullRequest.number} head changed while feedback implementation was being acquired` };
     }
     await ports.github.addPullRequestLabel(pullRequest.number, "agent:in-progress");

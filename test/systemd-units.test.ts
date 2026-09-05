@@ -81,7 +81,7 @@ describe("systemd Dispatcher templates", () => {
       expect(unit.Service?.WorkingDirectory).toBe("%h/repos/obsidian-llm-wiki-cli");
       // Node 24 type stripping runs the Dispatcher straight from trusted master.
       expect(unit.Service?.ExecStart).toMatch(/^%h\/\S*node --experimental-strip-types \.sandcastle\/main\.ts /u);
-      // The Dispatcher enforces job time limits itself; the unit must not cut a round.
+      // The Dispatcher enforces job time limits itself; the unit must not cut a Dispatch Session.
       expect(unit.Service?.TimeoutStartSec).toBe("0");
       expect(unit.Service?.Environment).toContain("PATH=");
       expect(unit.Service?.Environment).toContain("%h/.local/bin");
