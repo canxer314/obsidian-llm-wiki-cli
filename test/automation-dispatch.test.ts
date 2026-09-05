@@ -654,6 +654,129 @@ describe("Automation Command dispatch session", () => {
     await expect(session).resolves.toEqual({ status: "dispatched", selected: [eligible] });
   });
 
+  it("discards a refill discovery raced by a worker completion instead of draining on the stale snapshot", async () => {
+    // The second worker finishes while the refill discovery its colleague
+    // triggered is still in flight: the captured snapshot predates that
+    // completion's label changes, so its empty result must not drain the
+    // session. The pending completion wake re-discovers immediately — no
+    // idle poll has to fire.
+    const first = command({ number: 1, identity: "pull-request:1" });
+    const second = command({ number: 2, identity: "pull-request:2" });
+    const late = command({ number: 3, identity: "pull-request:3" });
+    const discovery = discoveryStore([first, second]);
+    const gate = pollGate();
+    const gates = new Map<number, () => void>();
+    const run = vi.fn(async (selected: TestCommand) => {
+      discovery.consume(selected);
+      await new Promise<void>((resolve) => { gates.set(selected.number, resolve); });
+      // The second command's completion makes new work eligible.
+      if (selected.number === 2) discovery.store.push(late);
+    });
+    let discoveries = 0;
+    let resolveStale: (() => void) | undefined;
+    const listCommands = vi.fn(() => {
+      discoveries += 1;
+      // The snapshot is captured when the discovery is issued, exactly how a
+      // list call in flight predates a concurrent label change.
+      const snapshot = discovery.store.slice();
+      if (discoveries === 2) {
+        return new Promise<readonly TestCommand[]>((resolve) => {
+          resolveStale = () => resolve(snapshot);
+        });
+      }
+      return Promise.resolve(snapshot);
+    });
+
+    const session = dispatchAutomationCommands({ concurrency: 2 }, {
+      scheduler,
+      promotion,
+      readiness,
+      recovery,
+      wait: gate.wait,
+      github: { verifyLabels: async () => {}, listCommands },
+      run,
+    });
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    // The first completion triggers a refill whose discovery is held...
+    gates.get(1)!();
+    await vi.waitFor(() => expect(discoveries).toBe(2));
+    // ...and the second completion lands while that discovery is in flight.
+    gates.get(2)!();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Resolving with the stale (empty) snapshot must neither drain the
+    // session nor dispatch from it: the pending wake refills immediately.
+    resolveStale!();
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(3));
+    gates.get(3)!();
+
+    await expect(session).resolves.toEqual({ status: "dispatched", selected: [first, second, late] });
+    expect(run).toHaveBeenNthCalledWith(3, late);
+    // Session start, the discarded stale discovery, the immediate refill
+    // that dispatched the late command, and the clean empty drain.
+    expect(listCommands).toHaveBeenCalledTimes(4);
+    // Both armed idle polls lost their race against completion wakes; no
+    // poll had to fire for the session to make progress.
+    expect(gate.waits).toEqual([
+      DISPATCH_SESSION_IDLE_POLL_MILLISECONDS,
+      DISPATCH_SESSION_IDLE_POLL_MILLISECONDS,
+    ]);
+    expect(gate.cancels).toBe(2);
+  });
+
+  it("does not re-dispatch a command whose trigger was consumed while the refill discovery was in flight", async () => {
+    // The stale snapshot still shows the second command's trigger because
+    // the list call was issued before the finishing job consumed it: filling
+    // from that snapshot would run the same operation twice.
+    const first = command({ number: 1, identity: "pull-request:1" });
+    const second = command({ number: 2, identity: "pull-request:2" });
+    const discovery = discoveryStore([first, second]);
+    const gates = new Map<number, () => void>();
+    const run = vi.fn(async (selected: TestCommand) => {
+      await new Promise<void>((resolve) => { gates.set(selected.number, resolve); });
+      // The second command consumes its trigger only as the job finishes,
+      // after the in-flight discovery already captured it.
+      discovery.consume(selected);
+    });
+    let discoveries = 0;
+    let resolveStale: (() => void) | undefined;
+    const listCommands = vi.fn(() => {
+      discoveries += 1;
+      const snapshot = discovery.store.slice();
+      if (discoveries === 2) {
+        return new Promise<readonly TestCommand[]>((resolve) => {
+          resolveStale = () => resolve(snapshot);
+        });
+      }
+      return Promise.resolve(snapshot);
+    });
+
+    const session = dispatchAutomationCommands({ concurrency: 2 }, {
+      scheduler,
+      promotion,
+      readiness,
+      recovery,
+      wait: neverPoll,
+      github: { verifyLabels: async () => {}, listCommands },
+      run,
+    });
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    gates.get(1)!();
+    await vi.waitFor(() => expect(discoveries).toBe(2));
+    // The second worker finishes — consuming its trigger — while the refill
+    // discovery that still contains it is in flight.
+    gates.get(2)!();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    resolveStale!();
+
+    await expect(session).resolves.toEqual({ status: "dispatched", selected: [first, second] });
+    expect(run).toHaveBeenCalledTimes(2);
+    // Session start, the discarded stale discovery, and the immediate
+    // refill's clean empty drain discovery.
+    expect(listCommands).toHaveBeenCalledTimes(3);
+  });
+
   it("never runs two operations for the same Work Item identity concurrently", async () => {
     const eligible = command({ number: 1, identity: "pull-request:1" });
     const discovery = discoveryStore([eligible]);

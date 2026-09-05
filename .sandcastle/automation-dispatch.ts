@@ -111,6 +111,11 @@ export async function dispatchAutomationCommands(
     // Identities with a worker in flight; excluded from every refill so one
     // Work Item never runs two operations concurrently.
     const running = new Set<string>();
+    // Completed-worker count. A refill discovery raced by a completion is
+    // stale: the snapshot may predate the completion's label changes, so it
+    // can neither fill (a finished command could be re-dispatched) nor prove
+    // the clean empty discovery the drain requires.
+    let completions = 0;
     let wake: () => void = () => {};
     let settled = new Promise<void>((resolve) => {
       wake = resolve;
@@ -126,6 +131,7 @@ export async function dispatchAutomationCommands(
           failures.push(reason);
         } finally {
           running.delete(command.identity);
+          completions += 1;
           // A worker completion triggers a fresh refill immediately.
           wake();
         }
@@ -175,12 +181,14 @@ export async function dispatchAutomationCommands(
     for (;;) {
       if (!firstRefill && cleanEmpty && running.size === 0) break;
       if (!firstRefill || running.size > 0) {
-        if (running.size === 0) {
-          // No worker can complete (the last refill failed); the idle poll
-          // is the only refill trigger left, so its timer must keep the
-          // process alive until it fires.
-          await cancellable(wait(DISPATCH_SESSION_IDLE_POLL_MILLISECONDS)).completed;
-        } else if (running.size < limit) {
+        if (running.size < limit) {
+          // A free slot arms the idle poll; a worker completion wins the
+          // race and refills immediately. With no worker in flight the poll
+          // is the only future refill trigger left, so its ref'd timer must
+          // keep the process alive until it fires — but a completion that
+          // raced the last refill's discovery left its wake pending on
+          // `settled`, and that wake refills immediately instead of waiting
+          // out the poll.
           const poll = cancellable(wait(DISPATCH_SESSION_IDLE_POLL_MILLISECONDS));
           try {
             await Promise.race([settled, poll.completed]);
@@ -210,9 +218,20 @@ export async function dispatchAutomationCommands(
         refillFailed = true;
       }
       try {
-        const frontier = select(await ports.github.listCommands(), new Set());
-        cleanEmpty = !refillFailed && frontier.length === 0;
-        fill(frontier);
+        const completionsBefore = completions;
+        const commands = await ports.github.listCommands();
+        if (completions !== completionsBefore) {
+          // A worker completed mid-discovery: the snapshot may predate that
+          // completion's label changes, so filling from it could re-dispatch
+          // a finished command and an empty result could not prove the clean
+          // drain. Discard it; the completion's pending wake re-discovers
+          // immediately instead of waiting out the idle poll.
+          cleanEmpty = false;
+        } else {
+          const frontier = select(commands, new Set());
+          cleanEmpty = !refillFailed && frontier.length === 0;
+          fill(frontier);
+        }
       } catch (reason: unknown) {
         failures.push(reason);
         cleanEmpty = false;
