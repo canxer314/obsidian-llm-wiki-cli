@@ -10,7 +10,7 @@ The Dispatcher ran as a one-shot round: it froze one discovery snapshot into a f
 
 ## Decision
 
-Replace the one-shot round with a continuously-refilling Dispatch Session. One session takes the scheduling lock, keeps its bounded workers full by re-discovering on worker completion and a short idle poll, runs queue promotion before each discovery, and releases the lock only when a clean discovery finds no eligible command and no worker is running. A single job or refill failure is recorded but does not end the session, which has no maximum lifetime.
+Replace the one-shot round with a continuously-refilling Dispatch Session. One session takes the scheduling lock, keeps its bounded workers full by re-discovering on worker completion and a short idle poll, runs queue promotion before each discovery, and releases the lock only when a clean discovery finds no eligible command and no worker is running. A single job or refill failure is recorded but does not end the session, which has no maximum lifetime; a refill whose promotion or discovery failed never counts as the clean discovery the drain requires and is retried on the next refill trigger.
 
 ## Consequences
 

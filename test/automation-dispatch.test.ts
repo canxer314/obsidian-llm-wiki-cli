@@ -76,16 +76,28 @@ const neverPoll = vi.fn((_milliseconds: number) => new Promise<void>(() => {}));
 
 function pollGate() {
   const waits: number[] = [];
+  // The loop cancels a poll that loses the race against a worker completion
+  // (a plain-promise wait gets a no-op cancel); count cancellations to pin
+  // that behavior.
+  let cancels = 0;
   let pending: (() => void) | undefined;
   const wait = vi.fn((milliseconds: number) => {
     waits.push(milliseconds);
-    return new Promise<void>((resolve) => {
-      pending = resolve;
-    });
+    return {
+      completed: new Promise<void>((resolve) => {
+        pending = resolve;
+      }),
+      cancel: () => {
+        cancels += 1;
+      },
+    };
   });
   return {
     wait,
     waits,
+    get cancels() {
+      return cancels;
+    },
     release() {
       pending?.();
       pending = undefined;
@@ -792,28 +804,52 @@ describe("Automation Command dispatch session", () => {
     expect(result).toEqual({ status: "dispatched", selected: [eligible] });
   });
 
-  it("records a refill promotion failure and reports it when the session drains", async () => {
+  it("records a refill promotion failure, retries on the idle poll instead of draining, and reports the failure", async () => {
     const existing = command({ number: 218 });
     const discovery = discoveryStore([existing]);
+    const gate = pollGate();
     const run = vi.fn(async (selected: TestCommand) => {
       discovery.consume(selected);
     });
-    await expect(dispatchAutomationCommands({}, {
+    const scan = vi.fn()
+      .mockRejectedValueOnce(new Error("GitHub dependency state is unavailable"))
+      .mockResolvedValue({ status: "scanned" as const, promoted: [], refused: [] });
+
+    const session = dispatchAutomationCommands({}, {
       scheduler,
       github: { verifyLabels: async () => {}, listCommands: discovery.listCommands },
-      promotion: { scan: async () => { throw new Error("GitHub dependency state is unavailable"); } },
+      promotion: { scan },
       readiness,
       recovery,
-      wait: neverPoll,
+      wait: gate.wait,
       run,
-    })).resolves.toEqual({
+    });
+    const settled = vi.fn();
+    void session.then(settled, settled);
+
+    // The completion-triggered refill wins its race against the idle poll
+    // (the losing poll is cancelled); its promotion failure is recorded and
+    // its empty discovery cannot drain the session — a failed refill never
+    // satisfies the clean-empty drain condition, so the session waits for the
+    // next idle poll.
+    await vi.waitFor(() => expect(gate.waits).toEqual([
+      DISPATCH_SESSION_IDLE_POLL_MILLISECONDS,
+      DISPATCH_SESSION_IDLE_POLL_MILLISECONDS,
+    ]));
+    expect(gate.cancels).toBe(1);
+    expect(settled).not.toHaveBeenCalled();
+
+    // The retried refill's promotion succeeds and its clean empty discovery
+    // drains the session, which reports the recorded failure.
+    gate.release();
+    await expect(session).resolves.toEqual({
       status: "failed",
       selected: [existing],
       failures: ["GitHub dependency state is unavailable"],
     });
-    // Session start discovered once; the failing refill still ran its own
-    // discovery so the session could observe the clean empty drain condition.
-    expect(discovery.listCommands).toHaveBeenCalledTimes(2);
+    // Session start, the failed refill, and the retry's drain discovery.
+    expect(discovery.listCommands).toHaveBeenCalledTimes(3);
+    expect(scan).toHaveBeenCalledTimes(2);
     expect(run).toHaveBeenCalledOnce();
     expect(run).toHaveBeenCalledWith(existing);
   });

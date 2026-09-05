@@ -5,7 +5,7 @@ export interface CancellableWait {
 
 export type Wait = (milliseconds: number) => Promise<void> | CancellableWait;
 
-function cancellable(wait: Promise<void> | CancellableWait): CancellableWait {
+export function cancellable(wait: Promise<void> | CancellableWait): CancellableWait {
   if ("completed" in wait) return wait;
   return { completed: wait, cancel: () => {} };
 }

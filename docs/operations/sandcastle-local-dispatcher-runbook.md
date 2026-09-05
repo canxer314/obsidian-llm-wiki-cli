@@ -155,7 +155,7 @@ systemctl --user list-timers   # 确认两个 timer 都尚未启用
 
 运行行为说明：
 
-- 一次 dispatch 执行构成一个 Dispatch Session（调度会话，ADR-0005）：获取调度锁后，会话在 worker 完成和短暂空闲轮询时重新发现新符合条件的命令并持续补充 worker，并在每次发现前执行队列提升。只有在一次干净的发现确认没有符合条件的命令、也没有运行中的 worker 时，会话才释放锁并结束。会话没有最长寿命；单个任务或补充失败会被记录，但不会结束会话。
+- 一次 dispatch 执行构成一个 Dispatch Session（调度会话，ADR-0005）：获取调度锁后，会话在 worker 完成和短暂空闲轮询时重新发现新符合条件的命令并持续补充 worker，并在每次发现前执行队列提升。只有在一次干净的发现确认没有符合条件的命令、也没有运行中的 worker 时，会话才释放锁并结束；队列提升或命令发现失败的补充不算干净，会话会在下一个补充触发时重试而不是结束。会话没有最长寿命；单个任务或补充失败会被记录，但不会结束会话。
 - dispatch timer 保持每分钟一次的节奏不变。如果新的 timer 触发发现 scheduler lock 已被占用，也就是上一个调度会话尚未排空结束，它会以 `status: "locked"` 退出，不执行任务。重叠的 timer 触发对持有中的调度锁是 no-op，调度会话不会并发运行。
 - `.sandcastle/dispatcher.lock` 记录持有者的进程 ID。如果 lock 所属进程已经退出，例如宿主机崩溃后，下一个调度会话会自动回收。仍需人工处理的一种情况是，进程在创建 lock 文件后、写入 PID 前遭到强制终止，导致文件中没有可读取的持有者 PID。系统不会自动回收这种 lock。先通过 `journalctl --user -u sandcastle-dispatch.service` 和 `inspect` 确认没有 Dispatcher 正在运行，再手动删除 `.sandcastle/dispatcher.lock`。
 - architecture-review timer 使用 `Persistent=false`，错过的执行不会补跑。等待下一次计划时间或手动运行即可。

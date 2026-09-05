@@ -7,6 +7,7 @@ import {
   type AutomationCommand,
 } from "./automation-command.ts";
 import type { QueuePromotionResult } from "./queue-promotion-automation.ts";
+import { cancellable, type CancellableWait, type Wait } from "./job-timeout.ts";
 
 // ADR-0005: a Dispatch Session re-discovers whenever a worker finishes and on
 // a fixed one-minute idle poll that runs only while at least one worker slot
@@ -41,16 +42,27 @@ export interface AutomationDispatchPorts {
   };
   readonly run: (command: AutomationCommand) => Promise<void>;
   // Idle-poll wait, injected so tests advance the session deterministically
-  // without real timers. The default is an unref'd timer so a drained session
-  // never delays process exit.
-  readonly wait?: (milliseconds: number) => Promise<void>;
+  // without real timers. A plain promise is accepted but cannot be cancelled;
+  // the default is a ref'd cancellable timer (see defaultWait).
+  readonly wait?: Wait;
 }
 
-const defaultWait = (milliseconds: number): Promise<void> =>
-  new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    timer.unref?.();
-  });
+// The production idle poll is a ref'd timer: when the poll is the only
+// refill trigger left, it is the one handle keeping the process alive for
+// the retry. The loop cancels a poll that loses the race against a worker
+// completion, so a drained session never delays process exit.
+const defaultWait = (milliseconds: number): CancellableWait => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    completed: new Promise((resolve) => {
+      timer = setTimeout(resolve, milliseconds);
+    }),
+    cancel: () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+};
 
 // The outcome of one Dispatch Session. "locked" means the scheduling lock was
 // unavailable and nothing ran. "dispatched" means the session drained with no
@@ -164,11 +176,19 @@ export async function dispatchAutomationCommands(
       if (!firstRefill && cleanEmpty && running.size === 0) break;
       if (!firstRefill || running.size > 0) {
         if (running.size === 0) {
-          // No worker can complete (the last discovery failed); the idle poll
-          // is the only refill trigger left.
-          await wait(DISPATCH_SESSION_IDLE_POLL_MILLISECONDS);
+          // No worker can complete (the last refill failed); the idle poll
+          // is the only refill trigger left, so its timer must keep the
+          // process alive until it fires.
+          await cancellable(wait(DISPATCH_SESSION_IDLE_POLL_MILLISECONDS)).completed;
         } else if (running.size < limit) {
-          await Promise.race([settled, wait(DISPATCH_SESSION_IDLE_POLL_MILLISECONDS)]);
+          const poll = cancellable(wait(DISPATCH_SESSION_IDLE_POLL_MILLISECONDS));
+          try {
+            await Promise.race([settled, poll.completed]);
+          } finally {
+            // A completion-driven wakeup cancels the losing poll timer so a
+            // drained session never delays process exit.
+            poll.cancel();
+          }
         } else {
           await settled;
         }
@@ -179,15 +199,19 @@ export async function dispatchAutomationCommands(
       firstRefill = false;
       // Promotion runs before every refill discovery so a promoted command is
       // visible to the same refill. A promotion failure is recorded and the
-      // refill still discovers, so a clean empty discovery can drain.
+      // refill still discovers so eligible work keeps flowing, but a failed
+      // refill never counts as the clean empty discovery the drain requires:
+      // the session retries on the next refill trigger instead of draining.
+      let refillFailed = false;
       try {
         await ports.promotion.scan();
       } catch (reason: unknown) {
         failures.push(reason);
+        refillFailed = true;
       }
       try {
         const frontier = select(await ports.github.listCommands(), new Set());
-        cleanEmpty = frontier.length === 0;
+        cleanEmpty = !refillFailed && frontier.length === 0;
         fill(frontier);
       } catch (reason: unknown) {
         failures.push(reason);
