@@ -47,7 +47,7 @@ export interface InterruptedAutomationEvidence {
   readonly records: readonly InterruptedAutomationJobRecord[];
   // Directories whose metadata is missing, unreadable, or invalid. Such a
   // record might be a live match for any identity, so its presence refuses
-  // every recovery in the round (fail closed, ADR-0004).
+  // every recovery in the Dispatch Session (fail closed, ADR-0004).
   readonly unreadable: readonly string[];
 }
 
@@ -78,8 +78,8 @@ export interface InterruptedAutomationRecoveryPorts {
 }
 
 export interface InterruptedAutomationRecovery {
-  // Returns the identities repaired this round so the Dispatcher excludes
-  // them from the frontier built from the same discovery snapshot.
+  // Returns the identities repaired in this Dispatch Session so the Dispatcher
+  // excludes them from the frontier built from the same discovery snapshot.
   recoverInterrupted(commands: readonly AutomationCommand[]): Promise<readonly string[]>;
 }
 
@@ -223,8 +223,9 @@ export function createInterruptedAutomationRecovery(
     const triggerRestored = !command.labels.includes(route.trigger);
     // Restore the trigger before clearing agent:in-progress so an interruption
     // (or failed call) between the two leaves the Work Item inconsistent —
-    // still a recovery candidate on the next round — rather than label-less and
-    // invisible. This mirrors acquisition and promotion label ordering.
+    // still a recovery candidate in the next Dispatch Session — rather than
+    // label-less and invisible. This mirrors acquisition and promotion label
+    // ordering.
     if (triggerRestored) await ports.github.addIssueLabel(command.number, route.trigger);
     await ports.github.removeIssueLabel(command.number, "agent:in-progress");
     await ports.github.addRecoveryDiagnostic(command.number, {

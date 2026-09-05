@@ -8,10 +8,11 @@ const executeFile = promisify(execFile);
 
 type Execute = (file: string, arguments_: readonly string[]) => Promise<{ readonly stdout: string }>;
 
-// The lock file carries the holder's process ID. A round that finds the file
-// held by a dead process reclaims it; a file without a readable PID (for
-// example one left between creation and the PID write by a hard kill) is
-// never reclaimed automatically and remains a manual operator case.
+// The lock file carries the holder's process ID. A Dispatch Session that
+// finds the file held by a dead process reclaims it; a file without a
+// readable PID (for example one left between creation and the PID write by a
+// hard kill) is never reclaimed automatically and remains a manual operator
+// case.
 async function acquireFileLock(path: string): Promise<{ release(): Promise<void> } | undefined> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {

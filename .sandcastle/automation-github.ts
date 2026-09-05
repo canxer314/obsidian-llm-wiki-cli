@@ -362,7 +362,8 @@ export function createAutomationDispatchGithubPort(options: {
         }
         // When both triggers are present, only the higher-priority
         // implementation command runs (#219); the split trigger stays for a
-        // later round so one Work Item never runs two operations at once.
+        // later Dispatch Session discovery so one Work Item never runs two
+        // operations at once.
         const splitRoute = resolveAutomationCommandRoute("split-spec", number);
         if (labels.includes(splitRoute.trigger) && !labels.includes("agent:implement")) {
           commands.push({ number, operation: splitRoute.operation, identity: splitRoute.identity, labels });

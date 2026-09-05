@@ -1,12 +1,15 @@
-# One-minute schedule for bounded Sandcastle dispatch rounds, offset from the
-# architecture-review schedule so the global lock does not suppress it.
+# One-minute schedule for Sandcastle Dispatch Sessions, offset from the
+# architecture-review schedule so the global lock does not suppress it. The
+# one-minute cadence is unchanged by ADR-0005: a session may refill without a
+# maximum lifetime, and an overlapping timer trigger no-ops on the held
+# scheduling lock.
 # Copy to ~/.config/systemd/user/ together with sandcastle-dispatch.service.
 # Shipped disabled: enable explicitly with
 #   systemctl --user enable --now sandcastle-dispatch.timer
 # only after the runbook canaries pass and the retired writer is stopped.
 
 [Unit]
-Description=Run one bounded Sandcastle dispatch round every minute
+Description=Run one Sandcastle Dispatch Session every minute
 
 [Timer]
 OnCalendar=*-*-* *:*:15

@@ -242,7 +242,7 @@ describe("Interrupted Automation recovery", () => {
     expectNoMutation(events);
   });
 
-  it("still recovers a provably-dead candidate when another candidate fails closed in the same round", async () => {
+  it("still recovers a provably-dead candidate when another candidate fails closed in the same Dispatch Session", async () => {
     // Fail-closed proof is per Work Item: a candidate inside the grace window
     // is skipped without aborting recovery of a second, provably-dead one.
     const recent: AutomationCommand = {
@@ -298,7 +298,7 @@ describe("Interrupted Automation recovery", () => {
     expectNoMutation(events);
   });
 
-  it("refuses the whole round when any job evidence is unreadable", async () => {
+  it("refuses the whole Dispatch Session when any job evidence is unreadable", async () => {
     const stale: AutomationCommand = {
       number: 41, operation: "implement-issue", identity: "issue:41", labels: ["agent:in-progress"],
     };
@@ -506,7 +506,7 @@ describe("Interrupted Automation recovery", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("refuses the whole round for a Spec split when any job evidence is unreadable", async () => {
+  it("refuses the whole Dispatch Session for a Spec split when any job evidence is unreadable", async () => {
     const inconsistentSpec: AutomationCommand = {
       number: 55, operation: "split-spec", identity: "spec:55", labels: ["agent:to-tickets", "agent:in-progress"],
     };
@@ -830,7 +830,7 @@ describe("Interrupted Automation recovery", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("refuses the whole round for Pull Request recovery when any job evidence is unreadable", async () => {
+  it("refuses the whole Dispatch Session for Pull Request recovery when any job evidence is unreadable", async () => {
     const stale: AutomationCommand = {
       number: 75, operation: "unknown", identity: "pull-request:75", labels: ["agent:in-progress"],
     };
@@ -872,7 +872,7 @@ describe("Interrupted Automation recovery", () => {
   it("restores the trigger before clearing in-progress so an interrupted recovery stays recoverable", async () => {
     // Mirror acquisition and promotion ordering: the restored trigger lands
     // first, so a failure or crash between the two label mutations leaves the
-    // Work Item inconsistent — still a candidate next round — never label-less.
+    // Work Item inconsistent — still a candidate in the next Dispatch Session — never label-less.
     const stale: AutomationCommand = {
       number: 41, operation: "implement-issue", identity: "issue:41", labels: ["agent:in-progress"],
     };

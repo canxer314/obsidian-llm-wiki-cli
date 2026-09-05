@@ -85,7 +85,7 @@ The thin trusted local scheduler that runs directly from the trusted local `mast
 _Avoid_: Workflow engine, claim service, orchestrator
 
 **Dispatch Session**:
-The Dispatcher's one continuous scheduling lifetime: it takes the scheduling lock, keeps its bounded workers refilled as Automation Commands become eligible and running jobs settle, and releases the lock only when a clean discovery finds no eligible command and no worker is running.
+The Dispatcher's one continuous scheduling lifetime (ADR-0005). It starts when the Dispatcher takes the scheduling lock, keeps its bounded workers refilled as Automation Commands become eligible and running jobs settle, and drains — releasing the lock — only when a clean discovery finds no eligible command and no worker is running. A session may refill without a maximum lifetime; the one-minute systemd timer is unchanged, and an overlapping timer invocation no-ops on the held scheduling lock.
 _Avoid_: One-shot round, frozen frontier, long-lived daemon
 
 **Target Checkout**:

@@ -918,12 +918,12 @@ describe("Automation Command dispatch session", () => {
 
 describe("Automation Command inspection", () => {
   // ADR-0004: stale-in-progress and inconsistent Work Items are Interrupted
-  // Automation, which the Dispatcher recovers automatically on a later
-  // dispatch round once the owning job is provably dead. Only evidence that
+  // Automation, which the Dispatcher recovers automatically in a later
+  // Dispatch Session once the owning job is provably dead. Only evidence that
   // fails closed keeps such a Work Item on the manual-inspection path; Blocked
   // Automation stays manual-only and is never implied auto-recoverable.
   const interruptedAutomationRetry =
-    "the Dispatcher automatically recovers this Interrupted Automation on a later dispatch round when the owning job is provably dead; if recovery evidence fails closed, inspect the Automation Work Item and resolve labels manually";
+    "the Dispatcher automatically recovers this Interrupted Automation in a later Dispatch Session when the owning job is provably dead; if recovery evidence fails closed, inspect the Automation Work Item and resolve labels manually";
   const blockedUnknownRetry =
     "inspect the Automation Work Item and restore the appropriate trigger manually before retrying";
 

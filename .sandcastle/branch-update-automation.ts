@@ -98,8 +98,8 @@ export async function runBranchUpdateAutomationCommand(
   try {
     // Business preflight refusal (#219 story 17): remove the trigger and
     // explain on the Automation Work Item, without agent:blocked, so an
-    // inapplicable request (e.g. a fork Pull Request) does not re-refuse
-    // every round.
+    // inapplicable request (e.g. a fork Pull Request) does not re-refuse on
+    // every Dispatch Session discovery.
     const reason = refusal(pullRequest);
     if (reason !== undefined) {
       await ports.github.removePullRequestLabel(pullRequest.number, "agent:update-branch");

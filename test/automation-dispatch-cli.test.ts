@@ -4,7 +4,7 @@ import { AutomationCliError, runAutomationCli } from "../.sandcastle/automation-
 import { GithubAgentReadinessError } from "../.sandcastle/github-readiness.js";
 
 describe("automation command CLI", () => {
-  it("dispatches one bounded round and reads inspection without allowing arbitrary operations", async () => {
+  it("dispatches one Dispatch Session and reads inspection without allowing arbitrary operations", async () => {
     const dispatch = vi.fn().mockResolvedValue({ status: "dispatched" });
     const inspect = vi.fn().mockResolvedValue({ commands: [] });
     const setupLabels = vi.fn().mockResolvedValue({ status: "labels-ready" });

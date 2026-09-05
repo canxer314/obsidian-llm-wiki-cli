@@ -1,4 +1,9 @@
-# Sandcastle Dispatcher: one bounded Automation Command dispatch round.
+# Sandcastle Dispatcher: one Dispatch Session of Automation Command dispatch.
+#
+# A Dispatch Session (ADR-0005) takes the scheduling lock, keeps its bounded
+# workers refilled as commands become eligible, and has no maximum lifetime: it
+# ends only after a clean-empty drain. The one-minute timer cadence is
+# unchanged; an overlapping timer trigger no-ops on the held scheduling lock.
 #
 # This is a version-controlled template, not an installed unit. To deploy:
 #   1. Follow docs/operations/sandcastle-local-dispatcher-runbook.md first.
@@ -10,7 +15,7 @@
 # path by being merged or copied.
 
 [Unit]
-Description=Sandcastle Dispatcher bounded dispatch round
+Description=Sandcastle Dispatcher Dispatch Session
 # Concurrency with the retired writer is prevented procedurally: the runbook's
 # cutover guard requires the old system to be stopped before this timer is
 # enabled. Old and new write paths must never be active at the same time.
@@ -24,11 +29,12 @@ WorkingDirectory=%h/repos/obsidian-llm-wiki-cli
 # Point this at the host's Node 24 installation; there is no build or install step.
 ExecStart=%h/.nvm/versions/node/v24.19.0/bin/node --experimental-strip-types .sandcastle/main.ts dispatch
 # Job time limits are enforced by the Dispatcher (process-group SIGTERM/SIGKILL).
-# The unit must not cut a bounded round, so disable the oneshot start timeout.
+# The unit must not cut a Dispatch Session, so disable the oneshot start
+# timeout.
 TimeoutStartSec=0
 # Child tools (claude, gh, git, docker, node, npm) resolve through this PATH.
 Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v24.19.0/bin:/usr/local/bin:/usr/bin:/bin
-# Bounded dispatch workers per round (default 2, allowed 1-8).
+# Bounded dispatch workers per Dispatch Session (default 2, allowed 1-8).
 Environment=SANDCASTLE_DISPATCH_CONCURRENCY=4
 # No credentials live in this unit. GH_TOKEN, Claude/CC-Switch routing and
 # authentication, and WSL proxy transport settings are loaded at startup from
@@ -36,7 +42,7 @@ Environment=SANDCASTLE_DISPATCH_CONCURRENCY=4
 # (~/.config/sandcastle/env, mode 0600, outside the repository).
 # Job state and logs stay local: Target Checkouts and job artifacts under
 # .sandcastle/jobs/, the scheduler lock and active-job markers under
-# .sandcastle/, and dispatch-round output in the systemd journal below.
+# .sandcastle/, and Dispatch Session output in the systemd journal below.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sandcastle-dispatch

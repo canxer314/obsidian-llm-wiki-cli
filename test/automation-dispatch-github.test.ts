@@ -219,7 +219,7 @@ describe("Automation Command GitHub discovery", () => {
     const port = createAutomationDispatchGithubPort({ execute });
 
     // Implementation has the higher priority (#219); the split trigger stays
-    // for a later round once implementation has consumed its own trigger.
+    // for a later Dispatch Session discovery once implementation has consumed its own trigger.
     await expect(port.listCommands()).resolves.toEqual([
       { number: 36, operation: "implement-issue", identity: "issue:36", labels: ["agent:implement", "agent:to-tickets"] },
     ]);
