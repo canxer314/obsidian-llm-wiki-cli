@@ -472,8 +472,99 @@ describe("Automation Command dispatch session", () => {
     expect(settled).not.toHaveBeenCalled();
 
     releaseSlow();
-    await expect(session).rejects.toThrow("review failed");
+    // The drained session reports the failure together with everything it
+    // dispatched — the failing command stays in the cumulative list.
+    await expect(session).resolves.toEqual({
+      status: "failed",
+      selected: [failing, slow],
+      failures: ["review failed"],
+    });
     expect(slowCompleted).toBe(true);
+  });
+
+  it("reuses the slot of a rejected worker for unrelated work the failure-triggered refill discovers", async () => {
+    const failing = command({ number: 1, identity: "pull-request:1" });
+    const late = command({ number: 2, identity: "pull-request:2" });
+    const discovery = discoveryStore([failing]);
+    const executed: number[] = [];
+    const run = vi.fn(async (selected: TestCommand) => {
+      discovery.consume(selected);
+      executed.push(selected.number);
+      if (selected.number === 1) {
+        // The unrelated command becomes eligible exactly as the only worker
+        // rejects; its freed slot must stay usable in the same session.
+        discovery.store.push(late);
+        throw new Error("review failed");
+      }
+    });
+
+    const session = dispatchAutomationCommands({ concurrency: 1 }, {
+      scheduler,
+      promotion,
+      readiness,
+      recovery,
+      wait: neverPoll,
+      github: { verifyLabels: async () => {}, listCommands: discovery.listCommands },
+      run,
+    });
+
+    // The rejection ends neither the session nor the slot: the refill the
+    // failure triggers dispatches the unrelated command into it.
+    await vi.waitFor(() => expect(executed).toEqual([1, 2]));
+    // The CLI prints this result (cumulative list plus failure evidence) and
+    // exits non-zero for the "failed" status.
+    await expect(session).resolves.toEqual({
+      status: "failed",
+      selected: [failing, late],
+      failures: ["review failed"],
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports every command dispatched before and after a failed refill without refill duplicates", async () => {
+    const first = command({ number: 1, identity: "pull-request:1" });
+    const late = command({ number: 2, identity: "pull-request:2" });
+    const discovery = discoveryStore([first]);
+    const gate = pollGate();
+    const listCommands = vi.fn()
+      .mockImplementationOnce(() => Promise.resolve(discovery.store.slice()))
+      .mockRejectedValueOnce(new Error("discovery snapshot unavailable"))
+      .mockImplementation(() => Promise.resolve(discovery.store.slice()));
+    const run = vi.fn(async (selected: TestCommand) => {
+      discovery.consume(selected);
+    });
+
+    const session = dispatchAutomationCommands({ concurrency: 1 }, {
+      scheduler,
+      promotion,
+      readiness,
+      recovery,
+      wait: gate.wait,
+      github: { verifyLabels: async () => {}, listCommands },
+      run,
+    });
+    const settled = vi.fn();
+    void session.then(settled, settled);
+
+    // first dispatches from the session-start snapshot; its completion refill
+    // fails discovery, which neither drains nor ends the session.
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(gate.waits).toEqual([DISPATCH_SESSION_IDLE_POLL_MILLISECONDS]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).not.toHaveBeenCalled();
+
+    // The retried refill discovers the late command and dispatches it.
+    discovery.store.push(late);
+    gate.release();
+    await expect(session).resolves.toEqual({
+      status: "failed",
+      selected: [first, late],
+      failures: ["discovery snapshot unavailable"],
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    // Session start, the failed refill, the retry that dispatched late, and
+    // the clean empty drain discovery.
+    expect(listCommands).toHaveBeenCalledTimes(4);
   });
 
   it("retries a transient refill failure on the idle poll instead of draining the session", async () => {
@@ -504,9 +595,14 @@ describe("Automation Command dispatch session", () => {
     expect(settled).not.toHaveBeenCalled();
     gate.release();
 
-    // The session drains on the later clean empty discovery and reports the
-    // first recorded failure.
-    await expect(session).rejects.toThrow("GitHub dependency state is unavailable");
+    // The session drains on the later clean empty discovery and reports both
+    // recorded failures — the promotion failure and the discovery failure —
+    // in recording order, with an empty but intact command list.
+    await expect(session).resolves.toEqual({
+      status: "failed",
+      selected: [],
+      failures: ["GitHub dependency state is unavailable", "discovery snapshot unavailable"],
+    });
     expect(scan).toHaveBeenCalledTimes(2);
     expect(listCommands).toHaveBeenCalledTimes(3);
   });
@@ -710,7 +806,11 @@ describe("Automation Command dispatch session", () => {
       recovery,
       wait: neverPoll,
       run,
-    })).rejects.toThrow("GitHub dependency state is unavailable");
+    })).resolves.toEqual({
+      status: "failed",
+      selected: [existing],
+      failures: ["GitHub dependency state is unavailable"],
+    });
     // Session start discovered once; the failing refill still ran its own
     // discovery so the session could observe the clean empty drain condition.
     expect(discovery.listCommands).toHaveBeenCalledTimes(2);

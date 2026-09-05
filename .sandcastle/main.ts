@@ -130,32 +130,39 @@ try {
         "architecture-review",
         () => scheduledArchitectureReview.run(),
       ),
-      dispatch: (concurrency: number | undefined) => dispatchAutomationCommands({
-        concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
-      }, {
-        scheduler,
-        github: dispatchGithub,
-        recovery: createInterruptedAutomationRecovery({
+      dispatch: async (concurrency: number | undefined) => {
+        const result = await dispatchAutomationCommands({
+          concurrency: concurrency ?? Number(process.env.SANDCASTLE_DISPATCH_CONCURRENCY ?? "2"),
+        }, {
           scheduler,
-          evidence: createJobLogEvidenceScanner({ root: jobLogRoot }),
           github: dispatchGithub,
-        }),
-        readiness: {
-          verifyGithubAgentAuthentication: () => requireGithubAgentReadiness({
-            image: startup.imageName,
-            uid: startup.uid,
-            gid: startup.gid,
-            environment: startup.childEnvironments.githubAgent,
+          recovery: createInterruptedAutomationRecovery({
+            scheduler,
+            evidence: createJobLogEvidenceScanner({ root: jobLogRoot }),
+            github: dispatchGithub,
           }),
-        },
-        promotion: {
-          scan: () => runQueuePromotionScan(
-            { github: dispatchGithub },
-            { createJobId: randomUUID },
-          ),
-        },
-        run: runCommand,
-      }),
+          readiness: {
+            verifyGithubAgentAuthentication: () => requireGithubAgentReadiness({
+              image: startup.imageName,
+              uid: startup.uid,
+              gid: startup.gid,
+              environment: startup.childEnvironments.githubAgent,
+            }),
+          },
+          promotion: {
+            scan: () => runQueuePromotionScan(
+              { github: dispatchGithub },
+              { createJobId: randomUUID },
+            ),
+          },
+          run: runCommand,
+        });
+        // A drained session that recorded any job or refill failure reports
+        // "failed": the JSON result (with the cumulative command list) still
+        // prints to stdout below, but the process exits non-zero.
+        if (result.status === "failed") process.exitCode = 1;
+        return result;
+      },
       inspect: async () => {
         const readiness = await inspectGithubAgentReadiness({
           image: startup.imageName,

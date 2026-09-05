@@ -622,8 +622,16 @@ async function verifyQueuePromotionBehavior(): Promise<void> {
       recovery: { recoverInterrupted: async () => [] },
       run: async () => { throw new Error("queue promotion has no Target operation"); },
     });
-    if (scenario === "blocked") await expect(execution).rejects.toThrow("promotion publication failed");
-    else await expect(execution).resolves.toEqual({ status: "dispatched", selected: [] });
+    // A blocked promotion publication is recorded, not thrown: the session
+    // still drains on its clean empty discovery and reports the failure with
+    // the (empty) cumulative command list.
+    if (scenario === "blocked") {
+      await expect(execution).resolves.toEqual({
+        status: "failed",
+        selected: [],
+        failures: ["promotion publication failed"],
+      });
+    } else await expect(execution).resolves.toEqual({ status: "dispatched", selected: [] });
     return { events, scanResult, scheduler: dispatchScheduler };
   };
 

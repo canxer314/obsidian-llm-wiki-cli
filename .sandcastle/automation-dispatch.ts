@@ -52,16 +52,35 @@ const defaultWait = (milliseconds: number): Promise<void> =>
     timer.unref?.();
   });
 
+// The outcome of one Dispatch Session. "locked" means the scheduling lock was
+// unavailable and nothing ran. "dispatched" means the session drained with no
+// recorded failure. "failed" means the session still drained (a clean empty
+// discovery with no worker running) but recorded at least one job or refill
+// failure along the way; it carries the same cumulative selected list plus a
+// summary of every recorded failure so the evidence survives in the CLI
+// output, which exits non-zero for it.
+export type AutomationDispatchResult =
+  | { readonly status: "locked" }
+  | { readonly status: "dispatched"; readonly selected: readonly AutomationCommand[] }
+  | {
+      readonly status: "failed";
+      readonly selected: readonly AutomationCommand[];
+      readonly failures: readonly string[];
+    };
+
 // One Dispatch Session (ADR-0005): acquire the scheduling lock once, run the
 // readiness probe, prepare, label verification, and Interrupted Automation
 // recovery once at session start, then keep the bounded workers refilled until
 // a clean discovery finds no eligible Automation Command and no worker is
 // running. A single job or refill failure is recorded but never ends the
-// session; the session reports the first recorded failure when it drains.
+// session; a session that recorded any failure drains into a "failed" result
+// carrying the cumulative dispatched-command list and every recorded failure
+// instead of throwing, so the reporting layer keeps both the failure evidence
+// and everything the session dispatched successfully.
 export async function dispatchAutomationCommands(
   request: { readonly concurrency?: number },
   ports: AutomationDispatchPorts,
-): Promise<{ readonly status: "locked" | "dispatched"; readonly selected?: readonly AutomationCommand[] }> {
+): Promise<AutomationDispatchResult> {
   const lock = await ports.scheduler.acquire();
   if (lock === undefined) return { status: "locked" };
   try {
@@ -175,7 +194,16 @@ export async function dispatchAutomationCommands(
         cleanEmpty = false;
       }
     }
-    if (failures.length > 0) throw failures[0];
+    // Draining never throws a recorded failure away: the cumulative command
+    // list and every recorded failure summary ride the result so the caller
+    // can print the evidence and still exit non-zero.
+    if (failures.length > 0) {
+      return {
+        status: "failed",
+        selected: dispatched,
+        failures: failures.map((reason) => reason instanceof Error ? reason.message : String(reason)),
+      };
+    }
     return { status: "dispatched", selected: dispatched };
   } finally {
     await lock.release();
