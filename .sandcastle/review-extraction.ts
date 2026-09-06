@@ -54,7 +54,7 @@ const extractionPrompt = `
 Now emit the review you just completed as one JSON object inside <review> tags. Do not make further code changes. Include a concise summary, inlineComments, and replies. Each inline comment requires a repository-relative path, exact current line number, and body. Each reply requires an exact commentId from the provided unresolved review threads and body. Use empty arrays when none apply.
 `;
 
-const REVIEW_TIMEOUT_MILLISECONDS = 30 * 60 * 1000;
+const REVIEW_TIMEOUT_MILLISECONDS = 90 * 60 * 1000;
 
 export function createSameSessionReviewExtractor(options: {
   readonly sandbox: SandboxProvider;

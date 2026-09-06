@@ -65,7 +65,7 @@ describe("protocol timeout mapping", () => {
 
     expect(start).toHaveBeenCalledOnce();
     expect(mocks.lifecycleRun).toHaveBeenCalledWith(expect.objectContaining({
-      timeoutMilliseconds: 30 * 60 * 1_000,
+      timeoutMilliseconds: 90 * 60 * 1_000,
       graceMilliseconds: 10 * 1_000,
     }));
   });

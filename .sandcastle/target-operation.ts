@@ -41,7 +41,7 @@ const targetOperationTimeouts: Readonly<Record<TargetOperationIdentity, number>>
   "implement-issue": 60 * 60 * 1000,
   "implement-spec": 60 * 60 * 1000,
   "implement-feedback": 60 * 60 * 1000,
-  review: 30 * 60 * 1000,
+  review: 90 * 60 * 1000,
   "update-branch": 60 * 60 * 1000,
   "split-spec": 60 * 60 * 1000,
   "architecture-review": 21 * 60 * 1000,
