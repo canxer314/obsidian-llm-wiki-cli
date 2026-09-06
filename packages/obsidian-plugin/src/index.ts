@@ -197,6 +197,21 @@ export {
   type ReleaseRemovalResult,
 } from "./lifecycle/install-release.js";
 export {
+  readManagedVaultUpgradeEvidence,
+  ReleaseUpgradeError,
+  UPGRADE_EVIDENCE_FILENAME,
+  UPGRADE_EVIDENCE_SCHEMA_VERSION,
+  UPGRADE_PHASE_ORDER,
+  upgradeManagedVaultRelease,
+  type ManagedVaultUpgradeEvidence,
+  type ManagedVaultUpgradeOptions,
+  type ManagedVaultUpgradeResult,
+  type ReleaseUpgradeFailureCode,
+  type UpgradeFailureRecord,
+  type UpgradePhase,
+  type UpgradeRuntimeAdapter,
+} from "./lifecycle/upgrade-release.js";
+export {
   verifyManagedVaultLifecycle,
   type LifecycleStatusProbes,
   type ManagedVaultLifecycleState,
@@ -228,6 +243,14 @@ export {
   type LifecycleScenarioStage,
   type LifecycleScenarioStageRecord,
 } from "./installed-runtime/lifecycle-scenario.js";
+export {
+  runManagedVaultUpgradeScenario,
+  type UpgradeScenarioOptions,
+  type UpgradeScenarioResult,
+  type UpgradeScenarioRuntimeHost,
+  type UpgradeScenarioStage,
+  type UpgradeScenarioStageRecord,
+} from "./installed-runtime/upgrade-scenario.js";
 export {
   EvidencePrivacyError,
   EvidenceWriteError,

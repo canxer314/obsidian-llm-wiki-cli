@@ -50,6 +50,44 @@ verification bypass, no raw-directory or URL input, and no skip flag.
   projects `not_installed` with the defective files listed. The module never
   reads Claude Code configuration — registration readiness needs the
   operator-supplied probe, and defaults to `mcp_not_registered`.
+- `upgrade-release.ts` — `upgradeManagedVaultRelease(options)` (issue #199,
+  spec §9.2) upgrades one drained Managed Vault from a verified staged
+  Release, composing the boundaries above without adding a second download,
+  provenance, file-ownership, or maintenance implementation:
+  - The loaded runtime's `runOperatorMaintenance` enters
+    `maintenance_pending`, drains the current Change Set to a trustworthy
+    terminal state, retains the FIFO queue, stops dequeueing, and rejects new
+    submissions while reads/health stay available; inside that drained window
+    the installer atomically swaps in the verified bundle (operational state
+    carried byte-for-byte) and revalidates persisted state.
+  - The host `reloadRuntime` seam then performs the real plugin reload or
+    Obsidian restart; the fresh runtime's `load()` migrates the versioned
+    persistent state and replays Recovery Journals fail-closed. A second
+    drained maintenance pass on the reloaded runtime proves the running files
+    hash-equal the verified bundle identity.
+  - Post-upgrade health evidence must confirm the expected plugin/protocol
+    versions, Vault identity, persistent-state and journal schema versions,
+    queue preservation (length, head, Submission Keys, enqueue sequence),
+    recovery trust, and Search Snapshot/index readiness — then the Vault
+    stays `maintenance_paused` until the Primary Operator explicitly calls
+    `resumeWrites()`. Copying files alone never reports success: `upgraded`
+    is returned only after the health phase validates.
+  - Every phase boundary is mirrored into the versioned evidence journal
+    `upgrade-state.json` (preserved operational state, atomically published),
+    so verification, staging, replacement, reload, migration, recovery, or
+    health failure never reports success, loses queued or idempotency state,
+    or reopens writes — the maintenance machine's persisted
+    `maintenance_failed` plus the journal are the machine-actionable
+    fail-closed evidence. `readManagedVaultUpgradeEvidence` reads it back;
+    a malformed record throws instead of being treated as a clean slate.
+  - Rollback restores the verified previous bundle only while the on-disk
+    persistent state stays readable by the old runtime (schema versions at or
+    below the ceilings the old runtime observed before the upgrade). The
+    drain barrier guarantees no Change Set executes inside the upgrade
+    window, so no new Recovery Journal frames can appear there. A migration
+    that crossed the readability boundary forbids blind downgrade
+    (`upgrade_downgrade_forbidden`): the new bundle, the new state, and the
+    diagnostic evidence are retained and the Vault remains blocked.
 
 ## Installed-runtime scenario
 
@@ -59,3 +97,13 @@ operator enablement → Bridge start → registration command generation (never
 execution) → `ready` → same-version `unchanged` → damage-and-repair with
 state preservation → identity-mismatch projection → cleanup. It is exposed
 for later composition by #44 and does not replace the harness corpus.
+
+`src/installed-runtime/upgrade-scenario.ts` (issue #199) proves the drained
+upgrade end to end on the same seams: previous Release installed and enabled
+→ Bridge started → work queued through the real MCP surface → orchestrated
+upgrade through a real Obsidian stop/start (the plugin reloads from the
+replaced bundle) → Vault identity, port, FIFO queue, and Submission Keys
+preserved → post-upgrade maintenance pause held with submissions rejected
+without key binding → the Primary Operator's explicit resume reopens writes
+and the refused key retries successfully → cleanup with no residue. It is a
+composable input to #44, not a harness-corpus replacement.
