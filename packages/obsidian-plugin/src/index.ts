@@ -64,7 +64,10 @@ export {
   type StandardDiagnosticBundleContent,
   type StandardDiagnosticEvidence,
 } from "./diagnostic-bundle.js";
-export { createRegistrationCommand } from "./registration-command.js";
+export {
+  createRegistrationCommand,
+  createRegistrationRemovalCommand,
+} from "./registration-command.js";
 export {
   createMoveReferenceProjector,
   withMoveReferenceProjection,
@@ -212,6 +215,16 @@ export {
   type UpgradeRuntimeAdapter,
 } from "./lifecycle/upgrade-release.js";
 export {
+  MCP_REGISTRATION_REMOVAL_REQUIRED,
+  ReleaseUninstallError,
+  uninstallManagedVaultRelease,
+  type ManagedVaultUninstallOptions,
+  type ManagedVaultUninstallResult,
+  type ReleaseUninstallFailureCode,
+  type ReleaseUninstallOutcome,
+  type UninstallFailureInjectionHooks,
+} from "./lifecycle/uninstall-release.js";
+export {
   verifyManagedVaultLifecycle,
   type LifecycleStatusProbes,
   type ManagedVaultLifecycleState,
@@ -251,6 +264,13 @@ export {
   type UpgradeScenarioStage,
   type UpgradeScenarioStageRecord,
 } from "./installed-runtime/upgrade-scenario.js";
+export {
+  runManagedVaultUninstallScenario,
+  type UninstallScenarioOptions,
+  type UninstallScenarioResult,
+  type UninstallScenarioStage,
+  type UninstallScenarioStageRecord,
+} from "./installed-runtime/uninstall-scenario.js";
 export {
   EvidencePrivacyError,
   EvidenceWriteError,

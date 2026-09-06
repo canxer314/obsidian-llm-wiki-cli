@@ -41,8 +41,53 @@ verification bypass, no raw-directory or URL input, and no skip flag.
     persistent port, FIFO/Submission Key state, settings, and every Recovery
     Journal survive byte-for-byte.
   - **Removal**: `removeReleaseManagedFiles` deletes only allowlisted files
-    and retains all operational state; the §9.3 refusal orchestration
-    (executing work, unresolved recovery) belongs to the uninstall ticket.
+    and retains all operational state; the §9.3 refusal orchestration lives in
+    `uninstall-release.ts`.
+- `uninstall-release.ts` — `uninstallManagedVaultRelease(options)` (issue
+  #200, spec §9.3) uninstalls the Release from one Managed Vault by removing
+  only release-managed files while retaining all operational state for a
+  lossless same-version reinstall. It composes the boundaries above and adds
+  no second file-ownership implementation:
+  - **Fail-closed safety gate**: uninstall refuses with a machine-actionable
+    failure code whenever a Change Set is executing (live
+    `queue.currentExecutionId` or a persisted registry entry in the
+    `executing` phase), work is queued (a non-empty FIFO, live or persisted),
+    recovery is in progress, unresolved, or blocked (live recovery state, a
+    pending/failed Recovery Journal frame, a `result_unproven` Change Set
+    record, a maintenance write mode or failed lifecycle in the persisted
+    registry, or interrupted/failed `upgrade-state.json` evidence read through
+    `readManagedVaultUpgradeEvidence`), or live and persisted evidence cannot
+    positively prove the target safe — unavailable or contradictory evidence
+    is a refusal, never a pass. A Vault whose plugin never loaded (no
+    `data.json`, no Recovery Journal, no upgrade evidence, no answering
+    Bridge) is provably free of queued work and recovery state, so its
+    managed files may be removed.
+  - **Managed-file-only deletion**: on success the removal is delegated to
+    the installer's `removeReleaseManagedFiles`, which deletes only the
+    allowlisted `manifest.json`, `main.js`, optional `styles.css`, and
+    `checksums.sha256`; `data.json` (Vault identity, persistent port, FIFO
+    queue, Submission Keys, Change Set records, settings), Recovery Journals,
+    other plugins' storage, and Vault content survive byte-for-byte. A
+    post-removal verification re-inspects the directory: any surviving
+    allowlisted file fails the uninstall — partial filesystem failures are
+    never reported as success.
+  - **Deterministic reruns**: the typed outcome (`uninstalled` /
+    `already_uninstalled` / `refused` / `failed` with failure codes) is
+    machine-actionable; removal is idempotent, so rerunning after a failed or
+    interrupted attempt completes it, and rerunning a completed uninstall
+    reports `already_uninstalled`. Failure-injection hooks mirror the
+    installer's interruption seams.
+  - **Operator-controlled configuration**: Claude Code configuration is never
+    read or modified. The result prints — but never executes — the exact
+    operator command removing this Managed Vault's MCP registration
+    (`createRegistrationRemovalCommand`, the `claude mcp remove` counterpart
+    of `createRegistrationCommand` in `src/registration-command.ts`). No
+    purge, force-removal, recovery-bypass, or state-deletion path is exposed.
+  - **Lossless reinstall**: because all operational state is retained,
+    reinstalling the same version through `installReleaseToManagedVaults`
+    restores the same Vault identity, endpoint/port, retained
+    queue/idempotency records, settings, and recovery state — never a fresh
+    Managed Vault.
 - `lifecycle-status.ts` — `verifyManagedVaultLifecycle(target, probes)`
   projects `not_installed` / `installed_not_enabled` / `bridge_offline` /
   `mcp_not_registered` / `identity_mismatch` / `ready`. Each state requires
@@ -107,3 +152,14 @@ preserved → post-upgrade maintenance pause held with submissions rejected
 without key binding → the Primary Operator's explicit resume reopens writes
 and the refused key retries successfully → cleanup with no residue. It is a
 composable input to #44, not a harness-corpus replacement.
+
+`src/installed-runtime/uninstall-scenario.ts` (issue #200) proves ordinary
+uninstall end to end on the same seams: install → operator enablement →
+Bridge start → registration command generation (never execution) → real work
+through the MCP surface drained to terminal → offline uninstall removing only
+release-managed files → lifecycle verification after removal (`not_installed`
+with state retained byte-for-byte) → lossless same-version reinstall → the
+restarted Bridge answers with the same Vault identity and endpoint, replays
+the retained Submission Key to the drained Change Set instead of registering
+fresh work, and projects `ready` after the operator's re-registration →
+cleanup with no residue. It is likewise a composable input to #44.
