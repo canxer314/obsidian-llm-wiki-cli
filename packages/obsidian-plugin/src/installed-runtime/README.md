@@ -84,6 +84,21 @@ byte-exact state preservation → the identity-mismatch projection → cleanup
 with no residue. #44 composes this scenario into larger corpora; the harness
 corpus above is unchanged.
 
+## Purge scenario (issue #201)
+
+`purge-scenario.ts` exposes `runManagedVaultPurgeScenario(options)` on the
+same seams, proving the spec §9.3 backup-backed interactive purge end to end:
+real per-Vault state is created through install, enablement, Bridge start,
+and real work through the MCP surface; the purge is refused while work is
+queued (live and offline persisted evidence), on an unresolved Recovery
+Journal frame, without a confirmation seam, and on operator cancellation;
+then an ordinary uninstall and a backup-backed confirmed purge tied to the
+Vault identity run, the lifecycle projects `not_installed` with the
+enumerated operational state gone and Vault content intact, the backup
+re-verifies independently, a rerun reports `already_purged`, and cleanup
+leaves no residue (scenario backups included). It is a composable input to
+#44, alongside the install, upgrade, and uninstall scenarios.
+
 ## Registered real-runtime smoke run
 
 On a registered Windows machine matching `MVP-PERF-REF-1`:

@@ -88,6 +88,49 @@ verification bypass, no raw-directory or URL input, and no skip flag.
     restores the same Vault identity, endpoint/port, retained
     queue/idempotency records, settings, and recovery state — never a fresh
     Managed Vault.
+- `purge-release.ts` — `purgeManagedVaultState(options)` (issue #201, spec
+  §9.3) is the **separate local interactive purge**: it intentionally removes
+  one Managed Vault's operational state — Vault identity and persistent
+  endpoint/port, FIFO queue and Change Set records, Submission Key records,
+  settings (`data.json`), and every Recovery Journal — and is neither an
+  uninstall flag nor a variant of `uninstallManagedVaultRelease`. It composes
+  the boundaries above and adds no second file-ownership or evidence
+  implementation:
+  - **Enumeration before anything is written**: the operator-facing inventory
+    names the Vault identity, persistent port, pending/retained FIFO and
+    Change Set records, Submission Key records, the settings file, and every
+    Recovery Journal file, each with byte count and SHA-256 digest, and spells
+    out which capabilities are permanently lost (Vault identity,
+    idempotency/Submission Key replay, queued work, recovery baselines).
+  - **Verifiable backup before confirmation**: every byte slated for removal
+    is copied into a fresh `purge-backup-<nonce>` directory under an
+    operator-chosen backup root that must be absolute and outside the Vault
+    (an unsafe location is a contract violation), with an `inventory.json`
+    and a `checksums.sha256` manifest; the backup is then re-verified against
+    the source state — a corrupt or incomplete backup fails the purge and
+    nothing is deleted. There is no skip-backup path.
+  - **Fail-closed recovery gate**: the same evidence standards as the
+    uninstall safety gate — an executing or queued Change Set (live or
+    persisted), live recovery state, a pending/failed Recovery Journal frame,
+    a `result_unproven` record, a maintenance write mode or failed lifecycle
+    in the persisted registry, interrupted/failed `upgrade-state.json`, or
+    unavailable/contradictory evidence refuses the purge before any backup is
+    written. No force or skip-recovery bypass exists.
+  - **Explicit per-Vault confirmation**: deletion runs only after the
+    operator's confirmation seam positively affirms the specific Vault
+    identity/path carried in the confirmation request. A missing seam
+    (`purge_confirmation_required`) or a declined/failed interaction
+    (`purge_confirmation_declined`) changes none of the enumerated state; the
+    retained verified backup is reported for a later confirmed run.
+  - **Deletion and verification**: only the enumerated state is deleted —
+    release-managed files, Vault content, and Claude Code local configuration
+    are never touched. Post-deletion verification re-inspects the target; any
+    surviving enumerated state fails the purge with the precise remainder and
+    the backup disposition, so backup, verification, confirmation, or
+    deletion failure never masquerades as a complete purge. Typed outcomes
+    (`purged` / `already_purged` / `refused` / `failed`) make reruns
+    deterministic and idempotent, and failure-injection hooks mirror the
+    installer's interruption seams.
 - `lifecycle-status.ts` — `verifyManagedVaultLifecycle(target, probes)`
   projects `not_installed` / `installed_not_enabled` / `bridge_offline` /
   `mcp_not_registered` / `identity_mismatch` / `ready`. Each state requires
@@ -163,3 +206,16 @@ restarted Bridge answers with the same Vault identity and endpoint, replays
 the retained Submission Key to the drained Change Set instead of registering
 fresh work, and projects `ready` after the operator's re-registration →
 cleanup with no residue. It is likewise a composable input to #44.
+
+`src/installed-runtime/purge-scenario.ts` (issue #201) proves the
+backup-backed interactive purge end to end on the same seams: install →
+operator enablement → Bridge start → registration command generation (never
+execution) → work queued through the real MCP surface → purge refused while
+work is queued (live and offline persisted evidence) → drained restart →
+purge refused on an unresolved Recovery Journal frame → refused without a
+confirmation seam and on operator cancellation with the state byte-identical
+afterwards → ordinary uninstall → backup-backed confirmed purge tied to the
+Vault identity → `not_installed` with the operational state gone, Vault
+content intact, the backup independently re-verifiable, and a rerun reporting
+`already_purged` → cleanup with no residue (the scenario's backups included).
+It is likewise a composable input to #44.

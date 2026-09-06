@@ -225,6 +225,23 @@ export {
   type UninstallFailureInjectionHooks,
 } from "./lifecycle/uninstall-release.js";
 export {
+  PURGE_LOST_CAPABILITIES,
+  PURGE_LOST_CAPABILITY_DETAILS,
+  purgeManagedVaultState,
+  ReleasePurgeError,
+  type ManagedVaultPurgeBackup,
+  type ManagedVaultPurgeConfirmation,
+  type ManagedVaultPurgeInventory,
+  type ManagedVaultPurgeOptions,
+  type ManagedVaultPurgeResult,
+  type PurgeFailureInjectionHooks,
+  type PurgeInventoryFile,
+  type PurgeInventoryFileKind,
+  type PurgeLostCapability,
+  type ReleasePurgeFailureCode,
+  type ReleasePurgeOutcome,
+} from "./lifecycle/purge-release.js";
+export {
   verifyManagedVaultLifecycle,
   type LifecycleStatusProbes,
   type ManagedVaultLifecycleState,
@@ -271,6 +288,14 @@ export {
   type UninstallScenarioStage,
   type UninstallScenarioStageRecord,
 } from "./installed-runtime/uninstall-scenario.js";
+export {
+  runManagedVaultPurgeScenario,
+  type PurgeScenarioOptions,
+  type PurgeScenarioRefusal,
+  type PurgeScenarioResult,
+  type PurgeScenarioStage,
+  type PurgeScenarioStageRecord,
+} from "./installed-runtime/purge-scenario.js";
 export {
   EvidencePrivacyError,
   EvidenceWriteError,
