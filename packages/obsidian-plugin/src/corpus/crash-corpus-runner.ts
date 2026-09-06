@@ -210,6 +210,8 @@ export interface CorpusScenarioEvidence {
   readonly reportPath: string;
   /** Issue #192 fault evidence; present only on the dedicated fault scenarios. */
   readonly fault?: CorpusFaultEvidence;
+  /** Issue #194 recovery-interference evidence; present only on the dedicated scenarios. */
+  readonly interference?: CorpusRecoveryInterferenceEvidence;
 }
 
 /** Fault-corpus evidence added by the issue #192 scenario runners. */
@@ -229,6 +231,57 @@ export interface CorpusFaultEvidence {
   };
   /** Public state preserved across the fault when recovery must not mutate. */
   readonly publicStatePreserved?: boolean;
+}
+
+/**
+ * Third-party conflict record (issue #194, spec A-22): observed and expected
+ * SHA-256 identities only — never any byte content. `path` is always the public
+ * Vault-relative footprint; a private managed-trash conflict names its owning
+ * public footprint and never leaks a private path or identifier (spec A-37).
+ */
+export interface CorpusConflictRecord {
+  readonly area: "public" | "private_trash";
+  readonly path: string;
+  readonly observedSha256: string | null;
+  readonly beforeSha256: string | null;
+  readonly expectedAfterSha256: string | null;
+  readonly matchesBefore: boolean;
+  readonly matchesExpectedAfter: boolean;
+}
+
+/** One post-interference generation: proof, gate, and sentinel-write ordering. */
+export interface CorpusRecoveryGenerationEvidence {
+  readonly generation: number;
+  readonly proofState: MutationCorpusProofState | null;
+  readonly effectiveGate: string | null;
+  readonly recoveryState: string | null;
+  readonly writeGate: string | null;
+  readonly sentinel: {
+    readonly attempted: boolean;
+    readonly admitted: boolean;
+    readonly gate: string | null;
+  };
+}
+
+/**
+ * Recovery-interference evidence added by the issue #194 scenario runner: the
+ * recovery park point, the mutation/recovery interleaving (supervisor actions +
+ * the monotonic child event logs), the hash-only conflict record, the write
+ * admission probe attempted while recovery was parked, and the proof/gate/
+ * sentinel transitions of every post-interference generation (including the
+ * restart that must keep the blocked gate).
+ */
+export interface CorpusRecoveryInterferenceEvidence {
+  readonly recoveryParkPoint: string;
+  readonly interleaving: readonly string[];
+  readonly conflict: CorpusConflictRecord | null;
+  readonly admissionDuringRecovery: {
+    readonly attempted: boolean;
+    readonly reachable: boolean;
+    readonly admitted: boolean;
+    readonly gate: string | null;
+  };
+  readonly generations: readonly CorpusRecoveryGenerationEvidence[];
 }
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
@@ -1224,6 +1277,7 @@ export async function runMutationCorpusScenario(
     }
     await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
     if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
     evidence.verdict = failures.length === 0 ? "pass" : "fail";
     await writeEvidence();
   }
@@ -1251,6 +1305,7 @@ export async function runMutationCorpusCollisionScenario(
 ): Promise<CorpusScenarioEvidence> {
   const { profile, seed } = options;
   const failures: string[] = [];
+  const phases: string[] = [];
   const crashPoint: MutationCorpusCrashPoint = { point: "destination_collision", phase: "apply" };
   await mkdir(options.reportDir, { recursive: true });
   const reportPath = join(options.reportDir, `${seed}.json`);
@@ -1358,6 +1413,7 @@ export async function runMutationCorpusCollisionScenario(
     }
     await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
     if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
     evidence.verdict = failures.length === 0 ? "pass" : "fail";
     await writeEvidence();
   }
@@ -1600,6 +1656,7 @@ export async function runMutationCorpusResidueScenario(
     }
     await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
     if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
     evidence.verdict = failures.length === 0 ? "pass" : "fail";
     await writeEvidence();
   }
@@ -2062,6 +2119,7 @@ export async function runMutationCorpusJournalFaultScenario(
     }
     await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
     if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
     evidence.verdict = failures.length === 0 ? "pass" : "fail";
     await writeEvidence();
   }
@@ -2413,6 +2471,7 @@ export async function runMutationCorpusJournalWriteFaultScenario(
     }
     await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
     if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
     evidence.verdict = failures.length === 0 ? "pass" : "fail";
     await writeEvidence();
   }
@@ -2605,6 +2664,7 @@ export async function runMutationCorpusCapacityFaultScenario(
     }
     await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
     if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
     evidence.verdict = failures.length === 0 ? "pass" : "fail";
     await writeEvidence();
   }
@@ -2852,9 +2912,927 @@ export async function runMutationCorpusHostOperationFaultScenario(
     }
     await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
     if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
     evidence.verdict = failures.length === 0 ? "pass" : "fail";
     await writeEvidence();
   }
   return evidence as CorpusScenarioEvidence;
 }
 
+
+// ---------------------------------------------------------------------------
+// Issue #194: startup-recovery / third-party interference corpus scenarios.
+//
+// These scenarios prove that startup recovery resolves an active durable
+// PREPARED frame before any new write can begin, and that compare-before-
+// restore never overwrites a third-party mutation — whether the interference
+// lands after execution (residue shape) or while recovery itself is parked
+// mid-restore. Generation 1 leaves a durable PREPARED frame via the profile's
+// rollback lead-in; generation 2 is armed with a recovery-path crash point so
+// the real owning process parks *inside* startup recovery (the Bridge binds its
+// loopback listener only after recovery resolves, so no write surface exists
+// while recovery is in progress); the supervisor probes write admission, then
+// writes third-party bytes over a declared footprint and terminates the child.
+// Generation 3 must fail closed (`result_unproven` + `recovery_blocked`) without
+// touching any third-party byte, and generation 4 must keep the gate blocked
+// across the restart.
+// ---------------------------------------------------------------------------
+
+/** Recovery-path crash seams a generation can park at inside startup recovery. */
+function isRecoveryParkPoint(point: string): boolean {
+  return (
+    point === "before_rollback" ||
+    point.startsWith("after_rollback_mutation:") ||
+    point.startsWith("recovery_after_file_prepared:") ||
+    point.startsWith("recovery_after_file_published:") ||
+    point === "after_rollback_verification" ||
+    point === "after_rollback_evidence" ||
+    point === "before_rolled_back"
+  );
+}
+
+async function readChildEventLog(controlDir: string, generation: number): Promise<string[]> {
+  try {
+    const text = await readFile(join(controlDir, "events.jsonl"), "utf8");
+    return text
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => `gen${generation}: ${line}`);
+  } catch {
+    return [];
+  }
+}
+
+interface SentinelObservation {
+  readonly attempted: boolean;
+  readonly admitted: boolean;
+  readonly gate: string | null;
+}
+
+/** Sentinel submit that also captures the returned gate code for ordering evidence. */
+async function submitSentinelDetailed(
+  client: Client,
+  profile: MutationCorpusProfile,
+  seed: string,
+  label: string,
+): Promise<{ readonly note: string; readonly submitted: boolean; readonly observation: SentinelObservation }> {
+  const sentinelNote = `CorpusSentinel-${label}-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`;
+  let result: ToolInvocation;
+  try {
+    result = await callTool(client, "vault_change_set_submit", {
+      submissionKey: profile.submissionKey(`${seed}-sentinel-${label}`),
+      operations: [
+        {
+          operationId: `sentinel-${label}-${seed}`,
+          kind: "create_note",
+          path: sentinelNote,
+          content: `# Sentinel ${label} ${seed}\n`,
+          ifExists: "reject",
+        },
+      ],
+    });
+  } catch {
+    return {
+      note: sentinelNote,
+      submitted: false,
+      observation: { attempted: true, admitted: false, gate: null },
+    };
+  }
+  const content = asRecord(result.structuredContent);
+  const changeSet = asRecord(content.changeSet);
+  const gate = asRecord(content.gate);
+  return {
+    note: sentinelNote,
+    submitted: result.isError !== true,
+    observation: {
+      attempted: true,
+      admitted: changeSet.state === "intent_applied",
+      gate: typeof gate.code === "string" ? gate.code : null,
+    },
+  };
+}
+
+/**
+ * Probe write admission while a generation is parked inside startup recovery.
+ * The Bridge binds its loopback listener only after `ChangeSetService.open`
+ * resolves the durable frame, so a parked recovery exposes no write surface at
+ * all (connection refused) — the strongest form of `recovery_in_progress`
+ * admission denial. If a surface is reachable, the `recovery_in_progress` gate
+ * must reject the probe instead.
+ */
+async function probeAdmissionDuringRecovery(
+  port: number,
+  vaultId: string,
+  profile: MutationCorpusProfile,
+  seed: string,
+): Promise<{ readonly attempted: true; readonly reachable: boolean; readonly admitted: boolean; readonly gate: string | null }> {
+  try {
+    const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    try {
+      const probe = await submitSentinelDetailed(client, profile, seed, "during-recovery");
+      return {
+        attempted: true,
+        reachable: true,
+        admitted: probe.observation.admitted,
+        gate: probe.observation.gate,
+      };
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  } catch {
+    return { attempted: true, reachable: false, admitted: false, gate: null };
+  }
+}
+
+export type RecoveryInterference =
+  | {
+      readonly area: "public";
+      /** Public footprint path (must be one of `profile.files[].path`). */
+      readonly path: string;
+      /** Third-party bytes matching neither the before nor the expected-after state. */
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly area: "private_trash";
+      /** Foreign bytes written over the single private managed-trash entry. */
+      readonly bytes: Uint8Array;
+    };
+
+export interface RunRecoveryInterferenceScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  /** Recovery-path crash point armed on generation 2 (parks mid-startup-recovery). */
+  readonly recoveryParkPoint: string;
+  /** Third-party footprint mutation applied while generation 2 is parked. */
+  readonly interference: RecoveryInterference;
+}
+
+/**
+ * Recovery-interference scenario (issue #194). See the section header above for
+ * the generation choreography. The machine oracle is byte-exact: after both
+ * post-interference generations, the interfered footprint must still hold the
+ * exact third-party bytes (compare-before-restore never overwrote them), every
+ * other profile file must be byte-identical to its parked-mid-recovery state
+ * (a failed-closed recovery writes nothing), the proof must be
+ * `result_unproven`, the effective gate must be `recovery_blocked`, the
+ * sentinel write must stay rejected, and all of that must survive the gen-4
+ * restart unchanged.
+ */
+export async function runMutationCorpusRecoveryInterferenceScenario(
+  options: RunRecoveryInterferenceScenarioOptions,
+): Promise<CorpusScenarioEvidence> {
+  const { profile, seed } = options;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const log = (message: string): void => {
+    phases.push(message);
+  };
+
+  if (!isRecoveryParkPoint(options.recoveryParkPoint)) {
+    throw new Error(`${options.recoveryParkPoint} is not a recovery-path park point`);
+  }
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-interference-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-interference-control-"));
+  const crashPoint: MutationCorpusCrashPoint = {
+    point: options.recoveryParkPoint,
+    phase: "rollback",
+  };
+  const evidence = createEvidence(
+    { profile, crashPoint, seed, root, vaultId, port, reportPath },
+    failures,
+  );
+  const writeEvidence = async (): Promise<void> => {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  };
+
+  const interleaving: string[] = [];
+  const generations: CorpusRecoveryGenerationEvidence[] = [];
+  let conflict: CorpusConflictRecord | null = null;
+  let admission: CorpusRecoveryInterferenceEvidence["admissionDuringRecovery"] = {
+    attempted: false,
+    reachable: false,
+    admitted: false,
+    gate: null,
+  };
+  const parkedBytes = new Map<string, Uint8Array | null>();
+  const sentinelNotes: string[] = [];
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    await writeEvidence();
+    return evidence as CorpusScenarioEvidence;
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+    log(`before inventory recorded (${evidence.before.length} public entries)`);
+
+    const leadInPoint = profile.crashPoints.find(
+      (candidate) =>
+        candidate.phase === "apply" && candidate.point === profile.rollbackLeadInPoint,
+    );
+    if (leadInPoint === undefined) {
+      throw new Error(`profile ${profile.label} has no apply crash point ${profile.rollbackLeadInPoint}`);
+    }
+    const leadInBoundary = profile.expectedBoundary(leadInPoint);
+    const submissionKey = profile.submissionKey(seed);
+
+    // ---- Generation 1: durable PREPARED + fully applied state --------------
+    log(`generation 1: armed crash point ${profile.rollbackLeadInPoint}`);
+    const gen1Control = join(controlBase, "gen1");
+    const gen1 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: gen1Control,
+      crashPoint: profile.rollbackLeadInPoint,
+    });
+    const bootMarker = await waitForControlMarker(gen1, ["ready", "parked", "failed"], profile.timeoutMs);
+    if (bootMarker === null || bootMarker.kind === "failed") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChild(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+    const gen1Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const submitPromise = submitChangeSet(gen1Client, profile.buildSubmitInput(seed));
+    const parkRace = await Promise.race([
+      waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs).then((marker) => ({
+        kind: "parked-or-failed" as const,
+        marker,
+      })),
+      submitPromise.then(() => ({ kind: "submit-settled" as const, marker: null })),
+    ]);
+    if (parkRace.kind !== "parked-or-failed" || parkRace.marker === null) {
+      failures.push(`rollback lead-in ${profile.rollbackLeadInPoint} was never reached during submission`);
+      await terminateChild(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("rollback lead-in was never reached");
+    }
+    if (parkRace.marker.kind === "failed") {
+      failures.push(`child failed during submission: ${JSON.stringify(parkRace.marker.value)}`);
+      await terminateChild(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("child failed during submission");
+    }
+    await gen1Client.close().catch(() => undefined);
+    const gen1Boundary = await observeBoundary(root, profile);
+    log(`generation 1 parked; boundary ${describeBoundary(gen1Boundary)}`);
+    const leadInFailures = await boundaryFailures(root, gen1Boundary, leadInBoundary, profile);
+    if (leadInFailures.length > 0) {
+      failures.push(`lead-in boundary mismatch: ${leadInFailures.join("; ")}`);
+    }
+    await terminateChild(gen1);
+    interleaving.push(...(await readChildEventLog(gen1Control, 1)));
+    interleaving.push("supervisor: terminated generation 1 at the rollback lead-in");
+    log("generation 1 terminated by supervisor");
+
+    // ---- Validate and declare the interference ------------------------------
+    const interference = options.interference;
+    let conflictFixture: MutationCorpusFileFixture | undefined;
+    if (interference.area === "public") {
+      conflictFixture = profile.files.find(({ path }) => path === interference.path);
+      if (conflictFixture === undefined) {
+        throw new Error(`interference path ${interference.path} is not a profile file`);
+      }
+      if (
+        bytesEqual(interference.bytes, conflictFixture.originalBytes) ||
+        (conflictFixture.committedBytes !== null &&
+          bytesEqual(interference.bytes, conflictFixture.committedBytes))
+      ) {
+        throw new Error("interference bytes must differ from both original and committed bytes");
+      }
+    } else {
+      conflictFixture = profile.files.find(({ path }) => path === profile.primaryPath);
+      if (conflictFixture === undefined) {
+        throw new Error(`profile ${profile.label} has no primary-path fixture`);
+      }
+    }
+
+    // ---- Generation 2: park *inside* startup recovery -----------------------
+    log(`generation 2: armed recovery park point ${options.recoveryParkPoint}`);
+    const gen2Control = join(controlBase, "gen2");
+    const gen2 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: gen2Control,
+      crashPoint: options.recoveryParkPoint,
+    });
+    const gen2Marker = await waitForControlMarker(
+      gen2,
+      ["ready", "parked", "failed"],
+      profile.timeoutMs,
+    );
+    if (gen2Marker === null || gen2Marker.kind !== "parked") {
+      failures.push(
+        `recovery park point ${options.recoveryParkPoint} was never reached in generation 2: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChild(gen2);
+      throw new Error("recovery park point was never reached");
+    }
+    evidence.boundary = await observeBoundary(root, profile);
+    log(
+      `generation 2 parked inside recovery at ${options.recoveryParkPoint}; boundary ${describeBoundary(evidence.boundary)}`,
+    );
+    if (evidence.boundary.journalPhase !== "PREPARED") {
+      failures.push(
+        `expected the durable PREPARED frame to remain unresolved while recovery is parked but observed ${String(evidence.boundary.journalPhase)}`,
+      );
+    }
+    const modeledParkPoint = profile.crashPoints.find(
+      (candidate) => candidate.phase === "rollback" && candidate.point === options.recoveryParkPoint,
+    );
+    if (modeledParkPoint !== undefined) {
+      const parkFailures = await boundaryFailures(
+        root,
+        evidence.boundary,
+        profile.expectedBoundary(modeledParkPoint),
+        profile,
+      );
+      if (parkFailures.length > 0) {
+        failures.push(`parked recovery boundary mismatch at ${options.recoveryParkPoint}: ${parkFailures.join("; ")}`);
+      }
+    }
+    for (const file of profile.files) {
+      parkedBytes.set(file.path, await readPathBytes(root, file.path));
+    }
+    interleaving.push(...(await readChildEventLog(gen2Control, 2)));
+
+    // While recovery is parked, no new Change Set mutation may begin: the
+    // Bridge exposes no write surface until recovery resolves, and a reachable
+    // surface must reject the probe with recovery_in_progress.
+    admission = await probeAdmissionDuringRecovery(port, vaultId, profile, seed);
+    interleaving.push(
+      `supervisor: probed Change Set admission during recovery (reachable=${admission.reachable}, admitted=${admission.admitted}, gate=${String(admission.gate)})`,
+    );
+    if (admission.admitted) {
+      failures.push("a new Change Set was admitted while startup recovery was in progress");
+    }
+    if (admission.reachable && admission.gate !== "recovery_in_progress") {
+      failures.push(
+        `expected recovery_in_progress to reject the admission probe but observed gate ${String(admission.gate)}`,
+      );
+    }
+
+    // Apply the third-party interference while generation 2 is parked.
+    if (interference.area === "public") {
+      const absolute = join(root, ...interference.path.split("/"));
+      await mkdir(dirname(absolute), { recursive: true });
+      await writeFile(absolute, interference.bytes);
+      interleaving.push(
+        `supervisor: wrote third-party bytes over ${interference.path} while recovery was parked`,
+      );
+      conflict = {
+        area: "public",
+        path: interference.path,
+        observedSha256: await sha256(interference.bytes),
+        beforeSha256:
+          conflictFixture.originalBytes === null ? null : await sha256(conflictFixture.originalBytes),
+        expectedAfterSha256:
+          conflictFixture.committedBytes === null ? null : await sha256(conflictFixture.committedBytes),
+        matchesBefore: false,
+        matchesExpectedAfter: false,
+      };
+    } else {
+      const trashFiles = await listPrivateAreaFiles(root, "trash");
+      if (trashFiles.length !== 1) {
+        throw new Error(
+          `private-trash interference requires exactly one managed-trash entry but found ${trashFiles.length}`,
+        );
+      }
+      const trashDirectory = join(root, BRIDGE_STATE_DIRECTORY, "trash");
+      await writeFile(join(trashDirectory, ...trashFiles[0]!.split("/")), interference.bytes);
+      interleaving.push(
+        "supervisor: replaced the private managed-trash bytes while recovery was parked",
+      );
+      conflict = {
+        area: "private_trash",
+        path: profile.primaryPath,
+        observedSha256: await sha256(interference.bytes),
+        beforeSha256:
+          conflictFixture.originalBytes === null ? null : await sha256(conflictFixture.originalBytes),
+        expectedAfterSha256:
+          conflictFixture.committedBytes === null ? null : await sha256(conflictFixture.committedBytes),
+        matchesBefore: false,
+        matchesExpectedAfter: false,
+      };
+    }
+    log("supervisor applied third-party interference; terminating generation 2");
+    await terminateChild(gen2);
+    interleaving.push("supervisor: terminated generation 2 mid-recovery");
+
+    // ---- Generations 3 and 4: fail closed, and keep failing closed ----------
+    for (const generation of [3, 4] as const) {
+      log(`generation ${generation}: startup recovery over third-party state`);
+      const genControl = join(controlBase, `gen${generation}`);
+      const child = spawnOwningProcess({
+        bundle,
+        root,
+        vaultId,
+        port,
+        controlDir: genControl,
+      });
+      const marker = await waitForControlMarker(child, ["ready", "parked", "failed"], profile.timeoutMs);
+      if (marker === null || marker.kind !== "ready") {
+        failures.push(
+          `generation ${generation} did not become ready after unproven recovery: ${JSON.stringify(marker)}; stderr: ${child.stderr.join("\n")}`,
+        );
+        await terminateChild(child);
+        throw new Error(`generation ${generation} did not become ready`);
+      }
+      interleaving.push(...(await readChildEventLog(genControl, generation)));
+      log(`generation ${generation} ready after startup recovery`);
+
+      const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+      const gate = await healthSnapshot(client);
+      const proofState = await statusProofState(client, submissionKey);
+      const sentinel = await submitSentinelDetailed(client, profile, seed, `gen${generation}`);
+      sentinelNotes.push(sentinel.note);
+      generations.push({
+        generation,
+        proofState,
+        effectiveGate: gate.effectiveGate,
+        recoveryState: gate.recoveryState,
+        writeGate: gate.writeGate,
+        sentinel: sentinel.observation,
+      });
+      log(
+        `generation ${generation}: proof ${String(proofState)}; effective gate ${String(gate.effectiveGate)}; sentinel admitted=${sentinel.observation.admitted} gate=${String(sentinel.observation.gate)}`,
+      );
+      if (generation === 3) {
+        evidence.gate = gate;
+        evidence.proofState = proofState;
+        evidence.sentinel = {
+          submitted: sentinel.submitted,
+          applied: sentinel.observation.admitted,
+        };
+      }
+      if (proofState !== "result_unproven") {
+        failures.push(
+          `expected result_unproven in generation ${generation} after third-party interference but observed ${String(proofState)}`,
+        );
+      }
+      if (gate.effectiveGate !== "recovery_blocked") {
+        failures.push(
+          `expected effective gate recovery_blocked in generation ${generation} but observed ${String(gate.effectiveGate)}`,
+        );
+      }
+      if (gate.writeGate !== "blocked") {
+        failures.push(
+          `expected the Vault-wide write gate to be blocked in generation ${generation} but observed ${String(gate.writeGate)}`,
+        );
+      }
+      if (sentinel.observation.admitted) {
+        failures.push(
+          `sentinel Change Set was admitted in generation ${generation} despite an unproven residue`,
+        );
+      }
+      await client.close().catch(() => undefined);
+      await terminateChild(child);
+      await rm(join(root, sentinel.note), { force: true });
+      interleaving.push(`supervisor: terminated generation ${generation}`);
+    }
+
+    // ---- Final disk evidence: not one third-party byte was overwritten ------
+    evidence.after = await inventoryCorpus(root);
+    evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
+
+    if (conflict === null) {
+      failures.push("no conflict record was produced");
+    } else if (interference.area === "public") {
+      const final = evidence.fileFinal.find(({ path }) => path === interference.path);
+      if (final?.sha256 !== conflict.observedSha256) {
+        failures.push(
+          `third-party bytes at ${interference.path} were overwritten or removed by recovery`,
+        );
+      }
+      if (final?.bytesMatchOriginal !== false || final?.bytesMatchCommitted !== false) {
+        failures.push(
+          `interfered footprint ${interference.path} was not reported as foreign state`,
+        );
+      }
+    } else {
+      // The tampered private copy must be preserved byte-for-byte: a failed
+      // restore never destroys the private entry and never publishes it.
+      if (
+        evidence.hidden === null ||
+        evidence.hidden.trashCount !== 1 ||
+        !digestSetMatches(evidence.hidden.trashSha256s, [conflict.observedSha256 ?? ""])
+      ) {
+        failures.push(
+          "the tampered private managed-trash entry was not preserved byte-for-byte",
+        );
+      }
+      const publicFinal = evidence.fileFinal.find(({ path }) => path === profile.primaryPath);
+      if (publicFinal === undefined || publicFinal.present) {
+        failures.push("the tampered private trash bytes were published to the public footprint");
+      }
+    }
+    for (const file of profile.files) {
+      if (interference.area === "public" && file.path === interference.path) continue;
+      const before = parkedBytes.get(file.path);
+      const after = await readPathBytes(root, file.path);
+      if (!bytesEqual(after ?? null, before ?? null)) {
+        failures.push(
+          `recovery mutated untouched footprint ${file.path} after a third-party conflict elsewhere`,
+        );
+      }
+    }
+
+    const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+      profile.files.map((file) => [file.path, terminalStateForFile("result_unproven", file)]),
+    );
+    const expectedPresent = expectedPaths(profile, expectedTerminal);
+    const privateResiduals = await privateAreaResidualPaths(
+      root,
+      redactsManagedTrashResiduals(profile),
+    );
+    evidence.residualPaths = [
+      ...residualPaths(evidence.after, expectedPresent),
+      ...privateResiduals,
+    ].sort();
+    if (interference.area === "public") {
+      const residueReported = evidence.residualPaths.some(
+        (entry) => entry === `file:${interference.path}`,
+      );
+      if (!residueReported) {
+        failures.push(
+          `third-party residue at ${interference.path} was not surfaced as a residual path`,
+        );
+      }
+    }
+    if (evidence.residualPaths.some((entry) => entry.startsWith("trash:"))) {
+      failures.push("a private Managed-Trash path was surfaced as a residual path");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  } finally {
+    evidence.interference = {
+      recoveryParkPoint: options.recoveryParkPoint,
+      interleaving,
+      conflict,
+      admissionDuringRecovery: admission,
+      generations,
+    };
+    try {
+      await rm(root, { recursive: true, force: true });
+      evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+    } catch (error) {
+      evidence.cleanup = { success: false, message: String(error) };
+    }
+    await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+    if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
+    evidence.verdict = failures.length === 0 ? "pass" : "fail";
+    await writeEvidence();
+  }
+  return evidence as CorpusScenarioEvidence;
+}
+
+export interface RunAlreadyRestoredScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  /**
+   * `crash_before_rolled_back` parks generation 2 after the rollback completed
+   * but before the durable ROLLED_BACK write; `supervisor_restored` has the
+   * supervisor itself return every public footprint to its exact before-state
+   * while the Vault is down (a "helpful" third party).
+   */
+  readonly mode: "crash_before_rolled_back" | "supervisor_restored";
+}
+
+/**
+ * Already-restored acceptance scenario (issue #194, spec A-22): when recovery
+ * finds a footprint already at its before state it must accept it as already
+ * restored, discard only the staged/hidden residue, persist ROLLED_BACK, and
+ * converge to `intent_not_applied` without rewriting any public byte. The write
+ * gate must be clean afterwards and the sentinel write must be admissible.
+ */
+export async function runMutationCorpusAlreadyRestoredScenario(
+  options: RunAlreadyRestoredScenarioOptions,
+): Promise<CorpusScenarioEvidence> {
+  const { profile, seed } = options;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const log = (message: string): void => {
+    phases.push(message);
+  };
+
+  const crashPoint: MutationCorpusCrashPoint = {
+    point: options.mode === "crash_before_rolled_back" ? "before_rolled_back" : "supervisor_restored",
+    phase: "rollback",
+  };
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-restored-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-restored-control-"));
+  const evidence = createEvidence(
+    { profile, crashPoint, seed, root, vaultId, port, reportPath },
+    failures,
+  );
+  const logAndPhase = log;
+  const writeEvidence = async (): Promise<void> => {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  };
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    await writeEvidence();
+    return evidence as CorpusScenarioEvidence;
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+    logAndPhase(`before inventory recorded (${evidence.before.length} public entries)`);
+
+    const leadInPoint = profile.crashPoints.find(
+      (candidate) =>
+        candidate.phase === "apply" && candidate.point === profile.rollbackLeadInPoint,
+    );
+    if (leadInPoint === undefined) {
+      throw new Error(`profile ${profile.label} has no apply crash point ${profile.rollbackLeadInPoint}`);
+    }
+    const leadInBoundary = profile.expectedBoundary(leadInPoint);
+    const submissionKey = profile.submissionKey(seed);
+
+    // ---- Generation 1: durable PREPARED + fully applied state --------------
+    logAndPhase(`generation 1: armed crash point ${profile.rollbackLeadInPoint}`);
+    const gen1Control = join(controlBase, "gen1");
+    const gen1 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: gen1Control,
+      crashPoint: profile.rollbackLeadInPoint,
+    });
+    const bootMarker = await waitForControlMarker(gen1, ["ready", "parked", "failed"], profile.timeoutMs);
+    if (bootMarker === null || bootMarker.kind === "failed") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChild(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+    const gen1Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const submitPromise = submitChangeSet(gen1Client, profile.buildSubmitInput(seed));
+    const parkRace = await Promise.race([
+      waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs).then((marker) => ({
+        kind: "parked-or-failed" as const,
+        marker,
+      })),
+      submitPromise.then(() => ({ kind: "submit-settled" as const, marker: null })),
+    ]);
+    if (parkRace.kind !== "parked-or-failed" || parkRace.marker === null) {
+      failures.push(`rollback lead-in ${profile.rollbackLeadInPoint} was never reached during submission`);
+      await terminateChild(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("rollback lead-in was never reached");
+    }
+    if (parkRace.marker.kind === "failed") {
+      failures.push(`child failed during submission: ${JSON.stringify(parkRace.marker.value)}`);
+      await terminateChild(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("child failed during submission");
+    }
+    await gen1Client.close().catch(() => undefined);
+    const gen1Boundary = await observeBoundary(root, profile);
+    logAndPhase(`generation 1 parked; boundary ${describeBoundary(gen1Boundary)}`);
+    const leadInFailures = await boundaryFailures(root, gen1Boundary, leadInBoundary, profile);
+    if (leadInFailures.length > 0) {
+      failures.push(`lead-in boundary mismatch: ${leadInFailures.join("; ")}`);
+    }
+    await terminateChild(gen1);
+    logAndPhase("generation 1 terminated by supervisor");
+
+    let recoveryGeneration = 2;
+    if (options.mode === "crash_before_rolled_back") {
+      const modeledPoint = profile.crashPoints.find(
+        (candidate) => candidate.phase === "rollback" && candidate.point === "before_rolled_back",
+      );
+      if (modeledPoint === undefined) {
+        throw new Error(`profile ${profile.label} does not model before_rolled_back`);
+      }
+      // Generation 2 runs the rollback to completion but parks before the
+      // durable ROLLED_BACK write: every public footprint already sits at its
+      // before state while the journal still says PREPARED.
+      logAndPhase("generation 2: armed recovery park point before_rolled_back");
+      const gen2Control = join(controlBase, "gen2");
+      const gen2 = spawnOwningProcess({
+        bundle,
+        root,
+        vaultId,
+        port,
+        controlDir: gen2Control,
+        crashPoint: "before_rolled_back",
+      });
+      const gen2Marker = await waitForControlMarker(
+        gen2,
+        ["ready", "parked", "failed"],
+        profile.timeoutMs,
+      );
+      if (gen2Marker === null || gen2Marker.kind !== "parked") {
+        failures.push(
+          `recovery park point before_rolled_back was never reached: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+        );
+        await terminateChild(gen2);
+        throw new Error("recovery park point was never reached");
+      }
+      evidence.boundary = await observeBoundary(root, profile);
+      logAndPhase(
+        `generation 2 parked at before_rolled_back; boundary ${describeBoundary(evidence.boundary)}`,
+      );
+      if (evidence.boundary.journalPhase !== "PREPARED") {
+        failures.push(
+          `expected the durable PREPARED frame to remain unresolved at before_rolled_back but observed ${String(evidence.boundary.journalPhase)}`,
+        );
+      }
+      const parkFailures = await boundaryFailures(
+        root,
+        evidence.boundary,
+        profile.expectedBoundary(modeledPoint),
+        profile,
+      );
+      if (parkFailures.length > 0) {
+        failures.push(`parked boundary mismatch at before_rolled_back: ${parkFailures.join("; ")}`);
+      }
+      await terminateChild(gen2);
+      logAndPhase("generation 2 terminated by supervisor");
+      recoveryGeneration = 3;
+    } else {
+      // A "helpful" third party returns every public footprint to its exact
+      // before-state while the Vault is down.
+      for (const file of profile.files) {
+        const absolute = join(root, ...file.path.split("/"));
+        if (file.originalBytes === null) {
+          await rm(absolute, { force: true });
+        } else {
+          await mkdir(dirname(absolute), { recursive: true });
+          await writeFile(absolute, file.originalBytes);
+        }
+      }
+      logAndPhase("supervisor restored every public footprint to its exact before-state");
+    }
+
+    // ---- Final generation: already-restored acceptance ----------------------
+    logAndPhase(`generation ${recoveryGeneration}: startup recovery over an already-restored state`);
+    const finalControl = join(controlBase, `gen${recoveryGeneration}`);
+    const finalChild = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: finalControl,
+    });
+    const finalMarker = await waitForControlMarker(
+      finalChild,
+      ["ready", "parked", "failed"],
+      profile.timeoutMs,
+    );
+    if (finalMarker === null || finalMarker.kind !== "ready") {
+      failures.push(
+        `generation ${recoveryGeneration} did not become ready after recovery: ${JSON.stringify(finalMarker)}; stderr: ${finalChild.stderr.join("\n")}`,
+      );
+      await terminateChild(finalChild);
+      throw new Error("startup recovery did not complete");
+    }
+    logAndPhase(`generation ${recoveryGeneration} ready after startup recovery`);
+
+    // The durable ROLLED_BACK frame is the terminal proof the recovery journal
+    // converged (spec §7.3: restored Semantic Evidence precedes ROLLED_BACK).
+    // Read it before the sentinel write, which would otherwise append its own
+    // COMMITTED frame as the newest one.
+    const terminalJournalPhase = await readJournalPhase(root);
+    if (terminalJournalPhase !== "ROLLED_BACK") {
+      failures.push(
+        `expected a durable ROLLED_BACK frame after already-restored recovery but observed ${String(terminalJournalPhase)}`,
+      );
+    }
+
+    const client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    evidence.gate = await healthSnapshot(client);
+    evidence.proofState = await statusProofState(client, submissionKey);
+    logAndPhase(
+      `proof state ${String(evidence.proofState)}; effective gate ${String(evidence.gate.effectiveGate)}; recovery ${String(evidence.gate.recoveryState)}`,
+    );
+    if (evidence.proofState !== "intent_not_applied") {
+      failures.push(
+        `expected intent_not_applied for an already-restored state but observed ${String(evidence.proofState)}`,
+      );
+    }
+    if (evidence.gate.effectiveGate !== null) {
+      failures.push(
+        `expected a clean gate after already-restored recovery but observed ${String(evidence.gate.effectiveGate)}`,
+      );
+    }
+    if (evidence.gate.recoveryState !== "none" && evidence.gate.recoveryState !== null) {
+      failures.push(
+        `unexpected recovery state ${String(evidence.gate.recoveryState)} after already-restored recovery`,
+      );
+    }
+
+    // The sentinel write becomes admissible only now that recovery has reached
+    // a trustworthy terminal outcome.
+    logAndPhase("submitting sentinel Change Set");
+    const sentinelNote = `CorpusSentinel-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`;
+    evidence.sentinel = await submitChangeSet(client, {
+      submissionKey: profile.submissionKey(`${seed}-sentinel`),
+      operations: [
+        {
+          operationId: `sentinel-${seed}`,
+          kind: "create_note",
+          path: sentinelNote,
+          content: `# Sentinel ${seed}\n`,
+          ifExists: "reject",
+        },
+      ],
+    });
+    if (!evidence.sentinel.submitted || !evidence.sentinel.applied) {
+      failures.push("sentinel Change Set was not admissible after already-restored recovery");
+    }
+    await client.close().catch(() => undefined);
+
+    logAndPhase(`terminating generation ${recoveryGeneration}`);
+    await terminateChild(finalChild);
+    await rm(join(root, sentinelNote), { force: true });
+    evidence.after = await inventoryCorpus(root);
+    evidence.fileFinal = await observeFinalFiles(root, profile);
+    evidence.hidden = await observeHiddenSnapshot(root);
+
+    // Every public footprint must hold its exact before-state bytes (or stay
+    // absent): recovery accepted the current state and rewrote nothing.
+    const finalFailures = finalFileFailures(evidence.fileFinal, "intent_not_applied", profile);
+    if (finalFailures.length > 0) failures.push(...finalFailures);
+
+    // Staged residue must be discarded by the already-restored acceptance; a
+    // Managed-Trash profile must also eliminate every private trash entry.
+    if (evidence.hidden !== null && evidence.hidden.stagingCount !== 0) {
+      failures.push(
+        `expected the staging area to be empty after already-restored recovery but observed ${evidence.hidden.stagingCount} entr${evidence.hidden.stagingCount === 1 ? "y" : "ies"}`,
+      );
+    }
+    const expectedHidden = profile.expectedHiddenState?.("intent_not_applied");
+    if (expectedHidden !== undefined && evidence.hidden !== null) {
+      failures.push(
+        ...hiddenStateFailures("hidden state after already-restored recovery", expectedHidden, evidence.hidden),
+      );
+    }
+
+    const expectedTerminal = new Map<string, MutationCorpusTerminalFileState>(
+      profile.files.map((file) => [file.path, terminalStateForFile("intent_not_applied", file)]),
+    );
+    const expectedPresent = expectedPaths(profile, expectedTerminal);
+    const privateResiduals = await privateAreaResidualPaths(
+      root,
+      redactsManagedTrashResiduals(profile),
+    );
+    evidence.residualPaths = [
+      ...residualPaths(evidence.after, expectedPresent),
+      ...privateResiduals,
+    ].sort();
+    if (evidence.residualPaths.length > 0) {
+      failures.push(`residual paths remain after already-restored recovery: ${evidence.residualPaths.join(", ")}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  } finally {
+    try {
+      await rm(root, { recursive: true, force: true });
+      evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+    } catch (error) {
+      evidence.cleanup = { success: false, message: String(error) };
+    }
+    await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+    if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+    evidence.phases = phases;
+    evidence.verdict = failures.length === 0 ? "pass" : "fail";
+    await writeEvidence();
+  }
+  return evidence as CorpusScenarioEvidence;
+}
