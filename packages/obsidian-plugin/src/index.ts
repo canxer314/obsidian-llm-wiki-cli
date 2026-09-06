@@ -142,7 +142,41 @@ export {
   type CandidateFileDigest,
   type CandidateManagedFile,
   type InstalledCandidate,
+  type VerifiedCandidateBundle,
 } from "./installed-runtime/candidate-bundle.js";
+export {
+  RELEASE_ATTESTATION_SUFFIX,
+  RELEASE_PLUGIN_ID,
+  RELEASE_REPOSITORY,
+  RELEASE_WORKFLOW_PATH,
+  ReleaseBundleError,
+  compareSemanticVersions,
+  currentSourceTreeTag,
+  expectedWorkflowRef,
+  parseReleaseTag,
+  type ParsedReleaseTag,
+  type ReleaseBundleFailureCode,
+} from "./release/release-identity.js";
+export {
+  ATTESTATION_SOURCES,
+  claimsFromGhAttestationVerifyOutput,
+  parseAttestationClaims,
+  serializeAttestationClaims,
+  type AttestationSource,
+  type ReleaseAttestationClaims,
+  type ReleaseAttestationSubject,
+} from "./release/attestation-claims.js";
+export {
+  assembleReleaseBundle,
+  type AssembleReleaseBundleOptions,
+  type AssembledReleaseBundle,
+  type AssembledReleaseFile,
+} from "./release/assemble-release-bundle.js";
+export {
+  verifyReleaseBundle,
+  type VerifiedReleaseBundle,
+  type VerifyReleaseBundleOptions,
+} from "./release/verify-release-bundle.js";
 export {
   EvidencePrivacyError,
   EvidenceWriteError,

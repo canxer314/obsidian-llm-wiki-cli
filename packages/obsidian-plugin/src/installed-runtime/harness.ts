@@ -3,11 +3,15 @@ import { connect } from "node:net";
 
 import {
   CandidateBundleError,
-  inspectCandidateBundle,
   installCandidateBundle,
   sha256Hex,
-  type CandidateBundleIdentity,
+  type VerifiedCandidateBundle,
 } from "./candidate-bundle.js";
+import {
+  ReleaseBundleError,
+  currentSourceTreeTag,
+} from "../release/release-identity.js";
+import { verifyReleaseBundle } from "../release/verify-release-bundle.js";
 import {
   writeEvidenceFile,
   type InstalledRuntimeEvidence,
@@ -82,7 +86,22 @@ export type HarnessFailureCode =
   | "candidate_file_missing"
   | "candidate_file_unexpected"
   | "candidate_checksum_mismatch"
+  | "candidate_checksum_manifest_missing"
   | "candidate_manifest_invalid"
+  | "candidate_unverified_bundle"
+  | "release_tag_malformed"
+  | "release_tag_mismatch"
+  | "release_plugin_id_mismatch"
+  | "release_build_output_missing"
+  | "release_bundle_directory_not_empty"
+  | "release_incompatible_runtime"
+  | "release_attestation_absent"
+  | "release_attestation_malformed"
+  | "release_repository_mismatch"
+  | "release_workflow_mismatch"
+  | "release_attestation_subject_missing"
+  | "release_attestation_subject_unexpected"
+  | "release_attestation_digest_mismatch"
   | "inventory_failed"
   | "obsidian_start_failed"
   | "obsidian_stop_failed"
@@ -118,6 +137,19 @@ export interface HarnessTimeouts {
 export interface InstalledRuntimeHarnessOptions {
   readonly profileName: string;
   readonly candidateBundleDirectory: string;
+  /**
+   * Release-verification expectations for the candidate (issue #196). The
+   * harness installs only the verifier's branded result; repository and
+   * workflow identity stay pinned to the release constants and are never
+   * caller-adjustable here.
+   */
+  readonly candidateVerification?: {
+    /** Immutable tag the candidate must match; defaults to the built version. */
+    readonly expectedTag?: string;
+    readonly expectedPluginId?: string;
+    readonly attestationPath?: string;
+    readonly supportedObsidianVersion?: string;
+  };
   /** Parent directory under which the generated Vault/profile roots are created. */
   readonly workingDirectory: string;
   /** Evidence destination; an existing file is never overwritten. */
@@ -152,7 +184,22 @@ const INVALID_VERDICT_CODES: ReadonlySet<HarnessFailureCode> = new Set([
   "candidate_file_missing",
   "candidate_file_unexpected",
   "candidate_checksum_mismatch",
+  "candidate_checksum_manifest_missing",
   "candidate_manifest_invalid",
+  "candidate_unverified_bundle",
+  "release_tag_malformed",
+  "release_tag_mismatch",
+  "release_plugin_id_mismatch",
+  "release_build_output_missing",
+  "release_bundle_directory_not_empty",
+  "release_incompatible_runtime",
+  "release_attestation_absent",
+  "release_attestation_malformed",
+  "release_repository_mismatch",
+  "release_workflow_mismatch",
+  "release_attestation_subject_missing",
+  "release_attestation_subject_unexpected",
+  "release_attestation_digest_mismatch",
   "inventory_failed",
   "cleanup_failed",
   "residual_test_content",
@@ -177,7 +224,7 @@ interface PhasedObservation {
 interface RunState {
   observed: ObservedRuntimeEnvironment | null;
   mismatches: readonly RuntimePreflightMismatch[];
-  candidate: CandidateBundleIdentity | null;
+  candidate: VerifiedCandidateBundle | null;
   vault: ProvisionedTestVault | null;
   beforeInventory: VaultInventoryEntry[] | null;
   afterInventory: VaultInventoryEntry[] | null;
@@ -241,6 +288,8 @@ export async function runInstalledRuntimeHarness(
   const failFromError = (stage: HarnessStage, error: unknown): void => {
     if (error instanceof CandidateBundleError) {
       fail(stage, error.code, sanitize(error.message));
+    } else if (error instanceof ReleaseBundleError) {
+      fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof TestVaultError) {
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
@@ -303,7 +352,7 @@ export async function runInstalledRuntimeHarness(
         async () => {
           observedIdentity = await readPersistedBridgeIdentity(
             vault.vaultPath,
-            candidate.pluginId,
+            candidate.identity.pluginId,
             configDirectoryName,
           );
           return observedIdentity !== null;
@@ -379,9 +428,21 @@ export async function runInstalledRuntimeHarness(
 
   if (state.failure === null) {
     try {
-      state.candidate = await inspectCandidateBundle(options.candidateBundleDirectory);
+      const verification = options.candidateVerification;
+      state.candidate = await verifyReleaseBundle({
+        bundleDirectory: options.candidateBundleDirectory,
+        expectedTag: verification?.expectedTag ?? currentSourceTreeTag().tag,
+        ...(verification?.expectedPluginId !== undefined
+          ? { expectedPluginId: verification.expectedPluginId }
+          : {}),
+        ...(verification?.attestationPath !== undefined
+          ? { attestationPath: verification.attestationPath }
+          : {}),
+        ...(verification?.supportedObsidianVersion !== undefined
+          ? { supportedObsidianVersion: verification.supportedObsidianVersion }
+          : {}),
+      });
       await installCandidateBundle(
-        options.candidateBundleDirectory,
         state.candidate,
         state.vault!.vaultPath,
         configDirectoryName,
@@ -483,11 +544,11 @@ export async function runInstalledRuntimeHarness(
     candidate: state.candidate === null
       ? null
       : {
-          pluginId: state.candidate.pluginId,
-          pluginVersion: state.candidate.pluginVersion,
-          minAppVersion: state.candidate.minAppVersion,
-          bundleSha256: state.candidate.bundleSha256,
-          files: state.candidate.files.map((file) => ({ ...file })),
+          pluginId: state.candidate.identity.pluginId,
+          pluginVersion: state.candidate.identity.pluginVersion,
+          minAppVersion: state.candidate.identity.minAppVersion,
+          bundleSha256: state.candidate.identity.bundleSha256,
+          files: state.candidate.identity.files.map((file) => ({ ...file })),
         },
     bridgeIdentity:
       firstIdentity === null || firstHealth === undefined
@@ -507,7 +568,7 @@ export async function runInstalledRuntimeHarness(
             },
           },
     inputHashes: {
-      candidateBundleSha256: state.candidate?.bundleSha256 ?? null,
+      candidateBundleSha256: state.candidate?.identity.bundleSha256 ?? null,
       vaultSeedManifestSha256: state.vault?.seedManifestSha256 ?? null,
     },
     beforeInventory: state.beforeInventory,

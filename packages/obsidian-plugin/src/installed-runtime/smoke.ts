@@ -23,15 +23,14 @@
  */
 
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { platform } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  CANDIDATE_CHECKSUM_MANIFEST,
-} from "./candidate-bundle.js";
+import { assembleReleaseBundle } from "../release/assemble-release-bundle.js";
+import { currentSourceTreeTag } from "../release/release-identity.js";
 import { runInstalledRuntimeHarness } from "./harness.js";
 import { createWindowsObsidianProcessControl } from "./obsidian-process.js";
 import {
@@ -140,10 +139,12 @@ async function probeHost(registration: SmokeRegistration): Promise<ObservedRunti
 }
 
 /**
- * Assembles the locally built plugin (`manifest.json` + `dist/main.js`) as
- * the candidate bundle. Missing build output is deliberately left missing so
- * the harness records candidate-stage invalid evidence instead of silently
- * skipping.
+ * Assembles the locally built plugin as the candidate bundle through the
+ * deterministic release packaging step (issue #196): exactly the
+ * release-managed files, a canonical checksum manifest, and sibling
+ * attestation claims pinned to this source tree's tag. Missing build output
+ * is deliberately left missing so the harness records candidate-stage
+ * invalid evidence instead of silently skipping.
  */
 async function assembleLocalCandidate(destination: string): Promise<void> {
   const packageRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -152,19 +153,15 @@ async function assembleLocalCandidate(destination: string): Promise<void> {
   if (!(await fileExists(manifest)) || !(await fileExists(mainJs))) {
     return;
   }
-  await mkdir(destination, { recursive: true });
-  const lines: string[] = [];
-  for (const file of ["manifest.json", "main.js"] as const) {
-    const source = file === "manifest.json" ? manifest : mainJs;
-    const target = join(destination, file);
-    await copyFile(source, target);
-    const digest = createHash("sha256")
-      .update(new Uint8Array(await readFile(target)))
-      .digest("hex");
-    lines.push(`${digest}  ${file}`);
-  }
-  lines.sort();
-  await writeFile(join(destination, CANDIDATE_CHECKSUM_MANIFEST), `${lines.join("\n")}\n`, "utf8");
+  // The destination is the harness-managed default candidate directory;
+  // packaging requires an absent-or-empty directory, so clear prior output.
+  await rm(destination, { recursive: true, force: true });
+  await rm(`${destination}.attestation.json`, { force: true });
+  await assembleReleaseBundle({
+    tag: currentSourceTreeTag().tag,
+    packageRoot,
+    bundleDirectory: destination,
+  });
 }
 
 async function main(): Promise<number> {

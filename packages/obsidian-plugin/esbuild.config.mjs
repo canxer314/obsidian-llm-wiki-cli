@@ -23,3 +23,21 @@ await esbuild.build({
   sourcemap: true,
   outfile: "dist/installed-runtime-smoke.mjs",
 });
+
+// The release-bundle assemble/verify entries (issue #196) ship as
+// self-contained ESM executables so the Release workflow and local operators
+// run the same code the verifier tests cover.
+for (const [entry, outfile] of [
+  ["src/release/assemble-cli.ts", "dist/release-assemble.mjs"],
+  ["src/release/verify-cli.ts", "dist/release-verify.mjs"],
+]) {
+  await esbuild.build({
+    entryPoints: [entry],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    target: "node24",
+    sourcemap: true,
+    outfile,
+  });
+}

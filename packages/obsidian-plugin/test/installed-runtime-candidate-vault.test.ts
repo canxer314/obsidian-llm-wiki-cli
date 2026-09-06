@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   CandidateBundleError,
+  RELEASE_REPOSITORY,
+  RELEASE_WORKFLOW_PATH,
   TestVaultError,
   cleanupTestVault,
   compareInventories,
@@ -14,6 +16,8 @@ import {
   installCandidateBundle,
   provisionTestVault,
   snapshotInventory,
+  verifyReleaseBundle,
+  type VerifiedReleaseBundle,
 } from "../src/index.js";
 
 function sha256(content: string): string {
@@ -34,6 +38,8 @@ const CANDIDATE_MANIFEST = `${JSON.stringify(
 const CANDIDATE_MAIN = "// candidate main\n";
 const CANDIDATE_STYLES = "/* candidate styles */\n";
 
+const CANDIDATE_TAG = "v0.2.0";
+
 async function writeCandidateBundle(
   directory: string,
   options: { corruptChecksum?: boolean; withStyles?: boolean } = {},
@@ -53,7 +59,31 @@ async function writeCandidateBundle(
   if (options.corruptChecksum === true) {
     lines[lines.findIndex((line) => line.endsWith("  main.js"))] = `${"0".repeat(64)}  main.js`;
   }
-  await writeFile(join(directory, "checksums.sha256"), `${lines.join("\n")}\n`, "utf8");
+  const checksums = `${lines.join("\n")}\n`;
+  await writeFile(join(directory, "checksums.sha256"), checksums, "utf8");
+  // Attestation claims live outside the closed bundle file set, mirroring the
+  // GitHub attestation store (issue #196).
+  const claims = {
+    source: "local-candidate",
+    repository: RELEASE_REPOSITORY,
+    workflowRef: `${RELEASE_REPOSITORY}/${RELEASE_WORKFLOW_PATH}@refs/tags/${CANDIDATE_TAG}`,
+    subjects: [
+      ...lines.map((line) => {
+        const [digest, path] = line.split("  ");
+        return { name: path, sha256: digest };
+      }),
+      { name: "checksums.sha256", sha256: sha256(checksums) },
+    ].sort((left, right) => left.name!.localeCompare(right.name!)),
+  };
+  await writeFile(`${directory}.attestation.json`, `${JSON.stringify(claims, null, 2)}\n`, "utf8");
+}
+
+function verifyCandidate(directory: string): Promise<VerifiedReleaseBundle> {
+  return verifyReleaseBundle({
+    bundleDirectory: directory,
+    expectedTag: CANDIDATE_TAG,
+    expectedPluginId: "candidate-bridge",
+  });
 }
 
 async function workspace(): Promise<string> {
@@ -145,10 +175,11 @@ describe("test Vault lifecycle", () => {
     const root = await workspace();
     const bundle = join(root, "candidate");
     await writeCandidateBundle(bundle, { withStyles: true });
-    const identity = await inspectCandidateBundle(bundle);
+    const verified = await verifyCandidate(bundle);
+    const identity = verified.identity;
     const vault = await provisionTestVault({ workingDirectory: root, runId: "run-b" });
 
-    const installed = await installCandidateBundle(bundle, identity, vault.vaultPath);
+    const installed = await installCandidateBundle(verified, vault.vaultPath);
     expect(installed.pluginDirectory).toBe(
       join(vault.vaultPath, ".obsidian", "plugins", "candidate-bridge"),
     );
@@ -163,8 +194,23 @@ describe("test Vault lifecycle", () => {
     ).toEqual(["candidate-bridge"]);
 
     await expect(
-      installCandidateBundle(bundle, identity, vault.vaultPath),
+      installCandidateBundle(verified, vault.vaultPath),
     ).rejects.toMatchObject({ code: "candidate_file_unexpected" });
+
+    // Deployment accepts only the verifier's branded result: a caller
+    // assertion carrying identical fields is refused (issue #196).
+    const forged = {
+      bundleDirectory: bundle,
+      identity,
+      tag: CANDIDATE_TAG,
+      repository: RELEASE_REPOSITORY,
+      workflowRef: `${RELEASE_REPOSITORY}/${RELEASE_WORKFLOW_PATH}@refs/tags/${CANDIDATE_TAG}`,
+      attestationSource: "local-candidate",
+    } as unknown as VerifiedReleaseBundle;
+    const secondVault = await provisionTestVault({ workingDirectory: root, runId: "run-b-forged" });
+    await expect(installCandidateBundle(forged, secondVault.vaultPath)).rejects.toMatchObject({
+      code: "candidate_unverified_bundle",
+    });
   });
 
   it("records path/hash inventories without note bodies and diffs before/after", async () => {

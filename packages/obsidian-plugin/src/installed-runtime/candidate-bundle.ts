@@ -34,7 +34,9 @@ export class CandidateBundleError extends Error {
       | "candidate_file_missing"
       | "candidate_file_unexpected"
       | "candidate_checksum_mismatch"
-      | "candidate_manifest_invalid",
+      | "candidate_checksum_manifest_missing"
+      | "candidate_manifest_invalid"
+      | "candidate_unverified_bundle",
   ) {
     super(message);
     this.name = "CandidateBundleError";
@@ -140,10 +142,12 @@ function parseChecksumManifest(bytes: Uint8Array): ReadonlyMap<string, string> {
 /**
  * Reads and verifies one candidate bundle directory. Every managed file is
  * hashed; when a `checksums.sha256` is present each listed digest must match
- * exactly, and unknown bundle members reject the candidate.
+ * exactly, and unknown bundle members reject the candidate. Release bundles
+ * pass `requireChecksumManifest` so the checksum manifest is mandatory.
  */
 export async function inspectCandidateBundle(
   directory: string,
+  options: { requireChecksumManifest?: boolean } = {},
 ): Promise<CandidateBundleIdentity> {
   let entries: string[];
   try {
@@ -194,6 +198,11 @@ export async function inspectCandidateBundle(
         );
       }
     }
+  } else if (options.requireChecksumManifest === true) {
+    throw new CandidateBundleError(
+      "Candidate bundle is missing checksums.sha256",
+      "candidate_checksum_manifest_missing",
+    );
   }
 
   const manifest = parseManifest(contents.get("manifest.json")!);
@@ -215,17 +224,62 @@ export interface InstalledCandidate {
 }
 
 /**
+ * Verification brand (issue #196): deployment accepts only the release
+ * verifier's result. The brand symbol is module-private — it is deliberately
+ * NOT re-exported from the package index — so no caller can mint an
+ * installable bundle by assertion; `verifyReleaseBundle` is the only path
+ * that produces one. There is no skip-verification flag.
+ */
+const VERIFIED_CANDIDATE_BRAND: unique symbol = Symbol("verified-candidate-bundle");
+
+export interface VerifiedCandidateBundle {
+  readonly [VERIFIED_CANDIDATE_BRAND]: true;
+  readonly bundleDirectory: string;
+  readonly identity: CandidateBundleIdentity;
+  /** Immutable tag the bundle was verified against, e.g. `v0.1.0`. */
+  readonly tag: string;
+  readonly repository: string;
+  readonly workflowRef: string;
+  readonly attestationSource: "github-artifact-attestation" | "local-candidate";
+}
+
+/** Internal mint for the release verifier; not part of the public package API. */
+export function brandVerifiedCandidateBundle(
+  bundle: Omit<VerifiedCandidateBundle, typeof VERIFIED_CANDIDATE_BRAND>,
+): VerifiedCandidateBundle {
+  return { [VERIFIED_CANDIDATE_BRAND]: true, ...bundle };
+}
+
+/** Runtime brand check: plain objects and caller assertions never pass. */
+export function isVerifiedCandidateBundle(bundle: unknown): bundle is VerifiedCandidateBundle {
+  return (
+    typeof bundle === "object" &&
+    bundle !== null &&
+    (bundle as Record<PropertyKey, unknown>)[VERIFIED_CANDIDATE_BRAND] === true
+  );
+}
+
+/**
  * Installs the verified candidate into the dedicated test Vault as the only
  * enabled community plugin and verifies the written bytes hash-equal the
- * inspected candidate. The plugin directory must not already exist: install
- * never overwrites release-managed files it did not just write.
+ * inspected candidate. Only a branded `VerifiedCandidateBundle` from
+ * `verifyReleaseBundle` is accepted — never a raw directory, URL, or caller
+ * assertion. The plugin directory must not already exist: install never
+ * overwrites release-managed files it did not just write.
  */
 export async function installCandidateBundle(
-  bundleDirectory: string,
-  identity: CandidateBundleIdentity,
+  bundle: VerifiedCandidateBundle,
   vaultPath: string,
   configDirectoryName = ".obsidian",
 ): Promise<InstalledCandidate> {
+  if (!isVerifiedCandidateBundle(bundle)) {
+    throw new CandidateBundleError(
+      "Refusing to install an unverified bundle: deployment requires the verified release-bundle result",
+      "candidate_unverified_bundle",
+    );
+  }
+  const bundleDirectory = bundle.bundleDirectory;
+  const identity = bundle.identity;
   const configDirectory = join(vaultPath, configDirectoryName);
   const pluginsRoot = join(configDirectory, "plugins");
   const pluginDirectory = join(pluginsRoot, identity.pluginId);

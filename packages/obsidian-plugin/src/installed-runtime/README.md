@@ -17,7 +17,8 @@ these seams instead of building parallel harnesses.
    dedicated Obsidian profile directory, refusing to overwrite any existing
    root (spec §12.2/§12.6).
 3. **Candidate** — verifies the candidate bundle (`manifest.json`, `main.js`,
-   optional `styles.css`, `checksums.sha256`), installs it into the test
+   optional `styles.css`, `checksums.sha256`) through the release verifier
+   (issue #196), installs only the verifier's branded result into the test
    Vault as the only enabled community plugin, and re-verifies written bytes.
 4. **Observe** — starts real Obsidian through the process-control seam, waits
    for the plugin-persisted Bridge identity, then initializes a real loopback

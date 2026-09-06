@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -12,6 +12,8 @@ import {
   ObsidianProcessError,
   parseEvidence,
   provisionTestVault,
+  RELEASE_REPOSITORY,
+  RELEASE_WORKFLOW_PATH,
   runInstalledRuntimeHarness,
   TEST_VAULT_DIRECTORY_PREFIX,
   type BridgeHealthState,
@@ -59,10 +61,11 @@ const CANDIDATE_MANIFEST = `${JSON.stringify(
   2,
 )}\n`;
 const CANDIDATE_MAIN = "// candidate main\n";
+const CANDIDATE_TAG = "v0.2.0";
 
 async function writeCandidateBundle(
   directory: string,
-  options: { corruptChecksum?: boolean } = {},
+  options: { corruptChecksum?: boolean; withAttestation?: boolean } = {},
 ): Promise<void> {
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "manifest.json"), CANDIDATE_MANIFEST, "utf8");
@@ -75,7 +78,33 @@ async function writeCandidateBundle(
   if (options.corruptChecksum === true) {
     lines[lines.findIndex((line) => line.endsWith("  main.js"))] = `${"0".repeat(64)}  main.js`;
   }
-  await writeFile(join(directory, "checksums.sha256"), `${lines.join("\n")}\n`, "utf8");
+  const checksums = `${lines.join("\n")}\n`;
+  await writeFile(join(directory, "checksums.sha256"), checksums, "utf8");
+  if (options.withAttestation === false) {
+    await rm(`${directory}.attestation.json`, { force: true });
+    return;
+  }
+  {
+    // Claims live outside the closed bundle file set, mirroring the GitHub
+    // attestation store (issue #196).
+    const claims = {
+      source: "local-candidate",
+      repository: RELEASE_REPOSITORY,
+      workflowRef: `${RELEASE_REPOSITORY}/${RELEASE_WORKFLOW_PATH}@refs/tags/${CANDIDATE_TAG}`,
+      subjects: [
+        ...lines.map((line) => {
+          const [subjectDigest, path] = line.split("  ");
+          return { name: path, sha256: subjectDigest };
+        }),
+        { name: "checksums.sha256", sha256: digest(checksums) },
+      ].sort((left, right) => left.name!.localeCompare(right.name!)),
+    };
+    await writeFile(
+      `${directory}.attestation.json`,
+      `${JSON.stringify(claims, null, 2)}\n`,
+      "utf8",
+    );
+  }
 }
 
 /**
@@ -169,6 +198,7 @@ async function arrangeRun(
   const options: InstalledRuntimeHarnessOptions = {
     profileName: INNER_PROFILE.name,
     candidateBundleDirectory: candidate,
+    candidateVerification: { expectedTag: CANDIDATE_TAG, expectedPluginId: "candidate-bridge" },
     workingDirectory: root,
     evidencePath: join(root, "evidence", `${runId}.json`),
     probe: probe(),
@@ -297,6 +327,21 @@ describe("installed-runtime harness failure projection", () => {
     });
     expect(result.evidence.candidate).toBeNull();
     await expect(stat(join(root, `${TEST_VAULT_DIRECTORY_PREFIX}run-corrupt-candidate`))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("records invalid evidence for a candidate without attestation claims", async () => {
+    const { root, candidate, options } = await arrangeRun("run-unattested-candidate");
+    await writeCandidateBundle(candidate, { withAttestation: false });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("invalid");
+    expect(result.failure).toMatchObject({
+      stage: "candidate",
+      code: "release_attestation_absent",
+    });
+    expect(result.evidence.candidate).toBeNull();
+    await expect(stat(join(root, `${TEST_VAULT_DIRECTORY_PREFIX}run-unattested-candidate`))).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
