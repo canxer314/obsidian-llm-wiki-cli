@@ -16,10 +16,16 @@ import {
 } from "./private-config.ts";
 import { createChildEnvironments } from "./automation-environment.ts";
 
+// The strict install prefers the image-seeded offline cache, but must not die
+// on a flaky readiness failure (#42's implementer sandbox failed the
+// version/sha/offline chain three times in one day while every clause passed
+// in faithful manual replicas): fall back to the revision-compatible repair
+// install, which refetches whatever the offline cache cannot satisfy. The
+// node/npm version check stays hard — a runtime mismatch means a broken
+// image, and installing on top of it would mask that.
 const OFFLINE_INSTALL = [
   "printf '%s\\n' \"$(node --version)\" \"$(npm --version)\" | cmp --silent - /home/agent/.npm/sandcastle-runtime.versions",
-  "sha256sum --check --status /home/agent/.npm/sandcastle-image.sha256",
-  "timeout --signal=TERM --kill-after=10s 240s npm ci --offline",
+  "(sha256sum --check --status /home/agent/.npm/sandcastle-image.sha256 && timeout --signal=TERM --kill-after=10s 240s npm ci --offline) || timeout --signal=TERM --kill-after=10s 240s npm ci --prefer-offline --fetch-timeout=30000 --fetch-retries=1 --fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=5000",
 ].join(" && ");
 
 const REPAIR_INSTALL = [
