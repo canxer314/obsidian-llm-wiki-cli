@@ -1644,6 +1644,16 @@ export class ChangeSetService {
   #writeTail: Promise<void> = Promise.resolve();
   #controlTail: Promise<void> = Promise.resolve();
   #recoveryBlocked = false;
+  /**
+   * Recovery Journal answers the registry could not give at startup (issue
+   * #195, spec A-34/A-35): when a durable frame references a Change Set the
+   * registry can neither produce nor prove expired, the registry is
+   * missing/truncated and startup recovery fails closed. While such a reference
+   * is unresolved, a status lookup for that exact key/identity must not
+   * degrade to an ordinary `unknown` — the lookup answers with the unproven
+   * blocked disposition instead.
+   */
+  #unresolvedRecoveryAnswers: { submissionKey: string; changeSetId: string }[] = [];
   #dequeuePaused = false;
   #admissionGate: ChangeSetGate | null = null;
   #currentExecutionId: string | null = null;
@@ -1751,6 +1761,23 @@ export class ChangeSetService {
       update(entry);
       await this.#save(nextState);
     });
+  }
+
+  /** Remember a journal reference the registry could not answer (see field note). */
+  #noteUnresolvedRecoveryAnswer(frame: RecoveryJournalFrame): void {
+    const answer = {
+      submissionKey: frame.input.submissionKey,
+      changeSetId: frame.changeSetId,
+    };
+    if (
+      !this.#unresolvedRecoveryAnswers.some(
+        (candidate) =>
+          candidate.submissionKey === answer.submissionKey &&
+          candidate.changeSetId === answer.changeSetId,
+      )
+    ) {
+      this.#unresolvedRecoveryAnswers.push(answer);
+    }
   }
 
   async #markUnproven(entry: ChangeSetRegistryEntry): Promise<void> {
@@ -2010,6 +2037,7 @@ export class ChangeSetService {
         (candidate) => candidate.changeSetId === frame.changeSetId,
       );
       if (expired && frame.phase !== "PREPARED") return;
+      this.#noteUnresolvedRecoveryAnswer(frame);
       throw new Error("Recovery Journal does not match the Change Set registry");
     }
     if (
@@ -3068,11 +3096,30 @@ export class ChangeSetService {
 
   async #expireRecords(): Promise<void> {
     const now = this.#options.now();
-    const expired = this.#state.entries.filter((entry) => entry.expiresAt <= now);
+    // A record past its retention boundary is only expired once nothing active
+    // can still reference it (issue #195, spec A-43): with an execution adapter
+    // configured, an entry whose execution never reached a terminal phase is
+    // still referenced by the live queue, an in-flight execution, or a
+    // Recovery Journal frame startup recovery must answer. Expiring it would
+    // race that reference and degrade a still-required recovery result, so the
+    // entry is retained until its execution goes terminal. Without an execution
+    // adapter no execution can ever begin, so queued entries expire normally.
+    const expired = this.#state.entries.filter(
+      (entry) =>
+        entry.expiresAt <= now &&
+        (this.#options.execution === undefined ||
+          entry.execution === undefined ||
+          entry.execution.phase === "terminal"),
+    );
     if (expired.length === 0) return;
     const existingKeys = new Set(this.#state.tombstones.map(({ submissionKey }) => submissionKey));
+    const retained = (entry: ChangeSetRegistryEntry): boolean =>
+      entry.expiresAt > now ||
+      (this.#options.execution !== undefined &&
+        entry.execution !== undefined &&
+        entry.execution.phase !== "terminal");
     const nextState = structuredClone(this.#state);
-    nextState.entries = nextState.entries.filter((entry) => entry.expiresAt > now);
+    nextState.entries = nextState.entries.filter(retained);
     for (const entry of expired) {
       if (!existingKeys.has(entry.submissionKey)) {
         nextState.tombstones.push({
@@ -3253,6 +3300,16 @@ export class ChangeSetService {
         lookup: "found",
         changeSet: entry.changeSet,
         vault: requestState.vault,
+      });
+    }
+    // A lookup the Recovery Journal still requires an answer for must not
+    // degrade to an ordinary `unknown`/`expired` while the registry that
+    // should hold the record is missing or truncated (issue #195, spec A-43):
+    // answer with the unproven blocked disposition instead.
+    if (this.#unresolvedRecoveryAnswers.some(matches)) {
+      return parseChangeSetStatusResult({
+        lookup: "operationally_blocked",
+        gate: { code: "recovery_blocked" },
       });
     }
     return parseChangeSetStatusResult({

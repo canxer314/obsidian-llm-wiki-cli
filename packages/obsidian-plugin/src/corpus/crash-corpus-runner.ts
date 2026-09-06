@@ -3836,3 +3836,1185 @@ export async function runMutationCorpusAlreadyRestoredScenario(
   }
   return evidence as CorpusScenarioEvidence;
 }
+
+// ---------------------------------------------------------------------------
+// Issue #195: Submission Key replay and seven-day retention corpus scenarios.
+//
+// These scenarios give the Primary Operator deterministic proof, over the real
+// owning process, that an accepted Submission Key binding and the complete
+// Change Set record survive reconnect, process crash, and restart: retries at
+// every timing return the same Change Set identity and current proof state
+// without another execution (at-most-once), a `recovery_blocked` submission's
+// historical bind/replay disposition stays stable across generations, and a
+// missing or corrupt registry fails closed (an unproven blocked answer or a
+// refused boot) instead of degrading a still-required recovery result to an
+// ordinary `unknown`. Reports never contain a raw Submission Key: keys appear
+// only as irreversible SHA-256 digests (spec A-33/A-37 redaction style).
+// ---------------------------------------------------------------------------
+
+/** Redacted registry entry observation: irreversible key digest, never the key. */
+export interface SubmissionKeyRegistryEntryObservation {
+  readonly keyDigest: string;
+  readonly changeSetId: string;
+  readonly fingerprint: string;
+  readonly state: string;
+  readonly executionPhase: string | null;
+  /** `expiresAt - acceptedAt`; must equal the seven-day retention minimum. */
+  readonly retentionMs: number;
+  readonly historicalGate: string | null;
+}
+
+export interface SubmissionKeyRegistryObservation {
+  readonly entryCount: number;
+  readonly tombstoneCount: number;
+  readonly entries: readonly SubmissionKeyRegistryEntryObservation[];
+}
+
+export interface SubmissionKeyGenerationEvidence {
+  readonly generation: number;
+  readonly outcome: "ready" | "parked_then_terminated" | "boot_refused";
+  /** Apply-path runs observed in the child event log (`before_prepared` count). */
+  readonly executionRuns: number;
+  /** Recovery rollbacks observed in the child event log (`before_rollback` count). */
+  readonly recoveryRuns: number;
+  readonly effectiveGate: string | null;
+  readonly recoveryState: string | null;
+}
+
+export interface SubmissionKeyCorpusEvidence {
+  readonly corpus: "submission_key";
+  readonly scenario: string;
+  readonly fixture: {
+    readonly seed: string;
+    readonly root: string;
+    readonly vaultId: string;
+    readonly port: number;
+    readonly notePath: string;
+  };
+  readonly phases: readonly string[];
+  /** Ordered record of concurrent/duplicate calls the supervisor issued. */
+  readonly callOrder: readonly string[];
+  /** label → irreversible `sha256:` digest of the raw Submission Key. */
+  readonly keyDigests: Readonly<Record<string, string>>;
+  /** label → bound Change Set identity observed over the wire. */
+  readonly changeSetIds: Readonly<Record<string, string>>;
+  /** label → structured submit/status result observed over the wire. */
+  readonly results: Readonly<Record<string, unknown>>;
+  readonly generations: readonly SubmissionKeyGenerationEvidence[];
+  readonly registryBefore: SubmissionKeyRegistryObservation | null;
+  readonly registryAfter: SubmissionKeyRegistryObservation | null;
+  readonly before: readonly CorpusInventoryEntry[];
+  readonly after: readonly CorpusInventoryEntry[];
+  readonly residualPaths: readonly string[];
+  readonly cleanup: { readonly success: boolean; readonly message: string };
+  readonly verdict: "pass" | "fail";
+  readonly failures: readonly string[];
+  readonly reportPath: string;
+}
+
+type WritableSubmissionKeyEvidence = { -readonly [K in keyof SubmissionKeyCorpusEvidence]: SubmissionKeyCorpusEvidence[K] };
+
+const BRIDGE_REGISTRY_FILE = "bridge-state.json";
+const BRIDGE_PRIMARY_SETTINGS_FILE = "plugin-data.json";
+
+function keyDigest(submissionKey: string): string {
+  return `sha256:${createHash("sha256").update(submissionKey, "utf8").digest("hex")}`;
+}
+
+/**
+ * Redacted projection of the persisted Change Set registry (the authoritative
+ * recovery copy). Raw Submission Keys never leave the private state file: only
+ * irreversible digests, record identities, fingerprints, proof states, and the
+ * retention window are observed.
+ */
+async function observeSubmissionKeyRegistry(
+  root: string,
+): Promise<SubmissionKeyRegistryObservation | null> {
+  try {
+    const text = await readFile(join(root, BRIDGE_STATE_DIRECTORY, BRIDGE_REGISTRY_FILE), "utf8");
+    const settings = JSON.parse(text) as Record<string, unknown>;
+    const changeSets = settings.changeSets;
+    if (typeof changeSets !== "object" || changeSets === null || Array.isArray(changeSets)) {
+      return null;
+    }
+    const registry = changeSets as Record<string, unknown>;
+    const entries = Array.isArray(registry.entries) ? registry.entries : [];
+    const tombstones = Array.isArray(registry.tombstones) ? registry.tombstones : [];
+    return {
+      entryCount: entries.length,
+      tombstoneCount: tombstones.length,
+      entries: entries.map((raw: unknown) => {
+        const entry = asRecord(raw);
+        const changeSet = asRecord(entry.changeSet);
+        const execution = asRecord(entry.execution);
+        const historicalGate = asRecord(entry.historicalGate);
+        return {
+          keyDigest: keyDigest(String(entry.submissionKey)),
+          changeSetId: String(entry.changeSetId),
+          fingerprint: String(entry.fingerprint),
+          state: String(changeSet.state),
+          executionPhase:
+            typeof execution.phase === "string" ? execution.phase : null,
+          retentionMs: Number(entry.expiresAt) - Number(entry.acceptedAt),
+          historicalGate:
+            typeof historicalGate.code === "string" ? historicalGate.code : null,
+        };
+      }),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Canonical JSON (sorted member order) so cross-process record equality is deterministic. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, member]) => member !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Full structured submit result (identity + proof state + historical gate). */
+async function submitFull(
+  client: Client,
+  input: Record<string, unknown>,
+): Promise<{ readonly isError: boolean; readonly content: Record<string, unknown> }> {
+  const result = await callTool(client, "vault_change_set_submit", input);
+  return { isError: result.isError === true, content: asRecord(result.structuredContent) };
+}
+
+async function statusFull(
+  client: Client,
+  input: { readonly submissionKey: string } | { readonly changeSetId: string },
+): Promise<{ readonly isError: boolean; readonly content: Record<string, unknown> }> {
+  const result = await callTool(client, "vault_change_set_status", input);
+  return { isError: result.isError === true, content: asRecord(result.structuredContent) };
+}
+
+/** Child event-log counts proving at-most-once execution per generation. */
+async function generationRunCounts(
+  controlDir: string,
+): Promise<{ readonly executionRuns: number; readonly recoveryRuns: number }> {
+  try {
+    const text = await readFile(join(controlDir, "events.jsonl"), "utf8");
+    const lines = text.split("\n").filter((line) => line.trim().length > 0);
+    return {
+      executionRuns: lines.filter((line) => line.includes('"point":"before_prepared"')).length,
+      recoveryRuns: lines.filter((line) => line.includes('"point":"before_rollback"')).length,
+    };
+  } catch {
+    return { executionRuns: 0, recoveryRuns: 0 };
+  }
+}
+
+function createSubmissionKeyEvidence(
+  options: {
+    readonly scenario: string;
+    readonly seed: string;
+    readonly root: string;
+    readonly vaultId: string;
+    readonly port: number;
+    readonly notePath: string;
+    readonly reportPath: string;
+  },
+  failures: string[],
+): WritableSubmissionKeyEvidence {
+  return {
+    corpus: "submission_key",
+    scenario: options.scenario,
+    fixture: {
+      seed: options.seed,
+      root: options.root,
+      vaultId: options.vaultId,
+      port: options.port,
+      notePath: options.notePath,
+    },
+    phases: [],
+    callOrder: [],
+    keyDigests: {},
+    changeSetIds: {},
+    results: {},
+    generations: [],
+    registryBefore: null,
+    registryAfter: null,
+    before: [],
+    after: [],
+    residualPaths: [],
+    cleanup: { success: false, message: "not attempted" },
+    verdict: "fail",
+    failures,
+    reportPath: options.reportPath,
+  };
+}
+
+async function finalizeSubmissionKeyEvidence(
+  evidence: WritableSubmissionKeyEvidence,
+  failures: string[],
+  phases: readonly string[],
+  callOrder: readonly string[],
+  root: string,
+  controlBase: string,
+): Promise<SubmissionKeyCorpusEvidence> {
+  try {
+    await rm(root, { recursive: true, force: true });
+    evidence.cleanup = { success: true, message: "scenario root removed by supervisor" };
+  } catch (error) {
+    evidence.cleanup = { success: false, message: String(error) };
+  }
+  await rm(controlBase, { recursive: true, force: true }).catch(() => undefined);
+  if (!evidence.cleanup.success) failures.push(`cleanup failed: ${evidence.cleanup.message}`);
+  evidence.phases = [...phases];
+  evidence.callOrder = [...callOrder];
+  evidence.verdict = failures.length === 0 ? "pass" : "fail";
+  await mkdir(dirname(evidence.reportPath), { recursive: true });
+  await writeFile(evidence.reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  return evidence as SubmissionKeyCorpusEvidence;
+}
+
+export interface RunSubmissionKeyReplayScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+}
+
+/**
+ * Clean-run replay scenario (issue #195 AC1/AC3): generation 1 submits the
+ * profile's Change Set to durable `intent_applied`, then replays the same
+ * key/request on the same connection and again on a reconnected Agent Session;
+ * generation 2 (a real process restart) must answer status and replay with the
+ * identical record — immutable preview, requested/derived effect identities and
+ * order, final paths, and proof state — without executing again.
+ */
+export async function runSubmissionKeyReplayScenario(
+  options: RunSubmissionKeyReplayScenarioOptions,
+): Promise<SubmissionKeyCorpusEvidence> {
+  const { profile, seed } = options;
+  const scenario = "replay_reconnect_restart";
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const callOrder: string[] = [];
+  const log = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-replay-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-replay-control-"));
+  const evidence = createSubmissionKeyEvidence(
+    { scenario, seed, root, vaultId, port, notePath: profile.primaryPath, reportPath },
+    failures,
+  );
+  const submissionKey = profile.submissionKey(seed);
+  evidence.keyDigests = { primary: keyDigest(submissionKey) };
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+    const submitted = profile.buildSubmitInput(seed);
+
+    log("generation 1: boot and submit to a durable terminal proof");
+    const gen1Control = join(controlBase, "gen1");
+    const gen1 = spawnOwningProcess({ bundle, root, vaultId, port, controlDir: gen1Control });
+    const gen1Marker = await waitForControlMarker(gen1, ["ready", "failed"], profile.timeoutMs);
+    if (gen1Marker === null || gen1Marker.kind !== "ready") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(gen1Marker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChild(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+
+    const clientA = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen1:submit:original");
+    const first = await submitFull(clientA, submitted);
+    if (first.isError || first.content.outcome !== "registered") {
+      failures.push(`original submission did not register: ${JSON.stringify(first.content)}`);
+      throw new Error("original submission failed");
+    }
+    const changeSetId = typeof asRecord(first.content.changeSet).changeSetId === "string"
+      ? (asRecord(first.content.changeSet).changeSetId as string)
+      : null;
+    if (changeSetId === null) {
+      failures.push("original submission returned no Change Set identity");
+      throw new Error("no Change Set identity");
+    }
+    evidence.changeSetIds = { primary: changeSetId };
+    if (asRecord(first.content.changeSet).state !== "intent_applied") {
+      failures.push("original submission did not reach intent_applied");
+    }
+
+    // Same-connection replay: identical result, no second execution.
+    callOrder.push("gen1:submit:replay-same-session");
+    const replaySame = await submitFull(clientA, submitted);
+    if (canonicalJson(replaySame.content) !== canonicalJson(first.content)) {
+      failures.push("same-session replay did not return the identical registered result");
+    }
+    const statusByKey = await statusFull(clientA, { submissionKey });
+    if (
+      statusByKey.content.lookup !== "found" ||
+      canonicalJson(asRecord(statusByKey.content.changeSet)) !==
+        canonicalJson(asRecord(first.content.changeSet))
+    ) {
+      failures.push("status by Submission Key did not return the identical record");
+    }
+    await clientA.close().catch(() => undefined);
+    log("generation 1: transport disconnected; reconnecting a fresh Agent Session");
+
+    const clientB = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen1:submit:replay-reconnected-session");
+    const replayReconnected = await submitFull(clientB, submitted);
+    if (canonicalJson(replayReconnected.content) !== canonicalJson(first.content)) {
+      failures.push("reconnected-session replay did not return the identical registered result");
+    }
+    const statusById = await statusFull(clientB, { changeSetId });
+    if (
+      statusById.content.lookup !== "found" ||
+      canonicalJson(asRecord(statusById.content.changeSet)) !==
+        canonicalJson(asRecord(first.content.changeSet))
+    ) {
+      failures.push("status by Change Set identity did not return the identical record");
+    }
+    await clientB.close().catch(() => undefined);
+    evidence.results = {
+      original: first.content,
+      replaySameSession: replaySame.content,
+      replayReconnectedSession: replayReconnected.content,
+      statusByKey: statusByKey.content,
+      statusByChangeSetId: statusById.content,
+    };
+
+    const gen1Runs = await generationRunCounts(gen1Control);
+    await terminateChild(gen1);
+    log("generation 1 terminated by supervisor (process kill)");
+    evidence.registryAfter = await observeSubmissionKeyRegistry(root);
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 1,
+      outcome: "ready",
+      executionRuns: gen1Runs.executionRuns,
+      recoveryRuns: gen1Runs.recoveryRuns,
+      effectiveGate: null,
+      recoveryState: null,
+    });
+    if (gen1Runs.executionRuns !== 1) {
+      failures.push(
+        `expected exactly one execution in generation 1 but observed ${gen1Runs.executionRuns}`,
+      );
+    }
+
+    log("generation 2: restart; the accepted binding must survive without re-execution");
+    const gen2Control = join(controlBase, "gen2");
+    const gen2 = spawnOwningProcess({ bundle, root, vaultId, port, controlDir: gen2Control });
+    const gen2Marker = await waitForControlMarker(gen2, ["ready", "failed"], profile.timeoutMs);
+    if (gen2Marker === null || gen2Marker.kind !== "ready") {
+      failures.push(
+        `generation 2 did not boot: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChild(gen2);
+      throw new Error("generation 2 failed to boot");
+    }
+    const clientC = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen2:status:after-restart");
+    const restartedStatus = await statusFull(clientC, { submissionKey });
+    if (
+      restartedStatus.content.lookup !== "found" ||
+      canonicalJson(asRecord(restartedStatus.content.changeSet)) !==
+        canonicalJson(asRecord(first.content.changeSet))
+    ) {
+      failures.push("status after restart did not return the identical record");
+    }
+    callOrder.push("gen2:submit:replay-after-restart");
+    const replayAfterRestart = await submitFull(clientC, submitted);
+    if (canonicalJson(replayAfterRestart.content) !== canonicalJson(first.content)) {
+      failures.push("replay after restart did not return the identical registered result");
+    }
+    evidence.results = {
+      ...evidence.results,
+      replayAfterRestart: replayAfterRestart.content,
+      statusAfterRestart: restartedStatus.content,
+    };
+    await clientC.close().catch(() => undefined);
+    const gen2Runs = await generationRunCounts(gen2Control);
+    await terminateChild(gen2);
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 2,
+      outcome: "ready",
+      executionRuns: gen2Runs.executionRuns,
+      recoveryRuns: gen2Runs.recoveryRuns,
+      effectiveGate: null,
+      recoveryState: null,
+    });
+    if (gen2Runs.executionRuns !== 0 || gen2Runs.recoveryRuns !== 0) {
+      failures.push(
+        `the restart re-executed or re-recovered a proven Change Set (execution runs ${gen2Runs.executionRuns}, recovery runs ${gen2Runs.recoveryRuns})`,
+      );
+    }
+    log("generation 2 terminated by supervisor");
+
+    evidence.after = await inventoryCorpus(root);
+    const noteBytes = await readPathBytes(root, profile.primaryPath);
+    const committed = profile.files.find((file) => file.path === profile.primaryPath)?.committedBytes ?? null;
+    if (!bytesEqual(noteBytes, committed)) {
+      failures.push(`public file ${profile.primaryPath} does not hold the exact committed bytes after the restart`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  }
+  return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+}
+
+export interface RunSubmissionKeyCrashReplayScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  /** Apply crash point generation 1 parks at (must leave a durable journal frame). */
+  readonly crashPoint: string;
+  /** Terminal proof state generation 2 recovery must converge to. */
+  readonly expectedProof: "intent_applied" | "intent_not_applied";
+}
+
+/**
+ * In-flight replay through a real crash (issue #195 AC1): generation 1 parks at
+ * a declared apply crash point while the original submit is unanswered; a
+ * second Agent Session observes the in-progress record and issues a same-key
+ * replay that stays in flight when the supervisor kills the process (transport
+ * disconnect). Generation 2 recovery converges to the declared terminal proof
+ * and the post-restart replay returns the same Change Set identity without
+ * another execution.
+ */
+export async function runSubmissionKeyCrashReplayScenario(
+  options: RunSubmissionKeyCrashReplayScenarioOptions,
+): Promise<SubmissionKeyCorpusEvidence> {
+  const { profile, seed } = options;
+  const scenario = `crash_replay_disconnect_${options.crashPoint.replace(/[^A-Za-z0-9_-]/gu, "_")}`;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const callOrder: string[] = [];
+  const log = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-crashreplay-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-crashreplay-control-"));
+  const evidence = createSubmissionKeyEvidence(
+    { scenario, seed, root, vaultId, port, notePath: profile.primaryPath, reportPath },
+    failures,
+  );
+  const submissionKey = profile.submissionKey(seed);
+  evidence.keyDigests = { primary: keyDigest(submissionKey) };
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+  }
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+    const submitted = profile.buildSubmitInput(seed);
+
+    log(`generation 1: submit and park at ${options.crashPoint}`);
+    const gen1Control = join(controlBase, "gen1");
+    const gen1 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: gen1Control,
+      crashPoint: options.crashPoint,
+    });
+    const bootMarker = await waitForControlMarker(gen1, ["ready", "parked", "failed"], profile.timeoutMs);
+    if (bootMarker === null || bootMarker.kind === "failed") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChild(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+    const clientA = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen1:submit:original(in-flight)");
+    // The original submission parks mid-execution: keep it in flight and treat
+    // the post-kill rejection as the expected transport disconnect.
+    const originalSettled = submitFull(clientA, submitted).then(
+      (value) => ({ kind: "settled" as const, value }),
+      () => ({ kind: "disconnected" as const }),
+    );
+    const parkMarker = await waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs);
+    if (parkMarker === null || parkMarker.kind !== "parked") {
+      failures.push(`declared crash point ${options.crashPoint} was never reached during submission`);
+      await terminateChild(gen1);
+      await clientA.close().catch(() => undefined);
+      throw new Error("declared crash point was never reached");
+    }
+
+    // While generation 1 is parked mid-execution, a second Agent Session must
+    // already observe the in-progress record under the same identity.
+    const clientB = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen1:status:while-parked");
+    const parkedStatus = await statusFull(clientB, { submissionKey });
+    const parkedChangeSet = asRecord(parkedStatus.content.changeSet);
+    const changeSetId = typeof parkedChangeSet.changeSetId === "string"
+      ? parkedChangeSet.changeSetId
+      : null;
+    if (parkedStatus.content.lookup !== "found" || parkedChangeSet.state !== "in_progress") {
+      failures.push(
+        `status while parked did not return the in-progress record: ${JSON.stringify(parkedStatus.content)}`,
+      );
+    }
+    if (changeSetId === null) {
+      failures.push("the in-progress record exposed no Change Set identity");
+      await terminateChild(gen1);
+      throw new Error("no Change Set identity while parked");
+    }
+    evidence.changeSetIds = { primary: changeSetId };
+
+    // Same-key/same-request retry issued while the original is still parked:
+    // it queues behind the write lease and stays in flight across the kill.
+    callOrder.push("gen1:submit:replay(in-flight)");
+    const replaySettled = submitFull(clientB, submitted).then(
+      (value) => ({ kind: "settled" as const, value }),
+      () => ({ kind: "disconnected" as const }),
+    );
+    // Give the replay one loopback round-trip so it demonstrably reached the
+    // Bridge before the supervisor terminates the process.
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    await terminateChild(gen1);
+    log("generation 1 terminated by supervisor while both calls were in flight");
+    const [originalOutcome, replayOutcome] = await Promise.all([originalSettled, replaySettled]);
+    await clientA.close().catch(() => undefined);
+    await clientB.close().catch(() => undefined);
+    callOrder.push(
+      `gen1:transport-disconnect(original=${originalOutcome.kind},replay=${replayOutcome.kind})`,
+    );
+    const gen1Runs = await generationRunCounts(gen1Control);
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 1,
+      outcome: "parked_then_terminated",
+      executionRuns: gen1Runs.executionRuns,
+      recoveryRuns: gen1Runs.recoveryRuns,
+      effectiveGate: null,
+      recoveryState: null,
+    });
+
+    log("generation 2: startup recovery must converge, then answer the replay");
+    const gen2Control = join(controlBase, "gen2");
+    const gen2 = spawnOwningProcess({ bundle, root, vaultId, port, controlDir: gen2Control });
+    const gen2Marker = await waitForControlMarker(gen2, ["ready", "failed"], profile.timeoutMs);
+    if (gen2Marker === null || gen2Marker.kind !== "ready") {
+      failures.push(
+        `generation 2 did not boot: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChild(gen2);
+      throw new Error("generation 2 failed to boot");
+    }
+    const clientC = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen2:submit:replay-after-restart");
+    const replayed = await submitFull(clientC, submitted);
+    const replayedChangeSet = asRecord(replayed.content.changeSet);
+    if (
+      replayed.content.outcome !== "registered" ||
+      replayedChangeSet.changeSetId !== changeSetId ||
+      replayedChangeSet.state !== options.expectedProof
+    ) {
+      failures.push(
+        `post-restart replay did not return identity ${changeSetId} at ${options.expectedProof}: ${JSON.stringify(replayed.content)}`,
+      );
+    }
+    callOrder.push("gen2:status:after-restart");
+    const statusAfter = await statusFull(clientC, { submissionKey });
+    if (
+      statusAfter.content.lookup !== "found" ||
+      asRecord(statusAfter.content.changeSet).changeSetId !== changeSetId ||
+      asRecord(statusAfter.content.changeSet).state !== options.expectedProof
+    ) {
+      failures.push("status after restart did not return the converged record");
+    }
+    await clientC.close().catch(() => undefined);
+    evidence.results = {
+      parkedStatus: parkedStatus.content,
+      replayAfterRestart: replayed.content,
+      statusAfterRestart: statusAfter.content,
+    };
+    const gen2Runs = await generationRunCounts(gen2Control);
+    await terminateChild(gen2);
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 2,
+      outcome: "ready",
+      executionRuns: gen2Runs.executionRuns,
+      recoveryRuns: gen2Runs.recoveryRuns,
+      effectiveGate: null,
+      recoveryState: null,
+    });
+    // Recovery may roll back (recovery runs) but must never re-run the apply
+    // path: at-most-once execution across the crash and restart.
+    if (gen2Runs.executionRuns !== 0) {
+      failures.push(
+        `the restart re-executed the apply path (observed ${gen2Runs.executionRuns} execution runs)`,
+      );
+    }
+    evidence.registryAfter = await observeSubmissionKeyRegistry(root);
+
+    evidence.after = await inventoryCorpus(root);
+    const noteBytes = await readPathBytes(root, profile.primaryPath);
+    const fixture = profile.files.find((file) => file.path === profile.primaryPath);
+    const expectedBytes =
+      options.expectedProof === "intent_applied"
+        ? fixture?.committedBytes ?? null
+        : fixture?.originalBytes ?? null;
+    if (!bytesEqual(noteBytes, expectedBytes)) {
+      failures.push(
+        `public file ${profile.primaryPath} does not match the ${options.expectedProof} terminal state`,
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  }
+  return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+}
+
+export interface RunSubmissionKeyRecoveryBlockedScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  /** Third-party bytes written over the primary path between generations 1 and 2. */
+  readonly residueBytes: Uint8Array;
+  /** Vault-relative path of the fresh Change Set submitted under the blocked gate. */
+  readonly blockedNotePath: string;
+}
+
+/**
+ * `recovery_blocked` disposition stability (issue #195 AC6): generation 1 parks
+ * at the rollback lead-in; the supervisor leaves a third-party residue so
+ * generation 2 recovery fails closed (`result_unproven` + `recovery_blocked`).
+ * A fresh Submission Key admitted under the blocked gate is recorded as a
+ * historical bind (`intent_not_applied` + gate); its replay disposition and its
+ * ordinary status view (found, without the gate) must stay stable across the
+ * generation-3 restart, alongside the unproven original record.
+ */
+export async function runSubmissionKeyRecoveryBlockedScenario(
+  options: RunSubmissionKeyRecoveryBlockedScenarioOptions,
+): Promise<SubmissionKeyCorpusEvidence> {
+  const { profile, seed } = options;
+  const scenario = "recovery_blocked_disposition";
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const callOrder: string[] = [];
+  const log = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-blocked-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-blocked-control-"));
+  const evidence = createSubmissionKeyEvidence(
+    { scenario, seed, root, vaultId, port, notePath: profile.primaryPath, reportPath },
+    failures,
+  );
+  const originalKey = profile.submissionKey(seed);
+  const blockedKey = profile.submissionKey(`${seed}-blocked`);
+  evidence.keyDigests = { original: keyDigest(originalKey), blocked: keyDigest(blockedKey) };
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+  }
+
+  const blockedInput: Record<string, unknown> = {
+    submissionKey: blockedKey,
+    operations: [
+      {
+        operationId: `blocked-${seed}`,
+        kind: "create_note",
+        path: options.blockedNotePath,
+        content: `# Blocked ${seed}\n`,
+        ifExists: "reject",
+      },
+    ],
+  };
+  let blockedChangeSetId: string | null = null;
+
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+
+    log(`generation 1: park at rollback lead-in ${profile.rollbackLeadInPoint}`);
+    const gen1 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen1"),
+      crashPoint: profile.rollbackLeadInPoint,
+    });
+    const bootMarker = await waitForControlMarker(gen1, ["ready", "parked", "failed"], profile.timeoutMs);
+    if (bootMarker === null || bootMarker.kind === "failed") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChild(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+    const gen1Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen1:submit:original(in-flight)");
+    const originalSettled = submitChangeSet(gen1Client, profile.buildSubmitInput(seed)).then(
+      () => ({ kind: "settled" as const }),
+      () => ({ kind: "disconnected" as const }),
+    );
+    const parkMarker = await waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs);
+    if (parkMarker === null || parkMarker.kind !== "parked") {
+      failures.push(`rollback lead-in ${profile.rollbackLeadInPoint} was never reached`);
+      await terminateChild(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("rollback lead-in was never reached");
+    }
+    await gen1Client.close().catch(() => undefined);
+    await terminateChild(gen1);
+    await originalSettled;
+    log("generation 1 terminated by supervisor");
+
+    // Third-party residue: recovery cannot prove restoration and must fail closed.
+    const residueAbsolute = join(root, ...profile.primaryPath.split("/"));
+    await mkdir(dirname(residueAbsolute), { recursive: true });
+    await writeFile(residueAbsolute, options.residueBytes);
+    log(`supervisor wrote third-party bytes over ${profile.primaryPath}`);
+
+    log("generation 2: recovery fails closed; a fresh key binds the historical disposition");
+    const gen2 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen2"),
+    });
+    const gen2Marker = await waitForControlMarker(gen2, ["ready", "failed"], profile.timeoutMs);
+    if (gen2Marker === null || gen2Marker.kind !== "ready") {
+      failures.push(
+        `generation 2 did not boot: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChild(gen2);
+      throw new Error("generation 2 failed to boot");
+    }
+    const gen2Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const gen2Gate = await healthSnapshot(gen2Client);
+    if (gen2Gate.effectiveGate !== "recovery_blocked") {
+      failures.push(`expected recovery_blocked in generation 2 but observed ${String(gen2Gate.effectiveGate)}`);
+    }
+    const originalStatus = await statusFull(gen2Client, { submissionKey: originalKey });
+    if (asRecord(originalStatus.content.changeSet).state !== "result_unproven") {
+      failures.push("the residue Change Set did not fail closed as result_unproven");
+    }
+    callOrder.push("gen2:submit:blocked-key");
+    const blockedFirst = await submitFull(gen2Client, blockedInput);
+    blockedChangeSetId = typeof asRecord(blockedFirst.content.changeSet).changeSetId === "string"
+      ? (asRecord(blockedFirst.content.changeSet).changeSetId as string)
+      : null;
+    if (
+      blockedFirst.content.outcome !== "registered" ||
+      asRecord(blockedFirst.content.changeSet).state !== "intent_not_applied" ||
+      asRecord(blockedFirst.content.gate).code !== "recovery_blocked" ||
+      blockedChangeSetId === null
+    ) {
+      failures.push(
+        `the blocked submission did not bind the historical recovery_blocked disposition: ${JSON.stringify(blockedFirst.content)}`,
+      );
+    }
+    callOrder.push("gen2:submit:blocked-key-replay");
+    const blockedReplay = await submitFull(gen2Client, blockedInput);
+    if (canonicalJson(blockedReplay.content) !== canonicalJson(blockedFirst.content)) {
+      failures.push("replaying the blocked key did not return the identical historical disposition");
+    }
+    callOrder.push("gen2:status:blocked-key");
+    const blockedStatus = await statusFull(gen2Client, { submissionKey: blockedKey });
+    if (
+      blockedStatus.content.lookup !== "found" ||
+      asRecord(blockedStatus.content.changeSet).changeSetId !== blockedChangeSetId ||
+      "gate" in blockedStatus.content
+    ) {
+      failures.push("the ordinary status view of the blocked bind was not stable (found without the gate)");
+    }
+    await gen2Client.close().catch(() => undefined);
+    const gen2Runs = await generationRunCounts(join(controlBase, "gen2"));
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 2,
+      outcome: "ready",
+      executionRuns: gen2Runs.executionRuns,
+      recoveryRuns: gen2Runs.recoveryRuns,
+      effectiveGate: gen2Gate.effectiveGate,
+      recoveryState: gen2Gate.recoveryState,
+    });
+    await terminateChild(gen2);
+    log("generation 2 terminated by supervisor");
+
+    log("generation 3: the dispositions must survive the restart unchanged");
+    const gen3 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen3"),
+    });
+    const gen3Marker = await waitForControlMarker(gen3, ["ready", "failed"], profile.timeoutMs);
+    if (gen3Marker === null || gen3Marker.kind !== "ready") {
+      failures.push(
+        `generation 3 did not boot: ${JSON.stringify(gen3Marker)}; stderr: ${gen3.stderr.join("\n")}`,
+      );
+      await terminateChild(gen3);
+      throw new Error("generation 3 failed to boot");
+    }
+    const gen3Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const gen3Gate = await healthSnapshot(gen3Client);
+    if (gen3Gate.effectiveGate !== "recovery_blocked") {
+      failures.push(`expected recovery_blocked to survive the restart but observed ${String(gen3Gate.effectiveGate)}`);
+    }
+    callOrder.push("gen3:submit:blocked-key-replay");
+    const restartedReplay = await submitFull(gen3Client, blockedInput);
+    if (canonicalJson(restartedReplay.content) !== canonicalJson(blockedFirst.content)) {
+      failures.push("the blocked-key replay disposition changed across the restart");
+    }
+    callOrder.push("gen3:status:blocked-key");
+    const restartedStatus = await statusFull(gen3Client, { submissionKey: blockedKey });
+    if (
+      restartedStatus.content.lookup !== "found" ||
+      asRecord(restartedStatus.content.changeSet).changeSetId !== blockedChangeSetId ||
+      "gate" in restartedStatus.content
+    ) {
+      failures.push("the ordinary status view of the blocked bind changed across the restart");
+    }
+    callOrder.push("gen3:status:original-key");
+    const restartedOriginal = await statusFull(gen3Client, { submissionKey: originalKey });
+    if (asRecord(restartedOriginal.content.changeSet).state !== "result_unproven") {
+      failures.push("the unproven original record did not survive the restart");
+    }
+    await gen3Client.close().catch(() => undefined);
+    const gen3Runs = await generationRunCounts(join(controlBase, "gen3"));
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 3,
+      outcome: "ready",
+      executionRuns: gen3Runs.executionRuns,
+      recoveryRuns: gen3Runs.recoveryRuns,
+      effectiveGate: gen3Gate.effectiveGate,
+      recoveryState: gen3Gate.recoveryState,
+    });
+    await terminateChild(gen3);
+    log("generation 3 terminated by supervisor");
+
+    if (blockedChangeSetId !== null) {
+      evidence.changeSetIds = { blocked: blockedChangeSetId };
+    }
+    evidence.results = {
+      blockedFirst: blockedFirst.content,
+      blockedReplay: blockedReplay.content,
+      blockedStatus: blockedStatus.content,
+      restartedReplay: restartedReplay.content,
+      restartedStatus: restartedStatus.content,
+      originalStatus: originalStatus.content,
+      restartedOriginal: restartedOriginal.content,
+    };
+    evidence.registryAfter = await observeSubmissionKeyRegistry(root);
+    evidence.after = await inventoryCorpus(root);
+    // The third-party residue is never overwritten by the failed recovery.
+    const residue = await readPathBytes(root, profile.primaryPath);
+    if (!bytesEqual(residue, options.residueBytes)) {
+      failures.push("the third-party residue was not preserved byte-for-byte");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  }
+  return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+}
+
+export type SubmissionKeyRegistryFaultKind = "missing" | "corrupt";
+
+export interface RunSubmissionKeyRegistryFaultScenarioOptions {
+  readonly profile: MutationCorpusProfile;
+  readonly seed: string;
+  readonly reportDir: string;
+  /** `missing`: delete both persisted settings files; `corrupt`: break the registry member. */
+  readonly fault: SubmissionKeyRegistryFaultKind;
+}
+
+/**
+ * Registry-fault fail-closed scenario (issue #195 AC5): generation 1 parks at
+ * `after_prepared`, leaving a durable PREPARED frame whose answer the registry
+ * must retain. The supervisor then destroys the persisted registry
+ * (`missing` removes both settings files; `corrupt` breaks the registry member
+ * in place). A `missing` registry must boot into the unproven blocked state:
+ * status for the still-required key/identity answers
+ * `operationally_blocked`/`recovery_blocked` — never an ordinary `unknown` —
+ * and no recovery mutation begins. A `corrupt` registry refuses the boot
+ * entirely. Either way the public inventory stays byte-identical.
+ */
+export async function runSubmissionKeyRegistryFaultScenario(
+  options: RunSubmissionKeyRegistryFaultScenarioOptions,
+): Promise<SubmissionKeyCorpusEvidence> {
+  const { profile, seed } = options;
+  const scenario = `registry_${options.fault}`;
+  const failures: string[] = [];
+  const phases: string[] = [];
+  const callOrder: string[] = [];
+  const log = (message: string): void => {
+    phases.push(message);
+  };
+
+  await mkdir(options.reportDir, { recursive: true });
+  const reportPath = join(options.reportDir, `${seed}.json`);
+  const vaultId = `corpus-${seed}`;
+  const root = await mkdtemp(join(tmpdir(), `corpus-${profile.label}-regfault-`));
+  const port = await pickAvailablePort();
+  const controlBase = await mkdtemp(join(tmpdir(), "corpus-regfault-control-"));
+  const evidence = createSubmissionKeyEvidence(
+    { scenario, seed, root, vaultId, port, notePath: profile.primaryPath, reportPath },
+    failures,
+  );
+  const submissionKey = profile.submissionKey(seed);
+  evidence.keyDigests = { primary: keyDigest(submissionKey) };
+
+  let bundle: string;
+  try {
+    bundle = await buildOwningProcessBundle();
+  } catch (error) {
+    failures.push(`could not bundle owning process: ${String(error)}`);
+    return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+  }
+
+  const parkPoint = "after_prepared";
+  try {
+    await seedCorpusRoot(root, profile);
+    evidence.before = await inventoryCorpus(root);
+
+    log(`generation 1: submit and park at ${parkPoint} (durable PREPARED, entry executing)`);
+    const gen1 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen1"),
+      crashPoint: parkPoint,
+    });
+    const bootMarker = await waitForControlMarker(gen1, ["ready", "parked", "failed"], profile.timeoutMs);
+    if (bootMarker === null || bootMarker.kind === "failed") {
+      failures.push(
+        `generation 1 did not boot: ${JSON.stringify(bootMarker)}; stderr: ${gen1.stderr.join("\n")}`,
+      );
+      await terminateChild(gen1);
+      throw new Error("generation 1 failed to boot");
+    }
+    const gen1Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    callOrder.push("gen1:submit:original(in-flight)");
+    const originalSettled = submitChangeSet(gen1Client, profile.buildSubmitInput(seed)).then(
+      () => ({ kind: "settled" as const }),
+      () => ({ kind: "disconnected" as const }),
+    );
+    const parkMarker = await waitForControlMarker(gen1, ["parked", "failed"], profile.timeoutMs);
+    if (parkMarker === null || parkMarker.kind !== "parked") {
+      failures.push(`declared crash point ${parkPoint} was never reached during submission`);
+      await terminateChild(gen1);
+      await gen1Client.close().catch(() => undefined);
+      throw new Error("declared crash point was never reached");
+    }
+    await gen1Client.close().catch(() => undefined);
+    await terminateChild(gen1);
+    await originalSettled;
+    log("generation 1 terminated by supervisor");
+    const gen1Runs = await generationRunCounts(join(controlBase, "gen1"));
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 1,
+      outcome: "parked_then_terminated",
+      executionRuns: gen1Runs.executionRuns,
+      recoveryRuns: gen1Runs.recoveryRuns,
+      effectiveGate: null,
+      recoveryState: null,
+    });
+
+    evidence.registryBefore = await observeSubmissionKeyRegistry(root);
+    const knownChangeSetId = evidence.registryBefore?.entries[0]?.changeSetId ?? null;
+    if (knownChangeSetId !== null) evidence.changeSetIds = { primary: knownChangeSetId };
+    if (
+      evidence.registryBefore === null ||
+      evidence.registryBefore.entryCount !== 1 ||
+      evidence.registryBefore.entries[0]?.executionPhase !== "executing"
+    ) {
+      failures.push(
+        "the pre-fault registry did not hold exactly one executing entry for the parked Change Set",
+      );
+    }
+
+    const stateDirectory = join(root, BRIDGE_STATE_DIRECTORY);
+    if (options.fault === "missing") {
+      await rm(join(stateDirectory, BRIDGE_REGISTRY_FILE), { force: true });
+      await rm(join(stateDirectory, BRIDGE_PRIMARY_SETTINGS_FILE), { force: true });
+      log("supervisor removed both persisted settings files (registry missing)");
+    } else {
+      for (const file of [BRIDGE_REGISTRY_FILE, BRIDGE_PRIMARY_SETTINGS_FILE]) {
+        const absolute = join(stateDirectory, file);
+        const parsed = JSON.parse(await readFile(absolute, "utf8")) as Record<string, unknown>;
+        parsed.changeSets = "corrupt-not-a-registry";
+        await writeFile(absolute, `${JSON.stringify(parsed)}\n`, "utf8");
+      }
+      log("supervisor corrupted the registry member of both persisted settings files");
+    }
+
+    log(`generation 2: restart over a ${options.fault} registry`);
+    const gen2 = spawnOwningProcess({
+      bundle,
+      root,
+      vaultId,
+      port,
+      controlDir: join(controlBase, "gen2"),
+    });
+    const gen2Marker = await waitForControlMarker(gen2, ["ready", "failed"], profile.timeoutMs);
+
+    if (options.fault === "corrupt") {
+      if (gen2Marker !== null && gen2Marker.kind === "ready") {
+        failures.push("generation 2 became ready despite a corrupt registry");
+        await terminateChild(gen2);
+      } else {
+        log("generation 2 refused to boot over the corrupt registry");
+      }
+      await terminateChild(gen2);
+      (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+        generation: 2,
+        outcome: gen2Marker !== null && gen2Marker.kind === "ready" ? "ready" : "boot_refused",
+        executionRuns: 0,
+        recoveryRuns: 0,
+        effectiveGate: null,
+        recoveryState: null,
+      });
+      evidence.after = await inventoryCorpus(root);
+      if (!inventoriesMatch(evidence.before, evidence.after)) {
+        failures.push("public inventory changed across the refused boot; no recovery mutation may begin");
+      }
+      return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+    }
+
+    if (gen2Marker === null || gen2Marker.kind !== "ready") {
+      failures.push(
+        `generation 2 did not boot into the blocked state: ${JSON.stringify(gen2Marker)}; stderr: ${gen2.stderr.join("\n")}`,
+      );
+      await terminateChild(gen2);
+      throw new Error("generation 2 failed to boot");
+    }
+    log("generation 2 ready with the registry missing");
+    const gen2Client = await connectClient(new URL(`http://127.0.0.1:${port}/mcp`), vaultId);
+    const gen2Gate = await healthSnapshot(gen2Client);
+    if (gen2Gate.effectiveGate !== "recovery_blocked") {
+      failures.push(
+        `expected recovery_blocked with a missing registry but observed ${String(gen2Gate.effectiveGate)}`,
+      );
+    }
+
+    // The still-required key/identity must never degrade to ordinary `unknown`.
+    callOrder.push("gen2:status:by-key");
+    const statusByKey = await statusFull(gen2Client, { submissionKey });
+    if (
+      statusByKey.content.lookup !== "operationally_blocked" ||
+      asRecord(statusByKey.content.gate).code !== "recovery_blocked"
+    ) {
+      failures.push(
+        `status by Submission Key did not fail closed: ${JSON.stringify(statusByKey.content)}`,
+      );
+    }
+    if (knownChangeSetId !== null) {
+      callOrder.push("gen2:status:by-id");
+      const statusById = await statusFull(gen2Client, { changeSetId: knownChangeSetId });
+      if (
+        statusById.content.lookup !== "operationally_blocked" ||
+        asRecord(statusById.content.gate).code !== "recovery_blocked"
+      ) {
+        failures.push(
+          `status by Change Set identity did not fail closed: ${JSON.stringify(statusById.content)}`,
+        );
+      }
+    }
+    callOrder.push("gen2:status:unrelated-key");
+    const unrelated = await statusFull(gen2Client, {
+      submissionKey: profile.submissionKey(`${seed}-unrelated`),
+    });
+    if (unrelated.content.lookup !== "unknown") {
+      failures.push(
+        "a key nothing requires an answer for must keep the ordinary unknown disposition",
+      );
+    }
+
+    callOrder.push("gen2:submit:sentinel");
+    const sentinel = await submitChangeSet(gen2Client, {
+      submissionKey: profile.submissionKey(`${seed}-sentinel`),
+      operations: [
+        {
+          operationId: `sentinel-${seed}`,
+          kind: "create_note",
+          path: `CorpusSentinel-${seed.replace(/[^A-Za-z0-9_-]/gu, "_")}.md`,
+          content: `# Sentinel ${seed}\n`,
+          ifExists: "reject",
+        },
+      ],
+    });
+    if (sentinel.applied) {
+      failures.push("a sentinel write was applied despite the missing registry");
+    }
+    await gen2Client.close().catch(() => undefined);
+    const gen2Runs = await generationRunCounts(join(controlBase, "gen2"));
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 2,
+      outcome: "ready",
+      executionRuns: gen2Runs.executionRuns,
+      recoveryRuns: gen2Runs.recoveryRuns,
+      effectiveGate: gen2Gate.effectiveGate,
+      recoveryState: gen2Gate.recoveryState,
+    });
+    if (gen2Runs.executionRuns !== 0 || gen2Runs.recoveryRuns !== 0) {
+      failures.push(
+        "recovery mutated from an unanswerable journal reference (execution or rollback ran)",
+      );
+    }
+    await terminateChild(gen2);
+    log("generation 2 terminated by supervisor");
+
+    evidence.results = {
+      statusByKey: statusByKey.content,
+      unrelatedStatus: unrelated.content,
+    };
+    evidence.registryAfter = await observeSubmissionKeyRegistry(root);
+    evidence.after = await inventoryCorpus(root);
+    // Recovery never began: the public inventory must be byte-identical to the
+    // parked boundary (no roll-forward, no rollback, no sentinel file).
+    if (!inventoriesMatch(evidence.before, evidence.after)) {
+      failures.push("public inventory changed while the registry could not answer the journal");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!failures.includes(message)) failures.push(message);
+  }
+  return finalizeSubmissionKeyEvidence(evidence, failures, phases, callOrder, root, controlBase);
+}
