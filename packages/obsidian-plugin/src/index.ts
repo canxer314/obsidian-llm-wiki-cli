@@ -178,6 +178,57 @@ export {
   type VerifyReleaseBundleOptions,
 } from "./release/verify-release-bundle.js";
 export {
+  ARTIFACTS_INSTALLED,
+  InstallInterruptionError,
+  installReleaseToManagedVaults,
+  MCP_REGISTRATION_REQUIRED,
+  PLUGIN_ENABLEMENT_REQUIRED,
+  recoverInterruptedInstall,
+  ReleaseInstallError,
+  removeReleaseManagedFiles,
+  type InstallFailureInjectionHooks,
+  type InstallReleaseOptions,
+  type InstallTargetAction,
+  type InstallTargetOutcome,
+  type ManagedVaultInstallTarget,
+  type ReleaseInstallBatchResult,
+  type ReleaseInstallFailureCode,
+  type ReleaseInstallTargetResult,
+  type ReleaseRemovalResult,
+} from "./lifecycle/install-release.js";
+export {
+  verifyManagedVaultLifecycle,
+  type LifecycleStatusProbes,
+  type ManagedVaultLifecycleState,
+  type ManagedVaultLifecycleStatus,
+  type ManagedVaultLifecycleTarget,
+  type ObservedBridgeEndpoint,
+} from "./lifecycle/lifecycle-status.js";
+export {
+  expectedInstalledFiles,
+  inspectDeployedManagedSet,
+  inspectInstalledManagedSet,
+  isReleaseManagedFile,
+  managedVaultPluginDirectory,
+  RELEASE_MANAGED_CHECKSUM_FILE,
+  RELEASE_MANAGED_FILES,
+  RELEASE_MANAGED_OPTIONAL_FILES,
+  RELEASE_MANAGED_REQUIRED_FILES,
+  type DeployedSetInspection,
+  type ExpectedManagedFile,
+  type InstalledManagedSet,
+  type InstalledSetIntegrity,
+  type ManagedFileCondition,
+  type ManagedFileReport,
+} from "./lifecycle/release-managed-files.js";
+export {
+  runLifecycleInstallScenario,
+  type LifecycleScenarioOptions,
+  type LifecycleScenarioResult,
+  type LifecycleScenarioStage,
+  type LifecycleScenarioStageRecord,
+} from "./installed-runtime/lifecycle-scenario.js";
+export {
   EvidencePrivacyError,
   EvidenceWriteError,
   installedRuntimeEvidenceSchema,

@@ -71,6 +71,19 @@ without forking the harness:
 - `profiles` — the registered-profile registry (defaults to the built-in
   registry containing `MVP-PERF-REF-1`).
 
+## Lifecycle scenario (issue #198)
+
+`lifecycle-scenario.ts` exposes `runLifecycleInstallScenario(options)` — one
+dedicated scenario composed over these same seams (`processControl`,
+`client`, `provisionVault`, `cleanupVault`) rather than a parallel harness.
+It proves per-Managed-Vault release lifecycle end to end in a generated test
+Vault: first install (files only) → explicit operator enablement → Bridge
+start and persisted identity → registration command generation (never
+execution) → `ready` → same-version `unchanged` → damage-and-repair with
+byte-exact state preservation → the identity-mismatch projection → cleanup
+with no residue. #44 composes this scenario into larger corpora; the harness
+corpus above is unchanged.
+
 ## Registered real-runtime smoke run
 
 On a registered Windows machine matching `MVP-PERF-REF-1`:

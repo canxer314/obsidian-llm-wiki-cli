@@ -66,6 +66,12 @@ function isCandidateManagedFile(path: string): path is CandidateManagedFile {
   return CANDIDATE_MANAGED_FILES.includes(path);
 }
 
+/** Lifecycle deployment (#198) reuses the same closed allowlist and parser. */
+export {
+  isCandidateManagedFile as isReleaseManagedBundleFile,
+  parseChecksumManifest as parseManagedChecksumManifest,
+};
+
 function parseManifest(bytes: Uint8Array): {
   id: string;
   version: string;
