@@ -12,6 +12,8 @@ const sandbox = { kind: "fake-sandbox" } as never;
 const hooks = { sandbox: { onSandboxReady: [] } };
 const logging = { type: "file", path: "/jobs/extraction.log", verbose: true } as const;
 
+const tagged = (value: unknown) => `<result>${JSON.stringify(value)}</result>`;
+
 function createExtractor(runAgent: ReturnType<typeof vi.fn>) {
   return createSameSessionStructuredExtractor({
     sandbox,
@@ -37,8 +39,11 @@ function plan(overrides: Partial<Parameters<ReturnType<typeof createExtractor>["
 }
 
 describe("same-session structured extraction", () => {
-  it("runs the fixed head, single-iteration production pass and resumes it with the same signal, logging, and output contract", async () => {
-    const resume = vi.fn().mockResolvedValue({ commits: [{ sha: "resumed" }], output: { value: "validated" } });
+  it("runs the fixed head, single-iteration production pass and resumes it with the same signal and logging, extracting from stdout itself", async () => {
+    const resume = vi.fn().mockResolvedValue({
+      commits: [{ sha: "resumed" }],
+      stdout: tagged({ value: "validated" }),
+    });
     const runAgent = vi.fn().mockResolvedValue({ commits: [{ sha: "initial" }], resume });
     const extractor = createExtractor(runAgent);
 
@@ -55,11 +60,15 @@ describe("same-session structured extraction", () => {
       maxIterations: 1,
       logging,
     }));
-    expect(resume).toHaveBeenCalledWith("emit <result> JSON now", expect.objectContaining({
+    expect(initial).not.toHaveProperty("output");
+    // Drift guard: candidate selection is never delegated back to the
+    // library's last-closed-block binding, so no output definition is handed
+    // to resume.
+    expect(resume).toHaveBeenCalledWith("emit <result> JSON now", {
       signal: initial.signal,
       logging,
-      output: expect.objectContaining({ _tag: "object", tag: "result", schema: outputSchema, maxRetries: undefined }),
-    }));
+    });
+    expect(resume.mock.calls[0]![1]).not.toHaveProperty("output");
   });
 
   it("fails before extraction and clears its deadline when production does not expose a resumable session", async () => {
@@ -103,7 +112,7 @@ describe("same-session structured extraction", () => {
     const events: string[] = [];
     const resume = vi.fn().mockImplementation(async () => {
       events.push("resume");
-      return { commits: [], output: { value: "validated" } };
+      return { commits: [], stdout: tagged({ value: "validated" }) };
     });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume });
     const extractor = createExtractor(runAgent);
@@ -114,6 +123,159 @@ describe("same-session structured extraction", () => {
     }))).resolves.toEqual({ value: "validated" });
 
     expect(events).toEqual(["initial observation", "resume", "resumed observation"]);
+  });
+
+  it("recovers a well-formed earlier block when the last closed block is malformed, without any model re-emit or retry", async () => {
+    // The live reviewer failure's shape: the output stream held a well-formed
+    // <result> block plus a malformed duplicate emitted after it. The seam
+    // tries candidates newest-first and recovers the well-formed copy before
+    // asking the model for anything.
+    const stdout = [
+      tagged({ value: "recovered" }),
+      "some trailing chatter",
+      "<result>not JSON at all</result>",
+    ].join("\n");
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      stdout,
+    });
+    const runAgent = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      resume,
+    });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.extract(plan())).resolves.toEqual({ value: "recovered" });
+
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(runAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a well-formed earlier block when the last closed block fails schema validation", async () => {
+    const stdout = [
+      tagged({ value: "recovered" }),
+      tagged({ wrong: "shape" }),
+    ].join("\n");
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      stdout,
+    });
+    const runAgent = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      resume,
+    });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.extract(plan())).resolves.toEqual({ value: "recovered" });
+
+    expect(runAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps selecting the last closed block when it is well-formed", async () => {
+    const stdout = [
+      tagged({ value: "first" }),
+      tagged({ value: "last" }),
+    ].join("\n");
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      stdout,
+    });
+    const runAgent = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      resume,
+    });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.extract(plan())).resolves.toEqual({ value: "last" });
+
+    expect(runAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests exactly one same-session re-emit carrying the parse detail when the only closed block is malformed", async () => {
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      stdout: "<result>not JSON</result>",
+    });
+    const runAgent = vi.fn()
+      .mockResolvedValueOnce({ commits: [], iterations: [{ sessionId: "session-1" }], resume })
+      .mockResolvedValueOnce({
+        commits: [],
+        iterations: [{ sessionId: "session-1" }],
+        stdout: tagged({ value: "validated" }),
+      });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.extract(plan())).resolves.toEqual({ value: "validated" });
+
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    const retry = runAgent.mock.calls[1]![0];
+    expect(retry).toEqual(expect.objectContaining({
+      resumeSession: "session-1",
+      prompt: expect.stringContaining("Emit only a corrected <result> block"),
+    }));
+    expect(retry).not.toHaveProperty("output");
+    expect(retry.prompt).toContain("Structured output tag <result> contains invalid JSON");
+    expect(retry.prompt).toContain("SyntaxError");
+    expect(retry.prompt).toContain("not JSON");
+  });
+
+  it("surfaces the newest candidate's parse detail when every closed block is malformed and the budget is spent", async () => {
+    const stdout = [
+      "<result>older malformed</result>",
+      "<result>newest malformed</result>",
+    ].join("\n");
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      stdout,
+    });
+    const runAgent = vi.fn()
+      .mockResolvedValueOnce({ commits: [], iterations: [{ sessionId: "session-1" }], resume })
+      .mockResolvedValue({
+        commits: [],
+        iterations: [{ sessionId: "session-1" }],
+        stdout,
+      });
+    const extractor = createExtractor(runAgent);
+
+    const failure = await extractor.extract(plan()).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(StructuredOutputError);
+    const classified = failure as StructuredOutputError;
+    expect(classified.message).toBe("Structured output tag <result> contains invalid JSON");
+    expect(classified.rawMatched).toBe("newest malformed");
+    expect(runAgent).toHaveBeenCalledTimes(STRUCTURED_EXTRACTION_ATTEMPTS);
+  });
+
+  it("treats a stream with no closed tag block as today: a recognised recoverable error retried within the budget", async () => {
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      stdout: "the agent narrated but never emitted the tag",
+    });
+    const runAgent = vi.fn()
+      .mockResolvedValueOnce({ commits: [], iterations: [{ sessionId: "session-1" }], resume })
+      .mockResolvedValueOnce({
+        commits: [],
+        iterations: [{ sessionId: "session-1" }],
+        stdout: tagged({ value: "validated" }),
+      });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.extract(plan())).resolves.toEqual({ value: "validated" });
+
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    const retry = runAgent.mock.calls[1]![0];
+    expect(retry.prompt).toContain("Structured output tag <result> not found in agent output");
+    expect(retry.prompt).toContain("(no matching tag was emitted)");
+    expect(retry.prompt).toContain("Emit only a corrected <result> block");
   });
 
   it("observes every malformed extraction attempt before retrying the same session", async () => {
@@ -128,7 +290,7 @@ describe("same-session structured extraction", () => {
     const resume = vi.fn().mockRejectedValueOnce(malformed);
     const runAgent = vi.fn()
       .mockResolvedValueOnce({ commits: [], resume })
-      .mockResolvedValueOnce({ commits: [], output: { value: "validated" } });
+      .mockResolvedValueOnce({ commits: [], stdout: tagged({ value: "validated" }) });
     const extractor = createExtractor(runAgent);
 
     await expect(extractor.extract(plan({
@@ -139,12 +301,15 @@ describe("same-session structured extraction", () => {
     expect(runAgent).toHaveBeenNthCalledWith(2, expect.objectContaining({
       prompt: expect.stringContaining("Emit only a corrected <result> block"),
       resumeSession: "session-1",
-      output: expect.objectContaining({ _tag: "object", tag: "result", maxRetries: undefined }),
     }));
+    expect(runAgent.mock.calls[1]![0]).not.toHaveProperty("output");
   });
 
   it("does not impose business observations when none are declared", async () => {
-    const resume = vi.fn().mockResolvedValue({ commits: [{ sha: "resumed" }], output: { value: "validated" } });
+    const resume = vi.fn().mockResolvedValue({
+      commits: [{ sha: "resumed" }],
+      stdout: tagged({ value: "validated" }),
+    });
     const runAgent = vi.fn().mockResolvedValue({ commits: [{ sha: "initial" }], resume });
     const extractor = createExtractor(runAgent);
 
@@ -152,15 +317,14 @@ describe("same-session structured extraction", () => {
   });
 
   it("retries a low-level parse fault escaping the extraction run within the same session", async () => {
-    // The live reviewer failure's shape: the output stream held a well-formed
-    // <review> block plus a malformed duplicate, and the failure escaped the
-    // retry guard as a raw SyntaxError (a JSON.parse fault), not a
+    // The live reviewer failure's surface form when the library still owned
+    // extraction: a raw SyntaxError (a JSON.parse fault), not a
     // StructuredOutputError — one session id, and no retry prompt in the log.
     const lowLevelParseFault = new SyntaxError(`Unexpected token '"' in JSON at position 312`);
     const resume = vi.fn().mockRejectedValueOnce(lowLevelParseFault);
     const runAgent = vi.fn()
       .mockResolvedValueOnce({ commits: [], iterations: [{ sessionId: "review-session-1" }], resume })
-      .mockResolvedValueOnce({ commits: [], output: { value: "validated" } });
+      .mockResolvedValueOnce({ commits: [], stdout: tagged({ value: "validated" }) });
     const extractor = createExtractor(runAgent);
 
     await expect(extractor.extract(plan())).resolves.toEqual({ value: "validated" });
@@ -208,7 +372,7 @@ describe("same-session structured extraction", () => {
     const resume = vi.fn().mockRejectedValueOnce(makeFailure());
     const runAgent = vi.fn()
       .mockResolvedValueOnce({ commits: [], iterations: [{ sessionId: "session-1" }], resume })
-      .mockResolvedValueOnce({ commits: [], output: { value: "validated" } });
+      .mockResolvedValueOnce({ commits: [], stdout: tagged({ value: "validated" }) });
     const extractor = createExtractor(runAgent);
 
     await expect(extractor.extract(plan())).resolves.toEqual({ value: "validated" });
@@ -237,7 +401,10 @@ describe("same-session structured extraction", () => {
 
   it("propagates a business observation failure unchanged and consumes no retry", async () => {
     const observationFailure = new Error("extraction session must not create commits");
-    const resume = vi.fn().mockResolvedValue({ commits: [{ sha: "resumed" }], output: { value: "validated" } });
+    const resume = vi.fn().mockResolvedValue({
+      commits: [{ sha: "resumed" }],
+      stdout: tagged({ value: "validated" }),
+    });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], iterations: [{ sessionId: "session-1" }], resume });
     const extractor = createExtractor(runAgent);
 

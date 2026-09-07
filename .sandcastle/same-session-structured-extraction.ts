@@ -1,5 +1,4 @@
 import {
-  Output,
   StructuredOutputError,
   claudeCode,
   run,
@@ -12,10 +11,6 @@ import type { z } from "zod";
 type RunResult = Awaited<ReturnType<typeof run>>;
 
 type ObservedResult = Pick<RunResult, "commits">;
-
-type StructuredRunResult<Output> = RunResult & {
-  readonly output: Output;
-};
 
 /**
  * Total structured-output parse attempts (initial attempt plus retries) shared
@@ -176,6 +171,100 @@ ${raw}
 Emit only a corrected <${error.tag}> block. Do not change files or run commands.`;
 }
 
+/**
+ * Enumerate every closed <tag> block in the output stream, newest first. The
+ * scan mirrors the library's findLastTagContent (non-overlapping, a trailing
+ * unclosed block is ignored) but keeps every candidate instead of binding to
+ * the last closed block, so a malformed trailing emission cannot shadow a
+ * well-formed copy that is already present.
+ */
+function closedTagContents(stdout: string, tag: string): string[] {
+  const openTag = `<${tag}>`;
+  const closeTag = `</${tag}>`;
+  const contents: string[] = [];
+  let searchFrom = 0;
+  while (true) {
+    const openIdx = stdout.indexOf(openTag, searchFrom);
+    if (openIdx === -1) break;
+    const contentStart = openIdx + openTag.length;
+    const closeIdx = stdout.indexOf(closeTag, contentStart);
+    if (closeIdx === -1) break;
+    contents.push(stdout.slice(contentStart, closeIdx));
+    searchFrom = closeIdx + closeTag.length;
+  }
+  return contents.reverse();
+}
+
+/** Fence-aware unwrapping identical to the library's extraction layer. */
+function unwrapFences(text: string): string {
+  const fenceMatch = text.match(/^```(?:json)?\s*\n([\s\S]*?)\n\s*```\s*$/);
+  if (fenceMatch) return fenceMatch[1]!.trim();
+  return text;
+}
+
+/**
+ * Extract the structured output from a run's stdout by trying every closed
+ * <tag> block newest-first — the last closed block first, preserving the
+ * library's binding when it is well-formed — and returning the first
+ * candidate that both JSON-parses and validates against the schema.
+ *
+ * Failure surfaces keep the library's exact shapes: no closed block yields
+ * "not found"; otherwise the newest candidate's parse or validation detail
+ * is thrown, tagged with the run's commits, branch, and session identity so
+ * the classified same-session retry path can take over.
+ */
+async function extractFromStdout<Output>(
+  result: RunResult,
+  tag: string,
+  schema: z.ZodType<Output>,
+): Promise<Output> {
+  const lastIteration = result.iterations?.at(-1);
+  const context = {
+    commits: result.commits,
+    branch: result.branch,
+    ...(result.preservedWorktreePath === undefined
+      ? {}
+      : { preservedWorktreePath: result.preservedWorktreePath }),
+    ...(lastIteration?.sessionId === undefined ? {} : { sessionId: lastIteration.sessionId }),
+    ...(lastIteration?.sessionFilePath === undefined
+      ? {}
+      : { sessionFilePath: lastIteration.sessionFilePath }),
+  };
+  const candidates = closedTagContents(result.stdout, tag);
+  if (candidates.length === 0) {
+    throw new StructuredOutputError(
+      `Structured output tag <${tag}> not found in agent output`,
+      { tag, rawMatched: undefined, ...context },
+    );
+  }
+  let newestFailure: StructuredOutputError | undefined;
+  for (const raw of candidates) {
+    const unwrapped = unwrapFences(raw.trim());
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(unwrapped);
+    } catch (cause) {
+      newestFailure ??= new StructuredOutputError(
+        `Structured output tag <${tag}> contains invalid JSON`,
+        { tag, rawMatched: raw, cause, ...context },
+      );
+      continue;
+    }
+    const validation = await schema["~standard"].validate(parsed);
+    if (validation.issues) {
+      newestFailure ??= new StructuredOutputError(
+        `Structured output tag <${tag}> failed schema validation`,
+        { tag, rawMatched: raw, cause: validation.issues, ...context },
+      );
+      continue;
+    }
+    return validation.value;
+  }
+  // Candidates was non-empty and every iteration either returned or recorded
+  // the newest candidate's failure, so this is always set.
+  throw newestFailure as StructuredOutputError;
+}
+
 export function createSameSessionStructuredExtractor(options: {
   readonly sandbox: SandboxProvider;
   readonly hooks: SandboxHooks;
@@ -207,7 +296,6 @@ export function createSameSessionStructuredExtractor(options: {
         () => controller.abort(plan.timeoutError),
         plan.timeoutMilliseconds,
       );
-      const output = Output.object({ tag: plan.output.tag, schema: plan.output.schema });
 
       try {
         const produced = await runAgent({
@@ -233,13 +321,18 @@ export function createSameSessionStructuredExtractor(options: {
         // the same session instead of bypassing the armed retry.
         let sessionId = produced.iterations?.at(-1)?.sessionId;
         for (let attempt = 1; attempt <= STRUCTURED_EXTRACTION_ATTEMPTS; attempt += 1) {
-          let extracted: StructuredRunResult<Output>;
+          let extracted: Output;
+          let resumedResult: RunResult;
           try {
-            extracted = await resume(prompt, {
+            // No output definition is handed to the library: the seam
+            // enumerates every closed <tag> block in the run's stdout itself
+            // so a well-formed earlier candidate is used before any
+            // model re-emit is requested, consuming no retry.
+            resumedResult = await resume(prompt, {
               ...(plan.logging === undefined ? {} : { logging: plan.logging }),
               signal: controller.signal,
-              output,
-            }) as StructuredRunResult<Output>;
+            });
+            extracted = await extractFromStdout(resumedResult, plan.output.tag, plan.output.schema);
           } catch (error) {
             const classified = classifyStructuredOutputError(error, {
               tag: plan.output.tag,
@@ -268,8 +361,8 @@ export function createSameSessionStructuredExtractor(options: {
             });
             continue;
           }
-          await plan.observeResumed?.(extracted);
-          return extracted.output;
+          await plan.observeResumed?.(resumedResult);
+          return extracted;
         }
 
         throw new Error("Structured extraction attempts were exhausted");

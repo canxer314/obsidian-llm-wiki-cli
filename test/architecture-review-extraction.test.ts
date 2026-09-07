@@ -46,7 +46,7 @@ describe("same-session architecture review extraction", () => {
   });
 
   it("runs one bounded read-only produce pass with the prior proposals, then extracts by resuming that session", async () => {
-    const extraction = vi.fn().mockResolvedValue({ commits: [], output: proposedOutcome });
+    const extraction = vi.fn().mockResolvedValue({ commits: [], stdout: `<output>${JSON.stringify(proposedOutcome)}</output>` });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
     const extractor = createExtractor(runAgent);
 
@@ -77,13 +77,13 @@ describe("same-session architecture review extraction", () => {
     expect(produceRequest.output).toBeUndefined();
     expect(extraction).toHaveBeenCalledWith(expect.stringContaining("<output>"), {
       signal: expect.any(AbortSignal),
-      output: expect.objectContaining({ _tag: "object", tag: "output", maxRetries: undefined }),
     });
+    expect(extraction.mock.calls[0]![1]).not.toHaveProperty("output");
   });
 
   it("accepts the upstream-equivalent skipped outcome", async () => {
     const skipped = { status: "skipped" as const, reason: "Every candidate is covered by #101." };
-    const extraction = vi.fn().mockResolvedValue({ commits: [], output: skipped });
+    const extraction = vi.fn().mockResolvedValue({ commits: [], stdout: `<output>${JSON.stringify(skipped)}</output>` });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
     const extractor = createExtractor(runAgent);
 
@@ -96,7 +96,7 @@ describe("same-session architecture review extraction", () => {
   });
 
   it("writes the complete reviewer output to the job artifact directory", async () => {
-    const extraction = vi.fn().mockResolvedValue({ commits: [], output: proposedOutcome });
+    const extraction = vi.fn().mockResolvedValue({ commits: [], stdout: `<output>${JSON.stringify(proposedOutcome)}</output>` });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
     const extractor = createExtractor(runAgent);
 
@@ -129,7 +129,10 @@ describe("same-session architecture review extraction", () => {
   });
 
   it("fails closed when the resumed extraction creates commits", async () => {
-    const extraction = vi.fn().mockResolvedValue({ commits: [{ sha: revision }], output: proposedOutcome });
+    const extraction = vi.fn().mockResolvedValue({
+      commits: [{ sha: revision }],
+      stdout: `<output>${JSON.stringify(proposedOutcome)}</output>`,
+    });
     const runAgent = vi.fn().mockResolvedValue({ commits: [], resume: extraction });
     const extractor = createExtractor(runAgent);
 
@@ -139,6 +142,37 @@ describe("same-session architecture review extraction", () => {
       priorProposals,
       model: "planner-model",
     })).rejects.toThrow("Architecture review session must not create commits");
+  });
+
+  it("recovers a well-formed earlier <output> block when the last closed block is malformed, with no re-emit and no commits", async () => {
+    const stdout = [
+      `<output>${JSON.stringify(proposedOutcome)}</output>`,
+      "<output>not JSON at all</output>",
+    ].join("\n");
+    const extraction = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "architecture-review-session" }],
+      stdout,
+    });
+    const runAgent = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "architecture-review-session" }],
+      resume: extraction,
+    });
+    const extractor = createExtractor(runAgent);
+
+    await expect(extractor.review({
+      revision,
+      checkoutPath: "/safe/disposable-checkout",
+      priorProposals,
+      model: "planner-model",
+    })).resolves.toEqual(proposedOutcome);
+
+    // Recovery consumed no retry: no same-session re-emit ran, so the
+    // read-only pass produced no commits and nothing was pushed, published,
+    // or replied to.
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(extraction).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed when a malformed extraction attempt creates commits", async () => {

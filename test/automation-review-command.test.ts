@@ -112,7 +112,10 @@ describe("review automation command", () => {
         checkoutRevision = reviewedRevision;
         return {
           commits: reviewedRevision === revision ? [] : [{}],
-          resume: vi.fn().mockResolvedValue({ output: { summary: "Reviewed.", inlineComments: [], replies: [] } }),
+          resume: vi.fn().mockResolvedValue({
+            commits: [],
+            stdout: `<review>${JSON.stringify({ summary: "Reviewed.", inlineComments: [], replies: [] })}</review>`,
+          }),
         };
       }) as never,
       createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
