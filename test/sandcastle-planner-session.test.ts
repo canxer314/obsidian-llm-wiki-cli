@@ -150,6 +150,50 @@ describe("Sandcastle Planner session adapter", () => {
     })).rejects.toBe(exhausted);
   });
 
+  it("classifies a low-level parse fault escaping the library retry guard as a recoverable output error", async () => {
+    const lowLevelParseFault = new SyntaxError(`Unexpected token '"' in JSON at position 97`);
+    const runAgent = vi.fn().mockRejectedValue(lowLevelParseFault);
+    const session = createSandcastlePlannerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: {},
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    const failure = await session.run({
+      issueNumber: 101,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(StructuredOutputError);
+    expect(failure).not.toBe(lowLevelParseFault);
+    const classified = failure as StructuredOutputError;
+    expect(classified.tag).toBe("plan");
+    expect(classified.cause).toBe(lowLevelParseFault);
+  });
+
+  it.each([
+    ["timeout", () => new Error("Planner execution timed out")],
+    ["abort", () => new DOMException("The operation was aborted", "AbortError")],
+    ["execution", () => new Error("claude exited with code 1: sandbox unavailable")],
+  ])("propagates the %s failure unchanged without classification", async (_name, makeFailure) => {
+    const failure = makeFailure();
+    const runAgent = vi.fn().mockRejectedValue(failure);
+    const session = createSandcastlePlannerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: {},
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    await expect(session.run({
+      issueNumber: 101,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    })).rejects.toBe(failure);
+  });
+
   it("runs a fresh read-only Planner session with Spec child context", async () => {
     const runAgent = vi.fn().mockResolvedValue({ output });
     const createAgent = vi.fn().mockReturnValue({ name: "fake-agent" });

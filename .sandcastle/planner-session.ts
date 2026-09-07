@@ -8,7 +8,10 @@ import {
 
 import { agentLogging } from "./agent-logging.ts";
 import type { PlannerAgentSession } from "./planner.js";
-import { STRUCTURED_EXTRACTION_ATTEMPTS } from "./same-session-structured-extraction.ts";
+import {
+  STRUCTURED_EXTRACTION_ATTEMPTS,
+  withStructuredOutputErrorClassification,
+} from "./same-session-structured-extraction.ts";
 
 const plannerPrompt = (
   issueNumber: number,
@@ -42,7 +45,11 @@ export function createSandcastlePlannerSession(options: {
   return {
     async run(request) {
       const logging = agentLogging();
-      const result = await runAgent({
+      // Classify at the seam boundary so a low-level parse fault escaping the
+      // library's armed retry guard still surfaces as the recognised
+      // recoverable output error; non-output failures propagate unchanged.
+      const classifiedRunAgent = withStructuredOutputErrorClassification(runAgent, request.output.tag);
+      const result = await classifiedRunAgent({
         agent: createAgent(request.model),
         sandbox: options.sandbox,
         ...(options.checkoutPath === undefined ? {} : { cwd: options.checkoutPath }),
