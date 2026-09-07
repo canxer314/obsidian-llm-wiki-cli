@@ -631,6 +631,32 @@ describe("Managed Vault release upgrade (issue #199)", () => {
     expect(evidence?.rollback.refused).toBe("downgrade_forbidden");
   });
 
+  it("refuses a rollback bundle that is not the installed release", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-upgrade-"));
+    const oldBundle = await verifiedBundle(root, "bundle-old", OLD_VERSION);
+    const newBundle = await verifiedBundle(root, "bundle-new", NEW_VERSION);
+    const unrelatedBundle = await verifiedBundle(root, "bundle-unrelated", "0.3.0");
+    const harness = await arrangeVaultHarness(root, "vault-a");
+    await startInstalledVault(harness, oldBundle);
+
+    const result = await upgradeManagedVaultRelease({
+      bundle: newBundle,
+      target: { vaultPath: harness.vaultPath, obsidianVersion: OBSIDIAN_VERSION },
+      runtime: harness.currentRuntime!,
+      reloadRuntime: harness.reloadRuntime,
+      observeHealth: harness.observeHealth,
+      rollbackBundle: unrelatedBundle,
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.failure?.code).toBe("upgrade_downgrade_forbidden");
+    expect(result.rollback).toEqual({
+      attempted: false,
+      restored: false,
+      refused: "downgrade_forbidden",
+    });
+  });
+
   it("rejects bundles that did not come from the release verifier", async () => {
     const root = await mkdtemp(join(tmpdir(), "lifecycle-upgrade-"));
     const oldBundle = await verifiedBundle(root, "bundle-old", OLD_VERSION);

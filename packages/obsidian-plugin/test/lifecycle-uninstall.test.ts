@@ -465,6 +465,44 @@ describe("Managed Vault release uninstall (issue #200)", () => {
     expect(rerun.registrationRemovalCommand).toBe("claude mcp remove --scope local vault-vault-a");
   });
 
+  it("returns a typed uninstalled outcome when the persisted identity cannot name an MCP server", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-uninstall-"));
+    const bundle = await verifiedBundle(root, "bundle", VERSION);
+    const harness = await arrangeVaultHarness(root, "vault-a");
+    await installReleaseToManagedVaults(bundle, [
+      { vaultPath: harness.vaultPath, obsidianVersion: OBSIDIAN_VERSION },
+    ]);
+    // A hand-edited identity that passes the safety gate (a non-empty string)
+    // but cannot form a Claude Code MCP server name: removal must still return
+    // a typed outcome rather than throwing after the files are deleted.
+    await writeFile(
+      harness.dataPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        vaultId: "my vault",
+        port: harness.port,
+        diagnosticPath: "diagnostics",
+        changeSets: emptyRegistry(),
+      }),
+      "utf8",
+    );
+
+    const result = await uninstallManagedVaultRelease({
+      target: { vaultPath: harness.vaultPath, obsidianVersion: OBSIDIAN_VERSION },
+      pluginId: PLUGIN_ID,
+    });
+    expect(result.outcome).toBe("uninstalled");
+    expect(result.failure).toBeNull();
+    expect(result.vaultId).toBe("my vault");
+    expect(result.registrationRemovalCommand).toBeNull();
+    expect(result.requiredNextSteps).toEqual([]);
+    expect(await managedFilesPresent(harness.pluginDirectory)).toEqual([]);
+    // Operational state is retained for a lossless reinstall.
+    expect(JSON.parse(await readFile(harness.dataPath, "utf8"))).toMatchObject({
+      vaultId: "my vault",
+    });
+  });
+
   it("refuses while a Change Set is executing — live or persisted", async () => {
     const root = await mkdtemp(join(tmpdir(), "lifecycle-uninstall-"));
     const bundle = await verifiedBundle(root, "bundle", VERSION);

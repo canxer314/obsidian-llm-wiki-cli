@@ -19,6 +19,7 @@ import {
 } from "./release-managed-files.js";
 import {
   readManagedVaultUpgradeEvidence,
+  ReleaseUpgradeError,
   type ManagedVaultUpgradeEvidence,
 } from "./upgrade-release.js";
 import { RELEASE_PLUGIN_ID } from "../release/release-identity.js";
@@ -111,10 +112,15 @@ export interface ManagedVaultUninstallOptions {
    */
   readonly observeHealth?: () => Promise<ObservedHealth | null>;
   /**
-   * Persisted `data.json` reader; defaults to reading the plugin directory's
-   * state file. Resolves undefined when no state file exists.
+   * Persisted settings reader; defaults to the authoritative bridge
+   * recovery-state copy (`.llm-wiki/bridge-state.json`) when present, falling
+   * back to the plugin directory's `data.json`. Resolves undefined when no
+   * state file exists.
    */
-  readonly readPersistedState?: (pluginDirectory: string) => Promise<unknown>;
+  readonly readPersistedState?: (
+    pluginDirectory: string,
+    vaultPath: string,
+  ) => Promise<unknown>;
   /**
    * Recovery Journal reader; defaults to opening the Vault's
    * `.llm-wiki/recovery-journal.bin`. Resolves null when no journal exists or
@@ -168,6 +174,15 @@ function detailOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function readFileBytesOrNull(path: string): Promise<Uint8Array | null> {
+  try {
+    return new Uint8Array(await readFile(path));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 interface PersistedUninstallEvidence {
   readonly vaultId: string;
   readonly port: number;
@@ -182,15 +197,16 @@ function pendingEntries(registry: ChangeSetRegistryState): ChangeSetRegistryStat
 }
 
 /**
- * Reads and validates the persisted `data.json` facts uninstall needs. A
+ * Reads and validates the persisted settings facts uninstall needs. A
  * malformed file or an out-of-shape record throws — corrupted fail-closed
  * evidence is a defect, never a clean slate.
  */
 async function readPersistedUninstallEvidence(
   pluginDirectory: string,
-  read: (pluginDirectory: string) => Promise<unknown>,
+  vaultPath: string,
+  read: (pluginDirectory: string, vaultPath: string) => Promise<unknown>,
 ): Promise<PersistedUninstallEvidence | null> {
-  const raw = await read(pluginDirectory);
+  const raw = await read(pluginDirectory, vaultPath);
   if (raw === undefined) return null;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new ReleaseUninstallError(
@@ -226,19 +242,41 @@ async function readPersistedUninstallEvidence(
   return { vaultId, port, registry };
 }
 
-async function defaultReadPersistedState(pluginDirectory: string): Promise<unknown> {
-  let raw: string;
-  try {
-    raw = await readFile(join(pluginDirectory, "data.json"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+async function defaultReadPersistedState(
+  pluginDirectory: string,
+  vaultPath: string,
+): Promise<unknown> {
+  // The running plugin persists its settings to `.llm-wiki/bridge-state.json`
+  // before `data.json` and loads that recovery-state copy in preference to the
+  // plugin directory's `data.json` (main.ts). The safety gate must read the
+  // same authoritative copy — otherwise a crash between the two writes would
+  // let the gate pass on a stale `data.json` while the authoritative state
+  // still carries executing or queued work.
+  const authoritativePath = join(
+    vaultPath,
+    BRIDGE_STATE_DIRECTORY_NAME,
+    "bridge-state.json",
+  );
+  let bytes = await readFileBytesOrNull(authoritativePath);
+  const statePath = bytes === null ? join(pluginDirectory, "data.json") : authoritativePath;
+  if (bytes === null) {
+    bytes = await readFileBytesOrNull(join(pluginDirectory, "data.json"));
   }
+  if (bytes === null) return undefined;
+  let text: string;
   try {
-    return JSON.parse(raw);
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     throw new ReleaseUninstallError(
-      "Persisted Bridge settings are not valid JSON",
+      `Persisted Bridge settings are not valid UTF-8: ${statePath}`,
+      "uninstall_evidence_contradictory",
+    );
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ReleaseUninstallError(
+      `Persisted Bridge settings are not valid JSON: ${statePath}`,
       "uninstall_evidence_contradictory",
     );
   }
@@ -295,10 +333,18 @@ export async function uninstallManagedVaultRelease(
     failure: ManagedVaultUninstallResult["failure"],
     removal: ReleaseRemovalResult | null,
   ): ManagedVaultUninstallResult => {
-    const registrationRemovalCommand =
-      (outcome === "uninstalled" || outcome === "already_uninstalled") && vaultId !== null
-        ? createRegistrationRemovalCommand(vaultId)
-        : null;
+    let registrationRemovalCommand: string | null = null;
+    if ((outcome === "uninstalled" || outcome === "already_uninstalled") && vaultId !== null) {
+      try {
+        registrationRemovalCommand = createRegistrationRemovalCommand(vaultId);
+      } catch {
+        // A persisted Vault identity that survives the safety gate but cannot
+        // name a Claude Code MCP server has no registration to remove; the
+        // typed outcome must still be returned rather than throwing after the
+        // removal already ran.
+        registrationRemovalCommand = null;
+      }
+    }
     return {
       outcome,
       pluginId,
@@ -335,8 +381,9 @@ export async function uninstallManagedVaultRelease(
     // retained state itself is never inspected for safety here because no
     // removal is needed.
     try {
-      vaultId = (await readPersistedUninstallEvidence(pluginDirectory, readPersistedState))
-        ?.vaultId ?? null;
+      vaultId = (
+        await readPersistedUninstallEvidence(pluginDirectory, target.vaultPath, readPersistedState)
+      )?.vaultId ?? null;
     } catch {
       vaultId = null;
     }
@@ -349,7 +396,11 @@ export async function uninstallManagedVaultRelease(
 
   let persisted: PersistedUninstallEvidence | null = null;
   try {
-    persisted = await readPersistedUninstallEvidence(pluginDirectory, readPersistedState);
+    persisted = await readPersistedUninstallEvidence(
+      pluginDirectory,
+      target.vaultPath,
+      readPersistedState,
+    );
   } catch (error) {
     if (error instanceof ReleaseUninstallError) {
       return refuse("uninstall_evidence_contradictory", error.message);
@@ -432,9 +483,15 @@ export async function uninstallManagedVaultRelease(
   try {
     upgradeEvidence = await readUpgradeEvidence(pluginDirectory);
   } catch (error) {
+    if (error instanceof ReleaseUpgradeError) {
+      return refuse(
+        "uninstall_evidence_contradictory",
+        `Persisted upgrade evidence failed validation: ${detailOf(error)}`,
+      );
+    }
     return refuse(
-      "uninstall_evidence_contradictory",
-      `Persisted upgrade evidence failed validation: ${detailOf(error)}`,
+      "uninstall_evidence_unavailable",
+      `Persisted upgrade evidence could not be read: ${detailOf(error)}`,
     );
   }
   if (upgradeEvidence !== null && upgradeEvidence.outcome !== "succeeded") {

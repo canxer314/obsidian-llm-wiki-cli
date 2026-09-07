@@ -1,7 +1,10 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION } from "../change-set.js";
+import {
+  BRIDGE_STATE_DIRECTORY_NAME,
+  RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION,
+} from "../change-set.js";
 import {
   isVerifiedCandidateBundle,
   sha256Hex,
@@ -322,7 +325,10 @@ function parseUpgradeEvidence(value: unknown): ManagedVaultUpgradeEvidence | nul
     typeof record.bundleTag !== "string" ||
     !["in_progress", "succeeded", "failed", "rolled_back"].includes(record.outcome as string) ||
     !Array.isArray(phases) ||
-    phases.some((phase) => !UPGRADE_PHASE_ORDER.includes(phase as UpgradePhase)) ||
+    // Completed phases must be exactly a prefix of the fixed durable order:
+    // out-of-order, duplicated, or non-prefix journals are corrupt evidence.
+    phases.length > UPGRADE_PHASE_ORDER.length ||
+    phases.some((phase, index) => phase !== UPGRADE_PHASE_ORDER[index]) ||
     typeof queue !== "object" || queue === null ||
     typeof queue.length !== "number" ||
     !(typeof queue.headChangeSetId === "string" || queue.headChangeSetId === null) ||
@@ -450,13 +456,29 @@ export async function upgradeManagedVaultRelease(
   const readSnapshot =
     options.readPersistedStateSnapshot ??
     (async (): Promise<unknown> => {
-      let raw: string;
-      try {
-        raw = await readFile(join(pluginDirectory, "data.json"), "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-        throw error;
-      }
+      // The running plugin persists its settings to `.llm-wiki/bridge-state.json`
+      // before `data.json` and loads that recovery-state copy in preference to
+      // the plugin directory's `data.json` (main.ts). The rollback-readability
+      // boundary must be judged on the same authoritative copy — otherwise a
+      // crash between the two writes could let the old bundle be restored over
+      // state it will actually load (from the recovery copy) and cannot read.
+      const authoritativePath = join(
+        target.vaultPath,
+        BRIDGE_STATE_DIRECTORY_NAME,
+        "bridge-state.json",
+      );
+      const readStateFile = async (path: string): Promise<string | null> => {
+        try {
+          return await readFile(path, "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      };
+      const raw = (await readStateFile(authoritativePath)) ?? (await readStateFile(
+        join(pluginDirectory, "data.json"),
+      ));
+      if (raw === null) return undefined;
       try {
         return JSON.parse(raw);
       } catch {
@@ -537,6 +559,22 @@ export async function upgradeManagedVaultRelease(
     );
   }
   evidence.fromVersion = deployed.pluginVersion;
+
+  // Rollback restores the verified previous Release — not an arbitrary older
+  // one. An operator-supplied rollback bundle that is not the running version
+  // could restore bytes whose schema ceiling is below the state the running
+  // bundle already wrote, so it is refused up front.
+  if (
+    options.rollbackBundle !== undefined &&
+    options.rollbackBundle.identity.pluginVersion !== evidence.fromVersion
+  ) {
+    evidence.rollback = { attempted: false, restored: false, refused: "downgrade_forbidden" };
+    return failPreflight(
+      "upgrade_downgrade_forbidden",
+      `Rollback bundle ${options.rollbackBundle.identity.pluginVersion} is not the installed release ` +
+        `${evidence.fromVersion}; only the verified previous Release may be restored`,
+    );
+  }
 
   // The pre-upgrade observation proves the old runtime's identity, queue,
   // and supported schema ceilings, and that the Vault is in a trustworthy
@@ -685,11 +723,16 @@ export async function upgradeManagedVaultRelease(
           "upgrade_replace_failed",
         );
       }
+      // The bundle bytes are replaced on disk as soon as the installer swap
+      // inside the drained window completes. Record that before the
+      // maintenance machine continues its own post-swap steps, so a failure
+      // after the swap (migration/health recheck) still reaches the bounded
+      // rollback decision instead of concluding "nothing to roll back".
+      bundleReplacedOnDisk = true;
       // `unchanged` means the deployed files already hash-equal the target —
       // only possible when resuming an interrupted upgrade; a fresh same
       // version is repaired, never "upgraded", and still continues safely.
     });
-    bundleReplacedOnDisk = true;
   } catch (error) {
     return fail(
       error instanceof InstallInterruptionError

@@ -1321,4 +1321,86 @@ describe("Managed Vault state purge (issue #201)", () => {
     ).rejects.toMatchObject({ code: "purge_path_unsafe" });
     expect(ReleasePurgeError).toBeDefined();
   });
+
+  it("enumerates, backs up, and removes the authoritative recovery-state mirror", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-purge-"));
+    const harness = await arrangeDrainedVault(root);
+    // The running plugin persists an authoritative recovery-state copy in
+    // `.llm-wiki/bridge-state.json` alongside `data.json` (main.ts). Purge
+    // must treat that copy as operational state: leaving it behind would
+    // resurrect the Vault identity, port, and retained records on the next
+    // plugin load after a fresh install.
+    const mirrorPath = join(harness.stateDirectory, "bridge-state.json");
+    await writeFile(mirrorPath, await readFile(harness.dataPath, "utf8"), "utf8");
+
+    const result = await purgeManagedVaultState({
+      target: { vaultPath: harness.vaultPath, obsidianVersion: OBSIDIAN_VERSION },
+      pluginId: PLUGIN_ID,
+      backupDirectory: harness.backupRoot,
+      confirm: affirmingConfirm,
+    });
+
+    expect(result.outcome).toBe("purged");
+    expect(result.failure).toBeNull();
+    expect(result.inventory?.files.map((file) => file.kind).sort()).toEqual([
+      "recovery_journal",
+      "recovery_state",
+      "settings",
+    ]);
+    expect(result.deletedFiles.slice().sort()).toEqual([
+      ".llm-wiki/bridge-state.json",
+      ".llm-wiki/recovery-journal.bin",
+      ".obsidian/plugins/purge-bridge/data.json",
+    ]);
+    expect(await pathExists(harness.dataPath)).toBe(false);
+    expect(await pathExists(mirrorPath)).toBe(false);
+    expect(await pathExists(join(harness.stateDirectory, "recovery-journal.bin"))).toBe(false);
+
+    // The backup preserved the mirror bytes, so the removed state is
+    // independently recoverable.
+    const backedUpMirror = new Uint8Array(
+      await readFile(join(result.backup!.directory, "files/.llm-wiki/bridge-state.json")),
+    );
+    expect(backedUpMirror.length).toBeGreaterThan(0);
+
+    const rerun = await purgeManagedVaultState({
+      target: { vaultPath: harness.vaultPath, obsidianVersion: OBSIDIAN_VERSION },
+      pluginId: PLUGIN_ID,
+      backupDirectory: harness.backupRoot,
+      confirm: affirmingConfirm,
+    });
+    expect(rerun.outcome).toBe("already_purged");
+  });
+
+  it("refuses when queued work exists only in the authoritative recovery-state mirror", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-purge-"));
+    const harness = await arrangeDrainedVault(root);
+    // A crash between the plugin's two writes leaves the recovery-state copy
+    // ahead of `data.json`; the runtime loads the copy first, so the purge gate
+    // must refuse on the work the copy still carries instead of passing on the
+    // stale empty `data.json`.
+    const mirrorPath = join(harness.stateDirectory, "bridge-state.json");
+    await writeFile(
+      mirrorPath,
+      persistedStateFixture(
+        emptyRegistry({
+          nextEnqueueSeq: 2,
+          entries: [registryEntry("key-queued", "cs-queued", 1, "queued", "in_progress")],
+        }),
+      ),
+      "utf8",
+    );
+
+    const result = await purgeManagedVaultState({
+      target: { vaultPath: harness.vaultPath, obsidianVersion: OBSIDIAN_VERSION },
+      pluginId: PLUGIN_ID,
+      backupDirectory: harness.backupRoot,
+      confirm: affirmingConfirm,
+    });
+    expect(result.outcome).toBe("refused");
+    expect(result.failure?.code).toBe("purge_work_queued");
+    expect(await pathExists(harness.dataPath)).toBe(true);
+    expect(await pathExists(mirrorPath)).toBe(true);
+    expect(await backupDirectories(harness.backupRoot)).toEqual([]);
+  });
 });

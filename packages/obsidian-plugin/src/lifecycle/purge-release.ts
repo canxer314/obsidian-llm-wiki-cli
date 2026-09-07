@@ -16,6 +16,7 @@ import {
 import { managedVaultPluginDirectory } from "./release-managed-files.js";
 import {
   readManagedVaultUpgradeEvidence,
+  ReleaseUpgradeError,
   type ManagedVaultUpgradeEvidence,
 } from "./upgrade-release.js";
 import { RELEASE_PLUGIN_ID } from "../release/release-identity.js";
@@ -28,9 +29,10 @@ import {
  * Managed Vault purge orchestration (issue #201, spec §9.3): the separate
  * local interactive operation that intentionally removes one Managed Vault's
  * operational state — Vault identity and persistent endpoint/port, FIFO queue
- * and Change Set records, Submission Key records, settings (`data.json`), and
- * every Recovery Journal — only after a verifiable backup exists outside the
- * state being removed and the Primary Operator explicitly confirms the loss.
+ * and Change Set records, Submission Key records, settings (`data.json`), the
+ * authoritative recovery-state copy (`.llm-wiki/bridge-state.json`), and every
+ * Recovery Journal — only after a verifiable backup exists outside the state
+ * being removed and the Primary Operator explicitly confirms the loss.
  *
  * Purge is NOT an uninstall flag or a variant of
  * `uninstallManagedVaultRelease`: uninstall removes only release-managed
@@ -98,7 +100,19 @@ export class ReleasePurgeError extends Error {
 }
 
 /** The operational-state file kinds purge enumerates, backs up, and deletes. */
-export type PurgeInventoryFileKind = "settings" | "recovery_journal";
+export type PurgeInventoryFileKind =
+  | "settings"
+  | "recovery_state"
+  | "recovery_journal";
+
+/** Recovery-state mirror of `data.json` the running plugin treats as authoritative. */
+const BRIDGE_RECOVERY_STATE_FILE = "bridge-state.json";
+/** Transient sibling written before the recovery-state rename. */
+const BRIDGE_RECOVERY_STATE_TEMPORARY_FILE = "bridge-state.next";
+const BRIDGE_RECOVERY_STATE_FILES: readonly string[] = [
+  BRIDGE_RECOVERY_STATE_FILE,
+  BRIDGE_RECOVERY_STATE_TEMPORARY_FILE,
+];
 
 export interface PurgeInventoryFile {
   readonly kind: PurgeInventoryFileKind;
@@ -216,10 +230,15 @@ export interface ManagedVaultPurgeOptions {
    */
   readonly observeHealth?: () => Promise<ObservedHealth | null>;
   /**
-   * Persisted `data.json` reader; defaults to reading the plugin directory's
-   * state file. Resolves undefined when no state file exists.
+   * Persisted settings reader; defaults to the authoritative bridge
+   * recovery-state copy (`.llm-wiki/bridge-state.json`) when present, falling
+   * back to the plugin directory's `data.json`. Resolves undefined when no
+   * state file exists.
    */
-  readonly readPersistedState?: (pluginDirectory: string) => Promise<unknown>;
+  readonly readPersistedState?: (
+    pluginDirectory: string,
+    vaultPath: string,
+  ) => Promise<unknown>;
   /**
    * Recovery Journal reader; defaults to opening the Vault's
    * `.llm-wiki/recovery-journal.bin`. Resolves null when no journal exists or
@@ -282,15 +301,16 @@ function pendingEntries(registry: ChangeSetRegistryState): ChangeSetRegistryStat
 }
 
 /**
- * Reads and validates the persisted `data.json` facts purge needs. A
- * malformed file or an out-of-shape record throws — corrupted fail-closed
- * evidence is a defect, never a clean slate.
+ * Reads and validates the persisted settings facts purge needs. A malformed
+ * file or an out-of-shape record throws — corrupted fail-closed evidence is a
+ * defect, never a clean slate.
  */
 async function readPersistedPurgeEvidence(
   pluginDirectory: string,
-  read: (pluginDirectory: string) => Promise<unknown>,
+  vaultPath: string,
+  read: (pluginDirectory: string, vaultPath: string) => Promise<unknown>,
 ): Promise<PersistedPurgeEvidence | null> {
-  const raw = await read(pluginDirectory);
+  const raw = await read(pluginDirectory, vaultPath);
   if (raw === undefined) return null;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new ReleasePurgeError(
@@ -326,19 +346,41 @@ async function readPersistedPurgeEvidence(
   return { vaultId, port, registry };
 }
 
-async function defaultReadPersistedState(pluginDirectory: string): Promise<unknown> {
-  let raw: string;
-  try {
-    raw = await readFile(join(pluginDirectory, "data.json"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+async function defaultReadPersistedState(
+  pluginDirectory: string,
+  vaultPath: string,
+): Promise<unknown> {
+  // The running plugin persists its settings to `.llm-wiki/bridge-state.json`
+  // before `data.json` and loads that recovery-state copy in preference to the
+  // plugin directory's `data.json` (main.ts). Purge must read the same
+  // authoritative copy — otherwise a crash between the two writes would let
+  // the gate pass on a stale `data.json` while the authoritative state still
+  // carries queued work that the next plugin load would restore.
+  const authoritativePath = join(
+    vaultPath,
+    BRIDGE_STATE_DIRECTORY_NAME,
+    BRIDGE_RECOVERY_STATE_FILE,
+  );
+  let bytes = await readFileBytesOrNull(authoritativePath);
+  const statePath = bytes === null ? join(pluginDirectory, "data.json") : authoritativePath;
+  if (bytes === null) {
+    bytes = await readFileBytesOrNull(join(pluginDirectory, "data.json"));
   }
+  if (bytes === null) return undefined;
+  let text: string;
   try {
-    return JSON.parse(raw);
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     throw new ReleasePurgeError(
-      "Persisted Bridge settings are not valid JSON",
+      `Persisted Bridge settings are not valid UTF-8: ${statePath}`,
+      "purge_evidence_contradictory",
+    );
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ReleasePurgeError(
+      `Persisted Bridge settings are not valid JSON: ${statePath}`,
       "purge_evidence_contradictory",
     );
   }
@@ -487,23 +529,30 @@ export async function purgeManagedVaultState(
       `The persisted Bridge settings could not be inspected: ${detailOf(error)}`,
     );
   }
-  let journalNames: string[];
+  let stateEntries: string[];
   try {
-    journalNames = (await readdir(stateDirectory))
-      .filter((entry) => RECOVERY_JOURNAL_FILE_NAME.test(entry))
-      .sort();
+    stateEntries = await readdir(stateDirectory);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      journalNames = [];
+      stateEntries = [];
     } else {
       return refuse(
         "purge_evidence_unavailable",
-        `The Recovery Journal directory could not be inspected: ${detailOf(error)}`,
+        `The Bridge state directory could not be inspected: ${detailOf(error)}`,
       );
     }
   }
+  const journalNames = stateEntries
+    .filter((entry) => RECOVERY_JOURNAL_FILE_NAME.test(entry))
+    .sort();
+  // The runtime's authoritative recovery-state mirror (and its transient
+  // sibling) also holds Vault identity, port, FIFO/Change Set and Submission
+  // Key records, so it is operational state a purge must back up and remove.
+  const recoveryStateNames = stateEntries
+    .filter((entry) => (BRIDGE_RECOVERY_STATE_FILES as readonly string[]).includes(entry))
+    .sort();
 
-  if (settingsBytes === null && journalNames.length === 0) {
+  if (settingsBytes === null && journalNames.length === 0 && recoveryStateNames.length === 0) {
     // No operational state exists: nothing would be removed, nothing needs a
     // backup, and no confirmation is required. Reruns are deterministic.
     return result("already_purged", null, null, null, [], []);
@@ -511,7 +560,11 @@ export async function purgeManagedVaultState(
 
   let persisted: PersistedPurgeEvidence | null = null;
   try {
-    persisted = await readPersistedPurgeEvidence(pluginDirectory, readPersistedState);
+    persisted = await readPersistedPurgeEvidence(
+      pluginDirectory,
+      target.vaultPath,
+      readPersistedState,
+    );
   } catch (error) {
     if (error instanceof ReleasePurgeError) {
       return refuse("purge_evidence_contradictory", error.message);
@@ -532,6 +585,23 @@ export async function purgeManagedVaultState(
       backupPath: `files/${sourcePath}`,
       bytes: settingsBytes.length,
       sha256: sha256Hex(settingsBytes),
+    });
+  }
+  for (const name of recoveryStateNames) {
+    const sourcePath = `${BRIDGE_STATE_DIRECTORY_NAME}/${name}`;
+    const bytes = await readFileBytesOrNull(join(stateDirectory, name));
+    if (bytes === null) {
+      return refuse(
+        "purge_evidence_unavailable",
+        `Recovery-state copy ${name} disappeared during enumeration; the evidence changed under the purge`,
+      );
+    }
+    inventoryFiles.push({
+      kind: "recovery_state",
+      sourcePath,
+      backupPath: `files/${sourcePath}`,
+      bytes: bytes.length,
+      sha256: sha256Hex(bytes),
     });
   }
   for (const name of journalNames) {
@@ -660,9 +730,16 @@ export async function purgeManagedVaultState(
   try {
     upgradeEvidence = await readUpgradeEvidence(pluginDirectory);
   } catch (error) {
+    if (error instanceof ReleaseUpgradeError) {
+      return refuse(
+        "purge_evidence_contradictory",
+        `Persisted upgrade evidence failed validation: ${detailOf(error)}`,
+        inventory,
+      );
+    }
     return refuse(
-      "purge_evidence_contradictory",
-      `Persisted upgrade evidence failed validation: ${detailOf(error)}`,
+      "purge_evidence_unavailable",
+      `Persisted upgrade evidence could not be read: ${detailOf(error)}`,
       inventory,
     );
   }
@@ -1002,28 +1079,16 @@ export async function purgeManagedVaultState(
     );
   }
 
-  // Post-deletion verification: re-inspect the target. Any surviving
-  // enumerated state fails the purge with the precise remainder; deletion is
-  // idempotent, so a confirmed rerun simply completes it.
+  // Post-deletion verification: re-inspect the target against every enumerated
+  // source path (settings, recovery-state copies, and Recovery Journals). Any
+  // surviving enumerated state fails the purge with the precise remainder;
+  // deletion is idempotent, so a confirmed rerun simply completes it.
   const survivors: string[] = [];
   try {
-    if ((await readFileBytesOrNull(settingsPath)) !== null) {
-      survivors.push(`${configDirectoryName}/plugins/${pluginId}/data.json`);
-    }
-    let remainingJournals: string[];
-    try {
-      remainingJournals = (await readdir(stateDirectory)).filter((entry) =>
-        RECOVERY_JOURNAL_FILE_NAME.test(entry),
-      );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        remainingJournals = [];
-      } else {
-        throw error;
+    for (const file of inventory.files) {
+      if ((await readFileBytesOrNull(join(target.vaultPath, ...file.sourcePath.split("/")))) !== null) {
+        survivors.push(file.sourcePath);
       }
-    }
-    for (const name of remainingJournals.sort()) {
-      survivors.push(`${BRIDGE_STATE_DIRECTORY_NAME}/${name}`);
     }
   } catch (error) {
     return result(

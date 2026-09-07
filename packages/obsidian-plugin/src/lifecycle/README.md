@@ -92,10 +92,12 @@ verification bypass, no raw-directory or URL input, and no skip flag.
   §9.3) is the **separate local interactive purge**: it intentionally removes
   one Managed Vault's operational state — Vault identity and persistent
   endpoint/port, FIFO queue and Change Set records, Submission Key records,
-  settings (`data.json`), and every Recovery Journal — and is neither an
-  uninstall flag nor a variant of `uninstallManagedVaultRelease`. It composes
-  the boundaries above and adds no second file-ownership or evidence
-  implementation:
+  settings (`data.json`), the authoritative recovery-state copy
+  (`.llm-wiki/bridge-state.json`, which the running plugin writes before
+  `data.json` and loads in preference to it), and every Recovery Journal — and
+  is neither an uninstall flag nor a variant of
+  `uninstallManagedVaultRelease`. It composes the boundaries above and adds no
+  second file-ownership or evidence implementation:
   - **Enumeration before anything is written**: the operator-facing inventory
     names the Vault identity, persistent port, pending/retained FIFO and
     Change Set records, Submission Key records, the settings file, and every
