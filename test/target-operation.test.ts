@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -488,6 +488,130 @@ describe("Target operation runner", () => {
       }
       rmSync(marker, { force: true });
       rmSync(logRoot, { recursive: true, force: true });
+    }
+  });
+
+  // The trusted-resolution change moved where the Target job worker file
+  // resolves from (workerRoot), not who owns the lifecycle: the runner still
+  // enforces the whole-job timeout table and finalizes the local job log, no
+  // matter which trusted root the entry resolved from.
+  it.each([
+    ["the module-local default", undefined],
+    ["an injected trusted root", "/trusted/automation/.sandcastle"],
+  ] as const)(
+    "enforces the review whole-job timeout and finalizes the job log as timed-out with %s worker root",
+    async (_case, trustedSandcastleRoot) => {
+      const root = mkdtempSync(join(tmpdir(), "target-operation-root-timeout-log-"));
+      const logsPath = join(root, "logs");
+      const runWorker = vi.fn(async (): Promise<never> => {
+        throw new AgentWorkerTimeoutError("Target operation review timed out");
+      });
+      const runner = createTargetOperationRunnerWithWorker({
+        checkoutOptions: { sourceRepositoryPath: "/trusted/repository" },
+        jobLogRoot: logsPath,
+        startup: {
+          imageName: "fixture-image",
+          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+        },
+        ...(trustedSandcastleRoot === undefined ? {} : { trustedSandcastleRoot }),
+        start: () => {
+          throw new Error("trusted-root timeout test start should not run");
+        },
+      }, runWorker);
+
+      try {
+        await expect(runner.run({
+          operation: "review",
+          number: 219,
+          revision,
+          jobId: "trusted-root-timed-out-219",
+          acquired: true,
+          pullRequest: {
+            headSha: revision,
+            headRefName: "feature-branch",
+            baseRefName: "master",
+            baseRepository: "owner/repository",
+            headRepository: "owner/repository",
+          },
+        })).rejects.toBeInstanceOf(AgentWorkerTimeoutError);
+        const request = runWorker.mock.calls[0]![0];
+        expect(request.workerRoot).toBe(
+          trustedSandcastleRoot ?? resolve(import.meta.dirname, "../.sandcastle"),
+        );
+        expect(request.workerFile).toBe("target-job-worker.ts");
+        expect(request.timeoutMilliseconds).toBe(90 * 60 * 1000);
+        expect(request.graceMilliseconds).toBe(10 * 1000);
+        expect(JSON.parse(readFileSync(
+          join(logsPath, "trusted-root-timed-out-219", "metadata.json"),
+          "utf8",
+        ))).toMatchObject({ status: "timed-out", jobId: "trusted-root-timed-out-219" });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("finalizes completed, blocked, and failed job logs from the runner with an injected trusted worker root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-root-status-log-"));
+    const logsPath = join(root, "logs");
+    const options = {
+      checkoutOptions: { sourceRepositoryPath: "/trusted/repository" },
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      trustedSandcastleRoot: "/trusted/automation/.sandcastle",
+      start: () => {
+        throw new Error("trusted-root finalization test start should not run");
+      },
+    } as const;
+    const invocation = {
+      operation: "implement-issue",
+      number: 219,
+      revision,
+      acquired: true,
+    } as const;
+
+    try {
+      const completed = createTargetOperationRunnerWithWorker(options, vi.fn(async () => ({
+        output: JSON.stringify({ status: "implemented" }),
+        code: 0,
+        diagnostics: "",
+      })));
+      await expect(completed.run({ ...invocation, jobId: "trusted-root-completed" }))
+        .resolves.toEqual({ status: "implemented" });
+
+      const blocked = createTargetOperationRunnerWithWorker(options, vi.fn(async () => ({
+        output: JSON.stringify({ status: "blocked", reason: "execution" }),
+        code: 0,
+        diagnostics: "",
+      })));
+      await expect(blocked.run({ ...invocation, jobId: "trusted-root-blocked" }))
+        .resolves.toEqual({ status: "blocked", reason: "execution" });
+
+      const failed = createTargetOperationRunnerWithWorker(options, vi.fn(async (): Promise<never> => {
+        throw new Error("worker infrastructure failure");
+      }));
+      await expect(failed.run({ ...invocation, jobId: "trusted-root-failed" }))
+        .rejects.toThrow("worker infrastructure failure");
+
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "trusted-root-completed", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "completed", jobId: "trusted-root-completed" });
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "trusted-root-blocked", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "failed", jobId: "trusted-root-blocked" });
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "trusted-root-failed", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "failed", jobId: "trusted-root-failed" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

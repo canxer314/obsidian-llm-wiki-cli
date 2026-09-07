@@ -10,6 +10,8 @@ The six label-triggered Automation Command families share one policy: public ope
 
 Discovery remains responsible for GitHub shape reads, top-level Issue and Spec classification, open implementation Pull Request detection, and competing-trigger priority. Eligibility and priority remain in Automation Command code. CLI names and wording remain CLI presentation. GitHub-capable Agent readiness, Target runtime profile/model composition, fixed operation entries, timeouts, managed GitHub lifecycle and security checks, staged acquisition authorization, and Target Checkout remain their existing independent seams.
 
+Fixed operation entries resolve from the trusted automation checkout's `.sandcastle` — the checkout running the automation — never from the operated Target Checkout snapshot, which is delivered to the worker only as an explicit authorized path. This resolution change does not merge seams: the fixed-entry and timeout seams remain independent of this route policy and of each other.
+
 `unknown` stays inspection-only. Queue promotion has no route. Scheduled architecture review remains a no-Work-Item Target invocation and is not label-triggered route policy.
 
 ## Consequences
