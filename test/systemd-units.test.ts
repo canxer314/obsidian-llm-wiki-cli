@@ -35,7 +35,13 @@ function parseUnit(source: string): UnitFile {
     if (assignment?.groups === undefined || current === undefined) {
       throw new Error(`Unparseable systemd unit line: ${line}`);
     }
-    sections[current][assignment.groups.key] = assignment.groups.value;
+    // systemd accumulates repeated keys such as Environment= instead of
+    // replacing them; keep every assignment so each remains assertable.
+    const key = assignment.groups.key;
+    const existing = sections[current][key];
+    sections[current][key] = existing === undefined
+      ? assignment.groups.value
+      : `${existing}\n${assignment.groups.value}`;
   }
   return sections;
 }

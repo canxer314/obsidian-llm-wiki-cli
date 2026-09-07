@@ -170,7 +170,12 @@ describe("worker process lifecycle ownership", () => {
     const protocolRunners = protocolRunnerSources(sources);
     const lifecycleAdapters = lifecycleAdapterSources(sources);
 
-    expect(timeoutImports).toEqual([lifecycleName]);
+    // The Dispatch Session's idle poll consumes only job-timeout's cancellable
+    // wait helper; timeout orchestration (runJobWithTimeout and the
+    // process-group terminator) stays exclusive to the lifecycle seam.
+    expect(timeoutImports).toEqual(["automation-dispatch.ts", lifecycleName]);
+    expect(source("automation-dispatch.ts")).not.toContain("runJobWithTimeout");
+    expect(source("automation-dispatch.ts")).not.toContain("terminateJobProcessGroup");
     expect(lifecycle).toContain('from "./job-timeout.ts"');
     expect(timeout).toContain("runJobWithTimeout");
     expect(protocolRunners.map(({ name }) => name)).toEqual([
@@ -248,5 +253,100 @@ describe("worker process lifecycle ownership", () => {
     for (const { content } of fixedAgentWorkers) {
       expect(content).toMatch(/workerFile:\s*"[a-z-]+-worker\.ts"/u);
     }
+  });
+});
+
+// Worker code always resolves from the trusted .sandcastle (the checkout
+// running the automation, via workerRoot/import.meta.dirname), never from the
+// operated Target Checkout. These guards fail the suite if any production
+// source reintroduces checkout-derived worker resolution such as
+// resolve(<checkoutPath>, ".sandcastle", <workerFile>), or if the operation
+// runtime re-derives the operated checkout from its own module location
+// instead of the delivered worker argument.
+function referencesOperatedCheckout(expression: ts.Expression): boolean {
+  if (ts.isIdentifier(expression)) return /checkout/iu.test(expression.text);
+  if (ts.isPropertyAccessExpression(expression)) {
+    return /checkout/iu.test(expression.name.text) || referencesOperatedCheckout(expression.expression);
+  }
+  return false;
+}
+
+function isWorkerCodeArgument(expression: ts.Expression): boolean {
+  if (ts.isStringLiteral(expression)) return /\.ts$/u.test(expression.text);
+  if (ts.isIdentifier(expression)) return /worker|entry/iu.test(expression.text);
+  if (ts.isPropertyAccessExpression(expression)) {
+    return /worker|entry/iu.test(expression.name.text);
+  }
+  return ts.isElementAccessExpression(expression);
+}
+
+function resolvesCheckoutWorkerCode(node: ts.Node): boolean {
+  if (!ts.isCallExpression(node)) return false;
+  if (!ts.isIdentifier(node.expression)) return false;
+  if (node.expression.text !== "resolve" && node.expression.text !== "join") return false;
+  const arguments_ = [...node.arguments];
+  const derivesCheckoutSandcastleRoot = arguments_.length === 2;
+  return arguments_.some((argument) =>
+      ts.isStringLiteral(argument) && argument.text === ".sandcastle")
+    && arguments_.some((argument) => referencesOperatedCheckout(argument))
+    && (derivesCheckoutSandcastleRoot || arguments_.some((argument) => isWorkerCodeArgument(argument)));
+}
+
+describe("trusted worker code resolution", () => {
+  it("never resolves worker code or the worker root from the operated Target Checkout", () => {
+    const violations = productionSources()
+      .filter((source) => containsNode(source, resolvesCheckoutWorkerCode))
+      .map(({ name }) => name);
+    expect(violations).toEqual([]);
+  });
+
+  it("recognizes reintroduced checkout-derived worker resolution", () => {
+    const synthetic = (content: string): ProductionSource => ({
+      name: "synthetic.ts",
+      path: resolve(sandcastleDirectory, "synthetic.ts"),
+      content,
+      syntax: ts.createSourceFile("synthetic.ts", content, ts.ScriptTarget.Latest, true),
+    });
+
+    for (const regression of [
+      'spawn(process.execPath, [resolve(checkoutPath, ".sandcastle", "implementation-worker.ts")]);',
+      'spawn(process.execPath, [resolve(options.checkoutPath, ".sandcastle", options.workerFile)]);',
+      'const root = await realpath(resolve(checkoutPath, ".sandcastle"));',
+      'const root = join(request.checkoutPath, ".sandcastle", entries[operation]);',
+    ]) {
+      expect(
+        containsNode(synthetic(regression), resolvesCheckoutWorkerCode),
+        regression,
+      ).toBe(true);
+    }
+    // Artifact directories under the operated checkout are data, not worker
+    // code, and stay legitimate.
+    expect(containsNode(
+      synthetic('const root = resolve(checkoutPath, ".sandcastle", "jobs", "review-artifacts");'),
+      resolvesCheckoutWorkerCode,
+    )).toBe(false);
+  });
+
+  it("keeps the operation runtime on the delivered checkout path, never its own module location", () => {
+    const runtime = source("target-operation-runtime.ts");
+    expect(runtime).not.toContain("import.meta.dirname");
+    expect(runtime).toContain("checkoutPath");
+  });
+
+  it("keeps the trusted worker root default module-local in the runner seams", () => {
+    const operation = source("target-operation.ts");
+    expect(operation).toContain("trustedSandcastleRoot");
+    const runners = productionSources()
+      .filter(({ content }) => /\bworkerRoot\b/u.test(content))
+      .map(({ name }) => name);
+    expect(runners).toEqual(expect.arrayContaining([
+      "agent-process-runner.ts",
+      "implementation-process-runner.ts",
+      "spec-implementation-process-runner.ts",
+      "feedback-process-runner.ts",
+      "spec-split-process-runner.ts",
+      "branch-update-conflict-process-runner.ts",
+      "target-operation.ts",
+    ]));
   });
 });
