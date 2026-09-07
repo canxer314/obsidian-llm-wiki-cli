@@ -1200,9 +1200,9 @@ function assertHeadlessPass(evidence: SubmissionKeyCorpusEvidence): void {
 }
 
 async function assertReportRedacted(evidence: SubmissionKeyCorpusEvidence, rawKeys: string[]): Promise<void> {
-  const onDisk = JSON.parse(await readFile(evidence.reportPath, "utf8")) as { verdict?: string };
-  expect(onDisk.verdict).toBe("pass");
   const text = await readFile(evidence.reportPath, "utf8");
+  const onDisk = JSON.parse(text) as { verdict?: string };
+  expect(onDisk.verdict).toBe("pass");
   for (const key of rawKeys) {
     expect(text, `report must never contain the raw Submission Key ${digestKey(key)}`).not.toContain(key);
   }
@@ -1350,8 +1350,13 @@ describe("Submission Key corpus through the real owning process (issue #195)", (
       });
 
       assertHeadlessPass(evidence);
-      expect(evidence.generations.map(({ generation }) => generation)).toEqual([2, 3]);
-      for (const generation of evidence.generations) {
+      expect(evidence.generations.map(({ generation }) => generation)).toEqual([1, 2, 3]);
+      // The original execution ran exactly once (generation 1, parked at the
+      // rollback lead-in) and never again in the blocked generations.
+      expect(evidence.generations[0]?.outcome).toBe("parked_then_terminated");
+      expect(evidence.generations[0]?.executionRuns).toBe(1);
+      expect(evidence.generations[0]?.recoveryRuns).toBe(0);
+      for (const generation of evidence.generations.slice(1)) {
         expect(generation.effectiveGate).toBe("recovery_blocked");
         expect(generation.executionRuns).toBe(0);
       }

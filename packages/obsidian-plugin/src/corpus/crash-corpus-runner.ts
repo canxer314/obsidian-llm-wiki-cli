@@ -4202,7 +4202,6 @@ export async function runSubmissionKeyReplayScenario(
     const gen1Runs = await generationRunCounts(gen1Control);
     await terminateChild(gen1);
     log("generation 1 terminated by supervisor (process kill)");
-    evidence.registryAfter = await observeSubmissionKeyRegistry(root);
     (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
       generation: 1,
       outcome: "ready",
@@ -4266,6 +4265,10 @@ export async function runSubmissionKeyReplayScenario(
     }
     log("generation 2 terminated by supervisor");
 
+    // The final registry observation is taken only after the restart replay:
+    // it proves the binding and record survived the whole scenario (reconnect
+    // AND restart) rather than just the first generation.
+    evidence.registryAfter = await observeSubmissionKeyRegistry(root);
     evidence.after = await inventoryCorpus(root);
     const noteBytes = await readPathBytes(root, profile.primaryPath);
     const committed = profile.files.find((file) => file.path === profile.primaryPath)?.committedBytes ?? null;
@@ -4601,6 +4604,23 @@ export async function runSubmissionKeyRecoveryBlockedScenario(
     await terminateChild(gen1);
     await originalSettled;
     log("generation 1 terminated by supervisor");
+    // Record generation 1 so the report accounts for every generation: the
+    // original execution ran exactly once here and must never run again in the
+    // blocked generations (at-most-once across the crash).
+    const gen1Runs = await generationRunCounts(join(controlBase, "gen1"));
+    (evidence.generations as SubmissionKeyGenerationEvidence[]).push({
+      generation: 1,
+      outcome: "parked_then_terminated",
+      executionRuns: gen1Runs.executionRuns,
+      recoveryRuns: gen1Runs.recoveryRuns,
+      effectiveGate: null,
+      recoveryState: null,
+    });
+    if (gen1Runs.executionRuns !== 1) {
+      failures.push(
+        `expected exactly one execution in generation 1 but observed ${gen1Runs.executionRuns}`,
+      );
+    }
 
     // Third-party residue: recovery cannot prove restoration and must fail closed.
     const residueAbsolute = join(root, ...profile.primaryPath.split("/"));
