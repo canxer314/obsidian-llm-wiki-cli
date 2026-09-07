@@ -5,6 +5,8 @@
 
 Dispatcher 直接通过 Node 24 type stripping 从受信任的本地 `master` checkout 运行。系统没有 TypeScript build、安装器、release 目录、符号链接或回滚机制。Agent worker 使用下文准备的独立本地内容寻址 Docker 镜像。
 
+每个 Target 操作的操作入口和全部嵌套 worker 也都从该受信任 checkout 的 `.sandcastle` 解析执行（ADR-0001）；Target Checkout 只是被操作的对象，以显式授权路径交付给 worker，不提供任何可执行代码。因此合并到 `master` 的自动化修复对所有已打开的 Pull Request 和 Spec 分支立即生效，不需要把 `master` 合并或 rebase 进这些分支。
+
 <a id="protected-configuration"></a>
 ## 受保护配置
 
@@ -204,6 +206,16 @@ Spec 实现会在完整的子 Issue 操作期间持有强制的跨进程 issue l
 3. 在本地读取调度会话日志：`journalctl --user -u sandcastle-dispatch.service`。架构 review 使用 `-t sandcastle-architecture-review`。完整 Agent 输出只存在于本地日志，不会写入 GitHub 评论。
 4. 检查 `.sandcastle/jobs/` 下保留的任务产物。失败或超时的 Target Checkout、metadata 和日志会保留七天。
 
+### 过期快照失败类（已修复）
+
+受信任代码解析修复（ADR-0001，fixed operation entry 从受信任自动化 checkout 的 `.sandcastle` 解析）之前，操作入口和嵌套 worker 从被操作的 Target Checkout 快照内的 `.sandcastle` 解析。head 携带旧版自动化代码的分支因此运行该快照代码，而不是当前 `master` 代码。这一类失败的识别特征：
+
+- 诊断评论、任务日志或 systemd journal 中，被诊断进程的路径解析在保留任务目录内部，形如 `.sandcastle/jobs/review-<n>/.sandcastle/...`，而不是受信任 checkout 的 `.sandcastle`；
+- review 任务在整整 30.0 分钟被超时终止，且日志显示 Agent 终止时仍在进行有效工具调用——当前 `master` 的 review 超时（`REVIEW_TIMEOUT_MILLISECONDS` 与操作超时表）为 90 分钟，30 分钟值说明运行的是快照里的过期代码；
+- review 发布阶段收到 GitHub HTTP 422 `comments is not an array`——旧 publisher 用表单字段 `-f comments[0][path]=...` 发送内联评论，凡带内联评论的 review 都会失败；当前 publisher 通过 `--input` 发送显式 JSON body。
+
+这类失败的 Work Item 停在 `agent:blocked`，不会被自动重试。根本原因已修复：修复后运行的操作不再执行快照代码，该失败类不会重现；存量的过期快照类 Blocked Automation 按下文手动重试恢复即可，不需要 rebase 被操作的分支。
+
 Agent 容器 GitHub readiness 失败不属于 Blocked Automation。它会让该调度会话或显式操作在获取 Work Item 前 fail closed，因此不会添加 `agent:blocked`，也不会写入诊断评论。如果具备 GitHub 能力的操作失败，但既没有分类评论也没有标签变化，应先怀疑 readiness。检查 `inspect` 和调度会话日志，并严格按上文 Agent 容器 GitHub readiness 小节中的分类处理。不得把 token 值或 readiness 命令的原始输出复制到 GitHub 诊断、保留产物或错误消息中。
 
 <a id="manual-retry"></a>
@@ -217,6 +229,12 @@ Agent 容器 GitHub readiness 失败不属于 Blocked Automation。它会让该�
 4. 验证 readiness。重试前，`npm run sandcastle -- inspect` 必须报告 `"imageReadiness":"ready"`。对于具备 GitHub 能力的命令，还必须报告 `"githubAgentReadiness":"ready"`。
 
 下一个调度会话或显式 `run` 命令会获取该命令。Review 重试必须复用现有 Work Item。不要创建替代 Issue、分支或 Pull Request。
+
+### 过期快照类阻塞的恢复
+
+过期快照类 Blocked Automation 走同一条手动重试路径，无需任何分支操作：移除 `agent:blocked`，恢复触发标签（review 为 `agent:review`），用 `npm run sandcastle -- inspect` 确认 `"imageReadiness":"ready"` 和 `"githubAgentReadiness":"ready"`，然后等待下一个调度会话获取，或显式运行 `npm run sandcastle -- run review <pr-number>`。重试会直接从受信任 `master` checkout 运行修正后的自动化代码——review 为 90 分钟超时和 `--input` JSON publisher——与被操作分支 head 携带的 `.sandcastle` 快照无关。不要把 `master` 合并或 rebase 进该分支来"领取"修复。
+
+PR #427 和 PR #414 的 review 正是被旧快照代码阻塞的（30 分钟超时和表单字段 publisher）。修复生效后，对它们执行上述恢复路径即可：两个 Pull Request 会运行修正后的 `master` review 代码，不需要 rebase 各自的分支。
 
 readiness 失败会保留 Work Item 和触发标签，也没有需要移除的 `agent:blocked`。在本地恢复凭据或镜像，通过 `inspect` 重新验证，然后重新运行操作或等待下一个调度会话。不要修改标签。
 
