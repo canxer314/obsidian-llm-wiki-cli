@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import { agentLogging } from "./agent-logging.ts";
 import type { FeedbackReplyIntent } from "./feedback-implementation-automation.ts";
+import { STRUCTURED_EXTRACTION_ATTEMPTS } from "./same-session-structured-extraction.ts";
 
 const replyIntentSchema = z.object({
   rootCommentId: z.string(),
@@ -49,7 +50,7 @@ export function createFeedbackImplementerSession(options: {
         output: Output.object({
           tag: "feedback-reply",
           schema: replyIntentSchema,
-          maxRetries: 2,
+          maxRetries: STRUCTURED_EXTRACTION_ATTEMPTS - 1,
         }),
         prompt: `Apply the requested feedback to existing GitHub Pull Request #${request.pullRequestNumber}. Work only on its existing branch ${request.branch}, which starts at the acquired full revision ${request.revision}. Inspect the Pull Request discussion and review feedback, make the smallest correct changes, choose and run the appropriate repository checks, then commit all intended changes. Do not create an Issue, branch, or Pull Request. Do not run gh auth setup-git, git push, rebase, or force-push; a controlled publisher will publish your local commit after you exit. The orchestrator owns every GitHub write: do not create, edit, or reply to any GitHub review comment or thread, do not run any gh write command (comments, replies, labels, edit, ready), and leave the Pull Request discussion untouched. The selected immutable feedback intent is the review-thread root ${request.rootCommentId}. Return one JSON object inside <feedback-reply> tags with exactly rootCommentId and body. Do not put rootCommentId or body in XML tag attributes. The rootCommentId must be exactly ${request.rootCommentId}; do not substitute another unresolved root or a reply comment.`,
       });

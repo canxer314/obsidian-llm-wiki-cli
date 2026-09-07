@@ -8,6 +8,7 @@ import {
 import { z } from "zod";
 
 import { agentLogging } from "./agent-logging.ts";
+import { STRUCTURED_EXTRACTION_ATTEMPTS } from "./same-session-structured-extraction.ts";
 
 const resolutionSchema = z.strictObject({
   comment: z.string().min(1),
@@ -65,7 +66,7 @@ export function createBranchUpdateConflictResolverSession(options: {
         name: `branch-update-pr-${request.pullRequestNumber}`,
         ...(logging === undefined ? {} : { logging }),
         prompt: resolutionPrompt(request),
-        output: Output.object({ tag: "output", schema: resolutionSchema, maxRetries: 2 }),
+        output: Output.object({ tag: "output", schema: resolutionSchema, maxRetries: STRUCTURED_EXTRACTION_ATTEMPTS - 1 }),
       });
       return result.output;
     },

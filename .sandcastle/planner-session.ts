@@ -8,6 +8,7 @@ import {
 
 import { agentLogging } from "./agent-logging.ts";
 import type { PlannerAgentSession } from "./planner.js";
+import { STRUCTURED_EXTRACTION_ATTEMPTS } from "./same-session-structured-extraction.ts";
 
 const plannerPrompt = (
   issueNumber: number,
@@ -54,6 +55,7 @@ export function createSandcastlePlannerSession(options: {
         output: Output.object({
           tag: request.output.tag,
           schema: request.output.schema,
+          maxRetries: STRUCTURED_EXTRACTION_ATTEMPTS - 1,
         }),
       });
       return result.output;

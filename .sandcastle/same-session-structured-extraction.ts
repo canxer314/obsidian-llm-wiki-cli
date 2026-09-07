@@ -16,7 +16,12 @@ type StructuredRunResult<Output> = RunResult & {
   readonly output: Output;
 };
 
-const EXTRACTION_ATTEMPTS = 3;
+/**
+ * Total structured-output parse attempts (initial attempt plus retries) shared
+ * by every extraction site. Sites that arm the library's same-session retry
+ * resolve their budget as STRUCTURED_EXTRACTION_ATTEMPTS - 1 maxRetries.
+ */
+export const STRUCTURED_EXTRACTION_ATTEMPTS = 3;
 
 function extractionRetryPrompt(error: StructuredOutputError, retriesRemaining: number): string {
   const raw = error.rawMatched === undefined ? "(no matching tag was emitted)" : error.rawMatched;
@@ -93,7 +98,7 @@ export function createSameSessionStructuredExtractor(options: {
 
         let resume = produced.resume;
         let prompt = plan.resumedPrompt;
-        for (let attempt = 1; attempt <= EXTRACTION_ATTEMPTS; attempt += 1) {
+        for (let attempt = 1; attempt <= STRUCTURED_EXTRACTION_ATTEMPTS; attempt += 1) {
           try {
             const extracted = await resume(prompt, {
               ...(plan.logging === undefined ? {} : { logging: plan.logging }),
@@ -105,10 +110,10 @@ export function createSameSessionStructuredExtractor(options: {
           } catch (error) {
             if (!(error instanceof StructuredOutputError)) throw error;
             await plan.observeResumed?.(error);
-            if (attempt === EXTRACTION_ATTEMPTS || error.sessionId === undefined) throw error;
+            if (attempt === STRUCTURED_EXTRACTION_ATTEMPTS || error.sessionId === undefined) throw error;
 
             const sessionId = error.sessionId;
-            prompt = extractionRetryPrompt(error, EXTRACTION_ATTEMPTS - attempt);
+            prompt = extractionRetryPrompt(error, STRUCTURED_EXTRACTION_ATTEMPTS - attempt);
             resume = (retryPrompt, retryOptions) => runAgent({
               agent: createAgent(plan.model),
               sandbox: options.sandbox,
