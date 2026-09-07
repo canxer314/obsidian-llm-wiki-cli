@@ -29,25 +29,24 @@ const request = {
 } as const;
 
 describe("branch update conflict process runner", () => {
-  it("loads the fixed worker from the authorized Target Checkout", async () => {
-    const checkoutPath = mkdtempSync(join(tmpdir(), "authorized-conflict-worker-"));
-    const workerDirectory = join(checkoutPath, ".sandcastle");
-    mkdirSync(workerDirectory);
+  it("loads the fixed worker from the trusted worker-code root", async () => {
+    const workerRoot = mkdtempSync(join(tmpdir(), "trusted-conflict-worker-"));
     writeFileSync(
-      join(workerDirectory, "branch-update-conflict-worker.ts"),
-      'process.stdout.write(JSON.stringify({ comment: "authorized-checkout" }));\n',
+      join(workerRoot, "branch-update-conflict-worker.ts"),
+      'process.stdout.write(JSON.stringify({ comment: "trusted-root" }));\n',
     );
 
     try {
       const resolver = createProcessBranchUpdateConflictResolver({
         startup: "startup",
         model: "merger-model",
+        workerRoot,
       });
-      await expect(resolver.resolve({ ...request, checkoutPath })).resolves.toEqual({
-        comment: "authorized-checkout",
+      await expect(resolver.resolve({ ...request, checkoutPath: "/delivered/checkout" })).resolves.toEqual({
+        comment: "trusted-root",
       });
     } finally {
-      rmSync(checkoutPath, { recursive: true, force: true });
+      rmSync(workerRoot, { recursive: true, force: true });
     }
   });
 

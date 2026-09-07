@@ -79,6 +79,11 @@ async function executeFeedbackTarget(
   githubEnvironment: Readonly<Record<string, string>>,
   invocation: AuthorizedTargetOperationInvocation,
 ): Promise<Record<string, unknown>> {
+  // The real operation entry runs from the trusted automation checkout, so the
+  // operated checkout must be delivered explicitly instead of being derived
+  // from the running module's own location.
+  const checkoutPath = await mkdtemp(join(tmpdir(), "feedback-operated-checkout-"));
+  temporaryDirectories.push(checkoutPath);
   const startup = {
     imageName: "fixture-image",
     childEnvironments: { git: {}, github: githubEnvironment, claude: {}, githubAgent: {} },
@@ -92,7 +97,7 @@ async function executeFeedbackTarget(
   const child = spawn(process.execPath, [
     "--experimental-strip-types",
     operationEntry,
-    ...targetOperationWorkerArguments(invocation),
+    ...targetOperationWorkerArguments(invocation, checkoutPath),
   ], {
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"],

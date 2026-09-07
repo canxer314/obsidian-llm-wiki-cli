@@ -89,7 +89,7 @@ The Dispatcher's one continuous scheduling lifetime (ADR-0005). It starts when t
 _Avoid_: One-shot round, frozen frontier, long-lived daemon
 
 **Target Checkout**:
-A disposable, independent local Git repository created for one Agent job at the exact authorized revision. It is never a registered worktree of the Primary Operator's checkout, and its cleanup cannot affect the source repository.
+A disposable, independent local Git repository created for one Agent job at the exact authorized revision. It is never a registered worktree of the Primary Operator's checkout, and its cleanup cannot affect the source repository. It is only the object being operated on and supplies no executable automation code: the fixed operation entry and every nested worker resolve from the trusted automation checkout's `.sandcastle` (ADR-0001), and the checkout reaches the operation worker solely as an explicit authorized path.
 _Avoid_: Shared worktree, shared clone, workspace replacement
 
 **Legacy Run State**:

@@ -18,6 +18,7 @@ import {
 } from "../.sandcastle/target-operation-runtime.js";
 
 const REVISION = "a".repeat(40);
+const CHECKOUT_PATH = "/delivered/target-checkout";
 const ISSUE_OPERATIONS = [
   "implement-issue",
   "implement-spec",
@@ -339,7 +340,10 @@ it("allows ordinary and explicitly reconciled feedback invocations", async () =>
 
   await runTargetOperationWithDependencies(
     "implement-feedback",
-    ["219", JSON.stringify(labelInvocation("implement-feedback", true))],
+    ["219", JSON.stringify({
+      ...labelInvocation("implement-feedback", true),
+      checkoutPath: CHECKOUT_PATH,
+    })],
     runtime,
   );
   await runTargetOperationWithDependencies(
@@ -347,6 +351,7 @@ it("allows ordinary and explicitly reconciled feedback invocations", async () =>
     ["219", JSON.stringify({
       ...labelInvocation("implement-feedback", true),
       reconcile: authorization,
+      checkoutPath: CHECKOUT_PATH,
     })],
     runtime,
   );
@@ -384,6 +389,7 @@ it("allows the exact scheduled invocation without managed acquisition fields", a
       operation: "architecture-review",
       revision: REVISION,
       jobId: "scheduled-review",
+      checkoutPath: CHECKOUT_PATH,
     })],
     runtime,
   );

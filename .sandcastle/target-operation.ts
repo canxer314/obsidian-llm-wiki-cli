@@ -77,6 +77,7 @@ export async function executeTargetOperationInCheckout(options: {
   readonly checkout: TargetCheckout;
   readonly startup: TargetOperationStartupSnapshot;
   readonly invocation: AuthorizedTargetOperationInvocation;
+  readonly trustedSandcastleRoot?: string;
 }): Promise<unknown> {
   const invocation = parseAuthorizedTargetOperationInvocation(options.invocation);
   const { operation, revision } = invocation;
@@ -85,10 +86,15 @@ export async function executeTargetOperationInCheckout(options: {
     revision,
     ...(number === undefined ? {} : { pullRequestNumber: number }),
   }, async (checkoutPath) => {
+    // The operation entry always resolves from the trusted automation .sandcastle
+    // (the checkout running the Target job; injected in tests). A Target Checkout
+    // whose .sandcastle carries divergent code never influences what runs; the
+    // operated checkout is delivered to the worker only through its arguments.
+    const trustedSandcastleRoot = options.trustedSandcastleRoot ?? resolve(import.meta.dirname);
     let operationRoot: string;
     let operationEntry: string;
     try {
-      operationRoot = await realpath(resolve(checkoutPath, ".sandcastle"));
+      operationRoot = await realpath(trustedSandcastleRoot);
       operationEntry = resolve(operationRoot, targetOperationEntries[operation]);
       const entryRelativePath = relative(operationRoot, await realpath(operationEntry));
       if (
@@ -96,16 +102,16 @@ export async function executeTargetOperationInCheckout(options: {
         entryRelativePath.startsWith("..") ||
         entryRelativePath === ""
       ) {
-        throw new Error("Target operation entry must be a regular file inside the authorized checkout");
+        throw new Error("Target operation entry must be a regular file inside the trusted automation checkout");
       }
     } catch {
-      throw new Error("Target operation entry must be a regular file inside the authorized checkout");
+      throw new Error("Target operation entry must be a regular file inside the trusted automation checkout");
     }
     const result = await runAgentWorker({
-      checkoutPath,
+      workerRoot: operationRoot,
       workerFile: targetOperationEntries[operation],
       workerName: `Target operation ${operation}`,
-      arguments_: targetOperationWorkerArguments(invocation),
+      arguments_: targetOperationWorkerArguments(invocation, checkoutPath),
       input: JSON.stringify(options.startup),
       timeoutMessage: `Target operation ${operation} timed out`,
     });
@@ -127,6 +133,7 @@ interface TargetOperationRunnerOptions {
   readonly timeoutMilliseconds?: number;
   readonly graceMilliseconds?: number;
   readonly start?: (arguments_: readonly string[]) => import("node:child_process").ChildProcess;
+  readonly trustedSandcastleRoot?: string;
 }
 
 export function createTargetOperationRunner(options: TargetOperationRunnerOptions) {
@@ -170,7 +177,7 @@ export function createTargetOperationRunnerWithWorker(
       let operationFailed = true;
       try {
         const result = await runWorker({
-          checkoutPath: resolve(import.meta.dirname, ".."),
+          workerRoot: options.trustedSandcastleRoot ?? resolve(import.meta.dirname),
           workerFile: "target-job-worker.ts",
           workerName: "Target job",
           arguments_: [],

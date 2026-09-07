@@ -10,6 +10,8 @@ Issue、Spec、review thread 或 Pull Request 必须能够独立说明任务。�
 
 本地 Dispatcher 由每分钟一次的 systemd timer 触发，每次触发开启一个 Dispatch Session（调度会话）：会话获取调度锁后，在 worker 完成和空闲轮询时持续发现新符合条件的命令并补充 worker，直到一次干净的发现确认没有可执行命令、也没有运行中的 worker 才释放锁并结束，且没有最长寿命（ADR-0005）。一般只需添加标签并等待调度会话获取，不需要在本地运行 Sandcastle 命令。
 
+每个 Target 操作都运行受信任 `master` checkout 中的 `.sandcastle` 自动化代码（ADR-0001）。为操作创建的 Target Checkout 只是被操作的对象，不提供任何可执行代码。因此合并到 `master` 的自动化修复对所有已打开的 Pull Request 和 Spec 分支立即生效：不需要把 `master` 合并或 rebase 进这些分支，下一次操作获取时会直接运行修正后的代码。
+
 > [!IMPORTANT]
 > Sandcastle 不会合并 Pull Request。自动 review 成功后，它会把 Draft Pull Request 标记为 Ready for Review。最终仍需人工核对 required checks 并合并。
 
@@ -178,6 +180,8 @@ npm run sandcastle -- inspect
    ```
 
    对 Pull Request 使用 `gh pr edit`，并根据操作恢复 `agent:review`、`agent:implement` 或 `agent:update-branch`。
+
+如果根本原因是自动化代码本身的缺陷，修复合并到 `master` 后按上述路径重试即可：重试会运行修正后的 `master` 自动化代码，不需要先把 `master` 合并或 rebase 进被操作的分支。
 
 不要创建替代 Issue、分支或 Pull Request 来绕过阻塞任务。重试必须复用现有 Work Item 和实现分支。
 

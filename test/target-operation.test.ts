@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -491,6 +491,130 @@ describe("Target operation runner", () => {
     }
   });
 
+  // The trusted-resolution change moved where the Target job worker file
+  // resolves from (workerRoot), not who owns the lifecycle: the runner still
+  // enforces the whole-job timeout table and finalizes the local job log, no
+  // matter which trusted root the entry resolved from.
+  it.each([
+    ["the module-local default", undefined],
+    ["an injected trusted root", "/trusted/automation/.sandcastle"],
+  ] as const)(
+    "enforces the review whole-job timeout and finalizes the job log as timed-out with %s worker root",
+    async (_case, trustedSandcastleRoot) => {
+      const root = mkdtempSync(join(tmpdir(), "target-operation-root-timeout-log-"));
+      const logsPath = join(root, "logs");
+      const runWorker = vi.fn(async (): Promise<never> => {
+        throw new AgentWorkerTimeoutError("Target operation review timed out");
+      });
+      const runner = createTargetOperationRunnerWithWorker({
+        checkoutOptions: { sourceRepositoryPath: "/trusted/repository" },
+        jobLogRoot: logsPath,
+        startup: {
+          imageName: "fixture-image",
+          childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+          models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+        },
+        ...(trustedSandcastleRoot === undefined ? {} : { trustedSandcastleRoot }),
+        start: () => {
+          throw new Error("trusted-root timeout test start should not run");
+        },
+      }, runWorker);
+
+      try {
+        await expect(runner.run({
+          operation: "review",
+          number: 219,
+          revision,
+          jobId: "trusted-root-timed-out-219",
+          acquired: true,
+          pullRequest: {
+            headSha: revision,
+            headRefName: "feature-branch",
+            baseRefName: "master",
+            baseRepository: "owner/repository",
+            headRepository: "owner/repository",
+          },
+        })).rejects.toBeInstanceOf(AgentWorkerTimeoutError);
+        const request = runWorker.mock.calls[0]![0];
+        expect(request.workerRoot).toBe(
+          trustedSandcastleRoot ?? resolve(import.meta.dirname, "../.sandcastle"),
+        );
+        expect(request.workerFile).toBe("target-job-worker.ts");
+        expect(request.timeoutMilliseconds).toBe(90 * 60 * 1000);
+        expect(request.graceMilliseconds).toBe(10 * 1000);
+        expect(JSON.parse(readFileSync(
+          join(logsPath, "trusted-root-timed-out-219", "metadata.json"),
+          "utf8",
+        ))).toMatchObject({ status: "timed-out", jobId: "trusted-root-timed-out-219" });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("finalizes completed, blocked, and failed job logs from the runner with an injected trusted worker root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "target-operation-root-status-log-"));
+    const logsPath = join(root, "logs");
+    const options = {
+      checkoutOptions: { sourceRepositoryPath: "/trusted/repository" },
+      jobLogRoot: logsPath,
+      startup: {
+        imageName: "fixture-image",
+        childEnvironments: { git: {}, github: {}, claude: {}, githubAgent: {} },
+        models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
+      },
+      trustedSandcastleRoot: "/trusted/automation/.sandcastle",
+      start: () => {
+        throw new Error("trusted-root finalization test start should not run");
+      },
+    } as const;
+    const invocation = {
+      operation: "implement-issue",
+      number: 219,
+      revision,
+      acquired: true,
+    } as const;
+
+    try {
+      const completed = createTargetOperationRunnerWithWorker(options, vi.fn(async () => ({
+        output: JSON.stringify({ status: "implemented" }),
+        code: 0,
+        diagnostics: "",
+      })));
+      await expect(completed.run({ ...invocation, jobId: "trusted-root-completed" }))
+        .resolves.toEqual({ status: "implemented" });
+
+      const blocked = createTargetOperationRunnerWithWorker(options, vi.fn(async () => ({
+        output: JSON.stringify({ status: "blocked", reason: "execution" }),
+        code: 0,
+        diagnostics: "",
+      })));
+      await expect(blocked.run({ ...invocation, jobId: "trusted-root-blocked" }))
+        .resolves.toEqual({ status: "blocked", reason: "execution" });
+
+      const failed = createTargetOperationRunnerWithWorker(options, vi.fn(async (): Promise<never> => {
+        throw new Error("worker infrastructure failure");
+      }));
+      await expect(failed.run({ ...invocation, jobId: "trusted-root-failed" }))
+        .rejects.toThrow("worker infrastructure failure");
+
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "trusted-root-completed", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "completed", jobId: "trusted-root-completed" });
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "trusted-root-blocked", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "failed", jobId: "trusted-root-blocked" });
+      expect(JSON.parse(readFileSync(
+        join(logsPath, "trusted-root-failed", "metadata.json"),
+        "utf8",
+      ))).toMatchObject({ status: "failed", jobId: "trusted-root-failed" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["missing Pull Request metadata", undefined],
     ["a mismatched head SHA", {
@@ -614,13 +738,14 @@ describe("Target operation runner", () => {
   });
 
   it("executes scheduled architecture review without a fake checkout number or wrapper argument", async () => {
-    const checkoutPath = mkdtempSync(join(tmpdir(), "scheduled-architecture-review-"));
-    const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+    const trustedSandcastleRoot = mkdtempSync(join(tmpdir(), "scheduled-architecture-review-trusted-"));
+    const operationDirectory = join(trustedSandcastleRoot, "operations");
     mkdirSync(operationDirectory, { recursive: true });
     writeFileSync(
       join(operationDirectory, "architecture-review.ts"),
-      'let input = ""; for await (const chunk of process.stdin) input += chunk; console.log(JSON.stringify({ status: "proposed", arguments: process.argv.slice(2), checkout: JSON.parse(input).imageName }));\n',
+      'let input = ""; for await (const chunk of process.stdin) input += chunk; const invocation = JSON.parse(process.argv[2]); console.log(JSON.stringify({ status: "proposed", checkoutPath: invocation.checkoutPath, checkout: JSON.parse(input).imageName }));\n',
     );
+    const checkoutPath = mkdtempSync(join(tmpdir(), "scheduled-architecture-review-"));
     const withCheckout = vi.fn(async (request, action: (path: string) => Promise<{
       readonly value: unknown;
       readonly disposition: "cleanup" | "retain";
@@ -644,31 +769,42 @@ describe("Target operation runner", () => {
           revision,
           jobId: "scheduled-architecture-review",
         },
+        trustedSandcastleRoot,
       })).resolves.toEqual({
         status: "proposed",
-        arguments: [JSON.stringify({ operation: "architecture-review", revision, jobId: "scheduled-architecture-review" })],
+        checkoutPath,
         checkout: "fixture-image",
       });
     } finally {
       rmSync(checkoutPath, { force: true, recursive: true });
+      rmSync(trustedSandcastleRoot, { force: true, recursive: true });
     }
   });
 
   it.each(Object.entries(operationEntries).filter(
     ([operation]) => operation !== "architecture-review",
   ) as [Exclude<TargetOperationIdentity, "architecture-review">, string][])(
-    "executes fixed %s from the authorized Target Checkout",
+    "executes fixed %s from the trusted .sandcastle while operating on the delivered Target Checkout",
     async (operation, entry) => {
-      const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-"));
-      const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+      const trustedSandcastleRoot = mkdtempSync(join(tmpdir(), "target-operation-trusted-"));
+      const operationDirectory = join(trustedSandcastleRoot, "operations");
       mkdirSync(operationDirectory, { recursive: true });
       writeFileSync(
         join(operationDirectory, entry),
         [
           'let input = ""; for await (const chunk of process.stdin) input += chunk;',
           'const startup = JSON.parse(input);',
-          'const invocation = JSON.parse(process.argv[3]); console.log(JSON.stringify({ status: ({ "implement-issue": "implemented", "implement-spec": "implemented", "implement-feedback": "implemented", review: "reviewed", "update-branch": "updated", "split-spec": "split", "architecture-review": "proposed" })[invocation.operation], source: "authorized-operation", number: Number(process.argv[2]), token: startup.childEnvironments.github.GH_TOKEN, tokenInArguments: process.argv.includes(startup.childEnvironments.github.GH_TOKEN) }));',
+          'const invocation = JSON.parse(process.argv[3]); console.log(JSON.stringify({ status: ({ "implement-issue": "implemented", "implement-spec": "implemented", "implement-feedback": "implemented", review: "reviewed", "update-branch": "updated", "split-spec": "split", "architecture-review": "proposed" })[invocation.operation], source: "trusted-operation", checkoutPath: invocation.checkoutPath, number: Number(process.argv[2]), token: startup.childEnvironments.github.GH_TOKEN, tokenInArguments: process.argv.includes(startup.childEnvironments.github.GH_TOKEN) }));',
         ].join("\n"),
+      );
+      const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-checkout-"));
+      // A deliberately divergent operation entry inside the operated checkout
+      // snapshot must never influence which code runs.
+      const divergentOperationDirectory = join(checkoutPath, ".sandcastle", "operations");
+      mkdirSync(divergentOperationDirectory, { recursive: true });
+      writeFileSync(
+        join(divergentOperationDirectory, entry),
+        'console.log(JSON.stringify({ source: "divergent-checkout-snapshot" }));\n',
       );
       const withCheckout = vi.fn(async (request, action: (path: string) => Promise<{
         readonly value: unknown;
@@ -706,9 +842,11 @@ describe("Target operation runner", () => {
                 }
               : {}),
           },
+          trustedSandcastleRoot,
         })).resolves.toEqual({
           status: operationStatuses[operation],
-          source: "authorized-operation",
+          source: "trusted-operation",
+          checkoutPath,
           number: 219,
           token: "snapshot-token",
           tokenInArguments: false,
@@ -716,18 +854,20 @@ describe("Target operation runner", () => {
         expect(withCheckout).toHaveBeenCalledOnce();
       } finally {
         rmSync(checkoutPath, { force: true, recursive: true });
+        rmSync(trustedSandcastleRoot, { force: true, recursive: true });
       }
     },
   );
 
   it("captures the current Pull Request revision while trusted acquisition owns the labels", async () => {
-    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-acquisition-"));
-    const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+    const trustedSandcastleRoot = mkdtempSync(join(tmpdir(), "target-operation-acquisition-trusted-"));
+    const operationDirectory = join(trustedSandcastleRoot, "operations");
     mkdirSync(operationDirectory, { recursive: true });
     writeFileSync(
       join(operationDirectory, "review-pr.ts"),
       'for await (const _chunk of process.stdin) {} console.log(JSON.stringify({ status: "reviewed" }));\n',
     );
+    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-acquisition-"));
     const discoveredRevision = "a".repeat(40);
     const acquiredRevision = "b".repeat(40);
     const events: string[] = [];
@@ -771,6 +911,7 @@ describe("Target operation runner", () => {
               models: { default: "default-model", planner: "planner-model", implementer: "implementer-model", reviewer: "reviewer-model" },
             },
             invocation,
+            trustedSandcastleRoot,
           }),
       };
       const runner = createTargetOperationCommandRunner({
@@ -796,6 +937,7 @@ describe("Target operation runner", () => {
       expect(read).toHaveBeenCalledTimes(3);
     } finally {
       rmSync(checkoutPath, { force: true, recursive: true });
+      rmSync(trustedSandcastleRoot, { force: true, recursive: true });
     }
   });
 
@@ -830,10 +972,11 @@ describe("Target operation runner", () => {
       return operationDirectory;
     }],
   ])("rejects a fixed operation entry that %s before a worker starts", async (_caseName, prepare) => {
-    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-invalid-entry-"));
-    const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+    const trustedSandcastleRoot = mkdtempSync(join(tmpdir(), "target-operation-invalid-entry-trusted-"));
+    const operationDirectory = join(trustedSandcastleRoot, "operations");
     mkdirSync(operationDirectory, { recursive: true });
     prepare(operationDirectory);
+    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-invalid-entry-"));
     const withCheckout = vi.fn(async (_request, action: (path: string) => Promise<{
       readonly value: unknown;
       readonly disposition: "cleanup" | "retain";
@@ -854,20 +997,23 @@ describe("Target operation runner", () => {
           jobId: "invalid-entry-job",
           acquired: true,
         },
-      })).rejects.toThrow("Target operation entry must be a regular file inside the authorized checkout");
+        trustedSandcastleRoot,
+      })).rejects.toThrow("Target operation entry must be a regular file inside the trusted automation checkout");
       expect(withCheckout).toHaveBeenCalledOnce();
     } finally {
       rmSync(checkoutPath, { force: true, recursive: true });
+      rmSync(trustedSandcastleRoot, { force: true, recursive: true });
     }
   });
 
-  it("rejects a fixed operation entry that escapes the Target Checkout through a symlink", async () => {
-    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-symlink-"));
+  it("rejects a fixed operation entry that escapes the trusted automation checkout through a symlink", async () => {
+    const trustedSandcastleRoot = mkdtempSync(join(tmpdir(), "target-operation-symlink-trusted-"));
     const outsidePath = join(tmpdir(), `outside-operation-${process.pid}.ts`);
-    const operationDirectory = join(checkoutPath, ".sandcastle", "operations");
+    const operationDirectory = join(trustedSandcastleRoot, "operations");
     mkdirSync(operationDirectory, { recursive: true });
     writeFileSync(outsidePath, 'console.log(JSON.stringify({ escaped: true }));\n');
     symlinkSync(outsidePath, join(operationDirectory, "implement-issue.ts"));
+    const checkoutPath = mkdtempSync(join(tmpdir(), "target-operation-symlink-"));
 
     try {
       await expect(executeTargetOperationInCheckout({
@@ -886,11 +1032,13 @@ describe("Target operation runner", () => {
           jobId: "job-219",
           acquired: true,
         },
+        trustedSandcastleRoot,
       })).rejects.toThrow(
-        "Target operation entry must be a regular file inside the authorized checkout",
+        "Target operation entry must be a regular file inside the trusted automation checkout",
       );
     } finally {
       rmSync(checkoutPath, { force: true, recursive: true });
+      rmSync(trustedSandcastleRoot, { force: true, recursive: true });
       rmSync(outsidePath, { force: true });
     }
   });

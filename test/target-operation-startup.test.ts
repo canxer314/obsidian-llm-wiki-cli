@@ -110,8 +110,8 @@ describe("Target operation startup", () => {
     await runTargetOperationWithDependencies(
       operation,
       operation === "architecture-review"
-        ? [JSON.stringify(invocation)]
-        : ["219", JSON.stringify(invocation)],
+        ? [JSON.stringify({ ...invocation, checkoutPath: "/delivered/target-checkout" })]
+        : ["219", JSON.stringify({ ...invocation, checkoutPath: "/delivered/target-checkout" })],
       runtime,
     );
 

@@ -61,8 +61,12 @@ export interface AgentWorkerResult {
   readonly diagnostics: string;
 }
 
+// The trusted .sandcastle directory that owns the automation code. Worker
+// files always resolve from this root so an operated checkout snapshot never
+// determines what code runs; the operated checkout is delivered separately
+// through each worker's arguments.
 interface FixedAgentWorkerOptions {
-  readonly checkoutPath: string;
+  readonly workerRoot: string;
   readonly workerFile: string;
   readonly workerName: string;
   readonly arguments_: readonly string[];
@@ -122,7 +126,7 @@ async function runFixedAgentWorker(
       outputSinkEnvironment = outputEnvironment(role, log);
       const start = options.start ?? ((arguments_: readonly string[]) => spawn(process.execPath, [
         "--experimental-strip-types",
-        resolve(options.checkoutPath, ".sandcastle", options.workerFile),
+        resolve(options.workerRoot, options.workerFile),
         ...arguments_,
       ], {
         detached: disposition.detached,

@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { resolve } from "node:path";
 
 import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
 import type { BranchUpdateResolver } from "./branch-update-process-runner.ts";
@@ -7,11 +8,12 @@ export function createProcessBranchUpdateConflictResolver(options: {
   readonly startup: string;
   readonly model: string;
   readonly start?: (arguments_: readonly string[]) => ChildProcess;
+  readonly workerRoot?: string;
 }): BranchUpdateResolver {
   return {
     async resolve(request) {
       const result = await runAgentWorker({
-        checkoutPath: request.checkoutPath,
+        workerRoot: options.workerRoot ?? resolve(import.meta.dirname),
         workerFile: "branch-update-conflict-worker.ts",
         workerName: "Branch update conflict resolution",
         arguments_: [
