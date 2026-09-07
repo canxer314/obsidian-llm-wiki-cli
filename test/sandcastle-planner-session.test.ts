@@ -129,6 +129,7 @@ describe("Sandcastle Planner session adapter", () => {
     const exhausted = new StructuredOutputError("Structured output tag <plan> contains invalid JSON", {
       tag: "plan",
       rawMatched: "not JSON",
+      cause: new SyntaxError("Unexpected end of JSON input"),
       commits: [],
       branch: "sandcastle/spec-437",
       sessionId: "session-1",
@@ -141,13 +142,30 @@ describe("Sandcastle Planner session adapter", () => {
       createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
     });
 
-    // The failure surfaces unchanged (not swallowed, not converted) so the
-    // operation fails as Blocked Automation in bounded time.
-    await expect(session.run({
+    const failure = await session.run({
       issueNumber: 101,
       model: "planner-model",
       output: { tag: "plan", schema: plannerOutputSchema },
-    })).rejects.toBe(exhausted);
+    }).catch((error: unknown) => error);
+
+    // The library's armed retry is exhausted inside the run call, so the
+    // escaped failure surfaces as the same bounded, classified shape the
+    // extraction seam produces: tag, attempts made, bounded parse detail —
+    // still a recoverable StructuredOutputError (not swallowed, not converted)
+    // so the operation fails as Blocked Automation in bounded time.
+    expect(failure).toBeInstanceOf(StructuredOutputError);
+    expect(failure).not.toBe(exhausted);
+    const classified = failure as StructuredOutputError;
+    expect(classified.tag).toBe("plan");
+    expect(classified.message).toContain(
+      `Structured output tag <plan> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts`,
+    );
+    expect(classified.message).toContain(
+      "last parse detail: SyntaxError: Unexpected end of JSON input",
+    );
+    // Drift guard: no rawMatched or stdout content leaks into the diagnostic.
+    expect(classified.message).not.toContain("not JSON");
+    expect(classified.rawMatched).toBeUndefined();
   });
 
   it("classifies a low-level parse fault escaping the library retry guard as a recoverable output error", async () => {

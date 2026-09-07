@@ -247,10 +247,23 @@ describe("same-session structured extraction", () => {
 
     const failure = await extractor.extract(plan()).catch((error: unknown) => error);
 
+    // Budget exhaustion surfaces the bounded, classified diagnostic: still a
+    // recoverable StructuredOutputError naming the tag, the attempts made,
+    // and the newest candidate's parse detail.
     expect(failure).toBeInstanceOf(StructuredOutputError);
     const classified = failure as StructuredOutputError;
-    expect(classified.message).toBe("Structured output tag <result> contains invalid JSON");
-    expect(classified.rawMatched).toBe("newest malformed");
+    expect(classified.tag).toBe("result");
+    expect(classified.message).toContain(
+      `Structured output tag <result> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts`,
+    );
+    expect(classified.message).toContain("last parse detail: SyntaxError: ");
+    // Drift guard: the bounded diagnostic never embeds rawMatched or stdout
+    // content, even when the runtime quotes the offending input inside its
+    // parser complaint.
+    expect(classified.message).not.toContain("newest malformed");
+    expect(classified.message).not.toContain("older malformed");
+    expect(classified.rawMatched).toBeUndefined();
+    // No retry happens beyond the budget.
     expect(runAgent).toHaveBeenCalledTimes(STRUCTURED_EXTRACTION_ATTEMPTS);
   });
 
@@ -428,8 +441,16 @@ describe("same-session structured extraction", () => {
     expect(failure).toBeInstanceOf(StructuredOutputError);
     expect(failure).not.toBe(lowLevelParseFault);
     const classified = failure as StructuredOutputError;
-    expect(classified.message).toBe("Structured output tag <result> contains invalid JSON");
+    // The exhausted budget surfaces the bounded, classified diagnostic:
+    // tag, attempts made, and the last parse detail — still the recoverable
+    // StructuredOutputError, never a silent success.
     expect(classified.tag).toBe("result");
+    expect(classified.message).toContain(
+      `Structured output tag <result> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts`,
+    );
+    expect(classified.message).toContain(
+      "last parse detail: SyntaxError: Unexpected end of JSON input",
+    );
     expect(classified.cause).toBe(lowLevelParseFault);
     expect(classified.sessionId).toBe("session-1");
     // The initial extraction plus the armed retries, then the budget is spent.
