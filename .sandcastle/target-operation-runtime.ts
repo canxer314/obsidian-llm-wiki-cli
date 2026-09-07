@@ -97,9 +97,8 @@ export async function runTargetOperationWithDependencies(
   argv: readonly string[],
   dependencies: TargetOperationRuntimeDependencies,
 ): Promise<unknown> {
-  const { number, invocation } = parseTargetOperationWorkerInvocation(operation, argv);
+  const { number, checkoutPath, invocation } = parseTargetOperationWorkerInvocation(operation, argv);
   const workItemNumber = number as number;
-  const checkoutPath = resolve(import.meta.dirname, "..");
   const startupInput = await dependencies.readStartup();
   const startup = startupInput.snapshot;
   const rawGithub = dependencies.createGithub({ environment: startup.childEnvironments.github });

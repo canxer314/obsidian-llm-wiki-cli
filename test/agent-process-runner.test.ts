@@ -116,7 +116,7 @@ describe("agent process runner", () => {
     mkdirSync(log.stdoutPath);
     const process = child(601);
     const running = runTargetJob({
-      checkoutPath: "unused",
+      workerRoot: "unused",
       workerFile: "unused.ts",
       workerName: "fixture",
       arguments_: [],
@@ -219,43 +219,66 @@ describe("agent process runner", () => {
     }
   });
 
-  it("loads the fixed worker from the authorized Target Checkout", async () => {
-    const checkoutPath = mkdtempSync(join(tmpdir(), "authorized-worker-"));
-    const workerDirectory = join(checkoutPath, ".sandcastle");
-    mkdirSync(workerDirectory);
+  it("loads the fixed worker from the trusted worker-code root", async () => {
+    const workerRoot = mkdtempSync(join(tmpdir(), "trusted-worker-root-"));
     writeFileSync(
-      join(workerDirectory, "fixture-worker.ts"),
-      'process.stdout.write(JSON.stringify({ source: "authorized-checkout" }));\n',
+      join(workerRoot, "fixture-worker.ts"),
+      'process.stdout.write(JSON.stringify({ source: "trusted-root" }));\n',
     );
 
     try {
       await expect(runAgentWorker({
-        checkoutPath,
+        workerRoot,
         workerFile: "fixture-worker.ts",
         workerName: "fixture",
         arguments_: [],
         timeoutMessage: "Fixture worker timed out",
       })).resolves.toMatchObject({
         code: 0,
-        output: JSON.stringify({ source: "authorized-checkout" }),
+        output: JSON.stringify({ source: "trusted-root" }),
       });
     } finally {
+      rmSync(workerRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("never spawns a worker that exists only under the operated checkout", async () => {
+    const workerRoot = mkdtempSync(join(tmpdir(), "trusted-worker-root-"));
+    const checkoutPath = mkdtempSync(join(tmpdir(), "divergent-checkout-"));
+    const workerDirectory = join(checkoutPath, ".sandcastle");
+    mkdirSync(workerDirectory);
+    writeFileSync(
+      join(workerDirectory, "fixture-worker.ts"),
+      'process.stdout.write(JSON.stringify({ source: "checkout-snapshot" }));\n',
+    );
+
+    try {
+      await expect(runAgentWorker({
+        workerRoot,
+        workerFile: "fixture-worker.ts",
+        workerName: "fixture",
+        arguments_: [],
+        timeoutMessage: "Fixture worker timed out",
+      })).resolves.toMatchObject({
+        code: 1,
+        output: "",
+      });
+    } finally {
+      rmSync(workerRoot, { force: true, recursive: true });
       rmSync(checkoutPath, { force: true, recursive: true });
     }
   });
 
   it("passes an immutable startup snapshot through worker stdin", async () => {
-    const checkoutPath = mkdtempSync(join(tmpdir(), "snapshot-worker-"));
-    const workerDirectory = join(checkoutPath, ".sandcastle");
-    mkdirSync(workerDirectory);
+    const workerRoot = mkdtempSync(join(tmpdir(), "snapshot-worker-"));
     writeFileSync(
-      join(workerDirectory, "fixture-worker.ts"),
+      join(workerRoot, "fixture-worker.ts"),
       'let input = ""; for await (const chunk of process.stdin) input += chunk; process.stdout.write(input);\n',
     );
 
     try {
       await expect(runAgentWorker({
-        checkoutPath,
+        workerRoot,
         workerFile: "fixture-worker.ts",
         workerName: "fixture",
         arguments_: [],
@@ -266,24 +289,22 @@ describe("agent process runner", () => {
         output: JSON.stringify({ snapshot: "round-one" }),
       });
     } finally {
-      rmSync(checkoutPath, { force: true, recursive: true });
+      rmSync(workerRoot, { force: true, recursive: true });
     }
   });
 
   it("marks a standalone Agent worker as the owner for its nested descendants", async () => {
     const previous = process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
     delete process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
-    const checkoutPath = mkdtempSync(join(tmpdir(), "standalone-agent-worker-"));
-    const workerDirectory = join(checkoutPath, ".sandcastle");
-    mkdirSync(workerDirectory);
+    const workerRoot = mkdtempSync(join(tmpdir(), "standalone-agent-worker-"));
     writeFileSync(
-      join(workerDirectory, "fixture-worker.ts"),
+      join(workerRoot, "fixture-worker.ts"),
       'process.stdout.write(process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP ?? "missing");\n',
     );
 
     try {
       await expect(runAgentWorker({
-        checkoutPath,
+        workerRoot,
         workerFile: "fixture-worker.ts",
         workerName: "fixture",
         arguments_: [],
@@ -292,21 +313,19 @@ describe("agent process runner", () => {
     } finally {
       if (previous === undefined) delete process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
       else process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP = previous;
-      rmSync(checkoutPath, { force: true, recursive: true });
+      rmSync(workerRoot, { force: true, recursive: true });
     }
   });
 
   it("attaches a nested worker to its inherited whole-job process group", async () => {
     const previous = process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
     process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP = "1";
-    const checkoutPath = mkdtempSync(join(tmpdir(), "nested-worker-"));
-    const workerDirectory = join(checkoutPath, ".sandcastle");
-    mkdirSync(workerDirectory);
-    writeFileSync(join(workerDirectory, "fixture-worker.ts"), 'process.stdout.write("nested");\n');
+    const workerRoot = mkdtempSync(join(tmpdir(), "nested-worker-"));
+    writeFileSync(join(workerRoot, "fixture-worker.ts"), 'process.stdout.write("nested");\n');
 
     try {
       await expect(runAgentWorker({
-        checkoutPath,
+        workerRoot,
         workerFile: "fixture-worker.ts",
         workerName: "fixture",
         arguments_: [],
@@ -315,7 +334,7 @@ describe("agent process runner", () => {
     } finally {
       if (previous === undefined) delete process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP;
       else process.env.SANDCASTLE_INHERITED_JOB_PROCESS_GROUP = previous;
-      rmSync(checkoutPath, { force: true, recursive: true });
+      rmSync(workerRoot, { force: true, recursive: true });
     }
   });
 });

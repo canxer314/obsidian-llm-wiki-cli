@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createTargetOperationRunner } from "../.sandcastle/target-operation.js";
 import { INHERITED_JOB_PROCESS_GROUP } from "../.sandcastle/worker-process.js";
+import { createTrustedAutomationFixture } from "./trusted-automation-fixture.js";
 
 const executeFile = promisify(execFile);
 const roots: string[] = [];
@@ -263,7 +264,7 @@ describe("whole Target job process", () => {
       join(contributorPath, ".sandcastle", "operations", "implement-issue.ts"),
       [
         'for await (const _chunk of process.stdin) {}',
-        'console.log(JSON.stringify({ status: "implemented", source: "target-revision" }));',
+        'console.log(JSON.stringify({ status: "implemented", source: "divergent-target-revision" }));',
       ].join("\n"),
     );
     await git(["-C", contributorPath, "add", "-A"]);
@@ -275,6 +276,17 @@ describe("whole Target job process", () => {
     await git(["-C", trustedPath, "config", "user.name", "Trusted Source"]);
     await git(["-C", trustedPath, "config", "user.email", "trusted@example.test"]);
     await git(["-C", trustedPath, "remote", "set-url", "origin", remoteUrl]);
+    // The operation entry resolves from the trusted automation .sandcastle,
+    // never from the divergent Target Checkout snapshot that the contributor
+    // branch deliberately carries.
+    const trustedSandcastleRoot = await createTrustedAutomationFixture(
+      root,
+      "implement-issue.ts",
+      [
+        'for await (const _chunk of process.stdin) {}',
+        'console.log(JSON.stringify({ status: "implemented", source: "trusted-operation" }));',
+      ].join("\n"),
+    );
     await mkdir(binPath);
     const gitWrapper = join(binPath, "git");
     await writeFile(gitWrapper, [
@@ -313,6 +325,7 @@ describe("whole Target job process", () => {
       },
       timeoutMilliseconds: 30_000,
       graceMilliseconds: 100,
+      trustedSandcastleRoot,
     });
 
     await expect(runner.run({
@@ -321,10 +334,10 @@ describe("whole Target job process", () => {
       revision,
       jobId: "job-219",
       acquired: true,
-    })).resolves.toEqual({ status: "implemented", source: "target-revision" });
+    })).resolves.toEqual({ status: "implemented", source: "trusted-operation" });
     await expect(readdir(jobsPath)).resolves.toEqual(["logs"]);
     await expect(readFile(join(logsPath, "job-219", "stdout.log"), "utf8"))
-      .resolves.toContain('"source":"target-revision"');
+      .resolves.toContain('"source":"trusted-operation"');
     await expect(readFile(join(logsPath, "job-219", "metadata.json"), "utf8").then(JSON.parse))
       .resolves.toMatchObject({ status: "completed", jobId: "job-219" });
   }, 40_000);

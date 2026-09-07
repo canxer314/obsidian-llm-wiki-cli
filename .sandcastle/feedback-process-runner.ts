@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { resolve } from "node:path";
 
 import type { FeedbackReplyIntent } from "./feedback-implementation-automation.ts";
 import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
@@ -7,6 +8,7 @@ export function createProcessFeedbackImplementer(options: {
   readonly startup: string;
   readonly model: string;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
+  readonly workerRoot?: string;
 }) {
   return {
     async implement(request: {
@@ -17,7 +19,7 @@ export function createProcessFeedbackImplementer(options: {
       readonly rootCommentId: string;
     }): Promise<{ readonly reply: FeedbackReplyIntent }> {
       const result = await runAgentWorker({
-        checkoutPath: request.checkoutPath,
+        workerRoot: options.workerRoot ?? resolve(import.meta.dirname),
         workerFile: "feedback-worker.ts",
         workerName: "Feedback implementation",
         arguments_: [

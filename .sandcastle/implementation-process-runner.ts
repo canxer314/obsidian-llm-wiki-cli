@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { resolve } from "node:path";
 
 import { runAgentWorker, workerJson } from "./agent-process-runner.ts";
 
@@ -7,6 +8,7 @@ export function createProcessImplementer(options: {
   readonly plannerModel: string;
   readonly implementerModel: string;
   readonly start?: ((arguments_: readonly string[]) => ChildProcess) | undefined;
+  readonly workerRoot?: string;
 }) {
   return {
     async implement(request: {
@@ -15,7 +17,7 @@ export function createProcessImplementer(options: {
       readonly checkoutPath: string;
     }): Promise<{ readonly branch: string; readonly pullRequestUrl: string }> {
       const result = await runAgentWorker({
-        checkoutPath: request.checkoutPath,
+        workerRoot: options.workerRoot ?? resolve(import.meta.dirname),
         workerFile: "implementation-worker.ts",
         workerName: "Implementation",
         arguments_: [

@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createTargetOperationCommandRunner } from "../.sandcastle/target-operation-command.js";
 import { createTargetOperationRunner } from "../.sandcastle/target-operation.js";
+import { createTrustedAutomationFixture } from "./trusted-automation-fixture.js";
 
 const executeFile = promisify(execFile);
 const remoteUrl = "https://github.com/example/target-failure-projection.git";
@@ -71,10 +72,13 @@ const representativeScenarios: readonly Scenario[] = [
   },
   {
     name: "whole-operation-timeout",
+    // The trusted operation entry receives the operated Target Checkout path
+    // as an explicit worker argument and writes its marker there.
     operationSource: [
       'import { writeFile } from "node:fs/promises";',
       'import { join } from "node:path";',
-      'await writeFile(join(import.meta.dirname, "operation-started"), "started\\n");',
+      'const checkoutPath = JSON.parse(process.argv[3]).checkoutPath;',
+      'await writeFile(join(checkoutPath, ".sandcastle", "operations", "operation-started"), "started\\n");',
       "await new Promise((resolve) => setTimeout(resolve, 30_000));",
       'console.log(JSON.stringify({ status: "implemented" }));',
     ].join("\n"),
@@ -184,9 +188,10 @@ const representativeScenarios: readonly Scenario[] = [
     name: "checkout-cleanup-failure",
     operationSource: [
       'import { chmod, writeFile } from "node:fs/promises";',
-      'import { resolve } from "node:path";',
-      'await writeFile(resolve(import.meta.dirname, "../../cleanup-attempted"), "accepted before cleanup\\n");',
-      'await chmod(resolve(import.meta.dirname, "../../.."), 0o500);',
+      'import { join, resolve } from "node:path";',
+      'const checkoutPath = JSON.parse(process.argv[3]).checkoutPath;',
+      'await writeFile(join(checkoutPath, "cleanup-attempted"), "accepted before cleanup\\n");',
+      'await chmod(resolve(checkoutPath, ".."), 0o500);',
       'console.log(JSON.stringify({ status: "refused", reason: "accepted before cleanup" }));',
     ].join("\n"),
     errorContains: "EACCES",
@@ -246,6 +251,7 @@ describe("Target operation failure projections", () => {
   let checkoutRoot: string;
   let logsPath: string;
   let transport: NodeJS.ProcessEnv;
+  let trustedSandcastleRoot: string;
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), "target-failure-projections-"));
@@ -299,6 +305,14 @@ describe("Target operation failure projections", () => {
       HOME: process.env.HOME ?? "",
       PATH: `${binPath}:${process.env.PATH ?? ""}`,
     };
+    // The operation entry resolves from the trusted automation .sandcastle.
+    // Each scenario installs its own operation source there (see
+    // commitScenario); the Target Checkout revision never supplies code.
+    trustedSandcastleRoot = await createTrustedAutomationFixture(
+      root,
+      "implement-issue.ts",
+      'console.log(JSON.stringify({ status: "implemented" }));\n',
+    );
   });
 
   afterAll(async () => {
@@ -323,6 +337,13 @@ describe("Target operation failure projections", () => {
     }));
     await writeFile(
       join(contributorPath, ".sandcastle", "operations", "implement-issue.ts"),
+      scenario.operationSource,
+    );
+    // Install the same operation source into the fixture trusted automation
+    // .sandcastle: the whole job resolves the entry from there, not from the
+    // Target Checkout revision just pushed above.
+    await writeFile(
+      join(trustedSandcastleRoot, "operations", "implement-issue.ts"),
       scenario.operationSource,
     );
     await git(["-C", contributorPath, "add", "-A"]);
@@ -369,6 +390,7 @@ describe("Target operation failure projections", () => {
         },
         timeoutMilliseconds: scenario.timeoutMilliseconds ?? 30_000,
         graceMilliseconds: 100,
+        trustedSandcastleRoot,
       });
       const command = createTargetOperationCommandRunner({
         target,
@@ -503,6 +525,7 @@ describe("Target operation failure projections", () => {
       },
       timeoutMilliseconds: 30_000,
       graceMilliseconds: 100,
+      trustedSandcastleRoot,
     });
     const command = createTargetOperationCommandRunner({
       target,
@@ -535,10 +558,12 @@ describe("Target operation failure projections", () => {
     await resetProjectionFixture();
     const scenario: Scenario = {
       name: "encoded-credential-stderr-exfiltration",
-      // The operation is untrusted Target revision code. It reads the startup
-      // credential delivered on stdin, base64-encodes it, writes it to stderr,
-      // and exits unsuccessfully — the exact trust-boundary chain rejected by
-      // the #359 acceptance re-review.
+      // The operation entry is trusted automation code that is itself
+      // compromised or buggy: it reads the startup credential delivered on
+      // stdin, base64-encodes it, writes it to stderr, and exits
+      // unsuccessfully. Publication must still carry only the classified exit
+      // summary — the trust-boundary chain rejected by the #359 acceptance
+      // re-review.
       operationSource: [
         'let input = "";',
         "for await (const chunk of process.stdin) input += chunk;",
@@ -594,6 +619,7 @@ describe("Target operation failure projections", () => {
       },
       timeoutMilliseconds: 30_000,
       graceMilliseconds: 100,
+      trustedSandcastleRoot,
     });
     const command = createTargetOperationCommandRunner({
       target,
@@ -637,6 +663,10 @@ describe("Target operation failure projections", () => {
       join(contributorPath, ".sandcastle", "operations", "architecture-review.ts"),
       'console.log(JSON.stringify({ status: "implemented" }));\n',
     );
+    await writeFile(
+      join(trustedSandcastleRoot, "operations", "architecture-review.ts"),
+      'console.log(JSON.stringify({ status: "implemented" }));\n',
+    );
     await git(["-C", contributorPath, "add", "-A"]);
     await git(["-C", contributorPath, "commit", "-m", "scheduled architecture failure"]);
     const revision = await git(["-C", contributorPath, "rev-parse", "HEAD"]);
@@ -661,6 +691,7 @@ describe("Target operation failure projections", () => {
       },
       timeoutMilliseconds: 30_000,
       graceMilliseconds: 100,
+      trustedSandcastleRoot,
     });
 
     await expect(target.run({

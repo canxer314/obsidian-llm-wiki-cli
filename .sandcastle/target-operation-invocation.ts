@@ -39,7 +39,12 @@ interface OuterTargetOperationInvocation {
   readonly number: number;
 }
 
-type LabelTriggeredTargetOperationWorkerInvocation =
+// The label-triggered invocation as authorized by the Dispatcher: it carries
+// the Work Item number but never the operated checkout path. The checkout path
+// is injected only when the operation worker is spawned (see
+// targetOperationWorkerArguments), so the outer authorized schema stays
+// unchanged and the operated checkout snapshot never influences resolution.
+type LabelTriggeredAuthorizedInvocation =
   | (AcquiredTargetOperationInvocation & {
       readonly operation: IssueTargetOperationIdentity;
     })
@@ -60,16 +65,19 @@ type ScheduledArchitectureReviewInvocation = {
 };
 
 export type AuthorizedTargetOperationInvocation =
-  | (LabelTriggeredTargetOperationWorkerInvocation &
-      OuterTargetOperationInvocation)
+  | (LabelTriggeredAuthorizedInvocation & OuterTargetOperationInvocation)
   | ScheduledArchitectureReviewInvocation;
 
+// The worker-level invocation delivered over the operation worker argv: the
+// authorized invocation plus the explicit operated Target Checkout path that
+// the runtime must operate on.
 export type TargetOperationWorkerInvocation =
-  | LabelTriggeredTargetOperationWorkerInvocation
-  | ScheduledArchitectureReviewInvocation;
+  | (LabelTriggeredAuthorizedInvocation & { readonly checkoutPath: string })
+  | (ScheduledArchitectureReviewInvocation & { readonly checkoutPath: string });
 
 export interface ParsedTargetOperationWorkerInvocation {
   readonly number: number | undefined;
+  readonly checkoutPath: string;
   readonly invocation: TargetOperationWorkerInvocation;
 }
 
@@ -212,6 +220,7 @@ function workerLabelInvocationKeys(
     "revision",
     "jobId",
     "acquired",
+    "checkoutPath",
   ]);
   if (
     operation === "implement-feedback" ||
@@ -231,6 +240,19 @@ function requireScheduledInvocation(
     !isFullRevision(value.revision) ||
     !isNonEmptyString(value.jobId) ||
     !hasOnlyKeys(value, new Set(["operation", "revision", "jobId"]))
+  ) throw new Error(message);
+}
+
+function requireScheduledWorkerInvocation(
+  value: Record<string, unknown>,
+  message: string,
+): void {
+  if (
+    value.operation !== "architecture-review" ||
+    !isFullRevision(value.revision) ||
+    !isNonEmptyString(value.jobId) ||
+    !isNonEmptyString(value.checkoutPath) ||
+    !hasOnlyKeys(value, new Set(["operation", "revision", "jobId", "checkoutPath"]))
   ) throw new Error(message);
 }
 
@@ -291,6 +313,9 @@ function requireAuthorizedWorkerLabelInvocation(
   ) {
     throw new Error("Target feedback reconciliation authorization is invalid");
   }
+  if (!isNonEmptyString(value.checkoutPath)) {
+    throw new Error("Target operation invocation is invalid");
+  }
   if (!hasOnlyKeys(
     value,
     workerLabelInvocationKeys(operation, "reconcile" in value),
@@ -346,7 +371,7 @@ export function parseFeedbackReconcileAuthorization(
 
 function materializeLabelWorkerInvocation(
   value: Record<string, unknown>,
-): LabelTriggeredTargetOperationWorkerInvocation {
+): LabelTriggeredAuthorizedInvocation {
   const common = {
     operation: value.operation as LabelTriggeredTargetOperationIdentity,
     revision: value.revision as string,
@@ -416,12 +441,13 @@ export function parseAuthorizedTargetOperationInvocation(
 
 export function targetOperationWorkerArguments(
   invocation: AuthorizedTargetOperationInvocation,
+  checkoutPath: string,
 ): readonly string[] {
   if (invocation.operation === "architecture-review") {
-    return [JSON.stringify(invocation)];
+    return [JSON.stringify({ ...invocation, checkoutPath })];
   }
   const { number, ...workerInvocation } = invocation;
-  return [String(number), JSON.stringify(workerInvocation)];
+  return [String(number), JSON.stringify({ ...workerInvocation, checkoutPath })];
 }
 
 function parseSerializedInvocation(value: string | undefined): Record<string, unknown> {
@@ -466,18 +492,23 @@ export function parseTargetOperationWorkerInvocation(
   }
   let authorizedInvocation: TargetOperationWorkerInvocation;
   if (scheduled) {
-    requireScheduledInvocation(invocation, "Target operation invocation is invalid");
+    requireScheduledWorkerInvocation(invocation, "Target operation invocation is invalid");
     authorizedInvocation = {
       operation: "architecture-review",
       revision: invocation.revision as string,
       jobId: invocation.jobId as string,
+      checkoutPath: invocation.checkoutPath as string,
     };
   } else {
     requireAuthorizedWorkerLabelInvocation(invocation, operation);
-    authorizedInvocation = materializeLabelWorkerInvocation(invocation);
+    authorizedInvocation = {
+      ...materializeLabelWorkerInvocation(invocation),
+      checkoutPath: invocation.checkoutPath as string,
+    };
   }
   return {
     number,
+    checkoutPath: authorizedInvocation.checkoutPath,
     invocation: authorizedInvocation,
   };
 }
