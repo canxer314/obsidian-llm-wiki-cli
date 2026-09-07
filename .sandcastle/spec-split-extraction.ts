@@ -2,6 +2,7 @@ import { Output, claudeCode, run, type SandboxHooks, type SandboxProvider } from
 import { z } from "zod";
 
 import { agentLogging } from "./agent-logging.ts";
+import { STRUCTURED_EXTRACTION_ATTEMPTS } from "./same-session-structured-extraction.ts";
 
 export interface SpecSlice {
   readonly title: string;
@@ -57,7 +58,7 @@ export function createSameSessionSpecSplitExtractor(options: {
       if (produced.resume === undefined) throw new Error("Spec splitter session identity is unavailable");
       const extracted = await produced.resume(extractionPrompt, {
         ...(logging === undefined ? {} : { logging }),
-        output: Output.object({ tag: "output", schema: specSplitSchema, maxRetries: 2 }),
+        output: Output.object({ tag: "output", schema: specSplitSchema, maxRetries: STRUCTURED_EXTRACTION_ATTEMPTS - 1 }),
       }) as unknown as { readonly commits: readonly unknown[]; readonly output: { readonly slices: readonly SpecSlice[] } };
       if (extracted.commits.length > 0) throw new Error("Spec splitter session must not create commits");
       return extracted.output.slices;

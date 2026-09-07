@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { StructuredOutputError } from "@ai-hero/sandcastle";
 
 import {
   createSandcastlePlannerSession,
 } from "../.sandcastle/planner-session.js";
 import { plannerOutputSchema } from "../.sandcastle/planner.js";
+import { STRUCTURED_EXTRACTION_ATTEMPTS } from "../.sandcastle/same-session-structured-extraction.js";
 
 const output = {
   status: "ready" as const,
@@ -95,6 +97,119 @@ describe("Sandcastle Planner session adapter", () => {
     expect(request.prompt).not.toContain(output.issue.body);
     expect(request.prompt).not.toContain("shared accumulating branch");
     expect(request.prompt).not.toContain("git fetch origin");
+  });
+
+  it("arms the shared parse-retry budget so a malformed <plan> is retried in-session", async () => {
+    const runAgent = vi.fn().mockResolvedValue({ output });
+    const session = createSandcastlePlannerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: {},
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    await expect(session.run({
+      issueNumber: 101,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    })).resolves.toEqual(output);
+
+    // The library resumes the failed session with the parse detail and the
+    // model re-emits a corrected <plan>; the session layer only wires the
+    // budget derived from the shared constant.
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({
+      output: expect.objectContaining({
+        tag: "plan",
+        maxRetries: STRUCTURED_EXTRACTION_ATTEMPTS - 1,
+      }),
+    }));
+  });
+
+  it("propagates the StructuredOutputError when the parse-retry budget is exhausted", async () => {
+    const exhausted = new StructuredOutputError("Structured output tag <plan> contains invalid JSON", {
+      tag: "plan",
+      rawMatched: "not JSON",
+      cause: new SyntaxError("Unexpected end of JSON input"),
+      commits: [],
+      branch: "sandcastle/spec-437",
+      sessionId: "session-1",
+    });
+    const runAgent = vi.fn().mockRejectedValue(exhausted);
+    const session = createSandcastlePlannerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: {},
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    const failure = await session.run({
+      issueNumber: 101,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    }).catch((error: unknown) => error);
+
+    // The library's armed retry is exhausted inside the run call, so the
+    // escaped failure surfaces as the same bounded, classified shape the
+    // extraction seam produces: tag, attempts made, bounded parse detail —
+    // still a recoverable StructuredOutputError (not swallowed, not converted)
+    // so the operation fails as Blocked Automation in bounded time.
+    expect(failure).toBeInstanceOf(StructuredOutputError);
+    expect(failure).not.toBe(exhausted);
+    const classified = failure as StructuredOutputError;
+    expect(classified.tag).toBe("plan");
+    expect(classified.message).toContain(
+      `Structured output tag <plan> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts`,
+    );
+    expect(classified.message).toContain(
+      "last parse detail: SyntaxError: Unexpected end of JSON input",
+    );
+    // Drift guard: no rawMatched or stdout content leaks into the diagnostic.
+    expect(classified.message).not.toContain("not JSON");
+    expect(classified.rawMatched).toBeUndefined();
+  });
+
+  it("classifies a low-level parse fault escaping the library retry guard as a recoverable output error", async () => {
+    const lowLevelParseFault = new SyntaxError(`Unexpected token '"' in JSON at position 97`);
+    const runAgent = vi.fn().mockRejectedValue(lowLevelParseFault);
+    const session = createSandcastlePlannerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: {},
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    const failure = await session.run({
+      issueNumber: 101,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(StructuredOutputError);
+    expect(failure).not.toBe(lowLevelParseFault);
+    const classified = failure as StructuredOutputError;
+    expect(classified.tag).toBe("plan");
+    expect(classified.cause).toBe(lowLevelParseFault);
+  });
+
+  it.each([
+    ["timeout", () => new Error("Planner execution timed out")],
+    ["abort", () => new DOMException("The operation was aborted", "AbortError")],
+    ["execution", () => new Error("claude exited with code 1: sandbox unavailable")],
+  ])("propagates the %s failure unchanged without classification", async (_name, makeFailure) => {
+    const failure = makeFailure();
+    const runAgent = vi.fn().mockRejectedValue(failure);
+    const session = createSandcastlePlannerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: {},
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    await expect(session.run({
+      issueNumber: 101,
+      model: "planner-model",
+      output: { tag: "plan", schema: plannerOutputSchema },
+    })).rejects.toBe(failure);
   });
 
   it("runs a fresh read-only Planner session with Spec child context", async () => {
