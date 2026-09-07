@@ -87,7 +87,16 @@ async function readFileOrNull(path: string): Promise<Uint8Array | null> {
   try {
     return new Uint8Array(await readFile(path));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    // EISDIR: a directory squatting on a managed file name is damage (the
+    // installed-set comments say so) — treat it as an unreadable managed file
+    // so lifecycle operations repair or project it as defective instead of
+    // crashing on an untyped filesystem error.
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      (error as NodeJS.ErrnoException).code === "EISDIR"
+    ) {
+      return null;
+    }
     throw error;
   }
 }

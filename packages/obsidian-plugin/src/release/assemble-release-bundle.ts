@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -106,6 +106,29 @@ export async function assembleReleaseBundle(
     );
   }
 
+  const sources: [AssembledReleaseFile["path"], string][] = [
+    ["manifest.json", join(options.packageRoot, "manifest.json")],
+    ["main.js", join(options.packageRoot, "dist", "main.js")],
+    ["styles.css", join(options.packageRoot, "styles.css")],
+  ];
+  // Pre-read every source before creating the bundle directory so a missing
+  // required build output can never leave a partial bundle behind: assembly
+  // either emits the complete closed file set or changes nothing on disk.
+  const prepared: { path: AssembledReleaseFile["path"]; bytes: Uint8Array }[] = [];
+  for (const [path, source] of sources) {
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await readFile(source));
+    } catch {
+      if (path === "styles.css") continue; // optional release-managed file
+      throw new ReleaseBundleError(
+        `Required build output is missing: ${path} (run the plugin build first)`,
+        "release_build_output_missing",
+      );
+    }
+    prepared.push({ path, bytes });
+  }
+
   try {
     await mkdir(options.bundleDirectory, { recursive: true });
   } catch (error) {
@@ -121,24 +144,9 @@ export async function assembleReleaseBundle(
     );
   }
 
-  const sources: [AssembledReleaseFile["path"], string][] = [
-    ["manifest.json", join(options.packageRoot, "manifest.json")],
-    ["main.js", join(options.packageRoot, "dist", "main.js")],
-    ["styles.css", join(options.packageRoot, "styles.css")],
-  ];
   const files: AssembledReleaseFile[] = [];
-  for (const [path, source] of sources) {
-    let bytes: Uint8Array;
-    try {
-      bytes = new Uint8Array(await readFile(source));
-    } catch {
-      if (path === "styles.css") continue; // optional release-managed file
-      throw new ReleaseBundleError(
-        `Required build output is missing: ${path} (run the plugin build first)`,
-        "release_build_output_missing",
-      );
-    }
-    await copyFile(source, join(options.bundleDirectory, path));
+  for (const { path, bytes } of prepared) {
+    await writeFile(join(options.bundleDirectory, path), bytes);
     files.push({ path, sha256: sha256Hex(bytes), sizeBytes: bytes.length });
   }
 

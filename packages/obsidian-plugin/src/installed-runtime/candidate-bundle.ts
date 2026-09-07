@@ -62,6 +62,22 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function readCandidateFileBytes(directory: string, name: string): Promise<Uint8Array> {
+  try {
+    return new Uint8Array(await readFile(join(directory, name)));
+  } catch (error) {
+    // A directory squatting on a managed file name is a malformed candidate,
+    // never something to read or preserve.
+    if ((error as NodeJS.ErrnoException).code === "EISDIR") {
+      throw new CandidateBundleError(
+        `Candidate ${name} is a directory, not a readable file`,
+        "candidate_manifest_invalid",
+      );
+    }
+    throw error;
+  }
+}
+
 function isCandidateManagedFile(path: string): path is CandidateManagedFile {
   return CANDIDATE_MANAGED_FILES.includes(path);
 }
@@ -186,14 +202,14 @@ export async function inspectCandidateBundle(
   const files: CandidateFileDigest[] = [];
   const contents = new Map<string, Uint8Array>();
   for (const path of [...managedPresent].sort()) {
-    const bytes = new Uint8Array(await readFile(join(directory, path)));
+    const bytes = await readCandidateFileBytes(directory, path);
     contents.set(path, bytes);
     files.push({ path: path as CandidateManagedFile, sha256: sha256(bytes), sizeBytes: bytes.length });
   }
 
   if (entries.includes(CANDIDATE_CHECKSUM_MANIFEST)) {
     const declared = parseChecksumManifest(
-      new Uint8Array(await readFile(join(directory, CANDIDATE_CHECKSUM_MANIFEST))),
+      await readCandidateFileBytes(directory, CANDIDATE_CHECKSUM_MANIFEST),
     );
     for (const file of files) {
       const expected = declared.get(file.path);

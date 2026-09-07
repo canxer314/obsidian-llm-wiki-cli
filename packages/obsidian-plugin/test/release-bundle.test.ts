@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -174,6 +174,24 @@ describe("release bundle assembly", () => {
     await expect(
       assembleReleaseBundle({ tag: TAG, packageRoot, bundleDirectory }),
     ).rejects.toMatchObject({ code: "release_bundle_directory_not_empty" });
+  });
+
+  it("leaves no partial bundle when a required build output is missing", async () => {
+    const root = await workspace();
+    const packageRoot = await writePackageRoot(join(root, "a"), { withoutMain: true });
+    const bundleDirectory = join(root, "a", "bundle");
+    await expect(
+      assembleReleaseBundle({ tag: TAG, packageRoot, bundleDirectory }),
+    ).rejects.toMatchObject({ code: "release_build_output_missing" });
+    // No manifest.json was copied before the missing main.js was detected: the
+    // destination was never created, so a retry does not trip the not-empty
+    // guard.
+    await expect(readdir(bundleDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+
+    // Once the build output exists, the same directory assembles cleanly.
+    await writeFile(join(packageRoot, "dist", "main.js"), "// candidate main\n", "utf8");
+    const assembled = await assembleReleaseBundle({ tag: TAG, packageRoot, bundleDirectory });
+    expect(assembled.files.map((file) => file.path).sort()).toEqual(["main.js", "manifest.json"]);
   });
 });
 

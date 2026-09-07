@@ -378,6 +378,17 @@ export async function runInstalledRuntimeHarness(
       );
       return;
     }
+    // Readiness is the loopback listener answering, not merely the persisted
+    // identity file: on restart the file already exists from the prior run
+    // while the freshly started Obsidian may not have bound the port yet.
+    try {
+      await waitForCondition(() => isLoopbackPortOpen(identity.port), {
+        timeoutMs: timeouts.startupMs,
+      });
+    } catch (error) {
+      failFromError("bridge_readiness", error);
+      return;
+    }
     try {
       const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
       const observation = await client.observeHealth(endpoint, identity.vaultId);
@@ -500,10 +511,16 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  // Residual generated content invalidates the run's evidence even when a
+  // candidate-class failure was recorded first: a run that leaves generated
+  // content behind cannot be trusted as a clean pass or a clean failure.
+  const residualContent = state.cleanup !== null && state.cleanup.residualPaths.length > 0;
   const verdict: InstalledRuntimeVerdict =
     state.failure === null
       ? "passed"
-      : INVALID_VERDICT_CODES.has(state.failure.code) || state.failure.stage === "cleanup"
+      : INVALID_VERDICT_CODES.has(state.failure.code) ||
+          state.failure.stage === "cleanup" ||
+          residualContent
         ? "invalid"
         : "failed";
 

@@ -220,7 +220,15 @@ export function serializeEvidence(
   const validated = installedRuntimeEvidenceSchema.parse(evidence);
   const serialized = `${JSON.stringify(validated, null, 2)}\n`;
   for (const marker of privateMarkers) {
-    if (marker.length > 0 && serialized.includes(marker)) {
+    if (marker.length === 0) continue;
+    // A marker inside a JSON string value is escaped (backslashes, newlines,
+    // quotes, control characters), so a raw substring search would miss the
+    // exact markers the harness registers — Windows paths and multi-line note
+    // bodies. Search for the JSON-escaped form the serialization actually
+    // contains; for markers without special characters the escaped form is
+    // identical to the marker itself.
+    const escapedMarker = JSON.stringify(marker).slice(1, -1);
+    if (serialized.includes(marker) || serialized.includes(escapedMarker)) {
       throw new EvidencePrivacyError(
         "Evidence contains excluded private content and was not written",
       );

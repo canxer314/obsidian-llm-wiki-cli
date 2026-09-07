@@ -175,6 +175,37 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(leaked, ["note body not present"])).not.toThrow();
   });
 
+  it("refuses serialization for JSON-escaped private markers (Windows paths and note bodies)", () => {
+    // Windows absolute paths and multi-line note bodies contain characters
+    // (backslashes, newlines) that JSON string serialization escapes; the
+    // guard must match the escaped form, not just the raw substring.
+    const windowsLeak = {
+      ...passingEvidence(),
+      verdict: "failed" as const,
+      failure: {
+        stage: "health_initial",
+        code: "health_unreachable",
+        detail: "connect failed for C:\\Obsidian\\ThinkFlywheelVault",
+      },
+    };
+    expect(() => serializeEvidence(windowsLeak, ["C:\\Obsidian\\ThinkFlywheelVault"])).toThrow(
+      EvidencePrivacyError,
+    );
+    const noteBodyLeak = {
+      ...passingEvidence(),
+      verdict: "failed" as const,
+      failure: {
+        stage: "cleanup",
+        code: "residual_test_content",
+        detail: "note body leaked:\n# Installed Runtime Harness",
+      },
+    };
+    expect(() => serializeEvidence(noteBodyLeak, ["# Installed Runtime Harness"])).toThrow(
+      EvidencePrivacyError,
+    );
+    expect(() => serializeEvidence(windowsLeak, ["C:/Obsidian/Other"])).not.toThrow();
+  });
+
   it("writes atomically, reads back through the schema, and never overwrites", async () => {
     const directory = await mkdtemp(join(tmpdir(), "installed-runtime-evidence-"));
     const evidencePath = join(directory, "nested", "run.json");

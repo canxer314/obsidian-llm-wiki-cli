@@ -311,6 +311,29 @@ describe("release lifecycle installation", () => {
     expect(await readState(pluginDirectory, join("state", "recovery.journal"))).toBe(journalBefore);
   });
 
+  it("repairs a directory squatting on a managed file name instead of crashing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-install-"));
+    const bundle = await verifiedBundle(root, "bundle", { withStyles: true });
+    const { vaultPath, pluginDirectory } = await arrangeVault(root, "vault-a");
+    await installReleaseToManagedVaults(bundle, [{ vaultPath, obsidianVersion: OBSIDIAN_VERSION }]);
+    await writeOperationalState(pluginDirectory);
+    const dataBefore = await readState(pluginDirectory, "data.json");
+
+    // A directory named `main.js` is damage, never something to preserve.
+    await rm(join(pluginDirectory, "main.js"));
+    await mkdir(join(pluginDirectory, "main.js"));
+
+    const result = await installReleaseToManagedVaults(bundle, [
+      { vaultPath, obsidianVersion: OBSIDIAN_VERSION },
+    ]);
+    const [target] = result.targets;
+    expect(target?.outcome).toBe("success");
+    expect(target?.action).toBe("repaired");
+    expect(target?.repairedFiles).toEqual(["main.js"]);
+    expect((await stat(join(pluginDirectory, "main.js"))).isFile()).toBe(true);
+    expect(await readState(pluginDirectory, "data.json")).toBe(dataBefore);
+  });
+
   it("removes a stale managed file the bundle no longer carries", async () => {
     const root = await mkdtemp(join(tmpdir(), "lifecycle-install-"));
     const withStyles = await verifiedBundle(root, "bundle-styles", { withStyles: true });

@@ -106,8 +106,20 @@ export async function provisionTestVault(options: {
       await writeFile(destination, content, "utf8");
     }
   } catch (error) {
+    // Both roots were verified absent before this block, so any path that now
+    // exists was created by this provision attempt; remove it so a failed run
+    // never leaves generated roots behind without a residual report.
+    let cleanupNote = "";
+    try {
+      await rm(vaultPath, { recursive: true, force: true });
+      await rm(profileDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      cleanupNote = `; partial cleanup also failed: ${
+        cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+      }`;
+    }
     throw new TestVaultError(
-      `Test Vault provisioning failed: ${error instanceof Error ? error.message : String(error)}`,
+      `Test Vault provisioning failed: ${error instanceof Error ? error.message : String(error)}${cleanupNote}`,
       "vault_provision_failed",
     );
   }
@@ -172,8 +184,12 @@ export function compareInventories(
   const afterByPath = new Map(after.map((entry) => [entry.path, entry]));
   const added = [...afterByPath.keys()].filter((path) => !beforeByPath.has(path));
   const removed = [...beforeByPath.keys()].filter((path) => !afterByPath.has(path));
+  // A path is changed only when it exists in both inventories with a different
+  // digest; a removal is reported by `removedPaths`, never double-counted here.
   const changed = [...beforeByPath.keys()].filter(
-    (path) => afterByPath.get(path)?.sha256 !== beforeByPath.get(path)?.sha256,
+    (path) =>
+      afterByPath.has(path) &&
+      afterByPath.get(path)!.sha256 !== beforeByPath.get(path)!.sha256,
   );
   return {
     beforeDigest: digestEntries(before),

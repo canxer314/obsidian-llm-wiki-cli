@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -233,6 +233,20 @@ describe("test Vault lifecycle", () => {
     expect(comparison.removedPaths).toEqual([]);
     expect(comparison.changedPaths).toEqual([]);
     expect(comparison.beforeDigest).not.toBe(comparison.afterDigest);
+  });
+
+  it("diffs removals and in-place changes distinctly", async () => {
+    const root = await workspace();
+    const vault = await provisionTestVault({ workingDirectory: root, runId: "run-c3" });
+    const before = await snapshotInventory(vault.vaultPath);
+    await rm(join(vault.vaultPath, "Notes", "Welcome.md"));
+    await writeFile(join(vault.vaultPath, "Notes", "Linked.md"), "# Linked edited\n", "utf8");
+    const after = await snapshotInventory(vault.vaultPath);
+    const comparison = compareInventories(before, after);
+    // A removed path must not be double-counted as an in-place change.
+    expect(comparison.removedPaths).toEqual(["Notes/Welcome.md"]);
+    expect(comparison.changedPaths).toEqual(["Notes/Linked.md"]);
+    expect(comparison.addedPaths).toEqual([]);
   });
 
   it("removes generated roots and reports an empty residual inventory", async () => {

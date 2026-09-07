@@ -361,6 +361,23 @@ describe("installed-runtime harness failure projection", () => {
     expect(result.evidence.cleanup).toEqual({ attempted: true, residualPaths: [] });
   });
 
+  it("records invalid evidence when residual content survives after an earlier failure", async () => {
+    const { options } = await arrangeRun("run-residual-after-failure", {
+      processControl: createFakeObsidianProcessControl({
+        startError: new ObsidianProcessError("spawn ENOENT", "obsidian_start_failed"),
+      }),
+      cleanupVault: async () => ({ attempted: true, residualPaths: ["Notes/Welcome.md"] }),
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    // The residual content invalidates the run even though a candidate-class
+    // failure was recorded first; a failed verdict would hide the residue.
+    expect(result.verdict).toBe("invalid");
+    expect(result.evidence.cleanup).toEqual({
+      attempted: true,
+      residualPaths: ["Notes/Welcome.md"],
+    });
+  });
+
   it("records failed evidence when the Bridge never becomes ready", async () => {
     const { options } = await arrangeRun("run-no-readiness", {
       processControl: createFakeObsidianProcessControl({ skipPersist: true }),
