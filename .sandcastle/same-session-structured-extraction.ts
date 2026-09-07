@@ -135,43 +135,52 @@ export function classifyStructuredOutputError(
 const MAX_PARSE_DETAIL_LENGTH = 240;
 
 /**
- * Render the parser detail of a classified failure, length-bounded. The
- * matched raw text is redacted from the detail: runtimes quote the offending
- * input inside JSON.parse complaints, and a bounded diagnostic must never
- * carry rawMatched, stdout, or transcript text.
+ * Redact the matched raw text from a diagnostic excerpt and cap its length.
+ * Runtimes quote the offending input inside JSON.parse complaints, and a
+ * bounded diagnostic must never carry rawMatched, stdout, or transcript text.
+ */
+function boundedDiagnosticExcerpt(text: string, rawMatched: string | undefined): string {
+  const redacted = rawMatched === undefined || rawMatched.length === 0
+    ? text
+    : text.split(rawMatched).join("(redacted matched output)");
+  return redacted.length <= MAX_PARSE_DETAIL_LENGTH
+    ? redacted
+    : `${redacted.slice(0, MAX_PARSE_DETAIL_LENGTH)}…`;
+}
+
+/**
+ * Render the parser detail of a classified failure, length-bounded and with
+ * the matched raw text redacted.
  */
 function boundedParseDetail(error: StructuredOutputError): string {
-  let detail = error.cause === undefined
+  const detail = error.cause === undefined
     ? "(no parser detail)"
     : typeof error.cause === "string"
       ? error.cause
       : error.cause instanceof Error
         ? `${error.cause.name}: ${error.cause.message}`
         : JSON.stringify(error.cause, null, 2);
-  if (error.rawMatched !== undefined && error.rawMatched.length > 0) {
-    detail = detail.split(error.rawMatched).join("(redacted matched output)");
-  }
-  return detail.length <= MAX_PARSE_DETAIL_LENGTH
-    ? detail
-    : `${detail.slice(0, MAX_PARSE_DETAIL_LENGTH)}…`;
+  return boundedDiagnosticExcerpt(detail, error.rawMatched);
 }
 
 /**
  * Shape the classified failure surfaced when the parse-retry budget is spent
- * into a bounded diagnostic naming the tag, the attempts made, and the last
- * parse detail, so a structured-output formatting failure is distinguishable
- * from a real execution failure when the Primary Operator reads the local job
- * log. The result stays a StructuredOutputError, preserving the recoverable
- * classification; it deliberately drops rawMatched so no parser raw text or
- * stdout leaves the seam. Per ADR-0002 this shape is never registered as a
- * trusted failure — the published Work Item diagnostic remains the coarse
- * provenance-registered classification.
+ * into a bounded diagnostic naming the tag, the attempts made, the classified
+ * failure kind, and the last parse detail, so a structured-output formatting
+ * failure is distinguishable from a real execution failure when the Primary
+ * Operator reads the local job log — and a never-emitted tag stays
+ * distinguishable from a malformed one. The result stays a
+ * StructuredOutputError, preserving the recoverable classification; it
+ * deliberately drops rawMatched so no parser raw text or stdout leaves the
+ * seam. Per ADR-0002 this shape is never registered as a trusted failure —
+ * the published Work Item diagnostic remains the coarse provenance-registered
+ * classification.
  */
 export function structuredExtractionExhaustionError(
   error: StructuredOutputError,
 ): StructuredOutputError {
   return new StructuredOutputError(
-    `Structured output tag <${error.tag}> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts; last parse detail: ${boundedParseDetail(error)}`,
+    `Structured output tag <${error.tag}> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts; last failure: ${boundedDiagnosticExcerpt(error.message, error.rawMatched)}; last parse detail: ${boundedParseDetail(error)}`,
     {
       tag: error.tag,
       rawMatched: undefined,
@@ -194,9 +203,12 @@ export function structuredExtractionExhaustionError(
  * (timeouts, aborts, sandbox/execution errors) propagate unchanged.
  *
  * The caller arms the library's same-session retry with
- * STRUCTURED_EXTRACTION_ATTEMPTS - 1 maxRetries inside this run call, so a
- * parse-shaped failure escaping the guard has spent the whole budget and is
- * surfaced as the bounded exhaustion diagnostic.
+ * STRUCTURED_EXTRACTION_ATTEMPTS - 1 maxRetries inside this run call. A
+ * parse-shaped failure reaching this wrapper has escaped that armed guard —
+ * either the budget was spent, or the failure's surface form (a raw parse
+ * fault, a foreign-bundle StructuredOutputError) was never recognised by the
+ * guard — so it is classified and surfaced as the same bounded exhaustion
+ * diagnostic instead of passing the guard by.
  */
 export function withStructuredOutputErrorClassification(
   runAgent: typeof run,

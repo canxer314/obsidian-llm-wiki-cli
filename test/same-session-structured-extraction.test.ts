@@ -257,6 +257,11 @@ describe("same-session structured extraction", () => {
       `Structured output tag <result> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts`,
     );
     expect(classified.message).toContain("last parse detail: SyntaxError: ");
+    // The classified failure kind survives exhaustion, so a malformed
+    // emission stays distinguishable from a tag that was never emitted.
+    expect(classified.message).toContain(
+      "last failure: Structured output tag <result> contains invalid JSON",
+    );
     // Drift guard: the bounded diagnostic never embeds rawMatched or stdout
     // content, even when the runtime quotes the offending input inside its
     // parser complaint.
@@ -264,6 +269,35 @@ describe("same-session structured extraction", () => {
     expect(classified.message).not.toContain("older malformed");
     expect(classified.rawMatched).toBeUndefined();
     // No retry happens beyond the budget.
+    expect(runAgent).toHaveBeenCalledTimes(STRUCTURED_EXTRACTION_ATTEMPTS);
+  });
+
+  it("keeps the never-emitted kind in the bounded diagnostic when a stream with no closed block exhausts the budget", async () => {
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      iterations: [{ sessionId: "session-1" }],
+      stdout: "the agent narrated but never emitted the tag",
+    });
+    const runAgent = vi.fn()
+      .mockResolvedValueOnce({ commits: [], iterations: [{ sessionId: "session-1" }], resume })
+      .mockResolvedValue({
+        commits: [],
+        iterations: [{ sessionId: "session-1" }],
+        stdout: "still no tag",
+      });
+    const extractor = createExtractor(runAgent);
+
+    const failure = await extractor.extract(plan()).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(StructuredOutputError);
+    const classified = failure as StructuredOutputError;
+    expect(classified.message).toContain(
+      `Structured output tag <result> could not be parsed after ${STRUCTURED_EXTRACTION_ATTEMPTS} attempts`,
+    );
+    expect(classified.message).toContain(
+      "last failure: Structured output tag <result> not found in agent output",
+    );
+    expect(classified.message).toContain("last parse detail: (no parser detail)");
     expect(runAgent).toHaveBeenCalledTimes(STRUCTURED_EXTRACTION_ATTEMPTS);
   });
 
