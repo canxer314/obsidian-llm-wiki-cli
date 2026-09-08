@@ -1,10 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { CheckoutObserver } from "../.sandcastle/checkout-safety.js";
+import { StopRetryError, isStopRetry } from "../.sandcastle/invocation-recovery.js";
 import { createReviewPublisher } from "../.sandcastle/review-publisher.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const REMOTE = "https://github.com/example/repository.git";
+
+// The publisher's clean-checkout proof is an injected seam in these tests;
+// production defaults to the real checkout observer.
+function cleanObserver() {
+  const snapshot = { head: SHA_B, entries: [] };
+  const requireClean = vi.fn().mockResolvedValue(snapshot);
+  const observer = {
+    observe: vi.fn().mockResolvedValue(snapshot),
+    requireClean,
+    requireUnchanged: vi.fn().mockResolvedValue(snapshot),
+  } as CheckoutObserver;
+  return { observer, requireClean };
+}
 
 describe("review publisher", () => {
   it("starts the review branch at the acquired head and pushes the reviewer commit with an exact lease", async () => {
@@ -16,7 +31,8 @@ describe("review publisher", () => {
       .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: `${REMOTE}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" });
-    const publisher = createReviewPublisher({ execute });
+    const { observer, requireClean } = cleanObserver();
+    const publisher = createReviewPublisher({ execute, observer });
 
     await publisher.prepare("/checkout", "feature/review", SHA_A);
     await expect(publisher.publish({ checkoutPath: "/checkout", branch: "feature/review", expectedRevision: SHA_A })).resolves.toBe(SHA_B);
@@ -25,6 +41,10 @@ describe("review publisher", () => {
     expect(execute).toHaveBeenNthCalledWith(2, "git", ["-C", "/checkout", "config", "user.email", "claude-code[bot]@users.noreply.github.com"]);
     expect(execute).toHaveBeenNthCalledWith(3, "git", ["-C", "/checkout", "checkout", "-B", "feature/review", SHA_A]);
     expect(execute).toHaveBeenNthCalledWith(5, "git", ["-C", "/checkout", "rev-parse", "HEAD"]);
+    // The clean-checkout proof runs after head verification and before the
+    // remote lookup and leased push.
+    expect(requireClean).toHaveBeenCalledOnce();
+    expect(requireClean).toHaveBeenCalledWith("/checkout");
     expect(execute).toHaveBeenNthCalledWith(6, "git", ["-C", "/checkout", "remote", "get-url", "origin"]);
     expect(execute).toHaveBeenNthCalledWith(7, "git", [
       "-C", "/checkout", "push", REMOTE,
@@ -48,7 +68,7 @@ describe("review publisher", () => {
     },
   ])("rejects $name before preparing the checkout", async ({ branch, revision, diagnostic }) => {
     const execute = vi.fn();
-    const publisher = createReviewPublisher({ execute });
+    const publisher = createReviewPublisher({ execute, observer: cleanObserver().observer });
 
     await expect(publisher.prepare("/checkout", branch, revision)).rejects.toThrow(diagnostic);
     expect(execute).not.toHaveBeenCalled();
@@ -60,7 +80,7 @@ describe("review publisher", () => {
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" });
-    const publisher = createReviewPublisher({ execute });
+    const publisher = createReviewPublisher({ execute, observer: cleanObserver().observer });
 
     await expect(publisher.prepare("/checkout", "feature/review", SHA_A))
       .rejects.toThrow("Review checkout did not start at the acquired revision");
@@ -86,6 +106,7 @@ describe("review publisher", () => {
     const publisher = createReviewPublisher({
       execute,
       sourceRepositoryPath: "/trusted/source",
+      observer: cleanObserver().observer,
     });
 
     await expect(publisher.publish({
@@ -108,7 +129,7 @@ describe("review publisher", () => {
       .mockResolvedValueOnce({ stdout: `${SHA_A}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: `${REMOTE}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" });
-    const publisher = createReviewPublisher({ execute });
+    const publisher = createReviewPublisher({ execute, observer: cleanObserver().observer });
 
     await expect(publisher.publish({
       checkoutPath: "/checkout",
@@ -148,7 +169,7 @@ describe("review publisher", () => {
     const execute = head === undefined
       ? vi.fn()
       : vi.fn().mockResolvedValueOnce({ stdout: head, stderr: "" });
-    const publisher = createReviewPublisher({ execute });
+    const publisher = createReviewPublisher({ execute, observer: cleanObserver().observer });
 
     await expect(publisher.publish({
       checkoutPath: "/checkout",
@@ -162,7 +183,7 @@ describe("review publisher", () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "https://token@example.test/repo.git\n", stderr: "" });
-    const publisher = createReviewPublisher({ execute });
+    const publisher = createReviewPublisher({ execute, observer: cleanObserver().observer });
 
     await expect(publisher.publish({
       checkoutPath: "/checkout",
@@ -177,10 +198,32 @@ describe("review publisher", () => {
       .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: `${REMOTE}\n`, stderr: "" })
       .mockRejectedValueOnce(new Error("stale info"));
-    const publisher = createReviewPublisher({ execute });
+    const publisher = createReviewPublisher({ execute, observer: cleanObserver().observer });
 
     await expect(publisher.publish({ checkoutPath: "/checkout", branch: "feature/review", expectedRevision: SHA_A }))
       .rejects.toThrow("stale info");
     expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("never pushes from a dirty checkout: the clean-checkout proof gates the push", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" });
+    const { observer, requireClean } = cleanObserver();
+    requireClean.mockRejectedValueOnce(
+      new StopRetryError("Target Checkout is not clean (staged=0, unstaged=1, unmerged=0, untracked=0)"),
+    );
+    const publisher = createReviewPublisher({ execute, observer });
+
+    const failure = await publisher.publish({
+      checkoutPath: "/checkout",
+      branch: "feature/review",
+      expectedRevision: SHA_A,
+    }).catch((error: unknown) => error);
+
+    expect(isStopRetry(failure)).toBe(true);
+    expect((failure as Error).message).toContain("Target Checkout is not clean");
+    // Head verification ran; the remote lookup and the push never did.
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith("git", ["-C", "/checkout", "rev-parse", "HEAD"]);
   });
 });

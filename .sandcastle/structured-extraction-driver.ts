@@ -60,10 +60,16 @@ export const MAX_STRUCTURED_ATTEMPTS = STRUCTURED_EXTRACTION_ATTEMPTS;
 
 // A resumable session checkpoint captured from a completed response. Only a
 // completed invalid response can advance the checkpoint; invocation
-// rejections carry no completed session and never touch it.
-interface SessionCheckpoint {
+// rejections carry no completed session and never touch it. A stage that
+// follows a substantive produce stage (the Reviewer's formatting stage) hands
+// its frozen produce checkpoint in with the plan so structured attempt one
+// resumes the produce session instead of starting a fresh Agent run.
+export interface StructuredExtractionCheckpoint {
   readonly resume: NonNullable<RunResult["resume"]>;
 }
+
+// Internal alias kept for the handoff payload below.
+type SessionCheckpoint = StructuredExtractionCheckpoint;
 
 export type StructuredFailureKind = "missing-tag" | "invalid-json" | "schema-invalid";
 
@@ -134,6 +140,10 @@ export interface StructuredExtractionPlan<Output> {
   // format-correction prompt.
   readonly readOnlyContract: string;
   readonly logging?: LoggingOption;
+  // An optional resumable checkpoint captured by a prior produce stage. When
+  // present, structured attempt one resumes it with the initial prompt; a
+  // completed invalid response still advances it like any other checkpoint.
+  readonly checkpoint?: StructuredExtractionCheckpoint;
   readonly output: {
     readonly tag: string;
     readonly schema: z.ZodType<Output>;
@@ -183,25 +193,26 @@ export function createStructuredExtractionDriver(options: StructuredExtractionDr
       // initial HEAD and status that every later observation compares against.
       const frozen = await observer.requireClean(options.checkoutPath);
 
-      // The correction state pairs the retained resumable checkpoint with the
-      // latest classified failure. A completed invalid response that carries
-      // a resumable session checkpoint advances it; otherwise the prior
-      // usable checkpoint is retained. With no checkpoint the next structured
+      // The resumable checkpoint and the latest classified parse failure are
+      // tracked separately. The checkpoint starts from the plan's optional
+      // produce-stage checkpoint; a completed invalid response that carries a
+      // resumable session checkpoint advances it, otherwise the prior usable
+      // checkpoint is retained. The classified failure selects the
+      // format-correction prompt; with no checkpoint the next structured
       // attempt starts a new complete prompt.
-      let correction:
-        | { readonly checkpoint: SessionCheckpoint; readonly classified: StructuredOutputError }
-        | undefined;
+      let checkpoint: SessionCheckpoint | undefined = plan.checkpoint;
+      let classified: StructuredOutputError | undefined;
 
       for (
         let structuredOrdinal = 1;
         structuredOrdinal <= MAX_STRUCTURED_ATTEMPTS;
         structuredOrdinal += 1
       ) {
-        const prompt = correction === undefined
+        const prompt = classified === undefined || checkpoint === undefined
           ? plan.initialPrompt
           : structuredCorrectionPrompt({
               tag: plan.output.tag,
-              kind: structuredFailureKind(correction.classified),
+              kind: structuredFailureKind(classified),
               nextStructuredOrdinal: structuredOrdinal,
               readOnlyContract: plan.readOnlyContract,
             });
@@ -215,7 +226,8 @@ export function createStructuredExtractionDriver(options: StructuredExtractionDr
               // and the driver owns every structured attempt with the same
               // model, sandbox, hooks, head branch strategy, schema, and
               // prompt.
-              result = correction === undefined
+              const session = checkpoint;
+              result = session === undefined
                 ? await runAgent({
                     agent: createAgent(plan.model),
                     sandbox: options.sandbox,
@@ -228,7 +240,7 @@ export function createStructuredExtractionDriver(options: StructuredExtractionDr
                     ...(plan.signal === undefined ? {} : { signal: plan.signal }),
                     prompt,
                   })
-                : await correction.checkpoint.resume(prompt, {
+                : await session.resume(prompt, {
                     ...(plan.logging === undefined ? {} : { logging: plan.logging }),
                     ...(plan.signal === undefined ? {} : { signal: plan.signal }),
                   });
@@ -275,17 +287,15 @@ export function createStructuredExtractionDriver(options: StructuredExtractionDr
             throw failure;
           }
           const advanced = failure.checkpoint !== undefined;
-          const retained = failure.checkpoint ?? correction?.checkpoint;
-          correction = retained === undefined
-            ? undefined
-            : { checkpoint: retained, classified: failure.classified };
+          checkpoint = failure.checkpoint ?? checkpoint;
+          classified = failure.classified;
           appendDriverEntry(options.log, {
             role: options.role,
             stage: options.stage,
             structuredAttempt: structuredOrdinal,
             outcome: "invalid",
             failureKind: structuredFailureKind(failure.classified),
-            checkpoint: advanced ? "advanced" : retained === undefined ? "none" : "retained",
+            checkpoint: advanced ? "advanced" : checkpoint === undefined ? "none" : "retained",
           });
           if (structuredOrdinal === MAX_STRUCTURED_ATTEMPTS) {
             appendDriverEntry(options.log, {
