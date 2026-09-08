@@ -963,6 +963,46 @@ describe("automation GitHub port", () => {
       expect(execute).toHaveBeenCalledTimes(2);
       expect(waits).toEqual([]);
     });
+
+    it("executes a transiently failing child-close comment POST exactly once without retrying", async () => {
+      // The revision comment is an implicit POST (gh infers POST from the -f
+      // body fields), not a retry-safe GET, so a transient failure must not
+      // replay it into duplicate "Implemented in" comments.
+      const execute = vi.fn().mockRejectedValue(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.closeImplementedChild({ specNumber: 226, childNumber: 301, revision }))
+        .rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+    });
+
+    it("executes a transiently failing spec-split sub-issue POST exactly once without retrying", async () => {
+      // The sub-issue relationship and dependency writes set the method through
+      // the -X short flag; they are writes and must stay single-shot.
+      const execute = vi.fn()
+        .mockResolvedValueOnce({ stdout: "https://example.test/issues/301\n", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "3010\n", stderr: "" })
+        .mockRejectedValue(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.publishSpecSplit({
+        specNumber: 223,
+        slices: [{ title: "Prepare vertical path", whatToBuild: "Build the path.", acceptanceCriteria: ["Works"] }],
+      })).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(waits).toEqual([]);
+    });
   });
 
   describe("publishReview routes its reads through the shared safe-read retry boundary", () => {

@@ -127,6 +127,18 @@ describe("Sandcastle GitHub safe-read retry boundary", () => {
       name: "mutating gh command",
       arguments: ["pr", "create", "--draft", "--head", "sandcastle/issue-1", "--body", "Closes #1"],
     },
+    {
+      name: "implicit POST inferred from -f body fields",
+      arguments: ["api", "repos/{owner}/{repo}/issues/1/comments", "-f", "body=Implemented in abc. Part of #1."],
+    },
+    {
+      name: "POST via the -X short method flag",
+      arguments: ["api", "-X", "POST", "repos/{owner}/{repo}/issues/1/sub_issues", "-F", "sub_issue_id=3010"],
+    },
+    {
+      name: "POST from an --input review body",
+      arguments: ["api", "repos/{owner}/{repo}/pulls/1/reviews", "--method", "POST", "--input", "/tmp/review.json"],
+    },
   ])("never retries $name writes", async ({ arguments: arguments_ }) => {
     const execute = vi.fn().mockRejectedValue(transientError());
     const waits: number[] = [];

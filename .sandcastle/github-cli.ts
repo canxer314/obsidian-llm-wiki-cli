@@ -282,8 +282,20 @@ function isRetrySafeGithubRead(arguments_: readonly string[]): boolean {
   if (arguments_[0] === "label") return arguments_[1] === "list";
   if (arguments_[0] !== "api") return false;
   if (arguments_[1] === "graphql") return true;
-  const methodIndex = arguments_.indexOf("--method");
-  return methodIndex === -1 || arguments_[methodIndex + 1]?.toUpperCase() === "GET";
+  // `gh api` defaults to GET but switches to POST as soon as the request
+  // carries body fields (-f/-F/--input) and honours -X/--method overrides.
+  // Only a request that positively resolves to GET is safe to replay, so every
+  // other method resolution — including the implicit POST from body fields —
+  // must stay on the single-shot write path.
+  const methodFlag = arguments_.indexOf("--method");
+  if (methodFlag !== -1) return arguments_[methodFlag + 1]?.toUpperCase() === "GET";
+  const requestFlag = arguments_.indexOf("-X");
+  if (requestFlag !== -1) return arguments_[requestFlag + 1]?.toUpperCase() === "GET";
+  const carriesBody = arguments_.some((argument) =>
+    argument === "-f" || argument === "-F"
+    || argument === "--raw-field" || argument === "--field"
+    || argument === "--input");
+  return !carriesBody;
 }
 
 export function classifyGithubReadError(
