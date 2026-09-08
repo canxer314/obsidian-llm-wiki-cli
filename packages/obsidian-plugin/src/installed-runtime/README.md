@@ -57,6 +57,14 @@ report. Serialization scans for registered private markers (seeded note
 bodies, absolute Vault/profile roots) and refuses to write on any leak;
 unknown fields reject fail closed.
 
+The public-wire corpus evidence (issue #174) extends the same envelope with a
+deterministic read-side corpus identity (`corpusId`, seed-inventory and
+scenario-program digests), wire-observed before/after inventories from
+deterministic discovery, and a retained-byte cleanup report proving every
+continuation chain the corpus issued was consumed to completion and rejected
+on replay. A passing run requires the observed inventory digest to be
+unchanged and every issued chain consumed and single-use proven.
+
 ## Scenario seams
 
 Later lifecycle tickets inject behavior through `InstalledRuntimeHarnessOptions`

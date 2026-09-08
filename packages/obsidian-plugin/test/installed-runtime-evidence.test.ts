@@ -104,6 +104,28 @@ function passingEvidence(): InstalledRuntimeEvidence {
         "vault_change_set_submit",
         "vault_change_set_status",
       ],
+      corpus: {
+        corpusId: "discovery-reads-continuation",
+        seedManifestSha256: DIGEST,
+        scenarioManifestSha256: DIGEST,
+      },
+      beforeInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      afterInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      retainedByteCleanup: {
+        chainsIssued: 1,
+        chainsConsumed: 1,
+        replayAfterConsumptionRejected: 1,
+        bytesReconstructed: 42,
+        residualChains: 0,
+      },
       eventLog: [
         {
           sequence: 1,
@@ -143,6 +165,54 @@ describe("installed-runtime evidence record", () => {
   it("refuses a passing verdict without a complete public-wire corpus", () => {
     const missingCorpus = { ...passingEvidence(), publicWireCorpus: null };
     expect(() => serializeEvidence(missingCorpus)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses passing evidence whose read-side corpus inventory changed or leaked chains", () => {
+    const changedInventory: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      publicWireCorpus: {
+        ...passingEvidence().publicWireCorpus!,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [
+            { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+            { path: "Notes/Added.md", sha256: DIGEST, sizeBytes: 7 },
+          ],
+          digest: "f".repeat(64),
+        },
+      },
+    };
+    expect(() => serializeEvidence(changedInventory)).toThrow(/inventory unchanged/u);
+
+    const abandonedChain: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      publicWireCorpus: {
+        ...passingEvidence().publicWireCorpus!,
+        retainedByteCleanup: {
+          chainsIssued: 2,
+          chainsConsumed: 1,
+          replayAfterConsumptionRejected: 1,
+          bytesReconstructed: 42,
+          residualChains: 0,
+        },
+      },
+    };
+    expect(() => serializeEvidence(abandonedChain)).toThrow(/consume every continuation chain/u);
+
+    const replayMismatch: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      publicWireCorpus: {
+        ...passingEvidence().publicWireCorpus!,
+        retainedByteCleanup: {
+          chainsIssued: 2,
+          chainsConsumed: 2,
+          replayAfterConsumptionRejected: 1,
+          bytesReconstructed: 42,
+          residualChains: 0,
+        },
+      },
+    };
+    expect(() => serializeEvidence(replayMismatch)).toThrow(/single-use replay rejection/u);
   });
 
   it("refuses a passing verdict without both lifecycle observations and clean cleanup", () => {

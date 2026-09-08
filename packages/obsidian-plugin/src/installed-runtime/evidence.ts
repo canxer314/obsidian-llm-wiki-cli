@@ -151,11 +151,62 @@ const publicWireEventSchema = z
   })
   .strict();
 
+/**
+ * Deterministic corpus identity (issue #174): one closed, machine-checkable
+ * name for the read-side corpus plus the immutable seed-inventory and
+ * scenario-program digests that make a run reproducible. The seed manifest is
+ * the same canonical fixture digest the harness provisions; the scenario
+ * manifest hashes the deterministic discovery/read/continuation program (not
+ * the run-dependent continuation tokens, which appear only as event digests).
+ */
+const corpusIdentitySchema = z
+  .object({
+    corpusId: z.literal("discovery-reads-continuation"),
+    seedManifestSha256: sha256Schema,
+    scenarioManifestSha256: sha256Schema,
+  })
+  .strict();
+
+/**
+ * A wire-observed inventory: canonical path, exact Content Version, and byte
+ * size only — never note bodies — plus a digest over the sorted entries. The
+ * read-side corpus records this from deterministic discovery before and after
+ * every read/continuation scenario so any mutation would flip the digest.
+ */
+const corpusInventorySchema = z
+  .object({
+    scope: z.string().min(1),
+    entries: z.array(inventoryEntrySchema),
+    digest: sha256Schema,
+  })
+  .strict();
+
+/**
+ * Retained-byte cleanup report (spec §6.4): every continuation chain the
+ * corpus issues is consumed to completion and the consumed token is rejected
+ * on replay, which is the protocol-visible proof that single use released the
+ * retained frozen bytes. `residualChains` is a literal zero because the corpus
+ * never abandons a chain.
+ */
+const retainedByteCleanupReportSchema = z
+  .object({
+    chainsIssued: z.number().int().nonnegative(),
+    chainsConsumed: z.number().int().nonnegative(),
+    replayAfterConsumptionRejected: z.number().int().nonnegative(),
+    bytesReconstructed: z.number().int().nonnegative(),
+    residualChains: z.literal(0),
+  })
+  .strict();
+
 export const publicWireCorpusEvidenceSchema = z
   .object({
     fixtureSeed: sha256Schema,
     canonicalManifestSha256: sha256Schema,
     tools: z.array(z.string().min(1)).length(6),
+    corpus: corpusIdentitySchema,
+    beforeInventory: corpusInventorySchema,
+    afterInventory: corpusInventorySchema,
+    retainedByteCleanup: retainedByteCleanupReportSchema,
     eventLog: z.array(publicWireEventSchema).min(1),
     assertions: z.array(z.string().min(1)),
     verdict: z.enum(["passed", "failed"]),
@@ -170,6 +221,31 @@ export const publicWireCorpusEvidenceSchema = z
     }
     if (corpus.verdict === "passed" && corpus.assertions.length === 0) {
       context.addIssue({ code: "custom", message: "Passing public-wire evidence requires assertions" });
+    }
+    if (
+      corpus.verdict === "passed" &&
+      corpus.beforeInventory.digest !== corpus.afterInventory.digest
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "A passing read-side corpus must leave the observed inventory unchanged",
+      });
+    }
+    if (corpus.retainedByteCleanup.chainsConsumed !== corpus.retainedByteCleanup.chainsIssued) {
+      context.addIssue({
+        code: "custom",
+        message: "A passing corpus must consume every continuation chain it issues",
+      });
+    }
+    if (
+      corpus.retainedByteCleanup.chainsIssued > 0 &&
+      corpus.retainedByteCleanup.replayAfterConsumptionRejected !==
+        corpus.retainedByteCleanup.chainsIssued
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Every consumed chain must prove single-use replay rejection",
+      });
     }
   });
 

@@ -327,6 +327,8 @@ export {
 } from "./installed-runtime/loopback-client.js";
 export {
   PUBLIC_WIRE_TOOL_NAMES,
+  READ_SIDE_CORPUS_ID,
+  READ_SIDE_SCENARIO_PLAN,
   PublicWireCorpusError,
   canonicalPublicWireCorpusManifest,
   createPublicWireCorpusManifest,
@@ -338,10 +340,15 @@ export {
   registerStatusPublicWireFragment,
   registerSubmitPublicWireFragment,
   runPublicWireCorpus,
+  runReadSideCorpus,
+  type CorpusInventoryEntry,
   type PublicWireCorpusManifest,
   type PublicWireCorpusResult,
   type PublicWireScenarioFragment,
   type PublicWireToolName,
+  type ReadSideCorpusOutcome,
+  type ReadSideScenarioName,
+  type RetainedByteCleanupReport,
 } from "./installed-runtime/public-wire-corpus.js";
 export {
   BridgeIdentityError,

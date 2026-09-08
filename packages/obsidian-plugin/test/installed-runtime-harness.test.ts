@@ -217,6 +217,28 @@ async function arrangeRun(
           "vault_change_set_submit",
           "vault_change_set_status",
         ],
+        corpus: {
+          corpusId: "discovery-reads-continuation",
+          seedManifestSha256: "c".repeat(64),
+          scenarioManifestSha256: "d".repeat(64),
+        },
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: "c".repeat(64), sizeBytes: 0 }],
+          digest: "e".repeat(64),
+        },
+        afterInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: "c".repeat(64), sizeBytes: 0 }],
+          digest: "e".repeat(64),
+        },
+        retainedByteCleanup: {
+          chainsIssued: 1,
+          chainsConsumed: 1,
+          replayAfterConsumptionRejected: 1,
+          bytesReconstructed: 0,
+          residualChains: 0,
+        },
         eventLog: [
           {
             sequence: 1,

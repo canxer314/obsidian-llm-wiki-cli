@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalPublicWireCorpusManifest,
   createPublicWireCorpusManifest,
+  READ_SIDE_CORPUS_ID,
+  READ_SIDE_SCENARIO_PLAN,
   registerHealthPublicWireFragment,
   runPublicWireCorpus,
 } from "../src/index.js";
@@ -35,6 +37,47 @@ describe("authoritative public-wire corpus manifest", () => {
         registerHealthPublicWireFragment(register);
       }),
     ).toThrow("exactly six tools");
+  });
+});
+
+describe("read-side corpus deterministic plan", () => {
+  it("names a closed discovery/read/continuation scenario program", () => {
+    expect(READ_SIDE_CORPUS_ID).toBe("discovery-reads-continuation");
+    expect([...READ_SIDE_SCENARIO_PLAN]).toEqual([
+      "discovery/empty-result",
+      "discovery/combined-graph",
+      "discovery/inventory-before",
+      "read/ordered-byte-exact-and-no-section-fallback",
+      "read/single-note-over-limit-refusal",
+      "read/multi-note-logical-grouping",
+      "continuation/framing-reconstructs-frozen-result",
+      "continuation/single-use-replay-rejected",
+      "continuation/never-issued-token-unavailable",
+      "discovery/inventory-after",
+    ]);
+  });
+
+  it("hashes to a stable deterministic scenario-manifest digest", () => {
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          corpusId: READ_SIDE_CORPUS_ID,
+          scenarios: [...READ_SIDE_SCENARIO_PLAN],
+        }),
+        "utf8",
+      )
+      .digest("hex");
+    expect(digest).toMatch(/^[a-f0-9]{64}$/u);
+    const recomputed = createHash("sha256")
+      .update(
+        JSON.stringify({
+          corpusId: READ_SIDE_CORPUS_ID,
+          scenarios: [...READ_SIDE_SCENARIO_PLAN],
+        }),
+        "utf8",
+      )
+      .digest("hex");
+    expect(recomputed).toBe(digest);
   });
 });
 

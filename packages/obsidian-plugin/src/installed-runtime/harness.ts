@@ -492,6 +492,7 @@ export async function runInstalledRuntimeHarness(
         endpoint: new URL(`http://127.0.0.1:${firstIdentity.port}/mcp`),
         expectedVaultId: firstIdentity.vaultId,
         fixtureSeed: state.vault.seedManifestSha256,
+        seedNotes: state.vault.seedNotes.map(({ path, content }) => ({ path, content })),
       });
     } catch (error) {
       failFromError("public_wire_corpus", error);
