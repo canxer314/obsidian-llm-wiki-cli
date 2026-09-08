@@ -1154,4 +1154,197 @@ describe("automation GitHub port", () => {
       expect(reviewPostCalls(execute)).toHaveLength(1);
     });
   });
+
+  describe("review-thread GraphQL reads route through the shared safe-read retry boundary", () => {
+    const transientFailure = () => new Error("network reset");
+    const rateLimitedFailure = (stderr: string): Error =>
+      Object.assign(new Error("gh exited"), { stderr });
+    const graphqlRead = (arguments_: readonly unknown[]) =>
+      arguments_[0] === "api" && arguments_[1] === "graphql";
+    const replyPost = (arguments_: readonly unknown[]) =>
+      arguments_.some((argument) =>
+        typeof argument === "string" && argument.endsWith("/pulls/220/comments/12345/replies"));
+    const replyPostCalls = (execute: ReturnType<typeof vi.fn>) =>
+      execute.mock.calls.filter(([, arguments_]) =>
+        Array.isArray(arguments_) && replyPost(arguments_));
+    const threadOutput = (hasNextPage = false) => JSON.stringify({
+      pageInfo: { hasNextPage },
+      nodes: [{
+        isResolved: false,
+        comments: {
+          pageInfo: { hasNextPage: false },
+          nodes: [{
+            id: "PRRC_1",
+            path: "src/safety.ts",
+            line: 4,
+            originalLine: null,
+            body: "Please fix this.",
+            author: { login: "maintainer" },
+          }],
+        },
+      }],
+    });
+
+    it("retries a transiently failing unresolved-thread GraphQL query before returning the threads", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        attempts += 1;
+        if (attempts === 1) throw transientFailure();
+        return { stdout: threadOutput(), stderr: "" };
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readUnresolvedReviewThreads(220)).resolves.toEqual([{
+        commentId: "PRRC_1",
+        path: "src/safety.ts",
+        line: 4,
+        author: "maintainer",
+        body: "Please fix this.",
+      }]);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+    });
+
+    it("retries a transiently failing reply databaseId GraphQL query before one reply POST", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) {
+          attempts += 1;
+          if (attempts === 1) throw transientFailure();
+          return { stdout: "12345\n", stderr: "" };
+        }
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.replyToReviewThread({ pullRequestNumber: 220, reply: { commentId: "PRRC_1", body: "Fixed." } });
+
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(replyPostCalls(execute)).toHaveLength(1);
+    });
+
+    it("exhausts the unresolved-thread GraphQL read budget and rethrows", async () => {
+      const execute = vi.fn(async () => { throw transientFailure(); });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readUnresolvedReviewThreads(220)).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(MAX_GITHUB_ATTEMPTS);
+      expect(waits).toEqual([...RETRY_DELAYS_MS]);
+    });
+
+    it("exhausts the reply databaseId GraphQL read budget without ever issuing the reply POST", async () => {
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) throw transientFailure();
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.replyToReviewThread({
+        pullRequestNumber: 220,
+        reply: { commentId: "PRRC_1", body: "Fixed." },
+      })).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(MAX_GITHUB_ATTEMPTS);
+      expect(waits).toEqual([...RETRY_DELAYS_MS]);
+      expect(replyPostCalls(execute)).toHaveLength(0);
+    });
+
+    it("performs one dedicated rate-limit wait for the unresolved-thread GraphQL read per the server hint", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (!graphqlRead(arguments_)) throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+        attempts += 1;
+        if (attempts === 1) throw rateLimitedFailure("HTTP 429 Retry-After: 90 seconds");
+        return { stdout: threadOutput(), stderr: "" };
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.readUnresolvedReviewThreads(220);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([90_000]);
+    });
+
+    it("defaults the reply databaseId rate-limit wait to the shared delay", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) {
+          attempts += 1;
+          if (attempts === 1) throw rateLimitedFailure("HTTP 403: API rate limit exceeded");
+          return { stdout: "12345\n", stderr: "" };
+        }
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.replyToReviewThread({ pullRequestNumber: 220, reply: { commentId: "PRRC_1", body: "Fixed." } });
+
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(waits).toEqual([DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS]);
+      expect(replyPostCalls(execute)).toHaveLength(1);
+    });
+
+    it("treats truncated review thread evidence as deterministic without any read retry", async () => {
+      const execute = vi.fn(async () => ({ stdout: threadOutput(true), stderr: "" }));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readUnresolvedReviewThreads(220)).rejects.toThrow("review thread evidence is truncated");
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+    });
+
+    it("silently drops a non-numeric review comment databaseId without a reply POST", async () => {
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) return { stdout: "PRRC_not_numeric\n", stderr: "" };
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.replyToReviewThread({ pullRequestNumber: 220, reply: { commentId: "PRRC_1", body: "Fixed." } });
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+      expect(replyPostCalls(execute)).toHaveLength(0);
+    });
+  });
 });

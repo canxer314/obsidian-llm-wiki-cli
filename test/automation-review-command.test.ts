@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createAutomationGithubPort } from "../.sandcastle/automation-github.js";
+import { MAX_GITHUB_ATTEMPTS, RETRY_DELAYS_MS } from "../.sandcastle/github-cli.js";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
 import { createSameSessionReviewExtractor } from "../.sandcastle/review-extraction.js";
 import { createReviewPublisher } from "../.sandcastle/review-publisher.js";
@@ -262,6 +263,165 @@ describe("review automation command", () => {
       expect(events).toEqual([
         "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`,
         `push:${revision}`, "add:agent:blocked", "blocked", "remove:agent:in-progress",
+      ]);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("publishes the review after a transiently failing unresolved-thread GraphQL read recovers", async () => {
+    const events: string[] = [];
+    const reviewer = vi.fn().mockResolvedValue({
+      summary: "Improved the branch.",
+      inlineComments: [],
+      replies: [{ commentId: "PRRC_1", body: "Fixed in the review commit." }],
+    });
+    const dependencies = ports(events, reviewer);
+    const threadOutput = JSON.stringify({
+      pageInfo: { hasNextPage: false },
+      nodes: [{
+        isResolved: false,
+        comments: {
+          pageInfo: { hasNextPage: false },
+          nodes: [{
+            id: "PRRC_1",
+            path: "src/safety.ts",
+            line: 4,
+            originalLine: null,
+            body: "Please fix this.",
+            author: { login: "maintainer" },
+          }],
+        },
+      }],
+    });
+    let threadReads = 0;
+    const execute = vi.fn(async () => {
+      threadReads += 1;
+      if (threadReads === 1) throw new Error("network reset");
+      return { stdout: threadOutput, stderr: "" };
+    });
+    const waits: number[] = [];
+    const github = createAutomationGithubPort({
+      execute,
+      waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+    });
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
+      ...dependencies,
+      github: { ...dependencies.github, readUnresolvedReviewThreads: github.readUnresolvedReviewThreads },
+    })).resolves.toEqual({ status: "reviewed", revision: improvedRevision, verdict: "improved" });
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+    expect(reviewer).toHaveBeenCalledWith(expect.objectContaining({
+      reviewThreads: [{ commentId: "PRRC_1", path: "src/safety.ts", line: 4, author: "maintainer", body: "Please fix this." }],
+    }));
+    expect(dependencies.github.publishReview).toHaveBeenCalledTimes(1);
+    expect(dependencies.github.markPullRequestReady).toHaveBeenCalledWith(220);
+    expect(dependencies.github.replyToReviewThread).toHaveBeenCalledWith(expect.objectContaining({ reply: { commentId: "PRRC_1", body: "Fixed in the review commit." } }));
+    expect(events).toEqual([
+      "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`,
+      `push:${revision}`, `review:${improvedRevision}`, "ready", "reply:PRRC_1", "remove:agent:in-progress",
+    ]);
+  });
+
+  it("maps an unresolved-thread GraphQL read budget exhaustion to a blocked review-execution", async () => {
+    const events: string[] = [];
+    const dependencies = ports(events);
+    // The re-review arrives on a branch that a prior attempt already improved;
+    // the retained revision must survive this blocked attempt untouched.
+    dependencies.github.readPullRequest.mockReset();
+    dependencies.github.readPullRequest
+      .mockResolvedValueOnce({ ...pullRequest(), headSha: improvedRevision })
+      .mockResolvedValueOnce({ ...pullRequest(["agent:review", "agent:in-progress"]), headSha: improvedRevision });
+    const execute = vi.fn(async () => { throw new Error("network reset"); });
+    const github = createAutomationGithubPort({
+      execute,
+      waitForRetry: async () => {},
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
+        ...dependencies,
+        github: { ...dependencies.github, readUnresolvedReviewThreads: github.readUnresolvedReviewThreads },
+        createJobId: () => "job-220",
+      })).resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
+
+      // The unresolved-thread GraphQL read exhausted the shared three-attempt
+      // budget before the reviewer or publisher ran, so the improved head is
+      // preserved and nothing is pushed or published again.
+      expect(execute.mock.calls.length).toBe(MAX_GITHUB_ATTEMPTS);
+      expect(dependencies.reviewer.review).not.toHaveBeenCalled();
+      expect(dependencies.checkout.withCheckout).not.toHaveBeenCalled();
+      expect(dependencies.publisher.prepare).not.toHaveBeenCalled();
+      expect(dependencies.publisher.publish).not.toHaveBeenCalled();
+      expect(dependencies.github.publishReview).not.toHaveBeenCalled();
+      expect(dependencies.github.markPullRequestReady).not.toHaveBeenCalled();
+      expect(dependencies.github.replyToReviewThread).not.toHaveBeenCalled();
+      expect(events).toEqual([
+        "add:agent:in-progress", "remove:agent:review",
+        "add:agent:blocked", "blocked", "remove:agent:in-progress",
+      ]);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("maps a reply databaseId GraphQL read budget exhaustion to a blocked review-execution after the review POST", async () => {
+    const events: string[] = [];
+    const reviewer = vi.fn().mockResolvedValue({
+      summary: "Improved the branch.",
+      inlineComments: [],
+      replies: [{ commentId: "PRRC_1", body: "Fixed in the review commit." }],
+    });
+    const dependencies = ports(events, reviewer);
+    const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+      if (arguments_[0] === "pr" && arguments_[1] === "view") {
+        return { stdout: `${improvedRevision}\n`, stderr: "" };
+      }
+      const endpoint = arguments_.find((argument): argument is string =>
+        typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+      if (endpoint?.endsWith("/files")) return { stdout: "[]", stderr: "" };
+      if (endpoint?.endsWith("/reviews")) return { stdout: "", stderr: "" };
+      if (arguments_[0] === "api" && arguments_[1] === "graphql") throw new Error("network reset");
+      throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+    });
+    const github = createAutomationGithubPort({
+      execute,
+      waitForRetry: async () => {},
+      headSettleMilliseconds: 0,
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
+        ...dependencies,
+        github: {
+          ...dependencies.github,
+          publishReview: github.publishReview,
+          replyToReviewThread: github.replyToReviewThread,
+        },
+        createJobId: () => "job-220",
+      })).resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
+
+      // The review was already published once and the PR marked ready before
+      // the reply's databaseId GraphQL read exhausted the shared budget, so
+      // the reply POST never fired and nothing was replayed.
+      const reviewPosts = execute.mock.calls.filter(([, arguments_]) =>
+        Array.isArray(arguments_)
+        && arguments_.some((argument) => typeof argument === "string" && argument.endsWith("/pulls/220/reviews")));
+      const replyPosts = execute.mock.calls.filter(([, arguments_]) =>
+        Array.isArray(arguments_)
+        && arguments_.some((argument) => typeof argument === "string" && argument.endsWith("/replies")));
+      expect(reviewPosts).toHaveLength(1);
+      expect(replyPosts).toHaveLength(0);
+      expect(execute.mock.calls.length).toBe(6);
+      expect(dependencies.publisher.publish).toHaveBeenCalledTimes(1);
+      expect(dependencies.github.markPullRequestReady).toHaveBeenCalledWith(220);
+      expect(events).toEqual([
+        "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`,
+        `push:${revision}`, "ready", "add:agent:blocked", "blocked", "remove:agent:in-progress",
       ]);
     } finally {
       errorLog.mockRestore();
