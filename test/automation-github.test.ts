@@ -6,6 +6,11 @@ import {
   createAutomationDispatchGithubPort,
   createAutomationGithubPort,
 } from "../.sandcastle/automation-github.js";
+import {
+  DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS,
+  MAX_GITHUB_ATTEMPTS,
+  RETRY_DELAYS_MS,
+} from "../.sandcastle/github-cli.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const HEAD_SETTLE_ATTEMPTS = 3;
@@ -890,5 +895,496 @@ describe("automation GitHub port", () => {
     expect(body).toContain("job-224");
     expect(body).not.toContain("secret");
     expect(body).not.toContain("push failed");
+  });
+
+  describe("safe GitHub read retries through the shared boundary", () => {
+    it("retries a transiently failing issue list read with the existing backoff", async () => {
+      const execute = vi.fn()
+        .mockRejectedValueOnce(new Error("network reset"))
+        .mockResolvedValueOnce({ stdout: "3\n", stderr: "" });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.countOpenArchitectureReviewProposals()).resolves.toBe(3);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([100]);
+    });
+
+    it("performs one dedicated rate-limit wait for a transiently rate-limited REST GET", async () => {
+      const rateLimited = Object.assign(new Error("gh exited"), {
+        stderr: "HTTP 403: API rate limit exceeded",
+      });
+      const execute = vi.fn()
+        .mockRejectedValueOnce(rateLimited)
+        .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readBaseRevision()).resolves.toBe(revision);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([60_000]);
+    });
+
+    it("executes a POST label write exactly once without retrying a transient failure", async () => {
+      const execute = vi.fn().mockRejectedValue(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.addIssueLabel(221, "agent:implement")).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+    });
+
+    it("executes a PATCH child close exactly once without retrying a transient failure", async () => {
+      const execute = vi.fn()
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockRejectedValueOnce(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.closeImplementedChild({ specNumber: 226, childNumber: 301, revision }))
+        .rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([]);
+    });
+
+    it("executes a transiently failing child-close comment POST exactly once without retrying", async () => {
+      // The revision comment is an implicit POST (gh infers POST from the -f
+      // body fields), not a retry-safe GET, so a transient failure must not
+      // replay it into duplicate "Implemented in" comments.
+      const execute = vi.fn().mockRejectedValue(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.closeImplementedChild({ specNumber: 226, childNumber: 301, revision }))
+        .rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+    });
+
+    it("executes a transiently failing spec-split sub-issue POST exactly once without retrying", async () => {
+      // The sub-issue relationship and dependency writes set the method through
+      // the -X short flag; they are writes and must stay single-shot.
+      const execute = vi.fn()
+        .mockResolvedValueOnce({ stdout: "https://example.test/issues/301\n", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "3010\n", stderr: "" })
+        .mockRejectedValue(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.publishSpecSplit({
+        specNumber: 223,
+        slices: [{ title: "Prepare vertical path", whatToBuild: "Build the path.", acceptanceCriteria: ["Works"] }],
+      })).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(waits).toEqual([]);
+    });
+  });
+
+  describe("publishReview routes its reads through the shared safe-read retry boundary", () => {
+    const transientFailure = () => new Error("network reset");
+    const rateLimitedFailure = (stderr: string): Error =>
+      Object.assign(new Error("gh exited"), { stderr });
+    const reviewPostCalls = (execute: ReturnType<typeof vi.fn>) =>
+      execute.mock.calls.filter(([, arguments_]) =>
+        Array.isArray(arguments_)
+        && arguments_.some((argument) =>
+          typeof argument === "string" && argument.endsWith("/pulls/220/reviews")));
+    const emptyReview = { summary: "Looks good.", inlineComments: [], replies: [] };
+    const headView = (head: string) => ({ stdout: `${head}\n`, stderr: "" });
+
+    it("retries a transiently failing changed-files GET and still publishes the review exactly once", async () => {
+      let postedBody: unknown;
+      const changedFiles = JSON.stringify([{
+        filename: "src/safety.ts",
+        patch: "@@ -10,3 +10,5 @@\n export function shield() {\n+  return true;\n }",
+      }]);
+      let fileAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) {
+          fileAttempts += 1;
+          if (fileAttempts === 1) throw transientFailure();
+          return { stdout: changedFiles, stderr: "" };
+        }
+        if (endpoint?.endsWith("/reviews")) {
+          const inputIndex = arguments_.indexOf("--input");
+          postedBody = JSON.parse(await readFile(arguments_[inputIndex + 1]!, "utf8"));
+          return { stdout: "", stderr: "" };
+        }
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.publishReview({
+        pullRequestNumber: 220,
+        revision,
+        review: {
+          summary: "One problem.",
+          inlineComments: [{ path: "src/safety.ts", line: 11, body: "Return early." }],
+          replies: [],
+        },
+      });
+
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(postedBody).toMatchObject({
+        commit_id: revision,
+        event: "COMMENT",
+        comments: [{ path: "src/safety.ts", line: 11, side: "RIGHT", body: "Return early." }],
+      });
+      expect(reviewPostCalls(execute)).toHaveLength(1);
+      expect(execute).toHaveBeenCalledTimes(4);
+    });
+
+    it("absorbs a transient pr view failure before settling a briefly stale head", async () => {
+      let viewAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") {
+          viewAttempts += 1;
+          if (viewAttempts === 1) throw transientFailure();
+          if (viewAttempts === 2) return headView("b".repeat(40));
+          return headView(revision);
+        }
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) return { stdout: "[]", stderr: "" };
+        if (endpoint?.endsWith("/reviews")) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+        headSettleMilliseconds: 0,
+      });
+
+      await github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview });
+
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(reviewPostCalls(execute)).toHaveLength(1);
+      expect(execute).toHaveBeenCalledTimes(5);
+    });
+
+    it("still refuses publication when the head never converges after the transient read recovers", async () => {
+      let viewAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") {
+          viewAttempts += 1;
+          if (viewAttempts === 1) throw transientFailure();
+          return headView("b".repeat(40));
+        }
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+        headSettleMilliseconds: 0,
+      });
+
+      await expect(github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview }))
+        .rejects.toThrow("Pull Request head changed before review publication");
+
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(execute).toHaveBeenCalledTimes(1 + HEAD_SETTLE_ATTEMPTS);
+      expect(reviewPostCalls(execute)).toHaveLength(0);
+    });
+
+    it("exhausts the changed-files read budget without ever calling the review POST", async () => {
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) throw transientFailure();
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview }))
+        .rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(1 + MAX_GITHUB_ATTEMPTS);
+      expect(waits).toEqual([...RETRY_DELAYS_MS]);
+      expect(reviewPostCalls(execute)).toHaveLength(0);
+    });
+
+    it("honors a server Retry-After hint on the changed-files read with one dedicated wait", async () => {
+      let fileAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) {
+          fileAttempts += 1;
+          if (fileAttempts === 1) throw rateLimitedFailure("HTTP 429 Retry-After: 90 seconds");
+          return { stdout: "[]", stderr: "" };
+        }
+        if (endpoint?.endsWith("/reviews")) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview });
+
+      expect(waits).toEqual([90_000]);
+      expect(reviewPostCalls(execute)).toHaveLength(1);
+    });
+
+    it("defaults a hint-less rate-limit wait on the changed-files read to the shared delay", async () => {
+      let fileAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) {
+          fileAttempts += 1;
+          if (fileAttempts === 1) throw rateLimitedFailure("HTTP 403: API rate limit exceeded");
+          return { stdout: "[]", stderr: "" };
+        }
+        if (endpoint?.endsWith("/reviews")) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview });
+
+      expect(waits).toEqual([DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS]);
+      expect(reviewPostCalls(execute)).toHaveLength(1);
+    });
+  });
+
+  describe("review-thread GraphQL reads route through the shared safe-read retry boundary", () => {
+    const transientFailure = () => new Error("network reset");
+    const rateLimitedFailure = (stderr: string): Error =>
+      Object.assign(new Error("gh exited"), { stderr });
+    const graphqlRead = (arguments_: readonly unknown[]) =>
+      arguments_[0] === "api" && arguments_[1] === "graphql";
+    const replyPost = (arguments_: readonly unknown[]) =>
+      arguments_.some((argument) =>
+        typeof argument === "string" && argument.endsWith("/pulls/220/comments/12345/replies"));
+    const replyPostCalls = (execute: ReturnType<typeof vi.fn>) =>
+      execute.mock.calls.filter(([, arguments_]) =>
+        Array.isArray(arguments_) && replyPost(arguments_));
+    const threadOutput = (hasNextPage = false) => JSON.stringify({
+      pageInfo: { hasNextPage },
+      nodes: [{
+        isResolved: false,
+        comments: {
+          pageInfo: { hasNextPage: false },
+          nodes: [{
+            id: "PRRC_1",
+            path: "src/safety.ts",
+            line: 4,
+            originalLine: null,
+            body: "Please fix this.",
+            author: { login: "maintainer" },
+          }],
+        },
+      }],
+    });
+
+    it("retries a transiently failing unresolved-thread GraphQL query before returning the threads", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        attempts += 1;
+        if (attempts === 1) throw transientFailure();
+        return { stdout: threadOutput(), stderr: "" };
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readUnresolvedReviewThreads(220)).resolves.toEqual([{
+        commentId: "PRRC_1",
+        path: "src/safety.ts",
+        line: 4,
+        author: "maintainer",
+        body: "Please fix this.",
+      }]);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+    });
+
+    it("retries a transiently failing reply databaseId GraphQL query before one reply POST", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) {
+          attempts += 1;
+          if (attempts === 1) throw transientFailure();
+          return { stdout: "12345\n", stderr: "" };
+        }
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.replyToReviewThread({ pullRequestNumber: 220, reply: { commentId: "PRRC_1", body: "Fixed." } });
+
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(replyPostCalls(execute)).toHaveLength(1);
+    });
+
+    it("exhausts the unresolved-thread GraphQL read budget and rethrows", async () => {
+      const execute = vi.fn(async () => { throw transientFailure(); });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readUnresolvedReviewThreads(220)).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(MAX_GITHUB_ATTEMPTS);
+      expect(waits).toEqual([...RETRY_DELAYS_MS]);
+    });
+
+    it("exhausts the reply databaseId GraphQL read budget without ever issuing the reply POST", async () => {
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) throw transientFailure();
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.replyToReviewThread({
+        pullRequestNumber: 220,
+        reply: { commentId: "PRRC_1", body: "Fixed." },
+      })).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(MAX_GITHUB_ATTEMPTS);
+      expect(waits).toEqual([...RETRY_DELAYS_MS]);
+      expect(replyPostCalls(execute)).toHaveLength(0);
+    });
+
+    it("performs one dedicated rate-limit wait for the unresolved-thread GraphQL read per the server hint", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (!graphqlRead(arguments_)) throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+        attempts += 1;
+        if (attempts === 1) throw rateLimitedFailure("HTTP 429 Retry-After: 90 seconds");
+        return { stdout: threadOutput(), stderr: "" };
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.readUnresolvedReviewThreads(220);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([90_000]);
+    });
+
+    it("defaults the reply databaseId rate-limit wait to the shared delay", async () => {
+      let attempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) {
+          attempts += 1;
+          if (attempts === 1) throw rateLimitedFailure("HTTP 403: API rate limit exceeded");
+          return { stdout: "12345\n", stderr: "" };
+        }
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.replyToReviewThread({ pullRequestNumber: 220, reply: { commentId: "PRRC_1", body: "Fixed." } });
+
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(waits).toEqual([DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS]);
+      expect(replyPostCalls(execute)).toHaveLength(1);
+    });
+
+    it("treats truncated review thread evidence as deterministic without any read retry", async () => {
+      const execute = vi.fn(async () => ({ stdout: threadOutput(true), stderr: "" }));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readUnresolvedReviewThreads(220)).rejects.toThrow("review thread evidence is truncated");
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+    });
+
+    it("silently drops a non-numeric review comment databaseId without a reply POST", async () => {
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (graphqlRead(arguments_)) return { stdout: "PRRC_not_numeric\n", stderr: "" };
+        if (replyPost(arguments_)) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.replyToReviewThread({ pullRequestNumber: 220, reply: { commentId: "PRRC_1", body: "Fixed." } });
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+      expect(replyPostCalls(execute)).toHaveLength(0);
+    });
   });
 });
