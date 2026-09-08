@@ -1644,6 +1644,16 @@ export class ChangeSetService {
   #writeTail: Promise<void> = Promise.resolve();
   #controlTail: Promise<void> = Promise.resolve();
   #recoveryBlocked = false;
+  /**
+   * Recovery Journal answers the registry could not give at startup (issue
+   * #195, spec A-34/A-35): when a durable frame references a Change Set the
+   * registry can neither produce nor prove expired, the registry is
+   * missing/truncated and startup recovery fails closed. While such a reference
+   * is unresolved, a status lookup for that exact key/identity must not
+   * degrade to an ordinary `unknown` — the lookup answers with the unproven
+   * blocked disposition instead.
+   */
+  #unresolvedRecoveryAnswers: { submissionKey: string; changeSetId: string }[] = [];
   #dequeuePaused = false;
   #admissionGate: ChangeSetGate | null = null;
   #currentExecutionId: string | null = null;
@@ -1751,6 +1761,23 @@ export class ChangeSetService {
       update(entry);
       await this.#save(nextState);
     });
+  }
+
+  /** Remember a journal reference the registry could not answer (see field note). */
+  #noteUnresolvedRecoveryAnswer(frame: RecoveryJournalFrame): void {
+    const answer = {
+      submissionKey: frame.input.submissionKey,
+      changeSetId: frame.changeSetId,
+    };
+    if (
+      !this.#unresolvedRecoveryAnswers.some(
+        (candidate) =>
+          candidate.submissionKey === answer.submissionKey &&
+          candidate.changeSetId === answer.changeSetId,
+      )
+    ) {
+      this.#unresolvedRecoveryAnswers.push(answer);
+    }
   }
 
   async #markUnproven(entry: ChangeSetRegistryEntry): Promise<void> {
@@ -2010,6 +2037,7 @@ export class ChangeSetService {
         (candidate) => candidate.changeSetId === frame.changeSetId,
       );
       if (expired && frame.phase !== "PREPARED") return;
+      this.#noteUnresolvedRecoveryAnswer(frame);
       throw new Error("Recovery Journal does not match the Change Set registry");
     }
     if (
@@ -2285,7 +2313,11 @@ export class ChangeSetService {
       entry.execution.input,
       entry.execution.boundMoves,
     );
-    if (!checked.accepted || JSON.stringify(checked.preview) !== JSON.stringify(frozenPreview)) {
+    if (
+      !checked.accepted ||
+      JSON.stringify(canonicalize(checked.preview)) !==
+        JSON.stringify(canonicalize(frozenPreview))
+    ) {
       await reject(checked.failure);
       return;
     }
@@ -2576,12 +2608,23 @@ export class ChangeSetService {
             requireSemanticMatch: projectedOutcome === "changed",
           };
         });
-      await execution.awaitSemanticEvidence?.(semanticRequest);
+      const semanticWait = execution.awaitSemanticEvidence?.(semanticRequest);
+      // A process termination here blocks inside the semantic-evidence wait
+      // (a required process-crash corpus boundary for issue #187): the on-disk
+      // mutations are complete and durable, but the success barrier has not
+      // converged and `COMMITTED` is not yet durable.
+      await this.#crash("during_semantic_evidence");
+      await semanticWait;
       await this.#crash("after_semantic_evidence");
       // The move barrier always runs, even when the evidence tracker already
       // published a snapshot: only it proves the reference closure resolved
       // to the destination.
-      await execution.publishSearchSnapshot(snapshotTargets, frame.successBarrier);
+      const successPublication = execution.publishSearchSnapshot(
+        snapshotTargets,
+        frame.successBarrier,
+      );
+      await this.#crash("during_success_barrier");
+      await successPublication;
       for (const file of files) {
         if (!(await executionPathMatches(execution, file.path, file.expectedAfter))) {
           throw new Error("Final file evidence changed during the success barrier");
@@ -2635,7 +2678,15 @@ export class ChangeSetService {
     this.#currentExecutionId = entry.changeSetId;
     this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
     const checked = await preflight(this.#options.dataSource, plan.input);
-    if (!checked.accepted || JSON.stringify(checked.preview) !== JSON.stringify(plan.preview)) {
+    // The immutable preview is compared canonically: the registry round-trips
+    // through JSON and the contract parser, which may order derived-effect
+    // members differently than the raw preflight object (a real process-crash
+    // restart exposed the order-sensitive comparison).
+    if (
+      !checked.accepted ||
+      JSON.stringify(canonicalize(checked.preview)) !==
+        JSON.stringify(canonicalize(plan.preview))
+    ) {
       await this.#updateEntry(entry.changeSetId, (current) => {
         current.changeSet = {
           changeSetId: current.changeSetId,
@@ -2926,10 +2977,17 @@ export class ChangeSetService {
         },
       );
       if (hasSemanticOperations) {
-        await execution.awaitSemanticEvidence?.(semanticRequest);
+        const semanticWait = execution.awaitSemanticEvidence?.(semanticRequest);
+        // Process termination here blocks inside the semantic-evidence wait:
+        // the on-disk mutations are complete and durable, but the success
+        // barrier has not converged and `COMMITTED` is not yet durable.
+        await this.#crash("during_semantic_evidence");
+        await semanticWait;
         await this.#crash("after_semantic_evidence");
         if (execution.semanticEvidencePublishesSnapshot !== true) {
-          await execution.publishSearchSnapshot(snapshotTargets);
+          const successPublication = execution.publishSearchSnapshot(snapshotTargets);
+          await this.#crash("during_success_barrier");
+          await successPublication;
         }
         for (const mutation of mutations) {
           if (mutation.kind !== "trash") continue;
@@ -2939,7 +2997,12 @@ export class ChangeSetService {
           }
         }
       } else {
-        await execution.publishSearchSnapshot(snapshotTargets);
+        const successPublication = execution.publishSearchSnapshot(snapshotTargets);
+        // create_note and the other Markdown mutation kinds prove success
+        // through the successor Search Snapshot; a termination here parks
+        // inside that success-barrier wait before `COMMITTED` is durable.
+        await this.#crash("during_success_barrier");
+        await successPublication;
       }
       const finalPaths: Extract<ChangeSetRecord, { state: "intent_applied" }>["paths"] = [];
       for (const projected of plan.preview.paths) {
@@ -3033,11 +3096,30 @@ export class ChangeSetService {
 
   async #expireRecords(): Promise<void> {
     const now = this.#options.now();
-    const expired = this.#state.entries.filter((entry) => entry.expiresAt <= now);
+    // A record past its retention boundary is only expired once nothing active
+    // can still reference it (issue #195, spec A-43): with an execution adapter
+    // configured, an entry whose execution never reached a terminal phase is
+    // still referenced by the live queue, an in-flight execution, or a
+    // Recovery Journal frame startup recovery must answer. Expiring it would
+    // race that reference and degrade a still-required recovery result, so the
+    // entry is retained until its execution goes terminal. Without an execution
+    // adapter no execution can ever begin, so queued entries expire normally.
+    const expired = this.#state.entries.filter(
+      (entry) =>
+        entry.expiresAt <= now &&
+        (this.#options.execution === undefined ||
+          entry.execution === undefined ||
+          entry.execution.phase === "terminal"),
+    );
     if (expired.length === 0) return;
     const existingKeys = new Set(this.#state.tombstones.map(({ submissionKey }) => submissionKey));
+    const retained = (entry: ChangeSetRegistryEntry): boolean =>
+      entry.expiresAt > now ||
+      (this.#options.execution !== undefined &&
+        entry.execution !== undefined &&
+        entry.execution.phase !== "terminal");
     const nextState = structuredClone(this.#state);
-    nextState.entries = nextState.entries.filter((entry) => entry.expiresAt > now);
+    nextState.entries = nextState.entries.filter(retained);
     for (const entry of expired) {
       if (!existingKeys.has(entry.submissionKey)) {
         nextState.tombstones.push({
@@ -3218,6 +3300,16 @@ export class ChangeSetService {
         lookup: "found",
         changeSet: entry.changeSet,
         vault: requestState.vault,
+      });
+    }
+    // A lookup the Recovery Journal still requires an answer for must not
+    // degrade to an ordinary `unknown`/`expired` while the registry that
+    // should hold the record is missing or truncated (issue #195, spec A-43):
+    // answer with the unproven blocked disposition instead.
+    if (this.#unresolvedRecoveryAnswers.some(matches)) {
+      return parseChangeSetStatusResult({
+        lookup: "operationally_blocked",
+        gate: { code: "recovery_blocked" },
       });
     }
     return parseChangeSetStatusResult({
