@@ -135,4 +135,52 @@ describe("Sandcastle Implementer session adapter", () => {
     expect(request.prompt).toContain("git push origin sandcastle/issue-103");
     expect(request.prompt).toContain("Closes #103");
   });
+
+  it("inspects earlier children and forbids resetting the shared branch in a Spec-child recovery prompt", async () => {
+    const baseline = "a".repeat(40);
+    const runAgent = vi.fn().mockResolvedValue({
+      branch: "sandcastle/spec-226",
+      commits: [],
+    });
+    const session = createSandcastleImplementerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: { sandbox: { onSandboxReady: [] } },
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    await session.run({
+      model: "implementer-model",
+      branch: "sandcastle/spec-226",
+      plan,
+      checkoutPath: "/safe/disposable-checkout",
+      parentSpec: { number: 226 },
+      recovery: { baseline },
+    });
+
+    const request = runAgent.mock.calls[0]![0];
+    // The Spec-child recovery prompt identifies the child of the Spec, the
+    // frozen shared-branch baseline, and the durable state to preserve:
+    // earlier child implementations, current local commits, the remote shared
+    // branch, and the single existing "Part of #226" Draft Pull Request.
+    expect(request.prompt).toContain("child #103 of Spec #226");
+    expect(request.prompt).toContain("shared accumulating branch sandcastle/spec-226");
+    expect(request.prompt).toContain(`frozen shared-branch baseline ${baseline}`);
+    expect(request.prompt).toContain("earlier child implementations");
+    expect(request.prompt).toContain("git log sandcastle/spec-226");
+    expect(request.prompt).toContain("git fetch origin sandcastle/spec-226");
+    expect(request.prompt).toContain("gh pr list --head sandcastle/spec-226");
+    expect(request.prompt).toContain("Part of #226");
+    expect(request.prompt).toContain("Never reset the local branch to the remote branch");
+    expect(request.prompt).toContain("never rebase");
+    expect(request.prompt).toContain("never force-push");
+    expect(request.prompt).toContain("never merge unknown concurrent work");
+    expect(request.prompt).toContain("never create a second Pull Request");
+    // The recovery prompt must not instruct the Agent to reset the local
+    // branch to origin/sandcastle/spec-226: that would discard a valid
+    // current-child commit left by the interrupted attempt.
+    expect(request.prompt).not.toContain("git checkout -B sandcastle/spec-226 origin/sandcastle/spec-226");
+    expect(request.prompt).not.toContain("Closes #103");
+    expect(request.prompt).toContain("git push origin sandcastle/spec-226");
+  });
 });

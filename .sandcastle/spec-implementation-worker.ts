@@ -1,3 +1,4 @@
+import { implementSpecChild } from "./implementer.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { planIssue } from "./planner.ts";
 import { createSandcastlePlannerSession } from "./planner-session.ts";
@@ -34,19 +35,18 @@ const implementerSession = createSandcastleImplementerSession({
   sandbox: startup.sandbox,
   hooks: sandboxHooksFor("implementer"),
 });
-const result = await implementerSession.run({
-  model: implementerModel,
-  branch,
+// The Spec child runs through the durable Implementer path (#459): branch
+// coordination freezes the shared accumulating branch head (or the Spec's
+// authorized base revision) before attempt 1, recovery reconciles durable
+// branch state between attempts, and the emitted headSha is read from the
+// durable named ref — never from a single invocation's commit list.
+const result = await implementSpecChild({
   plan,
+  model: implementerModel,
+  session: implementerSession,
+  specNumber: Number(specNumber),
+  branch,
+  baseRevision,
   checkoutPath,
-  parentSpec: { number: Number(specNumber) },
 });
-if (result.branch !== branch) {
-  throw new Error(`Implementer used branch ${result.branch}; expected ${branch}`);
-}
-const headSha = result.commits.at(-1)?.sha;
-if (headSha === undefined) throw new Error("Implementer did not create a commit");
-if (headSha === baseRevision) {
-  throw new Error("Implementer did not advance the authorized base revision");
-}
-console.log(JSON.stringify({ branch, headSha }));
+console.log(JSON.stringify({ branch: result.branch, headSha: result.headSha }));
