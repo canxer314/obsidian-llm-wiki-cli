@@ -8,6 +8,7 @@
     "build": "node esbuild.config.mjs",
     "release:assemble": "node dist/release-assemble.mjs",
     "release:verify": "node dist/release-verify.mjs",
+    "performance:fixture": "npm run build && node dist/performance-fixture.mjs",
     "smoke:installed-runtime": "npm run build && node dist/installed-runtime-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run test"
