@@ -232,8 +232,16 @@ async function submitAndDiscardUnusableResponse(
     if (partial.structuredContent !== undefined) {
       throw new ChangeSetSubmissionCorpusError("Truncated response carried structured content");
     }
+    const partialText = partial.content?.[0];
+    const partialTextValue =
+      typeof partialText === "object" &&
+      partialText !== null &&
+      "text" in partialText &&
+      typeof partialText.text === "string"
+        ? partialText.text
+        : "";
     try {
-      JSON.parse(partial.content[0]?.text ?? "");
+      JSON.parse(partialTextValue);
       throw new ChangeSetSubmissionCorpusError("truncated response was not refused");
     } catch (error) {
       if (error instanceof ChangeSetSubmissionCorpusError) throw error;

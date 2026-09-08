@@ -17,6 +17,7 @@ import {
   runInstalledRuntimeHarness,
   TEST_VAULT_DIRECTORY_PREFIX,
   type BridgeHealthState,
+  type GateIsolationOutcome,
   type InstalledRuntimeHarnessOptions,
   type LoopbackMcpClient,
   type ObsidianProcessControl,
@@ -346,10 +347,86 @@ async function arrangeRun(
         assertions: ["stubbed-change-set-replay"],
       };
     },
+    runGateIsolationCorpus: async ({ record, assertion }) => {
+      record("assertion", "stubbed-gate-isolation-began", {
+        corpusId: "per-vault-gate-isolation-proof",
+      });
+      record("cleanup", "stubbed-gate-isolation-residual", {});
+      assertion("stubbed-gate-isolation-corpus");
+      return stubGateIsolationOutcome();
+    },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 2_000 },
     ...overrides,
   };
   return { root, candidate, options };
+}
+
+function stubGateIsolationOutcome(): GateIsolationOutcome {
+  const entry = { path: "Notes/Welcome.md", sha256: "c".repeat(64), sizeBytes: 0 };
+  return {
+    scenarioManifestSha256: "a".repeat(64),
+    vaultIdSha256s: { "vault-a": "b".repeat(64), "vault-b": "b".repeat(64) },
+    beforeInventories: { "vault-a": [entry], "vault-b": [entry] },
+    afterInventories: { "vault-a": [entry], "vault-b": [entry] },
+    submissions: [
+      {
+        vaultLabel: "vault-a",
+        scenario: "isolation/shared-key-independent-registries",
+        submissionKeySha256: "d".repeat(64),
+        changeSetId: "change-set-a",
+        state: "in_progress",
+        historicalGate: null,
+      },
+      {
+        vaultLabel: "vault-b",
+        scenario: "isolation/shared-key-independent-registries",
+        submissionKeySha256: "d".repeat(64),
+        changeSetId: "change-set-b",
+        state: "in_progress",
+        historicalGate: null,
+      },
+    ],
+    isolation: {
+      sharedKeyIndependentRegistries: true,
+      distinctChangeSetIds: true,
+      crossVaultLookupRejected: true,
+      queuesIndependent: true,
+    },
+    recoveryBlocked: {
+      boundDispositions: 2,
+      replayAfterRecovery: 1,
+      conflictingReuseRejected: 1,
+      freshKeyRenewed: 1,
+      otherGatesLeftUnbound: 2,
+    },
+    manualPause: {
+      drainedInFlightToTrustworthyEnd: true,
+      fifoRetained: true,
+      newUnboundRejected: 1,
+      observationalContentAvailable: true,
+    },
+    incompatible: {
+      registryInspected: 0,
+      submissionKeysBound: 0,
+      compatibleSessionUnaffected: true,
+    },
+    gateHistory: [
+      {
+        sequence: 1,
+        vaultLabel: "vault-a",
+        scenario: "stubbed-gate-isolation",
+        outcome: "observed",
+        effectiveGate: null,
+        recoveryState: "none",
+        writeState: "writable",
+      },
+    ],
+    residualCleanup: {
+      "vault-a": { recoveryState: "none", writeGate: "open", writeState: "writable" },
+      "vault-b": { recoveryState: "none", writeGate: "open", writeState: "writable" },
+    },
+    assertions: ["stubbed-gate-isolation-corpus"],
+  };
 }
 
 describe("installed-runtime harness orchestration", () => {
@@ -383,6 +460,9 @@ describe("installed-runtime harness orchestration", () => {
     expect(evidence.changeSetCorpus?.verdict).toBe("passed");
     expect(evidence.changeSetCorpus?.corpusId).toBe("change-set-submission-proof");
     expect(evidence.changeSetCorpus?.replay.keysReplayed).toBeGreaterThan(0);
+    expect(evidence.gateIsolationCorpus?.verdict).toBe("passed");
+    expect(evidence.gateIsolationCorpus?.corpusId).toBe("per-vault-gate-isolation-proof");
+    expect(evidence.gateIsolationCorpus?.vaults).toHaveLength(2);
     expect(evidence.cleanup).toEqual({ attempted: true, residualPaths: [] });
 
     // The generated roots are gone and nothing private leaked into evidence.
@@ -642,6 +722,24 @@ describe("installed-runtime harness failure projection", () => {
     const result = await runInstalledRuntimeHarness(options);
     expect(result.verdict).toBe("invalid");
     expect(result.failure).toMatchObject({ stage: "inventory_before", code: "inventory_failed" });
+  });
+
+  it("records failed evidence when the gate-isolation corpus fails", async () => {
+    const { root, options } = await arrangeRun("run-gate-isolation-fails", {
+      runGateIsolationCorpus: async () => {
+        throw new Error("gate-isolation corpus failed");
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({
+      stage: "gate_isolation_corpus",
+      code: "gate_isolation_corpus_failed",
+    });
+    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    expect(evidence.verdict).toBe("failed");
+    expect(evidence.gateIsolationCorpus).toBeNull();
+    expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 
   it("never overwrites an existing evidence record", async () => {

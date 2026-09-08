@@ -86,6 +86,37 @@ evidence is proven across a real process restart. Only digest-only per-key
 proof records, digests of the wire-observed seed inventories, and the idle
 recovery/queue/write-gate report reach the evidence envelope.
 
+The gate-and-isolation corpus (issue #177) proves the per-Managed-Vault gate
+algebra of the same six-tool contract through two real loopback Bridges — two
+dedicated generated test Vaults that progress independently. It registers a
+closed `per-vault-gate-isolation-proof` corpus identity and runs one
+deterministic ordered scenario program over two concurrent Vault sessions plus
+a protocol-incompatible client: the same Submission Key and identical request
+register independent Change Sets in each Vault and a key bound in one Vault is
+never visible to the other; simultaneous gate conditions project exactly one
+effective gate in the fixed precedence order (`recovery_blocked` >
+`recovery_in_progress` > `writes_paused`/`upgrade_in_progress`, with
+session-level `incompatible_protocol` layered on top) and every public tool
+uses the contract-prescribed result branch, Submission Key consequence, and
+MCP `isError` value; a `recovery_blocked` submission atomically binds and
+records the historical `intent_not_applied` disposition, replays it after
+recovery, and requires a fresh Submission Key for renewed intent while other
+gate rows leave blocked unbound submissions unbound; manual pause drains the
+in-flight Change Set to a trustworthy end, retains queued FIFO order, rejects
+new unbound submissions, and keeps health/discovery/reads/status/continue
+available while writes remain gated; gate, pause, queue, and recovery
+transitions in one Managed Vault leave the other Vault's health, queue, and
+results independent; and the protocol-incompatible client gets
+`incompatible_protocol` operational blocks on the content tools and on
+submission/status without inspecting the Change Set registry and without
+binding a new Submission Key. Only digest-only per-Vault seed inventories, the
+wire-observed gate-history digest, per-key proof digests, and a residual-cleanup
+report reach the evidence envelope. The corpus runs through a caller-supplied
+seam in the harness (a self-contained two-Vault scenario over the same
+process-control, candidate-install, and real loopback MCP seams); when the seam
+is absent the harness records no gate-isolation block and the passing verdict
+accepts its absence.
+
 ## Scenario seams
 
 Later lifecycle tickets inject behavior through `InstalledRuntimeHarnessOptions`

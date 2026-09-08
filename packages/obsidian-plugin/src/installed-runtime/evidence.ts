@@ -345,6 +345,158 @@ const changeSetCorpusEvidenceSchema = z
     }
   });
 
+const gateIsolationVaultEvidenceSchema = z
+  .object({
+    label: z.enum(["vault-a", "vault-b"]),
+    /** Digest of the Vault identity; the raw identity is never recorded. */
+    vaultIdSha256: sha256Schema,
+    beforeInventory: corpusInventorySchema,
+    afterInventory: corpusInventorySchema,
+  })
+  .strict();
+
+/** One wire-observed effective-gate transition (issue #177). */
+const gateHistoryEntrySchema = z
+  .object({
+    sequence: z.number().int().positive(),
+    vaultLabel: z.enum(["vault-a", "vault-b", "incompatible-a"]),
+    scenario: z.string().min(1),
+    outcome: z.enum(["observed", "incompatible"]),
+    effectiveGate: z.string().min(1).nullable(),
+    recoveryState: z.enum(["none", "in_progress", "blocked"]).nullable(),
+    writeState: z.enum(["writable", "pausing", "paused"]).nullable(),
+  })
+  .strict();
+
+/** One digest-only per-key proof record bound by the corpus. */
+const gateIsolationSubmissionProofSchema = z
+  .object({
+    vaultLabel: z.enum(["vault-a", "vault-b"]),
+    scenario: z.string().min(1),
+    submissionKeySha256: sha256Schema,
+    changeSetId: z.string().min(1),
+    state: z.enum(["intent_applied", "intent_not_applied", "in_progress", "result_unproven"]),
+    historicalGate: z.literal("recovery_blocked").nullable(),
+  })
+  .strict();
+
+/**
+ * Deterministic per-Vault gate-and-isolation corpus identity (issue #177): one
+ * closed name for the two-Vault gate corpus plus the digest-only per-Vault
+ * inventories, the ordered wire-observed gate-history digest, the wire-observed
+ * residual-cleanup report, and a release-blocking verdict. A passing run
+ * requires both Vault seed inventories unchanged and every required proof
+ * present.
+ */
+export const gateIsolationCorpusEvidenceSchema = z
+  .object({
+    corpusId: z.literal("per-vault-gate-isolation-proof"),
+    seedManifestSha256: sha256Schema,
+    scenarioManifestSha256: sha256Schema,
+    vaults: z.array(gateIsolationVaultEvidenceSchema).length(2),
+    submissions: z.array(gateIsolationSubmissionProofSchema),
+    isolation: z
+      .object({
+        sharedKeyIndependentRegistries: z.literal(true),
+        distinctChangeSetIds: z.literal(true),
+        crossVaultLookupRejected: z.literal(true),
+        queuesIndependent: z.literal(true),
+      })
+      .strict(),
+    recoveryBlocked: z
+      .object({
+        boundDispositions: z.number().int().positive(),
+        replayAfterRecovery: z.number().int().positive(),
+        conflictingReuseRejected: z.number().int().positive(),
+        freshKeyRenewed: z.number().int().positive(),
+        otherGatesLeftUnbound: z.number().int().positive(),
+      })
+      .strict(),
+    manualPause: z
+      .object({
+        drainedInFlightToTrustworthyEnd: z.literal(true),
+        fifoRetained: z.literal(true),
+        newUnboundRejected: z.number().int().positive(),
+        observationalContentAvailable: z.literal(true),
+      })
+      .strict(),
+    incompatible: z
+      .object({
+        registryInspected: z.literal(0),
+        submissionKeysBound: z.literal(0),
+        compatibleSessionUnaffected: z.literal(true),
+      })
+      .strict(),
+    gateHistory: z.array(gateHistoryEntrySchema).min(1),
+    residualCleanup: z
+      .object({
+        "vault-a": z
+          .object({
+            recoveryState: z.literal("none"),
+            writeGate: z.literal("open"),
+            writeState: z.literal("writable"),
+          })
+          .strict(),
+        "vault-b": z
+          .object({
+            recoveryState: z.literal("none"),
+            writeGate: z.literal("open"),
+            writeState: z.literal("writable"),
+          })
+          .strict(),
+      })
+      .strict(),
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)),
+    verdict: z.enum(["passed", "failed"]),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({ code: "custom", message: "Gate-isolation event sequences must be monotonic" });
+    }
+    if (!corpus.gateHistory.every((entry, index) => entry.sequence === index + 1)) {
+      context.addIssue({ code: "custom", message: "Gate-history sequences must be monotonic" });
+    }
+    if (corpus.verdict === "passed" && corpus.assertions.length === 0) {
+      context.addIssue({ code: "custom", message: "Passing gate-isolation evidence requires assertions" });
+    }
+    for (const vault of corpus.vaults) {
+      if (
+        corpus.verdict === "passed" &&
+        vault.beforeInventory.digest !== vault.afterInventory.digest
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: `A passing gate-isolation corpus must leave the ${vault.label} seed inventory unchanged`,
+        });
+      }
+    }
+    if (corpus.verdict === "passed") {
+      if (
+        corpus.isolation.sharedKeyIndependentRegistries !== true ||
+        corpus.isolation.distinctChangeSetIds !== true ||
+        corpus.isolation.crossVaultLookupRejected !== true ||
+        corpus.isolation.queuesIndependent !== true
+      ) {
+        context.addIssue({ code: "custom", message: "A passing gate-isolation corpus requires all isolation proofs" });
+      }
+      if (corpus.recoveryBlocked.boundDispositions < 1) {
+        context.addIssue({ code: "custom", message: "A passing gate-isolation corpus requires a recovery_blocked bind" });
+      }
+      if (corpus.manualPause.fifoRetained !== true) {
+        context.addIssue({ code: "custom", message: "A passing gate-isolation corpus requires FIFO retention" });
+      }
+      if (
+        corpus.incompatible.registryInspected !== 0 ||
+        corpus.incompatible.submissionKeysBound !== 0 ||
+        corpus.incompatible.compatibleSessionUnaffected !== true
+      ) {
+        context.addIssue({ code: "custom", message: "A passing gate-isolation corpus requires an uninspected incompatible client" });
+      }
+    }
+  });
+
 export const publicWireCorpusEvidenceSchema = z
   .object({
     fixtureSeed: sha256Schema,
@@ -417,6 +569,7 @@ export const installedRuntimeEvidenceSchema = z
     observations: z.array(healthObservationEvidenceSchema),
     publicWireCorpus: publicWireCorpusEvidenceSchema.nullable(),
     changeSetCorpus: changeSetCorpusEvidenceSchema.nullable(),
+    gateIsolationCorpus: gateIsolationCorpusEvidenceSchema.nullable(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -441,18 +594,21 @@ export const installedRuntimeEvidenceSchema = z
           evidence.publicWireCorpus.verdict === "passed" &&
           evidence.changeSetCorpus !== null &&
           evidence.changeSetCorpus.verdict === "passed" &&
+          (evidence.gateIsolationCorpus === null ||
+            evidence.gateIsolationCorpus.verdict === "passed") &&
           evidence.cleanup !== null &&
           evidence.cleanup.residualPaths.length === 0 &&
           evidence.profile.mismatches.length === 0
         : true,
     {
       message:
-        "A passing verdict requires a matched profile, candidate and Bridge identity, both health observations, and clean read- and write-side corpus evidence",
+        "A passing verdict requires a matched profile, candidate and Bridge identity, both health observations, clean read- and write-side corpus evidence, and any recorded gate-isolation evidence to pass",
     },
   );
 
 export type PublicWireCorpusEvidence = z.infer<typeof publicWireCorpusEvidenceSchema>;
 export type ChangeSetCorpusEvidence = z.infer<typeof changeSetCorpusEvidenceSchema>;
+export type GateIsolationCorpusEvidence = z.infer<typeof gateIsolationCorpusEvidenceSchema>;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];
 

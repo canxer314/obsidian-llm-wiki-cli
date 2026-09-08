@@ -299,13 +299,15 @@ export {
 export {
   EvidencePrivacyError,
   EvidenceWriteError,
+  gateIsolationCorpusEvidenceSchema,
   installedRuntimeEvidenceSchema,
   parseEvidence,
   serializeEvidence,
   writeEvidenceFile,
+  type ChangeSetCorpusEvidence,
+  type GateIsolationCorpusEvidence,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
-  type ChangeSetCorpusEvidence,
   type PublicWireCorpusEvidence,
 } from "./installed-runtime/evidence.js";
 export {
@@ -343,6 +345,23 @@ export {
   type ChangeSetScenarioName,
   type ChangeSetSubmissionKeyRecord,
 } from "./installed-runtime/change-set-submission-corpus.js";
+export {
+  GATE_ISOLATION_CORPUS_ID,
+  GATE_ISOLATION_DIRECTORY,
+  GATE_ISOLATION_SCENARIO_PLAN,
+  GateIsolationCorpusError,
+  composeGateIsolationCorpusEvidence,
+  runGateIsolationCorpus,
+  type ArrangedVaultHealth,
+  type GateIsolationCorpusInventoryEntry,
+  type GateIsolationOperatorControl,
+  type GateIsolationOutcome,
+  type GateIsolationScenarioName,
+  type GateIsolationVaultSession,
+  type McpToolResult,
+  type WireClient,
+  type WireToolName,
+} from "./installed-runtime/gate-isolation-corpus.js";
 export {
   PUBLIC_WIRE_TOOL_NAMES,
   READ_SIDE_CORPUS_ID,

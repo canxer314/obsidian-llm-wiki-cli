@@ -15,6 +15,7 @@ import { verifyReleaseBundle } from "../release/verify-release-bundle.js";
 import {
   writeEvidenceFile,
   type ChangeSetCorpusEvidence,
+  type GateIsolationCorpusEvidence,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
 } from "./evidence.js";
@@ -57,6 +58,11 @@ import {
   type ChangeSetReplayOutcome,
 } from "./change-set-submission-corpus.js";
 import {
+  composeGateIsolationCorpusEvidence,
+  GateIsolationCorpusError,
+  type GateIsolationOutcome,
+} from "./gate-isolation-corpus.js";
+import {
   cleanupTestVault,
   compareInventories,
   provisionTestVault,
@@ -91,6 +97,7 @@ export type HarnessStage =
   | "public_wire_corpus"
   | "change_set_corpus"
   | "change_set_replay"
+  | "gate_isolation_corpus"
   | "inventory_after"
   | "cleanup";
 
@@ -136,6 +143,7 @@ export type HarnessFailureCode =
   | "public_wire_corpus_failed"
   | "change_set_corpus_failed"
   | "change_set_replay_failed"
+  | "gate_isolation_corpus_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -186,6 +194,28 @@ export interface InstalledRuntimeHarnessOptions {
    */
   readonly runChangeSetCorpus?: typeof runChangeSetSubmissionCorpusAtEndpoint;
   readonly runChangeSetReplay?: typeof runChangeSetReplayCorpusAtEndpoint;
+  /**
+   * Gate-and-isolation corpus seam (issue #177): a self-contained two-Managed-Vault
+   * scenario that provisions and starts two dedicated generated test Vaults
+   * through the harness seams and drives the six-tool gate algebra over real
+   * loopback Bridges. It runs between the initial window and the controlled
+   * restart; when absent, the stage is skipped and no gate-isolation evidence
+   * is recorded (the closed envelope accepts its absence). When present, a
+   * non-passing corpus outcome projects failed evidence.
+   */
+  readonly runGateIsolationCorpus?: (options: {
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<GateIsolationOutcome>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -261,6 +291,7 @@ interface RunState {
   publicWireCorpus: PublicWireCorpusResult | null;
   changeSetAdmission: ChangeSetAdmissionOutcome | null;
   changeSetReplay: ChangeSetReplayOutcome | null;
+  gateIsolation: GateIsolationOutcome | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -292,6 +323,7 @@ export async function runInstalledRuntimeHarness(
     publicWireCorpus: null,
     changeSetAdmission: null,
     changeSetReplay: null,
+    gateIsolation: null,
     cleanup: null,
     failure: null,
   };
@@ -331,6 +363,8 @@ export async function runInstalledRuntimeHarness(
       fail(stage, "public_wire_corpus_failed", sanitize(error.message));
     } else if (error instanceof ChangeSetSubmissionCorpusError) {
       fail(stage, "change_set_corpus_failed", sanitize(error.message));
+    } else if (error instanceof GateIsolationCorpusError) {
+      fail(stage, "gate_isolation_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof BridgeIdentityError) {
@@ -555,6 +589,25 @@ export async function runInstalledRuntimeHarness(
     changeSetAssertions.push(name);
   };
 
+  // Gate-isolation corpus event/assertion collectors (issue #177), spanning the
+  // stage that runs between the initial window and the controlled restart.
+  const gateIsolationEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const gateIsolationAssertions: string[] = [];
+  const recordGateIsolationEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    gateIsolationEvents.push({ kind, name, detail });
+  };
+  const recordGateIsolationAssertion = (name: string): void => {
+    gateIsolationAssertions.push(name);
+  };
+
   if (state.failure === null) {
     await startAndObserve("obsidian_start", "health_initial", "initial", {
       stage: "public_wire_corpus",
@@ -593,6 +646,43 @@ export async function runInstalledRuntimeHarness(
         }
       },
     });
+  }
+  // The gate-isolation corpus (issue #177) runs between the initial window and
+  // the controlled restart: it provisions and starts its own two dedicated
+  // generated test Vaults through the harness seams, so it runs while no other
+  // Obsidian window is live. When the caller does not wire the seam, the stage
+  // is skipped and the closed evidence envelope records no gate-isolation
+  // block (the top-level passing verdict accepts its absence).
+  if (state.failure === null && options.runGateIsolationCorpus !== undefined) {
+    const vault = state.vault;
+    const candidate = state.candidate;
+    if (vault === null || candidate === null) {
+      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate-isolation corpus requires a provisioned candidate");
+    } else {
+      try {
+        state.gateIsolation = await options.runGateIsolationCorpus({
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordGateIsolationEvent,
+          assertion: recordGateIsolationAssertion,
+        });
+      } catch (error) {
+        // The gate-isolation corpus seam is a self-contained scenario; any
+        // failure it reports projects to failed gate-isolation evidence.
+        fail(
+          "gate_isolation_corpus",
+          "gate_isolation_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
   }
   if (state.failure === null) {
     await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
@@ -677,6 +767,14 @@ export async function runInstalledRuntimeHarness(
           assertions: changeSetAssertions,
         })
       : null;
+  const gateIsolationCorpus: GateIsolationCorpusEvidence | null =
+    state.failure === null && state.gateIsolation !== null
+      ? composeGateIsolationCorpusEvidence({
+          outcome: state.gateIsolation,
+          events: gateIsolationEvents,
+          assertions: gateIsolationAssertions,
+        })
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -758,6 +856,7 @@ export async function runInstalledRuntimeHarness(
     observations: state.observations.map((observation) => toObservationEvidence(observation)),
     publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
     changeSetCorpus,
+    gateIsolationCorpus,
     verdict,
     failure:
       state.failure === null

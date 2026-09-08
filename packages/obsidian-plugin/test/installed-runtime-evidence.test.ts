@@ -15,6 +15,115 @@ import {
 
 const DIGEST = "a".repeat(64);
 
+function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsolationCorpus"]> {
+  return {
+    corpusId: "per-vault-gate-isolation-proof",
+    seedManifestSha256: DIGEST,
+    scenarioManifestSha256: DIGEST,
+    vaults: [
+      {
+        label: "vault-a",
+        vaultIdSha256: DIGEST,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+        afterInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+      },
+      {
+        label: "vault-b",
+        vaultIdSha256: DIGEST,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+        afterInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+      },
+    ],
+    submissions: [
+      {
+        vaultLabel: "vault-a",
+        scenario: "isolation/shared-key-independent-registries",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-a",
+        state: "in_progress",
+        historicalGate: null,
+      },
+      {
+        vaultLabel: "vault-b",
+        scenario: "isolation/shared-key-independent-registries",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-b",
+        state: "in_progress",
+        historicalGate: null,
+      },
+    ],
+    isolation: {
+      sharedKeyIndependentRegistries: true,
+      distinctChangeSetIds: true,
+      crossVaultLookupRejected: true,
+      queuesIndependent: true,
+    },
+    recoveryBlocked: {
+      boundDispositions: 2,
+      replayAfterRecovery: 1,
+      conflictingReuseRejected: 1,
+      freshKeyRenewed: 1,
+      otherGatesLeftUnbound: 2,
+    },
+    manualPause: {
+      drainedInFlightToTrustworthyEnd: true,
+      fifoRetained: true,
+      newUnboundRejected: 1,
+      observationalContentAvailable: true,
+    },
+    incompatible: {
+      registryInspected: 0,
+      submissionKeysBound: 0,
+      compatibleSessionUnaffected: true,
+    },
+    gateHistory: [
+      {
+        sequence: 1,
+        vaultLabel: "vault-a",
+        scenario: "gates/recovery-blocked-precedence",
+        outcome: "observed",
+        effectiveGate: "recovery_blocked",
+        recoveryState: "blocked",
+        writeState: "paused",
+      },
+      {
+        sequence: 2,
+        vaultLabel: "vault-a",
+        scenario: "gates/writes-paused-row",
+        outcome: "observed",
+        effectiveGate: "writes_paused",
+        recoveryState: "none",
+        writeState: "paused",
+      },
+    ],
+    residualCleanup: {
+      "vault-a": { recoveryState: "none", writeGate: "open", writeState: "writable" },
+      "vault-b": { recoveryState: "none", writeGate: "open", writeState: "writable" },
+    },
+    eventLog: [
+      { sequence: 1, kind: "assertion", name: "gate-isolation-corpus-began", detailSha256: DIGEST },
+    ],
+    assertions: ["gate-isolation-corpus-began"],
+    verdict: "passed",
+  };
+}
+
 function passingEvidence(): InstalledRuntimeEvidence {
   return {
     schemaVersion: 1,
@@ -221,6 +330,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
       assertions: ["change-set-corpus-began"],
       verdict: "passed",
     },
+    gateIsolationCorpus: gateIsolationEvidence(),
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
@@ -340,6 +450,80 @@ describe("installed-runtime evidence record", () => {
       },
     };
     expect(() => serializeEvidence(replayMismatch)).toThrow(/single-use replay rejection/u);
+  });
+
+  it("refuses a passing verdict when recorded gate-isolation evidence failed", () => {
+    const failedGateIsolation: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        verdict: "failed",
+      },
+    };
+    expect(() => serializeEvidence(failedGateIsolation)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses passing gate-isolation evidence whose Vault inventory changed or proofs are missing", () => {
+    const changedSeed: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        vaults: passingEvidence().gateIsolationCorpus!.vaults.map((vault, index) =>
+          index === 0
+            ? {
+                ...vault,
+                beforeInventory: {
+                  scope: "Notes/*.md",
+                  entries: [
+                    { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+                    { path: "Notes/Added.md", sha256: "f".repeat(64), sizeBytes: 7 },
+                  ],
+                  digest: "f".repeat(64),
+                },
+              }
+            : vault,
+        ),
+      },
+    };
+    expect(() => serializeEvidence(changedSeed)).toThrow(/vault-a seed inventory unchanged/u);
+
+    const noBind: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        recoveryBlocked: {
+          boundDispositions: 0,
+          replayAfterRecovery: 1,
+          conflictingReuseRejected: 1,
+          freshKeyRenewed: 1,
+          otherGatesLeftUnbound: 2,
+        },
+      },
+    };
+    expect(() => serializeEvidence(noBind)).toThrow(/recovery_blocked bind/u);
+
+    const inspectedRegistry: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        incompatible: {
+          registryInspected: 1,
+          submissionKeysBound: 0,
+          compatibleSessionUnaffected: true,
+        },
+      },
+    };
+    expect(() => serializeEvidence(inspectedRegistry)).toThrow(
+      /expected 0|uninspected incompatible client/u,
+    );
+  });
+
+  it("accepts a passing record with no gate-isolation corpus (the seam is optional)", () => {
+    const withoutGateIsolation: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: null,
+    };
+    expect(parseEvidence(serializeEvidence(withoutGateIsolation))).toEqual(withoutGateIsolation);
   });
 
   it("refuses a passing verdict without both lifecycle observations and clean cleanup", () => {
