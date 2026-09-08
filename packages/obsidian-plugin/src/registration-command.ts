@@ -25,3 +25,19 @@ export function createRegistrationCommand(
     quotePowerShell(`http://${LOOPBACK_ADDRESS}:${port}${MCP_PATH}`),
   ].join(" ");
 }
+
+/**
+ * The exact counterpart of `createRegistrationCommand` for uninstall (issue
+ * #200, spec §9.3): the operator command that removes this Managed Vault's
+ * local MCP registration. Returned for printing only — the plugin never
+ * executes it and never opens Claude Code configuration itself.
+ */
+export function createRegistrationRemovalCommand(
+  vaultId: string,
+  serverName = `vault-${vaultId}`,
+): string {
+  if (!/^[A-Za-z0-9_-]+$/u.test(serverName)) {
+    throw new Error("Claude Code MCP server name contains unsupported characters");
+  }
+  return ["claude mcp remove", "--scope local", serverName].join(" ");
+}

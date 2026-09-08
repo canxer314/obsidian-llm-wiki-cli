@@ -64,7 +64,10 @@ export {
   type StandardDiagnosticBundleContent,
   type StandardDiagnosticEvidence,
 } from "./diagnostic-bundle.js";
-export { createRegistrationCommand } from "./registration-command.js";
+export {
+  createRegistrationCommand,
+  createRegistrationRemovalCommand,
+} from "./registration-command.js";
 export {
   createMoveReferenceProjector,
   withMoveReferenceProjection,
@@ -131,6 +134,234 @@ export {
   type RequestPolicyFailure,
   verifyRequestPolicy,
 } from "./request-policy.js";
+export {
+  CANDIDATE_CHECKSUM_MANIFEST,
+  CANDIDATE_OPTIONAL_FILES,
+  CANDIDATE_REQUIRED_FILES,
+  CandidateBundleError,
+  inspectCandidateBundle,
+  installCandidateBundle,
+  type CandidateBundleIdentity,
+  type CandidateFileDigest,
+  type CandidateManagedFile,
+  type InstalledCandidate,
+  type VerifiedCandidateBundle,
+} from "./installed-runtime/candidate-bundle.js";
+export {
+  RELEASE_ATTESTATION_SUFFIX,
+  RELEASE_PLUGIN_ID,
+  RELEASE_REPOSITORY,
+  RELEASE_WORKFLOW_PATH,
+  ReleaseBundleError,
+  compareSemanticVersions,
+  currentSourceTreeTag,
+  expectedWorkflowRef,
+  parseReleaseTag,
+  type ParsedReleaseTag,
+  type ReleaseBundleFailureCode,
+} from "./release/release-identity.js";
+export {
+  ATTESTATION_SOURCES,
+  claimsFromGhAttestationVerifyOutput,
+  parseAttestationClaims,
+  serializeAttestationClaims,
+  type AttestationSource,
+  type ReleaseAttestationClaims,
+  type ReleaseAttestationSubject,
+} from "./release/attestation-claims.js";
+export {
+  assembleReleaseBundle,
+  type AssembleReleaseBundleOptions,
+  type AssembledReleaseBundle,
+  type AssembledReleaseFile,
+} from "./release/assemble-release-bundle.js";
+export {
+  verifyReleaseBundle,
+  type VerifiedReleaseBundle,
+  type VerifyReleaseBundleOptions,
+} from "./release/verify-release-bundle.js";
+export {
+  ARTIFACTS_INSTALLED,
+  InstallInterruptionError,
+  installReleaseToManagedVaults,
+  MCP_REGISTRATION_REQUIRED,
+  PLUGIN_ENABLEMENT_REQUIRED,
+  recoverInterruptedInstall,
+  ReleaseInstallError,
+  removeReleaseManagedFiles,
+  type InstallFailureInjectionHooks,
+  type InstallReleaseOptions,
+  type InstallTargetAction,
+  type InstallTargetOutcome,
+  type ManagedVaultInstallTarget,
+  type ReleaseInstallBatchResult,
+  type ReleaseInstallFailureCode,
+  type ReleaseInstallTargetResult,
+  type ReleaseRemovalResult,
+} from "./lifecycle/install-release.js";
+export {
+  readManagedVaultUpgradeEvidence,
+  ReleaseUpgradeError,
+  UPGRADE_EVIDENCE_FILENAME,
+  UPGRADE_EVIDENCE_SCHEMA_VERSION,
+  UPGRADE_PHASE_ORDER,
+  upgradeManagedVaultRelease,
+  type ManagedVaultUpgradeEvidence,
+  type ManagedVaultUpgradeOptions,
+  type ManagedVaultUpgradeResult,
+  type ReleaseUpgradeFailureCode,
+  type UpgradeFailureRecord,
+  type UpgradePhase,
+  type UpgradeRuntimeAdapter,
+} from "./lifecycle/upgrade-release.js";
+export {
+  MCP_REGISTRATION_REMOVAL_REQUIRED,
+  ReleaseUninstallError,
+  uninstallManagedVaultRelease,
+  type ManagedVaultUninstallOptions,
+  type ManagedVaultUninstallResult,
+  type ReleaseUninstallFailureCode,
+  type ReleaseUninstallOutcome,
+  type UninstallFailureInjectionHooks,
+} from "./lifecycle/uninstall-release.js";
+export {
+  PURGE_LOST_CAPABILITIES,
+  PURGE_LOST_CAPABILITY_DETAILS,
+  purgeManagedVaultState,
+  ReleasePurgeError,
+  type ManagedVaultPurgeBackup,
+  type ManagedVaultPurgeConfirmation,
+  type ManagedVaultPurgeInventory,
+  type ManagedVaultPurgeOptions,
+  type ManagedVaultPurgeResult,
+  type PurgeFailureInjectionHooks,
+  type PurgeInventoryFile,
+  type PurgeInventoryFileKind,
+  type PurgeLostCapability,
+  type ReleasePurgeFailureCode,
+  type ReleasePurgeOutcome,
+} from "./lifecycle/purge-release.js";
+export {
+  verifyManagedVaultLifecycle,
+  type LifecycleStatusProbes,
+  type ManagedVaultLifecycleState,
+  type ManagedVaultLifecycleStatus,
+  type ManagedVaultLifecycleTarget,
+  type ObservedBridgeEndpoint,
+} from "./lifecycle/lifecycle-status.js";
+export {
+  expectedInstalledFiles,
+  inspectDeployedManagedSet,
+  inspectInstalledManagedSet,
+  isReleaseManagedFile,
+  managedVaultPluginDirectory,
+  RELEASE_MANAGED_CHECKSUM_FILE,
+  RELEASE_MANAGED_FILES,
+  RELEASE_MANAGED_OPTIONAL_FILES,
+  RELEASE_MANAGED_REQUIRED_FILES,
+  type DeployedSetInspection,
+  type ExpectedManagedFile,
+  type InstalledManagedSet,
+  type InstalledSetIntegrity,
+  type ManagedFileCondition,
+  type ManagedFileReport,
+} from "./lifecycle/release-managed-files.js";
+export {
+  runLifecycleInstallScenario,
+  type LifecycleScenarioOptions,
+  type LifecycleScenarioResult,
+  type LifecycleScenarioStage,
+  type LifecycleScenarioStageRecord,
+} from "./installed-runtime/lifecycle-scenario.js";
+export {
+  runManagedVaultUpgradeScenario,
+  type UpgradeScenarioOptions,
+  type UpgradeScenarioResult,
+  type UpgradeScenarioRuntimeHost,
+  type UpgradeScenarioStage,
+  type UpgradeScenarioStageRecord,
+} from "./installed-runtime/upgrade-scenario.js";
+export {
+  runManagedVaultUninstallScenario,
+  type UninstallScenarioOptions,
+  type UninstallScenarioResult,
+  type UninstallScenarioStage,
+  type UninstallScenarioStageRecord,
+} from "./installed-runtime/uninstall-scenario.js";
+export {
+  runManagedVaultPurgeScenario,
+  type PurgeScenarioOptions,
+  type PurgeScenarioRefusal,
+  type PurgeScenarioResult,
+  type PurgeScenarioStage,
+  type PurgeScenarioStageRecord,
+} from "./installed-runtime/purge-scenario.js";
+export {
+  EvidencePrivacyError,
+  EvidenceWriteError,
+  installedRuntimeEvidenceSchema,
+  parseEvidence,
+  serializeEvidence,
+  writeEvidenceFile,
+  type InstalledRuntimeEvidence,
+  type InstalledRuntimeVerdict,
+} from "./installed-runtime/evidence.js";
+export {
+  runInstalledRuntimeHarness,
+  type HarnessFailure,
+  type HarnessFailureCode,
+  type HarnessStage,
+  type HarnessTimeouts,
+  type InstalledRuntimeHarnessOptions,
+  type InstalledRuntimeHarnessResult,
+} from "./installed-runtime/harness.js";
+export {
+  createLoopbackMcpClient,
+  HealthObservationError,
+  type BridgeHealthObservation,
+  type HealthObservationFailureCode,
+  type LoopbackMcpClient,
+  type LoopbackMcpClientOptions,
+  type ObservedHealth,
+} from "./installed-runtime/loopback-client.js";
+export {
+  BridgeIdentityError,
+  createWindowsObsidianProcessControl,
+  ObsidianProcessError,
+  ReadinessTimeoutError,
+  readPersistedBridgeIdentity,
+  waitForCondition,
+  type ObsidianLaunchRequest,
+  type ObsidianProcessControl,
+  type ObsidianProcessHandle,
+  type PersistedBridgeIdentity,
+  type ReadinessWaitOptions,
+} from "./installed-runtime/obsidian-process.js";
+export {
+  hostOsBuild,
+  lookupRegisteredRuntimeProfile,
+  MVP_PERF_REF_1,
+  preflightRuntimeProfile,
+  registeredRuntimeProfiles,
+  type ObservedRuntimeEnvironment,
+  type RegisteredRuntimeProfile,
+  type RuntimeEnvironmentProbe,
+  type RuntimePreflightMismatch,
+  type RuntimeVersionExpectation,
+} from "./installed-runtime/runtime-profile.js";
+export {
+  cleanupTestVault,
+  compareInventories,
+  provisionTestVault,
+  snapshotInventory,
+  TestVaultError,
+  TEST_PROFILE_DIRECTORY_PREFIX,
+  TEST_VAULT_DIRECTORY_PREFIX,
+  type CleanupReport,
+  type InventoryComparison,
+  type ProvisionedTestVault,
+  type VaultInventoryEntry,
+} from "./installed-runtime/test-vault.js";
 export {
   BRIDGE_VERSION,
   PLUGIN_VERSION,
