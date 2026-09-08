@@ -93,6 +93,28 @@ function passingEvidence(): InstalledRuntimeEvidence {
         vaultPathSha256: DIGEST,
       },
     ],
+    publicWireCorpus: {
+      fixtureSeed: DIGEST,
+      canonicalManifestSha256: DIGEST,
+      tools: [
+        "vault_health",
+        "vault_discover",
+        "vault_read",
+        "vault_continue",
+        "vault_change_set_submit",
+        "vault_change_set_status",
+      ],
+      eventLog: [
+        {
+          sequence: 1,
+          kind: "assertion",
+          name: "public-tool-inventory",
+          detailSha256: DIGEST,
+        },
+      ],
+      assertions: ["public-tool-inventory"],
+      verdict: "passed",
+    },
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
@@ -116,6 +138,11 @@ describe("installed-runtime evidence record", () => {
     expect(() =>
       serializeEvidence(invalidInventory as unknown as InstalledRuntimeEvidence),
     ).toThrow();
+  });
+
+  it("refuses a passing verdict without a complete public-wire corpus", () => {
+    const missingCorpus = { ...passingEvidence(), publicWireCorpus: null };
+    expect(() => serializeEvidence(missingCorpus)).toThrow(/passing verdict/u);
   });
 
   it("refuses a passing verdict without both lifecycle observations and clean cleanup", () => {

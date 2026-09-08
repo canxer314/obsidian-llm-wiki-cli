@@ -43,6 +43,11 @@ import {
   type RuntimePreflightMismatch,
 } from "./runtime-profile.js";
 import {
+  PublicWireCorpusError,
+  runPublicWireCorpus,
+  type PublicWireCorpusResult,
+} from "./public-wire-corpus.js";
+import {
   cleanupTestVault,
   compareInventories,
   provisionTestVault,
@@ -74,6 +79,7 @@ export type HarnessStage =
   | "obsidian_stop"
   | "obsidian_restart"
   | "health_restart"
+  | "public_wire_corpus"
   | "inventory_after"
   | "cleanup";
 
@@ -116,6 +122,7 @@ export type HarnessFailureCode =
   | "identity_mismatch"
   | "listener_mismatch"
   | "representation_mismatch"
+  | "public_wire_corpus_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -157,6 +164,7 @@ export interface InstalledRuntimeHarnessOptions {
   readonly probe: RuntimeEnvironmentProbe;
   readonly processControl: ObsidianProcessControl;
   readonly client?: LoopbackMcpClient;
+  readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -229,6 +237,7 @@ interface RunState {
   beforeInventory: VaultInventoryEntry[] | null;
   afterInventory: VaultInventoryEntry[] | null;
   observations: PhasedObservation[];
+  publicWireCorpus: PublicWireCorpusResult | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -257,6 +266,7 @@ export async function runInstalledRuntimeHarness(
     beforeInventory: null,
     afterInventory: null,
     observations: [],
+    publicWireCorpus: null,
     cleanup: null,
     failure: null,
   };
@@ -292,6 +302,8 @@ export async function runInstalledRuntimeHarness(
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof TestVaultError) {
       fail(stage, error.code, sanitize(error.message));
+    } else if (error instanceof PublicWireCorpusError) {
+      fail(stage, "public_wire_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof BridgeIdentityError) {
@@ -474,6 +486,17 @@ export async function runInstalledRuntimeHarness(
   if (state.failure === null) {
     await startAndObserve("obsidian_start", "health_initial", "initial");
   }
+  if (state.failure === null && firstIdentity !== null && state.vault !== null) {
+    try {
+      state.publicWireCorpus = await (options.runPublicWireCorpus ?? runPublicWireCorpus)({
+        endpoint: new URL(`http://127.0.0.1:${firstIdentity.port}/mcp`),
+        expectedVaultId: firstIdentity.vaultId,
+        fixtureSeed: state.vault.seedManifestSha256,
+      });
+    } catch (error) {
+      failFromError("public_wire_corpus", error);
+    }
+  }
   if (state.failure === null) {
     await startAndObserve("obsidian_restart", "health_restart", "after_restart");
   }
@@ -604,6 +627,7 @@ export async function runInstalledRuntimeHarness(
             };
           })(),
     observations: state.observations.map((observation) => toObservationEvidence(observation)),
+    publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
     verdict,
     failure:
       state.failure === null

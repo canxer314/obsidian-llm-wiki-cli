@@ -142,6 +142,37 @@ const cleanupEvidenceSchema = z
   })
   .strict();
 
+const publicWireEventSchema = z
+  .object({
+    sequence: z.number().int().positive(),
+    kind: z.enum(["transport", "tool", "assertion", "cleanup"]),
+    name: z.string().min(1),
+    detailSha256: sha256Schema,
+  })
+  .strict();
+
+export const publicWireCorpusEvidenceSchema = z
+  .object({
+    fixtureSeed: sha256Schema,
+    canonicalManifestSha256: sha256Schema,
+    tools: z.array(z.string().min(1)).length(6),
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)),
+    verdict: z.enum(["passed", "failed"]),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (new Set(corpus.tools).size !== 6) {
+      context.addIssue({ code: "custom", message: "Public-wire evidence must name six distinct tools" });
+    }
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({ code: "custom", message: "Public-wire event sequences must be monotonic" });
+    }
+    if (corpus.verdict === "passed" && corpus.assertions.length === 0) {
+      context.addIssue({ code: "custom", message: "Passing public-wire evidence requires assertions" });
+    }
+  });
+
 export const installedRuntimeEvidenceSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -161,6 +192,7 @@ export const installedRuntimeEvidenceSchema = z
     afterInventory: z.array(inventoryEntrySchema).nullable(),
     inventoryComparison: inventoryComparisonSchema.nullable(),
     observations: z.array(healthObservationEvidenceSchema),
+    publicWireCorpus: publicWireCorpusEvidenceSchema.nullable(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -181,6 +213,8 @@ export const installedRuntimeEvidenceSchema = z
           evidence.bridgeIdentity !== null &&
           evidence.observations.some((observation) => observation.phase === "initial") &&
           evidence.observations.some((observation) => observation.phase === "after_restart") &&
+          evidence.publicWireCorpus !== null &&
+          evidence.publicWireCorpus.verdict === "passed" &&
           evidence.cleanup !== null &&
           evidence.cleanup.residualPaths.length === 0 &&
           evidence.profile.mismatches.length === 0
@@ -191,6 +225,7 @@ export const installedRuntimeEvidenceSchema = z
     },
   );
 
+export type PublicWireCorpusEvidence = z.infer<typeof publicWireCorpusEvidenceSchema>;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];
 

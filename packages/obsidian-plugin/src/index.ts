@@ -305,6 +305,7 @@ export {
   writeEvidenceFile,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
+  type PublicWireCorpusEvidence,
 } from "./installed-runtime/evidence.js";
 export {
   runInstalledRuntimeHarness,
@@ -324,6 +325,24 @@ export {
   type LoopbackMcpClientOptions,
   type ObservedHealth,
 } from "./installed-runtime/loopback-client.js";
+export {
+  PUBLIC_WIRE_TOOL_NAMES,
+  PublicWireCorpusError,
+  canonicalPublicWireCorpusManifest,
+  createPublicWireCorpusManifest,
+  registerAuthoritativePublicWireFragments,
+  registerContinuePublicWireFragment,
+  registerDiscoverPublicWireFragment,
+  registerHealthPublicWireFragment,
+  registerReadPublicWireFragment,
+  registerStatusPublicWireFragment,
+  registerSubmitPublicWireFragment,
+  runPublicWireCorpus,
+  type PublicWireCorpusManifest,
+  type PublicWireCorpusResult,
+  type PublicWireScenarioFragment,
+  type PublicWireToolName,
+} from "./installed-runtime/public-wire-corpus.js";
 export {
   BridgeIdentityError,
   createWindowsObsidianProcessControl,

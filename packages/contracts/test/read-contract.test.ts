@@ -109,6 +109,28 @@ describe("vault_read contract", () => {
     });
   });
 
+  it("rejects unknown fields in shared read evidence definitions", () => {
+    expect(() =>
+      parseReadResult({
+        outcome: "items",
+        items: [
+          {
+            outcome: "satisfied",
+            result: {
+              kind: "exact",
+              index: 0,
+              path: "note.md",
+              contentVersion: version,
+              sizeBytes: 1,
+              content: "x",
+              unexpected: true,
+            },
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
   it("rejects non-canonical Content Versions and unknown root fields", () => {
     const exact = (contentVersion: string) => ({
       outcome: "items",

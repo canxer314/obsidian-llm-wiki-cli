@@ -205,6 +205,30 @@ async function arrangeRun(
     processControl: createFakeObsidianProcessControl(),
     profiles: PROFILES,
     runId,
+    runPublicWireCorpus: async ({ fixtureSeed }) => ({
+      evidence: {
+        fixtureSeed: createHash("sha256").update(fixtureSeed, "utf8").digest("hex"),
+        canonicalManifestSha256: "a".repeat(64),
+        tools: [
+          "vault_health",
+          "vault_discover",
+          "vault_read",
+          "vault_continue",
+          "vault_change_set_submit",
+          "vault_change_set_status",
+        ],
+        eventLog: [
+          {
+            sequence: 1,
+            kind: "assertion",
+            name: "stubbed-public-wire-corpus",
+            detailSha256: "b".repeat(64),
+          },
+        ],
+        assertions: ["stubbed-public-wire-corpus"],
+        verdict: "passed",
+      },
+    }),
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 2_000 },
     ...overrides,
   };
@@ -238,6 +262,7 @@ describe("installed-runtime harness orchestration", () => {
       ".obsidian/plugins/candidate-bridge/main.js",
     );
     expect(evidence.inventoryComparison).not.toBeNull();
+    expect(evidence.publicWireCorpus?.verdict).toBe("passed");
     expect(evidence.cleanup).toEqual({ attempted: true, residualPaths: [] });
 
     // The generated roots are gone and nothing private leaked into evidence.
