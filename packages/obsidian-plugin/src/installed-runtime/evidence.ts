@@ -497,6 +497,149 @@ export const gateIsolationCorpusEvidenceSchema = z
     }
   });
 
+/**
+ * One destination-only rewrite proof record (issue #178): a successful note
+ * move whose derived registered-reference rewrites are explicit, causally
+ * ordered, version-guarded Change Set effects. The record exposes the
+ * requested move, the derived rewrite identities (referrer paths), old-path
+ * absence, destination typed state, and exact final Content Versions — and
+ * never note bodies or absolute host paths.
+ */
+const rewriteMoveProofSchema = z
+  .object({
+    scenario: z.string().min(1),
+    profile: z.enum(["wikilink", "embed", "markdown_inline_link", "markdown_embed"]),
+    submissionKeySha256: sha256Schema,
+    changeSetId: z.string().min(1),
+    sourcePath: z.string().min(1),
+    destinationPath: z.string().min(1),
+    derivedPaths: z.array(z.string().min(1)).min(1),
+    /** Bare sha256 digest of the destination note's exact final bytes. */
+    destinationContentVersionSha256: sha256Schema,
+    /** Bare sha256 digest of the first derived referrer's exact final bytes. */
+    rewrittenContentVersionSha256: sha256Schema,
+    oldPathAbsent: z.literal(true),
+    destinationTypedMarkdown: z.literal(true),
+    finalBytesReread: z.literal(true),
+  })
+  .strict();
+
+/**
+ * One raw-byte span proof (issue #178 AC2/AC3): a referrer whose host UTF-16
+ * positions (BOM/CRLF/CJK/astral modes) acted only as candidate locators. Every
+ * located reference resolved to exactly one raw UTF-8 span matching both the
+ * cached original and the raw source slice, every untouched byte stayed exact,
+ * and the final bytes/hash were reread after the rewrite.
+ */
+const rawByteFixtureProofSchema = z
+  .object({
+    scenario: z.string().min(1),
+    hostModes: z.array(z.string().min(1)).min(1),
+    locatedReferences: z.number().int().positive(),
+    everyReferenceExactlyOneVerifiedSpan: z.literal(true),
+    everyUntouchedByteExact: z.literal(true),
+    finalBytesHashReread: z.literal(true),
+  })
+  .strict();
+
+const duplicateSpellingProofSchema = z
+  .object({
+    referencesRewritten: z.number().int().positive(),
+    untouchedBytesExact: z.literal(true),
+  })
+  .strict();
+
+/**
+ * One no-guessing rejection class (issue #178 AC3/AC4): the complete Change
+ * Set rejected without mutation. `registered` records whether the wire submit
+ * registered an `intent_not_applied` disposition (true) or failed earlier
+ * (false, e.g. the reference graph refused to close); either way the digest
+ * invariant proves no byte was mutated.
+ */
+const rewriteRejectionProofSchema = z
+  .object({
+    scenario: z.string().min(1),
+    failureCode: z.string().min(1).nullable(),
+    registered: z.boolean(),
+    noMutationDigestUnchanged: z.literal(true),
+  })
+  .strict();
+
+/**
+ * Observer evidence (issue #178 AC5): a second enabled MCP event observer that
+ * polled the Vault across successful work and rejection saw neither
+ * plugin-private staging paths nor half-written Markdown.
+ */
+const rewriteObserverEvidenceSchema = z
+  .object({
+    enabledSecondObserver: z.boolean(),
+    discoversIssued: z.number().int().positive(),
+    privateStagingPathsObserved: z.literal(0),
+    halfWrittenMarkdownObserved: z.literal(0),
+  })
+  .strict();
+
+/**
+ * Deterministic registered-reference rewrite corpus identity (issue #178): one
+ * closed name for the move-rewrite corpus plus the seed-inventory and
+ * scenario-program digests that make a run reproducible. The moves section
+ * records the destination-only rewrite proofs; rawBytes records the
+ * UTF-16-to-UTF-8 span proofs; rejections records the no-guessing classes;
+ * observer records the second-observer privacy evidence; and residualCleanup is
+ * wire-observed Bridge idle state. `beforeInventory`/`afterInventory` scope the
+ * deterministic seed notes the corpus never mutates.
+ */
+export const registeredReferenceRewriteCorpusEvidenceSchema = z
+  .object({
+    corpusId: z.literal("registered-reference-rewrite-proof"),
+    seedManifestSha256: sha256Schema,
+    scenarioManifestSha256: sha256Schema,
+    beforeInventory: corpusInventorySchema,
+    afterInventory: corpusInventorySchema,
+    moves: z.array(rewriteMoveProofSchema).min(4),
+    rawBytes: z
+      .object({
+        fixtures: z.array(rawByteFixtureProofSchema).min(1),
+        duplicateEqualSpellings: duplicateSpellingProofSchema,
+      })
+      .strict(),
+    rejections: z.array(rewriteRejectionProofSchema).min(1),
+    observer: rewriteObserverEvidenceSchema,
+    residualCleanup: changeSetIdleStateSchema,
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)),
+    verdict: z.enum(["passed", "failed"]),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({ code: "custom", message: "Registered-reference event sequences must be monotonic" });
+    }
+    if (corpus.verdict === "passed" && corpus.assertions.length === 0) {
+      context.addIssue({ code: "custom", message: "Passing registered-reference evidence requires assertions" });
+    }
+    if (
+      corpus.verdict === "passed" &&
+      corpus.beforeInventory.digest !== corpus.afterInventory.digest
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "A passing registered-reference corpus must leave the deterministic seed inventory unchanged",
+      });
+    }
+    if (corpus.verdict === "passed") {
+      if (corpus.moves.length < 4) {
+        context.addIssue({ code: "custom", message: "A passing registered-reference corpus requires all four grammar move proofs" });
+      }
+      if (corpus.rejections.some((entry) => !entry.noMutationDigestUnchanged)) {
+        context.addIssue({ code: "custom", message: "Every registered-reference rejection must prove no mutation" });
+      }
+      if (corpus.observer.enabledSecondObserver !== true) {
+        context.addIssue({ code: "custom", message: "A passing registered-reference corpus requires a second observer" });
+      }
+    }
+  });
+
 export const publicWireCorpusEvidenceSchema = z
   .object({
     fixtureSeed: sha256Schema,
@@ -570,6 +713,8 @@ export const installedRuntimeEvidenceSchema = z
     publicWireCorpus: publicWireCorpusEvidenceSchema.nullable(),
     changeSetCorpus: changeSetCorpusEvidenceSchema.nullable(),
     gateIsolationCorpus: gateIsolationCorpusEvidenceSchema.nullable(),
+    registeredReferenceRewriteCorpus:
+      registeredReferenceRewriteCorpusEvidenceSchema.nullable(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -596,6 +741,8 @@ export const installedRuntimeEvidenceSchema = z
           evidence.changeSetCorpus.verdict === "passed" &&
           (evidence.gateIsolationCorpus === null ||
             evidence.gateIsolationCorpus.verdict === "passed") &&
+          (evidence.registeredReferenceRewriteCorpus === null ||
+            evidence.registeredReferenceRewriteCorpus.verdict === "passed") &&
           evidence.cleanup !== null &&
           evidence.cleanup.residualPaths.length === 0 &&
           evidence.profile.mismatches.length === 0
@@ -609,6 +756,9 @@ export const installedRuntimeEvidenceSchema = z
 export type PublicWireCorpusEvidence = z.infer<typeof publicWireCorpusEvidenceSchema>;
 export type ChangeSetCorpusEvidence = z.infer<typeof changeSetCorpusEvidenceSchema>;
 export type GateIsolationCorpusEvidence = z.infer<typeof gateIsolationCorpusEvidenceSchema>;
+export type RegisteredReferenceRewriteCorpusEvidence = z.infer<
+  typeof registeredReferenceRewriteCorpusEvidenceSchema
+>;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];
 

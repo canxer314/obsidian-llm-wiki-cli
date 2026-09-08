@@ -742,6 +742,24 @@ describe("installed-runtime harness failure projection", () => {
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 
+  it("records failed evidence when the registered-reference rewrite corpus fails", async () => {
+    const { root, options } = await arrangeRun("run-registered-reference-fails", {
+      runRegisteredReferenceRewriteCorpus: async () => {
+        throw new Error("registered-reference rewrite corpus failed");
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({
+      stage: "registered_reference_rewrite_corpus",
+      code: "registered_reference_rewrite_corpus_failed",
+    });
+    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    expect(evidence.verdict).toBe("failed");
+    expect(evidence.registeredReferenceRewriteCorpus).toBeNull();
+    expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
+  });
+
   it("never overwrites an existing evidence record", async () => {
     const { options } = await arrangeRun("run-evidence-exists");
     await mkdir(join(options.evidencePath, ".."), { recursive: true });

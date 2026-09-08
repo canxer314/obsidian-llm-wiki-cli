@@ -302,6 +302,7 @@ export {
   gateIsolationCorpusEvidenceSchema,
   installedRuntimeEvidenceSchema,
   parseEvidence,
+  registeredReferenceRewriteCorpusEvidenceSchema,
   serializeEvidence,
   writeEvidenceFile,
   type ChangeSetCorpusEvidence,
@@ -309,6 +310,7 @@ export {
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
   type PublicWireCorpusEvidence,
+  type RegisteredReferenceRewriteCorpusEvidence,
 } from "./installed-runtime/evidence.js";
 export {
   runInstalledRuntimeHarness,
@@ -362,6 +364,25 @@ export {
   type WireClient,
   type WireToolName,
 } from "./installed-runtime/gate-isolation-corpus.js";
+export {
+  REFERENCE_REWRITE_CORPUS_DIRECTORY,
+  REGISTERED_REFERENCE_REWRITE_CORPUS_ID,
+  REGISTERED_REFERENCE_REWRITE_SCENARIO_PLAN,
+  RegisteredReferenceRewriteCorpusError,
+  composeRegisteredReferenceRewriteCorpusEvidence,
+  expectedRewrittenReferrer,
+  registeredReferenceRewriteFixtures,
+  runRegisteredReferenceRewriteCorpus,
+  type RegisteredReferenceRewriteArrange,
+  type RegisteredReferenceRewriteFixture,
+  type RegisteredReferenceRewriteInventoryEntry,
+  type RegisteredReferenceRewriteMoveRecord,
+  type RegisteredReferenceRewriteOutcome,
+  type RegisteredReferenceRewriteRejectionRecord,
+  type RegisteredReferenceRewriteRejectionSession,
+  type RegisteredReferenceRewriteScenarioName,
+  type RegisteredReferenceRewriteSession,
+} from "./installed-runtime/registered-reference-rewrite-corpus.js";
 export {
   PUBLIC_WIRE_TOOL_NAMES,
   READ_SIDE_CORPUS_ID,

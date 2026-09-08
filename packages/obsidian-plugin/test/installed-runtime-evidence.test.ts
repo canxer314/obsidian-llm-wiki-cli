@@ -124,6 +124,133 @@ function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsol
   };
 }
 
+function registeredReferenceRewriteEvidence(): NonNullable<
+  InstalledRuntimeEvidence["registeredReferenceRewriteCorpus"]
+> {
+  return {
+    corpusId: "registered-reference-rewrite-proof",
+    seedManifestSha256: DIGEST,
+    scenarioManifestSha256: DIGEST,
+    beforeInventory: {
+      scope: "Notes/*.md",
+      entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+      digest: DIGEST,
+    },
+    afterInventory: {
+      scope: "Notes/*.md",
+      entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+      digest: DIGEST,
+    },
+    moves: [
+      {
+        scenario: "move/wikilink-destination-only",
+        profile: "wikilink",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-w",
+        sourcePath: "ReferenceProof/Grammar/Wikilink.md",
+        destinationPath: "ReferenceProof/Grammar/Wikilink Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/WikilinkRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+      {
+        scenario: "move/embed-destination-only",
+        profile: "embed",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-e",
+        sourcePath: "ReferenceProof/Grammar/Embed.md",
+        destinationPath: "ReferenceProof/Grammar/Embed Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/EmbedRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+      {
+        scenario: "move/markdown-inline-destination-only",
+        profile: "markdown_inline_link",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-i",
+        sourcePath: "ReferenceProof/Grammar/Inline.md",
+        destinationPath: "ReferenceProof/Grammar/Inline Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/InlineRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+      {
+        scenario: "move/markdown-embed-destination-only",
+        profile: "markdown_embed",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-m",
+        sourcePath: "ReferenceProof/Grammar/MdEmbed.md",
+        destinationPath: "ReferenceProof/Grammar/MdEmbed Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/MdEmbedRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+    ],
+    rawBytes: {
+      fixtures: [
+        {
+          scenario: "span/bom-crlf-cjk-astral-exact",
+          hostModes: ["bom", "crlf", "cjk", "astral"],
+          locatedReferences: 1,
+          everyReferenceExactlyOneVerifiedSpan: true,
+          everyUntouchedByteExact: true,
+          finalBytesHashReread: true,
+        },
+      ],
+      duplicateEqualSpellings: { referencesRewritten: 2, untouchedBytesExact: true },
+    },
+    rejections: [
+      {
+        scenario: "reject/stale-closure",
+        failureCode: "stale_observation",
+        registered: true,
+        noMutationDigestUnchanged: true,
+      },
+      {
+        scenario: "reject/literal-hash-destination",
+        failureCode: null,
+        registered: true,
+        noMutationDigestUnchanged: true,
+      },
+    ],
+    observer: {
+      enabledSecondObserver: true,
+      discoversIssued: 3,
+      privateStagingPathsObserved: 0,
+      halfWrittenMarkdownObserved: 0,
+    },
+    residualCleanup: {
+      recoveryState: "none",
+      queueLength: 0,
+      currentExecutionId: null,
+      writeGate: "open",
+    },
+    eventLog: [
+      {
+        sequence: 1,
+        kind: "assertion",
+        name: "registered-reference-corpus-began",
+        detailSha256: DIGEST,
+      },
+    ],
+    assertions: ["registered-reference-corpus-began"],
+    verdict: "passed",
+  };
+}
+
 function passingEvidence(): InstalledRuntimeEvidence {
   return {
     schemaVersion: 1,
@@ -331,6 +458,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
       verdict: "passed",
     },
     gateIsolationCorpus: gateIsolationEvidence(),
+    registeredReferenceRewriteCorpus: registeredReferenceRewriteEvidence(),
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
@@ -524,6 +652,43 @@ describe("installed-runtime evidence record", () => {
       gateIsolationCorpus: null,
     };
     expect(parseEvidence(serializeEvidence(withoutGateIsolation))).toEqual(withoutGateIsolation);
+  });
+
+  it("accepts a passing record with no registered-reference rewrite corpus (the seam is optional)", () => {
+    const withoutRewrite: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      registeredReferenceRewriteCorpus: null,
+    };
+    expect(parseEvidence(serializeEvidence(withoutRewrite))).toEqual(withoutRewrite);
+  });
+
+  it("refuses a passing verdict when recorded registered-reference evidence failed", () => {
+    const failedRewrite: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      registeredReferenceRewriteCorpus: {
+        ...passingEvidence().registeredReferenceRewriteCorpus!,
+        verdict: "failed",
+      },
+    };
+    expect(() => serializeEvidence(failedRewrite)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses passing registered-reference evidence whose seed inventory changed", () => {
+    const changedSeed: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      registeredReferenceRewriteCorpus: {
+        ...passingEvidence().registeredReferenceRewriteCorpus!,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [
+            { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+            { path: "Notes/Added.md", sha256: "f".repeat(64), sizeBytes: 7 },
+          ],
+          digest: "f".repeat(64),
+        },
+      },
+    };
+    expect(() => serializeEvidence(changedSeed)).toThrow(/seed inventory unchanged/u);
   });
 
   it("refuses a passing verdict without both lifecycle observations and clean cleanup", () => {
