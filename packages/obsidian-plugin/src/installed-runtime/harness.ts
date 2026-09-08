@@ -14,6 +14,7 @@ import {
 import { verifyReleaseBundle } from "../release/verify-release-bundle.js";
 import {
   writeEvidenceFile,
+  type ChangeSetCorpusEvidence,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
 } from "./evidence.js";
@@ -48,6 +49,14 @@ import {
   type PublicWireCorpusResult,
 } from "./public-wire-corpus.js";
 import {
+  ChangeSetSubmissionCorpusError,
+  composeChangeSetCorpusEvidence,
+  runChangeSetReplayCorpusAtEndpoint,
+  runChangeSetSubmissionCorpusAtEndpoint,
+  type ChangeSetAdmissionOutcome,
+  type ChangeSetReplayOutcome,
+} from "./change-set-submission-corpus.js";
+import {
   cleanupTestVault,
   compareInventories,
   provisionTestVault,
@@ -80,6 +89,8 @@ export type HarnessStage =
   | "obsidian_restart"
   | "health_restart"
   | "public_wire_corpus"
+  | "change_set_corpus"
+  | "change_set_replay"
   | "inventory_after"
   | "cleanup";
 
@@ -123,6 +134,8 @@ export type HarnessFailureCode =
   | "listener_mismatch"
   | "representation_mismatch"
   | "public_wire_corpus_failed"
+  | "change_set_corpus_failed"
+  | "change_set_replay_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -165,6 +178,14 @@ export interface InstalledRuntimeHarnessOptions {
   readonly processControl: ObsidianProcessControl;
   readonly client?: LoopbackMcpClient;
   readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
+  /**
+   * Write-side corpus seams (issue #175). The admission phase runs in the
+   * initial Obsidian window; the replay phase reconnects after the controlled
+   * restart and replays every established Submission Key. Both default to the
+   * real loopback implementations and are injectable for inner tests.
+   */
+  readonly runChangeSetCorpus?: typeof runChangeSetSubmissionCorpusAtEndpoint;
+  readonly runChangeSetReplay?: typeof runChangeSetReplayCorpusAtEndpoint;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -238,6 +259,8 @@ interface RunState {
   afterInventory: VaultInventoryEntry[] | null;
   observations: PhasedObservation[];
   publicWireCorpus: PublicWireCorpusResult | null;
+  changeSetAdmission: ChangeSetAdmissionOutcome | null;
+  changeSetReplay: ChangeSetReplayOutcome | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -267,6 +290,8 @@ export async function runInstalledRuntimeHarness(
     afterInventory: null,
     observations: [],
     publicWireCorpus: null,
+    changeSetAdmission: null,
+    changeSetReplay: null,
     cleanup: null,
     failure: null,
   };
@@ -304,6 +329,8 @@ export async function runInstalledRuntimeHarness(
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof PublicWireCorpusError) {
       fail(stage, "public_wire_corpus_failed", sanitize(error.message));
+    } else if (error instanceof ChangeSetSubmissionCorpusError) {
+      fail(stage, "change_set_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof BridgeIdentityError) {
@@ -344,6 +371,10 @@ export async function runInstalledRuntimeHarness(
     startStage: "obsidian_start" | "obsidian_restart",
     healthStage: "health_initial" | "health_restart",
     phase: "initial" | "after_restart",
+    during?: {
+      stage: "public_wire_corpus" | "change_set_replay";
+      run: (identity: PersistedBridgeIdentity) => Promise<void>;
+    },
   ): Promise<void> => {
     const vault = state.vault;
     const candidate = state.candidate;
@@ -408,6 +439,27 @@ export async function runInstalledRuntimeHarness(
     } catch (error) {
       failFromError(healthStage, error);
       return;
+    }
+    // The during hook runs while Obsidian and its loopback Bridge are live —
+    // the only window a real transport corpus can exercise. A corpus failure is
+    // projected to failed evidence; the controlled stop still runs so cleanup
+    // never leaves a live process holding the generated Vault.
+    if (during !== undefined) {
+      try {
+        await during.run(identity);
+      } catch (error) {
+        if (error instanceof ChangeSetSubmissionCorpusError) {
+          fail(
+            during.stage,
+            during.stage === "change_set_replay"
+              ? "change_set_replay_failed"
+              : "change_set_corpus_failed",
+            sanitize(error.message),
+          );
+        } else {
+          failFromError(during.stage, error);
+        }
+      }
     }
     try {
       await stopObsidian();
@@ -483,23 +535,88 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  // Shared event/assertion collectors for both change-set corpus phases so the
+  // closed evidence block spans the initial admission and the post-restart
+  // replay with monotonic event sequences.
+  const changeSetEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const changeSetAssertions: string[] = [];
+  const recordChangeSetEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    changeSetEvents.push({ kind, name, detail });
+  };
+  const recordChangeSetAssertion = (name: string): void => {
+    changeSetAssertions.push(name);
+  };
+
   if (state.failure === null) {
-    await startAndObserve("obsidian_start", "health_initial", "initial");
-  }
-  if (state.failure === null && firstIdentity !== null && state.vault !== null) {
-    try {
-      state.publicWireCorpus = await (options.runPublicWireCorpus ?? runPublicWireCorpus)({
-        endpoint: new URL(`http://127.0.0.1:${firstIdentity.port}/mcp`),
-        expectedVaultId: firstIdentity.vaultId,
-        fixtureSeed: state.vault.seedManifestSha256,
-        seedNotes: state.vault.seedNotes.map(({ path, content }) => ({ path, content })),
-      });
-    } catch (error) {
-      failFromError("public_wire_corpus", error);
-    }
+    await startAndObserve("obsidian_start", "health_initial", "initial", {
+      stage: "public_wire_corpus",
+      run: async (identity) => {
+        const vault = state.vault;
+        if (vault === null) return;
+        if (state.failure === null) {
+          try {
+            state.publicWireCorpus = await (options.runPublicWireCorpus ?? runPublicWireCorpus)({
+              endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+              expectedVaultId: identity.vaultId,
+              fixtureSeed: vault.seedManifestSha256,
+              seedNotes: vault.seedNotes.map(({ path, content }) => ({ path, content })),
+            });
+          } catch (error) {
+            failFromError("public_wire_corpus", error);
+          }
+        }
+        if (state.failure === null && state.publicWireCorpus !== null) {
+          try {
+            state.changeSetAdmission = await (options.runChangeSetCorpus ??
+              runChangeSetSubmissionCorpusAtEndpoint)({
+              endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+              expectedVaultId: identity.vaultId,
+              seedNotes: vault.seedNotes.map(({ path, content }) => ({ path, content })),
+              record: recordChangeSetEvent,
+              assertion: recordChangeSetAssertion,
+            });
+          } catch (error) {
+            if (error instanceof ChangeSetSubmissionCorpusError) {
+              fail("change_set_corpus", "change_set_corpus_failed", sanitize(error.message));
+            } else {
+              failFromError("change_set_corpus", error);
+            }
+          }
+        }
+      },
+    });
   }
   if (state.failure === null) {
-    await startAndObserve("obsidian_restart", "health_restart", "after_restart");
+    await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
+      stage: "change_set_replay",
+      run: async (identity) => {
+        if (state.changeSetAdmission === null) return;
+        try {
+          state.changeSetReplay = await (options.runChangeSetReplay ??
+            runChangeSetReplayCorpusAtEndpoint)({
+            endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+            expectedVaultId: identity.vaultId,
+            establishedKeys: state.changeSetAdmission.replayKeys,
+            record: recordChangeSetEvent,
+            assertion: recordChangeSetAssertion,
+          });
+        } catch (error) {
+          if (error instanceof ChangeSetSubmissionCorpusError) {
+            fail("change_set_replay", "change_set_replay_failed", sanitize(error.message));
+          } else {
+            failFromError("change_set_replay", error);
+          }
+        }
+      },
+    });
   }
 
   // Best-effort stop before cleanup so a failed run never leaves a live
@@ -549,6 +666,17 @@ export async function runInstalledRuntimeHarness(
         : "failed";
 
   const firstHealth = state.observations[0]?.observation.health;
+  const changeSetCorpus: ChangeSetCorpusEvidence | null =
+    state.failure === null &&
+    state.changeSetAdmission !== null &&
+    state.changeSetReplay !== null
+      ? composeChangeSetCorpusEvidence({
+          admission: state.changeSetAdmission,
+          replay: state.changeSetReplay,
+          events: changeSetEvents,
+          assertions: changeSetAssertions,
+        })
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -629,6 +757,7 @@ export async function runInstalledRuntimeHarness(
           })(),
     observations: state.observations.map((observation) => toObservationEvidence(observation)),
     publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
+    changeSetCorpus,
     verdict,
     failure:
       state.failure === null

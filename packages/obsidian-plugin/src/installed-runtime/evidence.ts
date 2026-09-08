@@ -198,6 +198,153 @@ const retainedByteCleanupReportSchema = z
   })
   .strict();
 
+/**
+ * One per-submission-key proof record (issue #175): the Submission Key is
+ * recorded only as a digest, never raw; the Change Set identity, terminal
+ * proof state, and whether execution advanced are the durable identity
+ * evidence a replay across disconnect/restart must reproduce unchanged.
+ */
+const changeSetSubmissionProofSchema = z
+  .object({
+    submissionKeySha256: sha256Schema,
+    changeSetId: z.string().min(1),
+    state: z.enum(["intent_applied", "intent_not_applied", "in_progress", "result_unproven"]),
+    failureCode: z.string().min(1).nullable(),
+    executed: z.boolean(),
+  })
+  .strict();
+
+/** One preflight rejection class: the stable failure code and no-mutation proof. */
+const changeSetRejectionClassSchema = z
+  .object({
+    name: z.string().min(1),
+    failureCode: z.enum(["stale_observation", "path_conflict", "exact_match_count_mismatch"]),
+    noMutationDigestUnchanged: z.literal(true),
+  })
+  .strict();
+
+/** FIFO/concurrency report: exactly-once admission plus contended-target exclusion. */
+const changeSetFifoReportSchema = z
+  .object({
+    concurrentSubmissions: z.number().int().positive(),
+    applied: z.number().int().nonnegative(),
+    distinctChangeSetIds: z.number().int().nonnegative(),
+    contendedTarget: z
+      .object({
+        submissions: z.number().int().positive(),
+        winners: z.literal(1),
+        rejected: z.number().int().nonnegative(),
+        noPartialMutation: z.literal(true),
+      })
+      .strict(),
+  })
+  .strict();
+
+/** Replay report across a transport restart: identical identity, no re-execution. */
+const changeSetReplayReportSchema = z
+  .object({
+    keysReplayed: z.number().int().positive(),
+    identitiesPreserved: z.number().int().positive(),
+    recordsUnchanged: z.number().int().positive(),
+    conflictingReusesRejected: z.number().int().positive(),
+  })
+  .strict();
+
+/** One response-corruption recovery class. */
+const changeSetRecoveryClassSchema = z
+  .object({
+    name: z.string().min(1),
+    recoveredThroughOriginalKey: z.literal(true),
+    changedContentRejected: z.literal(true),
+    changedKeyCreatedNoChangeSet: z.literal(true),
+  })
+  .strict();
+
+/** An immutable record compared across preview, final result, status, and replay. */
+const immutableChangeSetRecordSchema = z
+  .object({
+    submissionKeySha256: sha256Schema,
+    changeSetId: z.string().min(1),
+    state: z.literal("intent_applied"),
+    requestedEffectIds: z.array(z.string().min(1)).min(1),
+    derivedEffectIds: z.array(z.string().min(1)),
+    pathCount: z.number().int().positive(),
+  })
+  .strict();
+
+const changeSetIdleStateSchema = z
+  .object({
+    recoveryState: z.literal("none"),
+    queueLength: z.literal(0),
+    currentExecutionId: z.null(),
+    writeGate: z.literal("open"),
+  })
+  .strict();
+
+/**
+ * Deterministic Change Set submission corpus identity (issue #175): one closed
+ * name for the write-side corpus plus the seed-inventory and scenario-program
+ * digests that make a run reproducible. The admission section records
+ * per-Submission-Key proof records, every lease-time preflight rejection class
+ * with a no-mutation digest check, the FIFO/concurrency report, the
+ * response-corruption recovery report, and immutable records proven stable
+ * across preview/final/status/replay. Replay across the controlled restart
+ * records the durable identity evidence. `beforeInventory`/`afterInventory`
+ * scope the deterministic seed notes the corpus never mutates; a passing run
+ * requires the observed digest unchanged. The residual-cleanup report is
+ * wire-observed Bridge idle state (no recovery frame, drained queue, open
+ * write gate), never a skipped green.
+ */
+const changeSetCorpusEvidenceSchema = z
+  .object({
+    corpusId: z.literal("change-set-submission-proof"),
+    seedManifestSha256: sha256Schema,
+    scenarioManifestSha256: sha256Schema,
+    beforeInventory: corpusInventorySchema,
+    afterInventory: corpusInventorySchema,
+    admission: z
+      .object({
+        submissions: z.array(changeSetSubmissionProofSchema).min(1),
+        rejectionClasses: z.array(changeSetRejectionClassSchema).min(1),
+        fifo: changeSetFifoReportSchema,
+        recovery: z.array(changeSetRecoveryClassSchema).min(1),
+        immutableRecords: z.array(immutableChangeSetRecordSchema).min(1),
+      })
+      .strict(),
+    replay: changeSetReplayReportSchema,
+    residualCleanup: changeSetIdleStateSchema,
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)),
+    verdict: z.enum(["passed", "failed"]),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({ code: "custom", message: "Change-set event sequences must be monotonic" });
+    }
+    if (corpus.verdict === "passed" && corpus.assertions.length === 0) {
+      context.addIssue({ code: "custom", message: "Passing change-set evidence requires assertions" });
+    }
+    if (
+      corpus.verdict === "passed" &&
+      corpus.beforeInventory.digest !== corpus.afterInventory.digest
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "A passing change-set corpus must leave the deterministic seed inventory unchanged",
+      });
+    }
+    if (corpus.verdict === "passed") {
+      const executed = corpus.admission.submissions.filter((record) => record.executed);
+      if (executed.length === 0) {
+        context.addIssue({ code: "custom", message: "A passing change-set corpus requires executed proofs" });
+      }
+      if (corpus.admission.rejectionClasses.some((entry) => !entry.noMutationDigestUnchanged)) {
+        context.addIssue({ code: "custom", message: "Every rejection class must prove no mutation" });
+      }
+    }
+  });
+
 export const publicWireCorpusEvidenceSchema = z
   .object({
     fixtureSeed: sha256Schema,
@@ -269,6 +416,7 @@ export const installedRuntimeEvidenceSchema = z
     inventoryComparison: inventoryComparisonSchema.nullable(),
     observations: z.array(healthObservationEvidenceSchema),
     publicWireCorpus: publicWireCorpusEvidenceSchema.nullable(),
+    changeSetCorpus: changeSetCorpusEvidenceSchema.nullable(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -291,17 +439,20 @@ export const installedRuntimeEvidenceSchema = z
           evidence.observations.some((observation) => observation.phase === "after_restart") &&
           evidence.publicWireCorpus !== null &&
           evidence.publicWireCorpus.verdict === "passed" &&
+          evidence.changeSetCorpus !== null &&
+          evidence.changeSetCorpus.verdict === "passed" &&
           evidence.cleanup !== null &&
           evidence.cleanup.residualPaths.length === 0 &&
           evidence.profile.mismatches.length === 0
         : true,
     {
       message:
-        "A passing verdict requires a matched profile, candidate and Bridge identity, both health observations, and a clean cleanup report",
+        "A passing verdict requires a matched profile, candidate and Bridge identity, both health observations, and clean read- and write-side corpus evidence",
     },
   );
 
 export type PublicWireCorpusEvidence = z.infer<typeof publicWireCorpusEvidenceSchema>;
+export type ChangeSetCorpusEvidence = z.infer<typeof changeSetCorpusEvidenceSchema>;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];
 

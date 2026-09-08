@@ -65,6 +65,27 @@ continuation chain the corpus issued was consumed to completion and rejected
 on replay. A passing run requires the observed inventory digest to be
 unchanged and every issued chain consumed and single-use proven.
 
+The change-set submission corpus (issue #175) proves the write side of the
+same six-tool contract through the same real loopback transport and the real
+file-system Change Set engine. It registers a closed
+`change-set-submission-proof` corpus identity, then exercises one deterministic
+ordered scenario program over `vault_change_set_submit` /
+`vault_change_set_status` (plus `vault_discover`/`vault_health` for inventory
+and idle-state evidence): a valid submit performs validation, complete
+preflight, registration, queueing, and execution-or-recovery advancement with
+no validate/apply handshake; every lease-time preflight rejection class
+returns only its stable evidence and mutates nothing; concurrent submissions
+prove exactly-once admission and single-writer contended-target exclusion;
+lost/truncated/schema-invalid/representation-mismatched submit responses are
+recovered only through the original Submission Key; and preview, final result,
+status, and replay preserve immutable effect IDs, causation, ordering, and
+typed path evidence. The harness runs the admission phase in the initial
+Obsidian window and replays every established Submission Key over a fresh
+connection after the controlled stop/restart boundary, so the durable identity
+evidence is proven across a real process restart. Only digest-only per-key
+proof records, digests of the wire-observed seed inventories, and the idle
+recovery/queue/write-gate report reach the evidence envelope.
+
 ## Scenario seams
 
 Later lifecycle tickets inject behavior through `InstalledRuntimeHarnessOptions`

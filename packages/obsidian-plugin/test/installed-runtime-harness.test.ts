@@ -251,6 +251,101 @@ async function arrangeRun(
         verdict: "passed",
       },
     }),
+    runChangeSetCorpus: async ({ seedNotes, record, assertion }) => {
+      const seeded =
+        seedNotes.find(({ path }) => path === "Notes/Welcome.md")?.content ?? "";
+      const digest = createHash("sha256").update(seeded, "utf8").digest("hex");
+      const entries = [{ path: "Notes/Welcome.md", sha256: digest, sizeBytes: 0 }];
+      record("assertion", "stubbed-change-set-corpus-began", {
+        corpusId: "change-set-submission-proof",
+      });
+      record("cleanup", "change-set-idle-state", {
+        recoveryState: "none",
+        queueLength: 0,
+        currentExecutionId: null,
+        writeGate: "open",
+      });
+      assertion("stubbed-change-set-corpus");
+      return {
+        scenarioManifestSha256: "d".repeat(64),
+        seedInventoryDigest: digest,
+        beforeInventory: entries,
+        afterInventory: entries,
+        replayKeys: [
+          {
+            submissionKey: "cs-proof-valid-create",
+            input: {
+              submissionKey: "cs-proof-valid-create",
+              operations: [
+                {
+                  operationId: "valid-create",
+                  kind: "create_note",
+                  path: "ChangeSetProof/Welcome.md",
+                  content: "# stub\n",
+                  ifExists: "reject",
+                },
+              ],
+            },
+          },
+        ],
+        submissions: [
+          {
+            submissionKeySha256: "b".repeat(64),
+            changeSetId: "change-set-1",
+            state: "intent_applied",
+            failureCode: null,
+            executed: true,
+          },
+        ],
+        rejectionClasses: [
+          { name: "rejection/stale-direct-target", failureCode: "stale_observation" },
+        ],
+        fifoReport: {
+          concurrentSubmissions: 1,
+          applied: 1,
+          distinctChangeSetIds: 1,
+          contendedTarget: {
+            submissions: 2,
+            winners: 1,
+            rejected: 1,
+            noPartialMutation: true,
+          },
+        },
+        recoveryClasses: [{ name: "recovery/missing-response" }],
+        immutableRecords: [
+          {
+            submissionKeySha256: "b".repeat(64),
+            changeSetId: "change-set-1",
+            state: "intent_applied",
+            requestedEffectIds: ["valid-create"],
+            derivedEffectIds: [],
+            pathCount: 2,
+          },
+        ],
+        residualCleanup: {
+          recoveryState: "none",
+          queueLength: 0,
+          currentExecutionId: null,
+          writeGate: "open",
+        },
+        assertions: ["stubbed-change-set-corpus"],
+      };
+    },
+    runChangeSetReplay: async ({ record, assertion }) => {
+      record("assertion", "stubbed-change-set-replay-began", {
+        keys: 1,
+      });
+      assertion("stubbed-change-set-replay");
+      return {
+        replayReport: {
+          keysReplayed: 1,
+          identitiesPreserved: 1,
+          recordsUnchanged: 1,
+          conflictingReusesRejected: 1,
+        },
+        assertions: ["stubbed-change-set-replay"],
+      };
+    },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 2_000 },
     ...overrides,
   };
@@ -285,6 +380,9 @@ describe("installed-runtime harness orchestration", () => {
     );
     expect(evidence.inventoryComparison).not.toBeNull();
     expect(evidence.publicWireCorpus?.verdict).toBe("passed");
+    expect(evidence.changeSetCorpus?.verdict).toBe("passed");
+    expect(evidence.changeSetCorpus?.corpusId).toBe("change-set-submission-proof");
+    expect(evidence.changeSetCorpus?.replay.keysReplayed).toBeGreaterThan(0);
     expect(evidence.cleanup).toEqual({ attempted: true, residualPaths: [] });
 
     // The generated roots are gone and nothing private leaked into evidence.

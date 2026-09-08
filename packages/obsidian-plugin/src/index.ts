@@ -305,6 +305,7 @@ export {
   writeEvidenceFile,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
+  type ChangeSetCorpusEvidence,
   type PublicWireCorpusEvidence,
 } from "./installed-runtime/evidence.js";
 export {
@@ -325,6 +326,23 @@ export {
   type LoopbackMcpClientOptions,
   type ObservedHealth,
 } from "./installed-runtime/loopback-client.js";
+export {
+  CHANGE_SET_CORPUS_DIRECTORY,
+  CHANGE_SET_SCENARIO_PLAN,
+  CHANGE_SET_SUBMISSION_CORPUS_ID,
+  ChangeSetSubmissionCorpusError,
+  composeChangeSetCorpusEvidence,
+  digestCorpusInventory,
+  runChangeSetReplayCorpus,
+  runChangeSetReplayCorpusAtEndpoint,
+  runChangeSetSubmissionCorpus,
+  runChangeSetSubmissionCorpusAtEndpoint,
+  type ChangeSetAdmissionOutcome,
+  type ChangeSetCorpusInventoryEntry,
+  type ChangeSetReplayOutcome,
+  type ChangeSetScenarioName,
+  type ChangeSetSubmissionKeyRecord,
+} from "./installed-runtime/change-set-submission-corpus.js";
 export {
   PUBLIC_WIRE_TOOL_NAMES,
   READ_SIDE_CORPUS_ID,

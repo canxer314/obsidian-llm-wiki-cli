@@ -137,6 +137,90 @@ function passingEvidence(): InstalledRuntimeEvidence {
       assertions: ["public-tool-inventory"],
       verdict: "passed",
     },
+    changeSetCorpus: {
+      corpusId: "change-set-submission-proof",
+      seedManifestSha256: DIGEST,
+      scenarioManifestSha256: DIGEST,
+      beforeInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      afterInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      admission: {
+        submissions: [
+          {
+            submissionKeySha256: DIGEST,
+            changeSetId: "change-set-1",
+            state: "intent_applied",
+            failureCode: null,
+            executed: true,
+          },
+        ],
+        rejectionClasses: [
+          {
+            name: "rejection/stale-direct-target",
+            failureCode: "stale_observation",
+            noMutationDigestUnchanged: true,
+          },
+        ],
+        fifo: {
+          concurrentSubmissions: 2,
+          applied: 2,
+          distinctChangeSetIds: 2,
+          contendedTarget: {
+            submissions: 2,
+            winners: 1,
+            rejected: 1,
+            noPartialMutation: true,
+          },
+        },
+        recovery: [
+          {
+            name: "recovery/missing-response",
+            recoveredThroughOriginalKey: true,
+            changedContentRejected: true,
+            changedKeyCreatedNoChangeSet: true,
+          },
+        ],
+        immutableRecords: [
+          {
+            submissionKeySha256: DIGEST,
+            changeSetId: "change-set-1",
+            state: "intent_applied",
+            requestedEffectIds: ["op-1"],
+            derivedEffectIds: [],
+            pathCount: 2,
+          },
+        ],
+      },
+      replay: {
+        keysReplayed: 1,
+        identitiesPreserved: 1,
+        recordsUnchanged: 1,
+        conflictingReusesRejected: 1,
+      },
+      residualCleanup: {
+        recoveryState: "none",
+        queueLength: 0,
+        currentExecutionId: null,
+        writeGate: "open",
+      },
+      eventLog: [
+        {
+          sequence: 1,
+          kind: "assertion",
+          name: "change-set-corpus-began",
+          detailSha256: DIGEST,
+        },
+      ],
+      assertions: ["change-set-corpus-began"],
+      verdict: "passed",
+    },
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
@@ -165,6 +249,49 @@ describe("installed-runtime evidence record", () => {
   it("refuses a passing verdict without a complete public-wire corpus", () => {
     const missingCorpus = { ...passingEvidence(), publicWireCorpus: null };
     expect(() => serializeEvidence(missingCorpus)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses a passing verdict without a complete change-set corpus", () => {
+    const missingWriteSide = { ...passingEvidence(), changeSetCorpus: null };
+    expect(() => serializeEvidence(missingWriteSide)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses passing change-set evidence whose seed inventory changed or proofs are missing", () => {
+    const changedSeedInventory: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      changeSetCorpus: {
+        ...passingEvidence().changeSetCorpus!,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [
+            { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+            { path: "Notes/Added.md", sha256: "f".repeat(64), sizeBytes: 7 },
+          ],
+          digest: "f".repeat(64),
+        },
+      },
+    };
+    expect(() => serializeEvidence(changedSeedInventory)).toThrow(/seed inventory unchanged/u);
+
+    const noExecutedProofs: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      changeSetCorpus: {
+        ...passingEvidence().changeSetCorpus!,
+        admission: {
+          ...passingEvidence().changeSetCorpus!.admission,
+          submissions: [
+            {
+              submissionKeySha256: DIGEST,
+              changeSetId: "change-set-1",
+              state: "intent_not_applied",
+              failureCode: "path_conflict",
+              executed: false,
+            },
+          ],
+        },
+      },
+    };
+    expect(() => serializeEvidence(noExecutedProofs)).toThrow(/executed proofs/u);
   });
 
   it("refuses passing evidence whose read-side corpus inventory changed or leaked chains", () => {
