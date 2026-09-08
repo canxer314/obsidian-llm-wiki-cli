@@ -6,6 +6,11 @@ import {
   createAutomationDispatchGithubPort,
   createAutomationGithubPort,
 } from "../.sandcastle/automation-github.js";
+import {
+  DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS,
+  MAX_GITHUB_ATTEMPTS,
+  RETRY_DELAYS_MS,
+} from "../.sandcastle/github-cli.js";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const HEAD_SETTLE_ATTEMPTS = 3;
@@ -957,6 +962,196 @@ describe("automation GitHub port", () => {
 
       expect(execute).toHaveBeenCalledTimes(2);
       expect(waits).toEqual([]);
+    });
+  });
+
+  describe("publishReview routes its reads through the shared safe-read retry boundary", () => {
+    const transientFailure = () => new Error("network reset");
+    const rateLimitedFailure = (stderr: string): Error =>
+      Object.assign(new Error("gh exited"), { stderr });
+    const reviewPostCalls = (execute: ReturnType<typeof vi.fn>) =>
+      execute.mock.calls.filter(([, arguments_]) =>
+        Array.isArray(arguments_)
+        && arguments_.some((argument) =>
+          typeof argument === "string" && argument.endsWith("/pulls/220/reviews")));
+    const emptyReview = { summary: "Looks good.", inlineComments: [], replies: [] };
+    const headView = (head: string) => ({ stdout: `${head}\n`, stderr: "" });
+
+    it("retries a transiently failing changed-files GET and still publishes the review exactly once", async () => {
+      let postedBody: unknown;
+      const changedFiles = JSON.stringify([{
+        filename: "src/safety.ts",
+        patch: "@@ -10,3 +10,5 @@\n export function shield() {\n+  return true;\n }",
+      }]);
+      let fileAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) {
+          fileAttempts += 1;
+          if (fileAttempts === 1) throw transientFailure();
+          return { stdout: changedFiles, stderr: "" };
+        }
+        if (endpoint?.endsWith("/reviews")) {
+          const inputIndex = arguments_.indexOf("--input");
+          postedBody = JSON.parse(await readFile(arguments_[inputIndex + 1]!, "utf8"));
+          return { stdout: "", stderr: "" };
+        }
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.publishReview({
+        pullRequestNumber: 220,
+        revision,
+        review: {
+          summary: "One problem.",
+          inlineComments: [{ path: "src/safety.ts", line: 11, body: "Return early." }],
+          replies: [],
+        },
+      });
+
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(postedBody).toMatchObject({
+        commit_id: revision,
+        event: "COMMENT",
+        comments: [{ path: "src/safety.ts", line: 11, side: "RIGHT", body: "Return early." }],
+      });
+      expect(reviewPostCalls(execute)).toHaveLength(1);
+      expect(execute).toHaveBeenCalledTimes(4);
+    });
+
+    it("absorbs a transient pr view failure before settling a briefly stale head", async () => {
+      let viewAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") {
+          viewAttempts += 1;
+          if (viewAttempts === 1) throw transientFailure();
+          if (viewAttempts === 2) return headView("b".repeat(40));
+          return headView(revision);
+        }
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) return { stdout: "[]", stderr: "" };
+        if (endpoint?.endsWith("/reviews")) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+        headSettleMilliseconds: 0,
+      });
+
+      await github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview });
+
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(reviewPostCalls(execute)).toHaveLength(1);
+      expect(execute).toHaveBeenCalledTimes(5);
+    });
+
+    it("still refuses publication when the head never converges after the transient read recovers", async () => {
+      let viewAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") {
+          viewAttempts += 1;
+          if (viewAttempts === 1) throw transientFailure();
+          return headView("b".repeat(40));
+        }
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+        headSettleMilliseconds: 0,
+      });
+
+      await expect(github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview }))
+        .rejects.toThrow("Pull Request head changed before review publication");
+
+      expect(waits).toEqual([RETRY_DELAYS_MS[0]]);
+      expect(execute).toHaveBeenCalledTimes(1 + HEAD_SETTLE_ATTEMPTS);
+      expect(reviewPostCalls(execute)).toHaveLength(0);
+    });
+
+    it("exhausts the changed-files read budget without ever calling the review POST", async () => {
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) throw transientFailure();
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview }))
+        .rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(1 + MAX_GITHUB_ATTEMPTS);
+      expect(waits).toEqual([...RETRY_DELAYS_MS]);
+      expect(reviewPostCalls(execute)).toHaveLength(0);
+    });
+
+    it("honors a server Retry-After hint on the changed-files read with one dedicated wait", async () => {
+      let fileAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) {
+          fileAttempts += 1;
+          if (fileAttempts === 1) throw rateLimitedFailure("HTTP 429 Retry-After: 90 seconds");
+          return { stdout: "[]", stderr: "" };
+        }
+        if (endpoint?.endsWith("/reviews")) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview });
+
+      expect(waits).toEqual([90_000]);
+      expect(reviewPostCalls(execute)).toHaveLength(1);
+    });
+
+    it("defaults a hint-less rate-limit wait on the changed-files read to the shared delay", async () => {
+      let fileAttempts = 0;
+      const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+        if (arguments_[0] === "pr" && arguments_[1] === "view") return headView(revision);
+        const endpoint = arguments_.find((argument): argument is string =>
+          typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+        if (endpoint?.endsWith("/files")) {
+          fileAttempts += 1;
+          if (fileAttempts === 1) throw rateLimitedFailure("HTTP 403: API rate limit exceeded");
+          return { stdout: "[]", stderr: "" };
+        }
+        if (endpoint?.endsWith("/reviews")) return { stdout: "", stderr: "" };
+        throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+      });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await github.publishReview({ pullRequestNumber: 220, revision, review: emptyReview });
+
+      expect(waits).toEqual([DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS]);
+      expect(reviewPostCalls(execute)).toHaveLength(1);
     });
   });
 });

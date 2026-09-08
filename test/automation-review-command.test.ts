@@ -225,6 +225,49 @@ describe("review automation command", () => {
     expect(dependencies.github.removePullRequestLabel).toHaveBeenCalledWith(220, "agent:in-progress");
   });
 
+  it("maps a publishReview changed-files read budget exhaustion to a blocked review-execution", async () => {
+    const events: string[] = [];
+    const dependencies = ports(events);
+    const execute = vi.fn(async (_file: string, arguments_: readonly string[]) => {
+      if (arguments_[0] === "pr" && arguments_[1] === "view") {
+        return { stdout: `${improvedRevision}\n`, stderr: "" };
+      }
+      const endpoint = arguments_.find((argument): argument is string =>
+        typeof argument === "string" && argument.startsWith("repos/{owner}/{repo}/pulls/220"));
+      if (endpoint?.endsWith("/files")) throw new Error("network reset");
+      throw new Error(`unexpected gh invocation: ${arguments_.join(" ")}`);
+    });
+    const github = createAutomationGithubPort({
+      execute,
+      waitForRetry: async () => {},
+      headSettleMilliseconds: 0,
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, {
+        ...dependencies,
+        github: { ...dependencies.github, publishReview: github.publishReview },
+        createJobId: () => "job-220",
+      })).resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
+
+      // The changed-files GET exhausted the shared three-attempt read budget
+      // (one transient failure + two backoff retries) before the review POST.
+      expect(execute.mock.calls.length).toBe(4);
+      expect(execute.mock.calls.some(([, arguments_]) =>
+        Array.isArray(arguments_)
+        && arguments_.some((argument) => typeof argument === "string" && argument.endsWith("/reviews")))).toBe(false);
+      expect(dependencies.github.markPullRequestReady).not.toHaveBeenCalled();
+      expect(dependencies.github.replyToReviewThread).not.toHaveBeenCalled();
+      expect(events).toEqual([
+        "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`,
+        `push:${revision}`, "add:agent:blocked", "blocked", "remove:agent:in-progress",
+      ]);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("refuses a fork decoded through the stable Pull Request REST shape before Agent execution", async () => {
     const events: string[] = [];
     const execute = vi.fn()
