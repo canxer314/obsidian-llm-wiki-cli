@@ -85,6 +85,7 @@ import {
 import {
   seedCorpusRoot,
   terminalStateForFile,
+  type MutationCorpusHiddenStateExpectation,
   type MutationCorpusProfile,
   type MutationCorpusProofState,
 } from "./crash-corpus-runner.js";
@@ -100,6 +101,7 @@ import {
   FRONTMATTER_ORIGINAL_BYTES,
 } from "./edit-fixtures.js";
 import {
+  TRASH_NOTE_BYTES,
   TRASH_NOTE_PATH,
   trashNoteCorpusProfile,
 } from "./managed-trash-corpus.js";
@@ -257,6 +259,14 @@ export interface SemanticEvidenceExpectation {
   readonly quietWindowResets?: number;
   /** Minimum number of diagnostically rejected barrier rounds. */
   readonly rejectionsMinimum?: number;
+  /**
+   * Declared redacted hidden state for a terminal the per-proof check does not
+   * cover (counts + digests only, never paths — spec A-37). A `result_unproven`
+   * scenario still owes this proof: a failed rollback over contrary
+   * third-party state must preserve the Bridge-owned trash copy byte-for-byte,
+   * and a restored-but-unproven rollback must leave no private residue.
+   */
+  readonly hidden?: MutationCorpusHiddenStateExpectation;
 }
 
 /** Derived-reference projection for `move` scenarios, declared from byte fixtures. */
@@ -906,10 +916,21 @@ export async function runSemanticEvidenceScenario(
   // rounds when the phase is undeclared.
   let applyRoundCursor = 0;
   let rollbackRoundCursor = 0;
+  // Implicit rounds (the sentinel phase, or an undeclared untargeted phase)
+  // model a clean convergence: the first round should match. They are bounded
+  // so a regression that prevents convergence fails the scenario at this
+  // budget instead of retrying the real quiet window forever.
+  const MAX_IMPLICIT_ROUNDS = 8;
+  const implicitRounds = new Map<string, number>();
+  const implicitRound = (): EvidenceRound | undefined => {
+    const used = (implicitRounds.get(phase) ?? 0) + 1;
+    implicitRounds.set(phase, used);
+    return used > MAX_IMPLICIT_ROUNDS ? undefined : {};
+  };
   const nextRound = (targeted: boolean): EvidenceRound | undefined => {
-    if (phase === "sentinel") return {};
+    if (phase === "sentinel") return implicitRound();
     const declared = phase === "apply" ? schedule.applyRounds : schedule.rollbackRounds;
-    if (declared === undefined) return targeted ? undefined : {};
+    if (declared === undefined) return targeted ? undefined : implicitRound();
     if (phase === "apply") {
       if (applyRoundCursor >= declared.length) return undefined;
       const round = declared[applyRoundCursor];
@@ -1519,6 +1540,13 @@ export async function runSemanticEvidenceScenario(
       if (sentinelSessions.length > 0) {
         failures.push("a blocked sentinel unexpectedly began an evidence session");
       }
+    } else if (runtimeState.blocked.length > 0) {
+      // A clean or rolled-back scenario must never trip the unproven write
+      // gate. The sentinel is injected with `recovery_blocked` only when the
+      // scenario declares it, so an unexpected block would pass silently here.
+      failures.push(
+        `writes were unexpectedly blocked for: ${runtimeState.blocked.join(", ")}`,
+      );
     }
     // The sentinel's own host emissions are exactly its published create
     // event when it applied, and nothing when the gate blocked it.
@@ -1567,6 +1595,22 @@ export async function runSemanticEvidenceScenario(
         ) {
           failures.push("hidden Managed-Trash state does not match the expected terminal state");
         }
+      }
+    }
+
+    // A declared hidden-state expectation applies to every terminal the
+    // per-proof check skips (spec A-37 redaction: counts and digests only).
+    if (expect.hidden !== undefined) {
+      if (report.hidden === null) {
+        failures.push("expected a hidden-state observation but none was recorded");
+      } else if (
+        report.hidden.trashCount !== expect.hidden.trashCount ||
+        JSON.stringify(report.hidden.trashSha256s) !==
+          JSON.stringify([...expect.hidden.trashSha256s].sort()) ||
+        report.hidden.stagingCount !== expect.hidden.stagingCount ||
+        report.hidden.stagingSha256s.length !== 0
+      ) {
+        failures.push("hidden state does not match the declared terminal expectation");
       }
     }
 
@@ -1663,6 +1707,17 @@ export async function runSemanticEvidenceScenario(
         }
       }
     }
+    // Foreign-write and sentinel bytes are note content too, even though no
+    // profile fixture owns them.
+    for (const [label, bytes] of [
+      ["the foreign-write residue", FOREIGN_NOTE_BYTES],
+      ["the sentinel write", textEncoder.encode(`# Sentinel ${seed}\n`)],
+    ] as const) {
+      const probeText = Buffer.from(bytes).toString("utf8").slice(0, 24);
+      if (probeText.length >= 16 && serialized.includes(probeText)) {
+        failures.push(`report leaks note content from ${label}`);
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!failures.includes(message)) failures.push(message);
@@ -1693,6 +1748,13 @@ const textEncoder = new TextEncoder();
 const FOREIGN_OBSERVATION_BYTES = textEncoder.encode("# Foreign cache observation 你好 🚀\n");
 const FOREIGN_OBSERVATION_VERSION = contentVersion(FOREIGN_OBSERVATION_BYTES);
 const FOREIGN_NOTE_BYTES = textEncoder.encode("# Third-party interference\n\nForeign 你好 🚀\n");
+const TRASH_NOTE_BYTES_DIGEST = `sha256:${createHash("sha256").update(TRASH_NOTE_BYTES).digest("hex")}`;
+const EMPTY_HIDDEN: MutationCorpusHiddenStateExpectation = {
+  trashCount: 0,
+  trashSha256s: [],
+  stagingCount: 0,
+  stagingSha256s: [],
+};
 
 const CLEAN_SESSION: readonly SemanticSessionExpectation[] = [
   { mode: "apply", outcome: "not_awaited" },
@@ -2382,6 +2444,9 @@ export function trashNoteRestoreEvidenceDeadlineBlocksWrites(): SemanticEvidence
       sentinelApplied: false,
       residue: false,
       snapshot: "never_accepted",
+      // The restore completed publicly but its evidence never converged: the
+      // private trash copy is gone and no staging residue remains.
+      hidden: EMPTY_HIDDEN,
     },
   };
 }
@@ -2417,6 +2482,14 @@ export function trashNoteContraryThirdPartyBlocksWrites(): SemanticEvidenceScena
       sentinelApplied: false,
       residue: true,
       snapshot: "never_accepted",
+      // The failed rollback preserves the Bridge-owned trash copy
+      // byte-for-byte and leaves no staging residue.
+      hidden: {
+        trashCount: 1,
+        trashSha256s: [TRASH_NOTE_BYTES_DIGEST],
+        stagingCount: 0,
+        stagingSha256s: [],
+      },
     },
   };
 }

@@ -207,12 +207,28 @@ async function resolveTargetIndex(
   const newest = valid[0];
   const older = valid[1];
   if (target === "both") {
+    if (valid.length === 0) {
+      throw new Error('Journal corruption target "both" found no valid frame to corrupt');
+    }
     return valid.map((entry) => entry.index);
   }
   if (target === "newest") {
-    return newest === undefined ? [] : [newest.index];
+    if (newest === undefined) {
+      throw new Error('Journal corruption target "newest" found no valid frame to corrupt');
+    }
+    return [newest.index];
   }
-  return older === undefined ? (newest === undefined ? [] : [newest.index]) : [older.index];
+  // An unavailable declared target must fail the scenario loudly: silently
+  // corrupting a different frame (or nothing) would record a fault identity
+  // that never actually fired.
+  if (older === undefined) {
+    throw new Error(
+      newest === undefined
+        ? 'Journal corruption target "older" found no valid frame to corrupt'
+        : 'Journal corruption target "older" found a single valid frame; refusing to corrupt the newest frame instead',
+    );
+  }
+  return [older.index];
 }
 
 /**

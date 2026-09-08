@@ -215,9 +215,10 @@ function scanCorpusReferences(content: string): ParsedCorpusReference[] {
     const embedded = content.charCodeAt(open - 1) === 0x21; // '!'
     const close = content.indexOf("]]", open + 2);
     if (close < 0) break;
+    // `original` spans `[[...]]` only; for an embed the leading `!` stays
+    // outside the span so a derived rewrite of `original` preserves it.
     const original = content.slice(open, close + 2);
-    const prefixLength = embedded ? 3 : 2;
-    const inner = original.slice(prefixLength, -2);
+    const inner = original.slice(2, -2);
     const fragment = inner.indexOf("#");
     const alias = inner.indexOf("|");
     const separator =

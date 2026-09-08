@@ -960,11 +960,14 @@ async function privateAreaResidualPaths(
     (relativePath) => `staging:${relativePath}`,
   );
   if (!redactTrash) {
-    residuals.push(
-      ...(await listPrivateAreaFiles(root, "trash")).map(
-        (relativePath) => `trash:${relativePath}`,
-      ),
-    );
+    // Non-Managed-Trash profiles own no trash state, so any trash residue is
+    // unexpected and must fail the scenario — but a private Managed-Trash path
+    // or identifier still never appears in a report (spec A-37), so the
+    // residue is recorded as a redacted marker.
+    const trashResiduals = await listPrivateAreaFiles(root, "trash");
+    for (let index = 0; index < trashResiduals.length; index += 1) {
+      residuals.push("trash:<redacted>");
+    }
   }
   return residuals.sort();
 }
@@ -1983,7 +1986,9 @@ export async function runMutationCorpusJournalFaultScenario(
           "public inventory changed across a refused boot; no recovery mutation may begin",
         );
       }
-      if (evidence.fileFinal.some((file) => !file.present && file.state !== "absent")) {
+      if (
+        evidence.fileFinal.some((file) => file.state !== "absent" && file.state !== "original")
+      ) {
         failures.push("a refused boot left an unexpected public path state");
       }
       evidence.fault = faultEvidence;
@@ -2054,6 +2059,18 @@ export async function runMutationCorpusJournalFaultScenario(
     await client.close().catch(() => undefined);
 
     await terminateChildIfRunning(gen2);
+    if (expectedRecovery === "blocked_unproven") {
+      // The untrustworthy journal is the evidence a blocked recovery stands
+      // behind: startup recovery must fail closed without mutating it. The
+      // earlier observation was taken before generation 2 booted, so the
+      // journal is re-observed after the child terminates.
+      const journalAfterRecovery = await observeJournal(root);
+      if (JSON.stringify(journalAfterRecovery) !== JSON.stringify(journalObservedAfter)) {
+        failures.push(
+          "startup recovery mutated the untrustworthy journal it should have preserved",
+        );
+      }
+    }
     await rm(join(root, sentinelNote), { force: true });
     evidence.after = await inventoryCorpus(root);
     evidence.fileFinal = await observeFinalFiles(root, profile);
@@ -2349,7 +2366,9 @@ export async function runMutationCorpusJournalWriteFaultScenario(
     }
 
     // ---- Strict-ordering and fail-closed assertions -------------------------
-    const fired = await readFaultFired(faultControlDir ?? "");
+    const fired = faultControlDir === null
+      ? { fired: false, at: null }
+      : await readFaultFired(faultControlDir);
     if (!fired.fired) {
       failures.push(
         `requested storage fault (${options.fault.phase}@${options.fault.occurrence}) was bypassed`,
@@ -2443,7 +2462,9 @@ export async function runMutationCorpusJournalWriteFaultScenario(
     const message = error instanceof Error ? error.message : String(error);
     if (!failures.includes(message)) failures.push(message);
   } finally {
-    const fired = await readFaultFired(faultControlDir ?? "").catch(() => ({ fired: false, at: null }));
+    const fired = faultControlDir === null
+      ? { fired: false, at: null }
+      : await readFaultFired(faultControlDir).catch(() => ({ fired: false, at: null }));
     evidence.fault = {
       kind: "journal_write",
       identity: `${options.fault.phase.toLowerCase()}_${options.fault.step}`,
