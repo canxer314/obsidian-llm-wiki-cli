@@ -8,7 +8,7 @@ import {
 } from "./worker-process-lifecycle.ts";
 import { reviewSchema, type ExtractedReview } from "./review-extraction.ts";
 
-const REVIEW_TIMEOUT_MILLISECONDS = 90 * 60 * 1000;
+const REVIEW_TIMEOUT_MILLISECONDS = 135 * 60 * 1000;
 const REVIEW_GRACE_MILLISECONDS = 10 * 1000;
 
 function parseReview(result: { readonly stdout: string; readonly stderr: string; readonly code: number | null }): ExtractedReview {

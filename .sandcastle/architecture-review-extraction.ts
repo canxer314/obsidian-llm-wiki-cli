@@ -59,7 +59,7 @@ Now emit the outcome of the architecture-review pass as one JSON object inside <
 `;
 
 // Upstream architecture-review jobs time out after twenty minutes.
-const ARCHITECTURE_REVIEW_TIMEOUT_MILLISECONDS = 20 * 60 * 1000;
+const ARCHITECTURE_REVIEW_TIMEOUT_MILLISECONDS = 30 * 60 * 1000;
 
 export function createSameSessionArchitectureReviewExtractor(options: {
   readonly sandbox: SandboxProvider;

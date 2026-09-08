@@ -16,7 +16,7 @@ import {
   workerProcessEnvironment,
 } from "./worker-process.ts";
 
-const AGENT_JOB_TIMEOUT_MILLISECONDS = 60 * 60 * 1000;
+const AGENT_JOB_TIMEOUT_MILLISECONDS = 90 * 60 * 1000;
 const AGENT_JOB_GRACE_MILLISECONDS = 10 * 1000;
 
 export class AgentWorkerTimeoutError extends Error {

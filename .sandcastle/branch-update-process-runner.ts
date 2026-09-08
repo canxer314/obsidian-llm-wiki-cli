@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import type { BranchUpdateResult } from "./branch-update-automation.ts";
 import { createWorkerProcessLifecycle } from "./worker-process-lifecycle.ts";
 
-const GIT_COMMAND_TIMEOUT_MILLISECONDS = 5 * 60 * 1000;
+const GIT_COMMAND_TIMEOUT_MILLISECONDS = 7.5 * 60 * 1000;
 const GIT_COMMAND_GRACE_MILLISECONDS = 10 * 1000;
 
 type Execute = (

@@ -16,7 +16,7 @@ import { architectureReviewSchema } from "./architecture-review-extraction.ts";
 // Upstream architecture-review jobs time out after twenty minutes. The worker
 // aborts itself at that mark so a timeout stays a classified graceful failure;
 // the outer clock adds a margin and only force-kills a worker that ignored it.
-const WORKER_TIMEOUT_MILLISECONDS = 20 * 60 * 1000;
+const WORKER_TIMEOUT_MILLISECONDS = 30 * 60 * 1000;
 const FORCE_KILL_MARGIN_MILLISECONDS = 60 * 1000;
 const ARCHITECTURE_REVIEW_GRACE_MILLISECONDS = 10 * 1000;
 

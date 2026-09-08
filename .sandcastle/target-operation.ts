@@ -38,13 +38,13 @@ import type { TargetOperationStartupSnapshot } from "./target-operation-startup.
 
 const TARGET_JOB_GRACE_MILLISECONDS = 10 * 1000;
 const targetOperationTimeouts: Readonly<Record<TargetOperationIdentity, number>> = {
-  "implement-issue": 60 * 60 * 1000,
-  "implement-spec": 60 * 60 * 1000,
-  "implement-feedback": 60 * 60 * 1000,
-  review: 90 * 60 * 1000,
-  "update-branch": 60 * 60 * 1000,
-  "split-spec": 60 * 60 * 1000,
-  "architecture-review": 21 * 60 * 1000,
+  "implement-issue": 90 * 60 * 1000,
+  "implement-spec": 90 * 60 * 1000,
+  "implement-feedback": 90 * 60 * 1000,
+  review: 135 * 60 * 1000,
+  "update-branch": 90 * 60 * 1000,
+  "split-spec": 90 * 60 * 1000,
+  "architecture-review": 31.5 * 60 * 1000,
 };
 
 export function targetOperationTimeout(operation: TargetOperationIdentity): number {
