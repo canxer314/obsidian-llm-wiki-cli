@@ -11,6 +11,20 @@ function automationSources(): { readonly name: string; readonly content: string 
     .map((name) => ({ name, content: readFileSync(resolve(sandcastleDir, name), "utf8") }));
 }
 
+// The absence guards describe behavior, not prose. Comment-only lines are
+// stripped before matching so an explanatory comment that uses the retired
+// vocabulary (or the Spec #449 recovery vocabulary) never counts as a live
+// execution path. This keeps the guard on code while tolerating documentation
+// that names what must not return.
+function executableContent(content: string): string {
+  return content.split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      return !(trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*"));
+    })
+    .join("\n");
+}
+
 // The retired claim/watch/worktree/repair system must not survive in any
 // replacement execution path. These patterns encode the cutover boundary:
 // no claim branches or receipts, no manual remote-tracking refs, no
@@ -30,7 +44,7 @@ describe("retired Sandcastle system absence", () => {
     const sources = automationSources();
     expect(sources.length).toBeGreaterThan(0);
     const violations = sources.flatMap(({ name, content }) =>
-      FORBIDDEN_PATTERNS.filter(({ pattern }) => pattern.test(content))
+      FORBIDDEN_PATTERNS.filter(({ pattern }) => pattern.test(executableContent(content)))
         .map(({ behavior }) => `${name}: ${behavior}`));
     expect(violations).toEqual([]);
   });
