@@ -92,4 +92,47 @@ describe("Sandcastle Implementer session adapter", () => {
     expect(request.prompt).toContain("Do not rebase or force-push");
     expect(request.prompt).not.toContain("Closes #103");
   });
+
+  it("inspects durable branch state and forbids unsafe history operations in the recovery prompt", async () => {
+    const baseline = "a".repeat(40);
+    const runAgent = vi.fn().mockResolvedValue({
+      branch: "sandcastle/issue-103",
+      commits: [],
+    });
+    const session = createSandcastleImplementerSession({
+      sandbox: { kind: "fake-sandbox" } as never,
+      hooks: { sandbox: { onSandboxReady: [] } },
+      runAgent: runAgent as never,
+      createAgent: vi.fn().mockReturnValue({ name: "fake-agent" }) as never,
+    });
+
+    await session.run({
+      model: "implementer-model",
+      branch: "sandcastle/issue-103",
+      plan,
+      checkoutPath: "/safe/disposable-checkout",
+      recovery: { baseline },
+    });
+
+    const request = runAgent.mock.calls[0]![0];
+    // The recovery prompt inspects the local branch, the remote branch, and
+    // any existing Draft Pull Request before acting.
+    expect(request.prompt).toContain("interrupted");
+    expect(request.prompt).toContain(`frozen authorized base revision ${baseline}`);
+    expect(request.prompt).toContain("git log sandcastle/issue-103");
+    expect(request.prompt).toContain("git fetch origin sandcastle/issue-103");
+    expect(request.prompt).toContain("gh pr list --head sandcastle/issue-103");
+    // Later attempts never reset to the remote, rebase, force-push, merge
+    // unknown concurrent work, or create a duplicate Pull Request.
+    expect(request.prompt).toContain("Never reset the local branch to the remote branch");
+    expect(request.prompt).toContain("never rebase");
+    expect(request.prompt).toContain("never force-push");
+    expect(request.prompt).toContain("never merge unknown concurrent work");
+    expect(request.prompt).toContain("never create a second Pull Request");
+    // The implementation instructions still apply: same plan, branch, push,
+    // and Draft Pull Request behavior.
+    expect(request.prompt).toContain(JSON.stringify(plan));
+    expect(request.prompt).toContain("git push origin sandcastle/issue-103");
+    expect(request.prompt).toContain("Closes #103");
+  });
 });

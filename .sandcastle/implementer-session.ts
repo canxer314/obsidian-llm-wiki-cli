@@ -14,6 +14,11 @@ export interface ImplementerAgentSessionRequest {
   readonly plan: Extract<PlannerOutput, { status: "ready" }>;
   readonly checkoutPath?: string;
   readonly parentSpec?: { readonly number: number };
+  // Present from the second bounded invocation attempt onward (Issue #458):
+  // the frozen authorized base revision the deterministic branch started
+  // from. Its presence selects the recovery prompt, which inspects durable
+  // branch state before acting.
+  readonly recovery?: { readonly baseline: string };
 }
 
 export interface ImplementerAgentSessionResult {
@@ -27,7 +32,7 @@ export interface ImplementerAgentSession {
 
 const draftPullRequestInstructions = (branch: string, relationship: string) => `Before publishing, inspect whether this branch already has a Draft Pull Request. Reuse and update one existing upstream-equivalent Draft Pull Request; otherwise create exactly one Draft Pull Request with gh pr create --draft. Its base must be the repository default branch, its head must be ${branch}, and its body must contain the relationship ${relationship}.`;
 
-const initialImplementerPrompt = (
+const implementationInstructions = (
   branch: string,
   plan: Extract<PlannerOutput, { status: "ready" }>,
   parentSpec?: { readonly number: number },
@@ -45,6 +50,31 @@ ${parentSpec === undefined
 ${plan.allowsAutomationChanges
     ? "This Issue explicitly allows changes to Sandcastle or GitHub workflow automation."
     : "Do not modify .sandcastle/ or .github/workflows/. This Issue does not allow automation changes."}
+`;
+
+// The complete implementer prompt for the first bounded invocation attempt.
+export const initialImplementerPrompt = implementationInstructions;
+
+// The recovery implementer prompt used from the second bounded invocation
+// attempt onward (Issue #458). The interrupted attempt may have left durable
+// partial work — local commits, a pushed remote branch, or a Draft Pull
+// Request — so the Agent first inspects that durable state and then
+// continues it. It never resets the local branch to the remote, rebases,
+// force-pushes, merges unknown concurrent work, or opens a duplicate Pull
+// Request.
+export const recoveryImplementerPrompt = (
+  branch: string,
+  plan: Extract<PlannerOutput, { status: "ready" }>,
+  baseline: string,
+  parentSpec?: { readonly number: number },
+) => `
+A previous attempt to implement GitHub Issue #${plan.issue.number} on branch ${branch} was interrupted before it finished. The branch started at the frozen authorized base revision ${baseline}, which remains the authorized base for this recovery.
+
+Before doing anything else, inspect the durable state the interrupted attempt left behind: the local branch ${branch} (git status and git log ${branch}), the remote branch (git fetch origin ${branch}, then git log origin/${branch} when it exists), and any existing Draft Pull Request for ${branch} (gh pr list --head ${branch} --state all). Then continue that work instead of starting over: keep every valid commit already on the branch, complete or commit any partial work you find, and do not duplicate commits, pushes, or Pull Requests that already exist.
+
+Never reset the local branch to the remote branch, never rebase, never force-push, never merge unknown concurrent work, and never create a second Pull Request — when a Draft Pull Request for ${branch} already exists, reuse and update that one.
+
+${implementationInstructions(branch, plan, parentSpec)}
 `;
 
 export function createSandcastleImplementerSession(options: {
@@ -70,7 +100,14 @@ export function createSandcastleImplementerSession(options: {
         maxIterations: 1,
         name: `implementer-issue-${request.plan.issue.number}`,
         ...(logging === undefined ? {} : { logging }),
-        prompt: initialImplementerPrompt(request.branch, request.plan, request.parentSpec),
+        prompt: request.recovery === undefined
+          ? initialImplementerPrompt(request.branch, request.plan, request.parentSpec)
+          : recoveryImplementerPrompt(
+            request.branch,
+            request.plan,
+            request.recovery.baseline,
+            request.parentSpec,
+          ),
       });
       return { branch: result.branch, commits: result.commits };
     },
