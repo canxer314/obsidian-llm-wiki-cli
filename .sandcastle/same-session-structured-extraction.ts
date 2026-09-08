@@ -285,8 +285,12 @@ function unwrapFences(text: string): string {
  * "not found"; otherwise the newest candidate's parse or validation detail
  * is thrown, tagged with the run's commits, branch, and session identity so
  * the classified same-session retry path can take over.
+ *
+ * Exported for the repository-owned structured extraction driver
+ * (structured-extraction-driver.ts), which applies the same multi-block
+ * candidate semantics inside its own bounded structured attempts.
  */
-async function extractFromStdout<Output>(
+export async function extractFromStdout<Output>(
   result: RunResult,
   tag: string,
   schema: z.ZodType<Output>,
