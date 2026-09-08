@@ -8,20 +8,21 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
-type Execute = (
+export type GithubExecute = (
   file: string,
   arguments_: readonly string[],
+  environment?: Readonly<Record<string, string>>,
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
-type Wait = (milliseconds: number) => Promise<void>;
+export type Wait = (milliseconds: number) => Promise<void>;
 
 const wait: Wait = (milliseconds) => new Promise((resolve) => {
   setTimeout(resolve, milliseconds);
 });
 
-const MAX_GITHUB_ATTEMPTS = 3;
-const RETRY_DELAYS_MS = [100, 250] as const;
-const DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS = 60_000;
+export const MAX_GITHUB_ATTEMPTS = 3;
+export const RETRY_DELAYS_MS = [100, 250] as const;
+export const DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS = 60_000;
 // Node schedules larger one-shot delays almost immediately, so never pass one
 // through to a production timer.
 export const MAX_SAFE_ONE_SHOT_DELAY_MILLISECONDS = 2_147_483_647;
@@ -82,53 +83,28 @@ const isAutomationPath = (path: string): boolean =>
   path.startsWith(".github/workflows/");
 
 export class GithubCliPort implements ImplementerGithubPort {
-  private readonly run: Execute;
-  private readonly wait: Wait;
+  private readonly executeBoundary: GithubExecute;
 
   constructor(
-    execute?: Execute,
+    execute?: GithubExecute,
     waitForRetry: Wait = wait,
     environment?: Readonly<Record<string, string>>,
   ) {
-    this.run = execute ?? (async (file, arguments_) => {
+    const run = execute ?? (async (file: string, arguments_: readonly string[]) => {
       const result = await execFileAsync(file, [...arguments_], environment === undefined ? {} : { env: environment });
       return { stdout: result.stdout, stderr: result.stderr };
     });
-    this.wait = waitForRetry;
+    this.executeBoundary = createGithubSafeReadRetryBoundary(
+      (file: string, arguments_: readonly string[]) => run(file, arguments_),
+      waitForRetry,
+    );
   }
 
   private async execute(
     file: string,
     arguments_: readonly string[],
   ): Promise<{ readonly stdout: string; readonly stderr: string }> {
-    if (file === "gh" && isRetrySafeGithubRead(arguments_)) {
-      return this.executeWithRetry(arguments_);
-    }
-    return this.run(file, arguments_);
-  }
-
-  private async executeWithRetry(
-    arguments_: readonly string[],
-  ): Promise<{ readonly stdout: string; readonly stderr: string }> {
-    let rateLimitRetried = false;
-    let normalAttempts = 0;
-    for (;;) {
-      try {
-        return await this.run("gh", arguments_);
-      } catch (error) {
-        const classification = classifyGithubReadError(error);
-        if (classification.kind === "deterministic") throw error;
-        if (classification.kind === "rate-limited") {
-          if (rateLimitRetried) throw error;
-          rateLimitRetried = true;
-          await this.wait(classification.retryAfterMilliseconds ?? DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS);
-          continue;
-        }
-        if (normalAttempts === MAX_GITHUB_ATTEMPTS - 1) throw error;
-        await this.wait(RETRY_DELAYS_MS[normalAttempts]!);
-        normalAttempts += 1;
-      }
-    }
+    return this.executeBoundary(file, arguments_);
   }
 
   async verifyImplementation(request: {
@@ -258,6 +234,43 @@ export class GithubCliPort implements ImplementerGithubPort {
   }
 }
 
+/**
+ * The single retryable execution boundary shared by every publisher of safe
+ * `gh` reads. It accepts an underlying execute (which may carry extra
+ * arguments such as the child environment, forwarded unchanged) and an
+ * injectable wait so tests run with zero real delay, and it only wraps `gh`
+ * invocations proven idempotent — every write still executes exactly once.
+ */
+export function createGithubSafeReadRetryBoundary(
+  execute: GithubExecute,
+  waitForRetry: Wait = wait,
+): GithubExecute {
+  return async (file, arguments_, environment) => {
+    if (file !== "gh" || !isRetrySafeGithubRead(arguments_)) {
+      return execute(file, arguments_, environment);
+    }
+    let rateLimitRetried = false;
+    let normalAttempts = 0;
+    for (;;) {
+      try {
+        return await execute("gh", arguments_, environment);
+      } catch (error) {
+        const classification = classifyGithubReadError(error);
+        if (classification.kind === "deterministic") throw error;
+        if (classification.kind === "rate-limited") {
+          if (rateLimitRetried) throw error;
+          rateLimitRetried = true;
+          await waitForRetry(classification.retryAfterMilliseconds ?? DEFAULT_RATE_LIMIT_RETRY_DELAY_MILLISECONDS);
+          continue;
+        }
+        if (normalAttempts === MAX_GITHUB_ATTEMPTS - 1) throw error;
+        await waitForRetry(RETRY_DELAYS_MS[normalAttempts]!);
+        normalAttempts += 1;
+      }
+    }
+  };
+}
+
 function isRetrySafeGithubRead(arguments_: readonly string[]): boolean {
   if (arguments_[0] === "repo") return arguments_[1] === "view";
   if (arguments_[0] === "pr") {
@@ -266,6 +279,7 @@ function isRetrySafeGithubRead(arguments_: readonly string[]): boolean {
   if (arguments_[0] === "issue") {
     return arguments_[1] === "view" || arguments_[1] === "list";
   }
+  if (arguments_[0] === "label") return arguments_[1] === "list";
   if (arguments_[0] !== "api") return false;
   if (arguments_[1] === "graphql") return true;
   const methodIndex = arguments_.indexOf("--method");

@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import {
+  createGithubSafeReadRetryBoundary,
+  type Wait,
+} from "./github-cli.ts";
+import {
   canonicalAutomationTriggerLabels,
   commandRoutesForReceiver,
   resolveAutomationCommandRoute,
@@ -392,12 +396,16 @@ export function createAutomationDispatchGithubPort(options: {
 export function createAutomationGithubPort(options: {
   readonly execute?: Execute;
   readonly environment?: Readonly<Record<string, string>>;
+  readonly waitForRetry?: Wait;
   readonly headSettleMilliseconds?: number;
 }): ReviewAutomationPorts["github"] & ImplementationAutomationPorts["github"] & FeedbackImplementationResources["github"] & BranchUpdateAutomationPorts["github"] & SpecSplitAutomationPorts["github"] & SpecSplitAutomationPorts["publisher"] & SpecImplementationAutomationPorts["github"] & SpecImplementationAutomationPorts["pullRequests"] & ArchitectureReviewAutomationPorts["github"] & ArchitectureReviewAutomationPorts["publisher"] {
-  const execute = options.execute ?? (async (file, arguments_, environment) => {
-    const result = await executeFile(file, [...arguments_], { env: environment });
-    return { stdout: result.stdout, stderr: result.stderr };
-  });
+  const execute = createGithubSafeReadRetryBoundary(
+    options.execute ?? (async (file, arguments_, environment) => {
+      const result = await executeFile(file, [...arguments_], { env: environment });
+      return { stdout: result.stdout, stderr: result.stderr };
+    }),
+    options.waitForRetry,
+  );
   const labels = createLabelMutations(execute, options.environment);
   const readHeadSha = async () => {
     const { stdout } = await execute("gh", [

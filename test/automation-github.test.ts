@@ -891,4 +891,72 @@ describe("automation GitHub port", () => {
     expect(body).not.toContain("secret");
     expect(body).not.toContain("push failed");
   });
+
+  describe("safe GitHub read retries through the shared boundary", () => {
+    it("retries a transiently failing issue list read with the existing backoff", async () => {
+      const execute = vi.fn()
+        .mockRejectedValueOnce(new Error("network reset"))
+        .mockResolvedValueOnce({ stdout: "3\n", stderr: "" });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.countOpenArchitectureReviewProposals()).resolves.toBe(3);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([100]);
+    });
+
+    it("performs one dedicated rate-limit wait for a transiently rate-limited REST GET", async () => {
+      const rateLimited = Object.assign(new Error("gh exited"), {
+        stderr: "HTTP 403: API rate limit exceeded",
+      });
+      const execute = vi.fn()
+        .mockRejectedValueOnce(rateLimited)
+        .mockResolvedValueOnce({ stdout: `${revision}\n`, stderr: "" });
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.readBaseRevision()).resolves.toBe(revision);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([60_000]);
+    });
+
+    it("executes a POST label write exactly once without retrying a transient failure", async () => {
+      const execute = vi.fn().mockRejectedValue(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.addIssueLabel(221, "agent:implement")).rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(waits).toEqual([]);
+    });
+
+    it("executes a PATCH child close exactly once without retrying a transient failure", async () => {
+      const execute = vi.fn()
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockRejectedValueOnce(new Error("network reset"));
+      const waits: number[] = [];
+      const github = createAutomationGithubPort({
+        execute,
+        waitForRetry: async (milliseconds) => { waits.push(milliseconds); },
+      });
+
+      await expect(github.closeImplementedChild({ specNumber: 226, childNumber: 301, revision }))
+        .rejects.toThrow("network reset");
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(waits).toEqual([]);
+    });
+  });
 });
