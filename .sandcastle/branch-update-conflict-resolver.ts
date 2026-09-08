@@ -61,7 +61,11 @@ export function createBranchUpdateConflictResolverSession(options: {
         sandbox: options.sandbox,
         cwd: request.checkoutPath,
         hooks: options.hooks,
-        branchStrategy: { type: "branch", branch: request.branch },
+        // Head strategy: the Target Checkout's root index already holds the
+        // failed merge, so the agent must resolve it in place. A named-branch
+        // strategy would ask Sandcastle for a second managed worktree of the
+        // same checked-out branch and collide before the agent could run.
+        branchStrategy: { type: "head" },
         maxIterations: 1,
         name: `branch-update-pr-${request.pullRequestNumber}`,
         ...(logging === undefined ? {} : { logging }),

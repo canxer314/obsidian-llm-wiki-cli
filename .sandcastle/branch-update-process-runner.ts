@@ -81,11 +81,39 @@ export function createProcessBranchUpdater(options: {
 
       await git(["fetch", "--no-tags", "origin", request.baseBranch]);
       await git(["switch", "--create", request.branch, request.revision]);
+      // Freeze the revisions that authorize exactly one merge result: the
+      // pre-merge Pull Request head and the freshly fetched base head. Every
+      // post-resolution check below compares against these frozen values.
       const preMergeSha = await revisionOf("HEAD");
       const baseSha = await revisionOf(`origin/${request.baseBranch}`);
       const mergeBase = (await git(["merge-base", "HEAD", `origin/${request.baseBranch}`])).stdout.trim();
 
       if (mergeBase === baseSha) return { status: "up-to-date" };
+
+      const requireExactMergeCommit = async (revision: string) => {
+        // rev-list --parents prints "<commit> <parent1> <parent2>..." for the
+        // single HEAD commit, so one line pins the commit, its parent count,
+        // and the parent order at once.
+        const topology = (await git(["rev-list", "--parents", "--max-count=1", "HEAD"])).stdout
+          .trim().split(/\s+/u);
+        if (topology[0] !== revision || topology.length !== 3) {
+          throw new Error("Conflict-resolution agent did not finish with exactly one merge commit");
+        }
+        if (topology[1] !== preMergeSha || topology[2] !== baseSha) {
+          throw new Error(
+            `Conflict-resolution agent produced a merge commit with parents ${topology[1]} ${topology[2]}`
+            + ` instead of ${preMergeSha} ${baseSha}`,
+          );
+        }
+      };
+      const requireCleanCheckout = async () => {
+        // Porcelain output already honours ignore rules, so any line at all
+        // is staged, unstaged, or non-ignored untracked residue.
+        const status = (await git(["status", "--porcelain"])).stdout.trim();
+        if (status.length > 0) {
+          throw new Error(`Conflict-resolution agent left the checkout dirty:\n${status}`);
+        }
+      };
 
       try {
         await git(["merge", "--no-edit", `origin/${request.baseBranch}`]);
@@ -109,11 +137,13 @@ export function createProcessBranchUpdater(options: {
         if (postSha === preMergeSha) {
           throw new Error("Conflict-resolution agent produced no commits");
         }
+        const revision = requireFullRevision(postSha);
+        await requireExactMergeCommit(revision);
         const unresolved = await unresolvedConflicts();
         if (unresolved.length > 0) {
           throw new Error(`Conflict-resolution agent left unresolved conflicts in:\n${unresolved.join("\n")}`);
         }
-        const revision = requireFullRevision(postSha);
+        await requireCleanCheckout();
         await push(revision);
         return { status: "updated", revision, comment: resolved.comment };
       }
