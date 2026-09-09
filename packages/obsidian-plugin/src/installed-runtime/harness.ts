@@ -14,8 +14,11 @@ import {
 import { verifyReleaseBundle } from "../release/verify-release-bundle.js";
 import {
   writeEvidenceFile,
+  type ChangeSetCorpusEvidence,
+  type GateIsolationCorpusEvidence,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
+  type RegisteredReferenceRewriteCorpusEvidence,
 } from "./evidence.js";
 import {
   createLoopbackMcpClient,
@@ -42,6 +45,29 @@ import {
   type RuntimeEnvironmentProbe,
   type RuntimePreflightMismatch,
 } from "./runtime-profile.js";
+import {
+  PublicWireCorpusError,
+  runPublicWireCorpus,
+  type PublicWireCorpusResult,
+} from "./public-wire-corpus.js";
+import {
+  ChangeSetSubmissionCorpusError,
+  composeChangeSetCorpusEvidence,
+  runChangeSetReplayCorpusAtEndpoint,
+  runChangeSetSubmissionCorpusAtEndpoint,
+  type ChangeSetAdmissionOutcome,
+  type ChangeSetReplayOutcome,
+} from "./change-set-submission-corpus.js";
+import {
+  composeGateIsolationCorpusEvidence,
+  GateIsolationCorpusError,
+  type GateIsolationOutcome,
+} from "./gate-isolation-corpus.js";
+import {
+  composeRegisteredReferenceRewriteCorpusEvidence,
+  RegisteredReferenceRewriteCorpusError,
+  type RegisteredReferenceRewriteOutcome,
+} from "./registered-reference-rewrite-corpus.js";
 import {
   cleanupTestVault,
   compareInventories,
@@ -74,6 +100,11 @@ export type HarnessStage =
   | "obsidian_stop"
   | "obsidian_restart"
   | "health_restart"
+  | "public_wire_corpus"
+  | "change_set_corpus"
+  | "change_set_replay"
+  | "gate_isolation_corpus"
+  | "registered_reference_rewrite_corpus"
   | "inventory_after"
   | "cleanup";
 
@@ -116,6 +147,11 @@ export type HarnessFailureCode =
   | "identity_mismatch"
   | "listener_mismatch"
   | "representation_mismatch"
+  | "public_wire_corpus_failed"
+  | "change_set_corpus_failed"
+  | "change_set_replay_failed"
+  | "gate_isolation_corpus_failed"
+  | "registered_reference_rewrite_corpus_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -157,6 +193,59 @@ export interface InstalledRuntimeHarnessOptions {
   readonly probe: RuntimeEnvironmentProbe;
   readonly processControl: ObsidianProcessControl;
   readonly client?: LoopbackMcpClient;
+  readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
+  /**
+   * Write-side corpus seams (issue #175). The admission phase runs in the
+   * initial Obsidian window; the replay phase reconnects after the controlled
+   * restart and replays every established Submission Key. Both default to the
+   * real loopback implementations and are injectable for inner tests.
+   */
+  readonly runChangeSetCorpus?: typeof runChangeSetSubmissionCorpusAtEndpoint;
+  readonly runChangeSetReplay?: typeof runChangeSetReplayCorpusAtEndpoint;
+  /**
+   * Gate-and-isolation corpus seam (issue #177): a self-contained two-Managed-Vault
+   * scenario that provisions and starts two dedicated generated test Vaults
+   * through the harness seams and drives the six-tool gate algebra over real
+   * loopback Bridges. It runs between the initial window and the controlled
+   * restart; when absent, the stage is skipped and no gate-isolation evidence
+   * is recorded (the closed envelope accepts its absence). When present, a
+   * non-passing corpus outcome projects failed evidence.
+   */
+  readonly runGateIsolationCorpus?: (options: {
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<GateIsolationOutcome>;
+  /**
+   * Registered-reference rewrite corpus seam (issue #178): a self-contained
+   * move-rewrite scenario that proves destination-only registered-reference
+   * rewrites preserve exact bytes over the real transport. It runs between the
+   * initial window and the controlled restart; when absent, the stage is
+   * skipped and no registered-reference evidence is recorded (the closed
+   * envelope accepts its absence). When present, a non-passing corpus outcome
+   * projects failed evidence.
+   */
+  readonly runRegisteredReferenceRewriteCorpus?: (options: {
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<RegisteredReferenceRewriteOutcome>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -229,6 +318,11 @@ interface RunState {
   beforeInventory: VaultInventoryEntry[] | null;
   afterInventory: VaultInventoryEntry[] | null;
   observations: PhasedObservation[];
+  publicWireCorpus: PublicWireCorpusResult | null;
+  changeSetAdmission: ChangeSetAdmissionOutcome | null;
+  changeSetReplay: ChangeSetReplayOutcome | null;
+  gateIsolation: GateIsolationOutcome | null;
+  registeredReferenceRewrite: RegisteredReferenceRewriteOutcome | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -257,6 +351,11 @@ export async function runInstalledRuntimeHarness(
     beforeInventory: null,
     afterInventory: null,
     observations: [],
+    publicWireCorpus: null,
+    changeSetAdmission: null,
+    changeSetReplay: null,
+    gateIsolation: null,
+    registeredReferenceRewrite: null,
     cleanup: null,
     failure: null,
   };
@@ -292,6 +391,14 @@ export async function runInstalledRuntimeHarness(
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof TestVaultError) {
       fail(stage, error.code, sanitize(error.message));
+    } else if (error instanceof PublicWireCorpusError) {
+      fail(stage, "public_wire_corpus_failed", sanitize(error.message));
+    } else if (error instanceof ChangeSetSubmissionCorpusError) {
+      fail(stage, "change_set_corpus_failed", sanitize(error.message));
+    } else if (error instanceof GateIsolationCorpusError) {
+      fail(stage, "gate_isolation_corpus_failed", sanitize(error.message));
+    } else if (error instanceof RegisteredReferenceRewriteCorpusError) {
+      fail(stage, "registered_reference_rewrite_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof BridgeIdentityError) {
@@ -332,6 +439,10 @@ export async function runInstalledRuntimeHarness(
     startStage: "obsidian_start" | "obsidian_restart",
     healthStage: "health_initial" | "health_restart",
     phase: "initial" | "after_restart",
+    during?: {
+      stage: "public_wire_corpus" | "change_set_replay";
+      run: (identity: PersistedBridgeIdentity) => Promise<void>;
+    },
   ): Promise<void> => {
     const vault = state.vault;
     const candidate = state.candidate;
@@ -396,6 +507,27 @@ export async function runInstalledRuntimeHarness(
     } catch (error) {
       failFromError(healthStage, error);
       return;
+    }
+    // The during hook runs while Obsidian and its loopback Bridge are live —
+    // the only window a real transport corpus can exercise. A corpus failure is
+    // projected to failed evidence; the controlled stop still runs so cleanup
+    // never leaves a live process holding the generated Vault.
+    if (during !== undefined) {
+      try {
+        await during.run(identity);
+      } catch (error) {
+        if (error instanceof ChangeSetSubmissionCorpusError) {
+          fail(
+            during.stage,
+            during.stage === "change_set_replay"
+              ? "change_set_replay_failed"
+              : "change_set_corpus_failed",
+            sanitize(error.message),
+          );
+        } else {
+          failFromError(during.stage, error);
+        }
+      }
     }
     try {
       await stopObsidian();
@@ -471,11 +603,203 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  // Shared event/assertion collectors for both change-set corpus phases so the
+  // closed evidence block spans the initial admission and the post-restart
+  // replay with monotonic event sequences.
+  const changeSetEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const changeSetAssertions: string[] = [];
+  const recordChangeSetEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    changeSetEvents.push({ kind, name, detail });
+  };
+  const recordChangeSetAssertion = (name: string): void => {
+    changeSetAssertions.push(name);
+  };
+
+  // Gate-isolation corpus event/assertion collectors (issue #177), spanning the
+  // stage that runs between the initial window and the controlled restart.
+  const gateIsolationEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const gateIsolationAssertions: string[] = [];
+  const recordGateIsolationEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    gateIsolationEvents.push({ kind, name, detail });
+  };
+  const recordGateIsolationAssertion = (name: string): void => {
+    gateIsolationAssertions.push(name);
+  };
+
+  // Registered-reference rewrite corpus event/assertion collectors (issue #178),
+  // spanning the stage that runs between the initial window and the restart.
+  const registeredReferenceRewriteEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const registeredReferenceRewriteAssertions: string[] = [];
+  const recordRegisteredReferenceRewriteEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    registeredReferenceRewriteEvents.push({ kind, name, detail });
+  };
+  const recordRegisteredReferenceRewriteAssertion = (name: string): void => {
+    registeredReferenceRewriteAssertions.push(name);
+  };
+
   if (state.failure === null) {
-    await startAndObserve("obsidian_start", "health_initial", "initial");
+    await startAndObserve("obsidian_start", "health_initial", "initial", {
+      stage: "public_wire_corpus",
+      run: async (identity) => {
+        const vault = state.vault;
+        if (vault === null) return;
+        if (state.failure === null) {
+          try {
+            state.publicWireCorpus = await (options.runPublicWireCorpus ?? runPublicWireCorpus)({
+              endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+              expectedVaultId: identity.vaultId,
+              fixtureSeed: vault.seedManifestSha256,
+              seedNotes: vault.seedNotes.map(({ path, content }) => ({ path, content })),
+            });
+          } catch (error) {
+            failFromError("public_wire_corpus", error);
+          }
+        }
+        if (state.failure === null && state.publicWireCorpus !== null) {
+          try {
+            state.changeSetAdmission = await (options.runChangeSetCorpus ??
+              runChangeSetSubmissionCorpusAtEndpoint)({
+              endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+              expectedVaultId: identity.vaultId,
+              seedNotes: vault.seedNotes.map(({ path, content }) => ({ path, content })),
+              record: recordChangeSetEvent,
+              assertion: recordChangeSetAssertion,
+            });
+          } catch (error) {
+            if (error instanceof ChangeSetSubmissionCorpusError) {
+              fail("change_set_corpus", "change_set_corpus_failed", sanitize(error.message));
+            } else {
+              failFromError("change_set_corpus", error);
+            }
+          }
+        }
+      },
+    });
+  }
+  // The gate-isolation corpus (issue #177) runs between the initial window and
+  // the controlled restart: it provisions and starts its own two dedicated
+  // generated test Vaults through the harness seams, so it runs while no other
+  // Obsidian window is live. When the caller does not wire the seam, the stage
+  // is skipped and the closed evidence envelope records no gate-isolation
+  // block (the top-level passing verdict accepts its absence).
+  if (state.failure === null && options.runGateIsolationCorpus !== undefined) {
+    const vault = state.vault;
+    const candidate = state.candidate;
+    if (vault === null || candidate === null) {
+      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate-isolation corpus requires a provisioned candidate");
+    } else {
+      try {
+        state.gateIsolation = await options.runGateIsolationCorpus({
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordGateIsolationEvent,
+          assertion: recordGateIsolationAssertion,
+        });
+      } catch (error) {
+        // The gate-isolation corpus seam is a self-contained scenario; any
+        // failure it reports projects to failed gate-isolation evidence.
+        fail(
+          "gate_isolation_corpus",
+          "gate_isolation_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
+  }
+  // The registered-reference rewrite corpus (issue #178) runs between the
+  // initial window and the controlled restart, alongside the gate-isolation
+  // corpus: when the caller does not wire the seam, the stage is skipped and the
+  // closed evidence envelope records no registered-reference rewrite block (the
+  // top-level passing verdict accepts its absence). A real-runtime seam must
+  // stand up its own generated Vault through the harness seams and drive the
+  // move-rewrite program over the real loopback Bridge.
+  if (state.failure === null && options.runRegisteredReferenceRewriteCorpus !== undefined) {
+    const vault = state.vault;
+    const candidate = state.candidate;
+    if (vault === null || candidate === null) {
+      fail(
+        "registered_reference_rewrite_corpus",
+        "registered_reference_rewrite_corpus_failed",
+        "Registered-reference rewrite corpus requires a provisioned candidate",
+      );
+    } else {
+      try {
+        state.registeredReferenceRewrite = await options.runRegisteredReferenceRewriteCorpus({
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordRegisteredReferenceRewriteEvent,
+          assertion: recordRegisteredReferenceRewriteAssertion,
+        });
+      } catch (error) {
+        fail(
+          "registered_reference_rewrite_corpus",
+          "registered_reference_rewrite_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
   }
   if (state.failure === null) {
-    await startAndObserve("obsidian_restart", "health_restart", "after_restart");
+    await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
+      stage: "change_set_replay",
+      run: async (identity) => {
+        if (state.changeSetAdmission === null) return;
+        try {
+          state.changeSetReplay = await (options.runChangeSetReplay ??
+            runChangeSetReplayCorpusAtEndpoint)({
+            endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+            expectedVaultId: identity.vaultId,
+            establishedKeys: state.changeSetAdmission.replayKeys,
+            record: recordChangeSetEvent,
+            assertion: recordChangeSetAssertion,
+          });
+        } catch (error) {
+          if (error instanceof ChangeSetSubmissionCorpusError) {
+            fail("change_set_replay", "change_set_replay_failed", sanitize(error.message));
+          } else {
+            failFromError("change_set_replay", error);
+          }
+        }
+      },
+    });
   }
 
   // Best-effort stop before cleanup so a failed run never leaves a live
@@ -525,6 +849,33 @@ export async function runInstalledRuntimeHarness(
         : "failed";
 
   const firstHealth = state.observations[0]?.observation.health;
+  const changeSetCorpus: ChangeSetCorpusEvidence | null =
+    state.failure === null &&
+    state.changeSetAdmission !== null &&
+    state.changeSetReplay !== null
+      ? composeChangeSetCorpusEvidence({
+          admission: state.changeSetAdmission,
+          replay: state.changeSetReplay,
+          events: changeSetEvents,
+          assertions: changeSetAssertions,
+        })
+      : null;
+  const gateIsolationCorpus: GateIsolationCorpusEvidence | null =
+    state.failure === null && state.gateIsolation !== null
+      ? composeGateIsolationCorpusEvidence({
+          outcome: state.gateIsolation,
+          events: gateIsolationEvents,
+          assertions: gateIsolationAssertions,
+        })
+      : null;
+  const registeredReferenceRewriteCorpus: RegisteredReferenceRewriteCorpusEvidence | null =
+    state.failure === null && state.registeredReferenceRewrite !== null
+      ? composeRegisteredReferenceRewriteCorpusEvidence({
+          outcome: state.registeredReferenceRewrite,
+          events: registeredReferenceRewriteEvents,
+          assertions: registeredReferenceRewriteAssertions,
+        })
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -604,6 +955,10 @@ export async function runInstalledRuntimeHarness(
             };
           })(),
     observations: state.observations.map((observation) => toObservationEvidence(observation)),
+    publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
+    changeSetCorpus,
+    gateIsolationCorpus,
+    registeredReferenceRewriteCorpus,
     verdict,
     failure:
       state.failure === null

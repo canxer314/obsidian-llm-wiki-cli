@@ -15,6 +15,242 @@ import {
 
 const DIGEST = "a".repeat(64);
 
+function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsolationCorpus"]> {
+  return {
+    corpusId: "per-vault-gate-isolation-proof",
+    seedManifestSha256: DIGEST,
+    scenarioManifestSha256: DIGEST,
+    vaults: [
+      {
+        label: "vault-a",
+        vaultIdSha256: DIGEST,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+        afterInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+      },
+      {
+        label: "vault-b",
+        vaultIdSha256: DIGEST,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+        afterInventory: {
+          scope: "Notes/*.md",
+          entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+          digest: DIGEST,
+        },
+      },
+    ],
+    submissions: [
+      {
+        vaultLabel: "vault-a",
+        scenario: "isolation/shared-key-independent-registries",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-a",
+        state: "in_progress",
+        historicalGate: null,
+      },
+      {
+        vaultLabel: "vault-b",
+        scenario: "isolation/shared-key-independent-registries",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-b",
+        state: "in_progress",
+        historicalGate: null,
+      },
+    ],
+    isolation: {
+      sharedKeyIndependentRegistries: true,
+      distinctChangeSetIds: true,
+      crossVaultLookupRejected: true,
+      queuesIndependent: true,
+    },
+    recoveryBlocked: {
+      boundDispositions: 2,
+      replayAfterRecovery: 1,
+      conflictingReuseRejected: 1,
+      freshKeyRenewed: 1,
+      otherGatesLeftUnbound: 2,
+    },
+    manualPause: {
+      drainedInFlightToTrustworthyEnd: true,
+      fifoRetained: true,
+      newUnboundRejected: 1,
+      observationalContentAvailable: true,
+    },
+    incompatible: {
+      registryInspected: 0,
+      submissionKeysBound: 0,
+      compatibleSessionUnaffected: true,
+    },
+    gateHistory: [
+      {
+        sequence: 1,
+        vaultLabel: "vault-a",
+        scenario: "gates/recovery-blocked-precedence",
+        outcome: "observed",
+        effectiveGate: "recovery_blocked",
+        recoveryState: "blocked",
+        writeState: "paused",
+      },
+      {
+        sequence: 2,
+        vaultLabel: "vault-a",
+        scenario: "gates/writes-paused-row",
+        outcome: "observed",
+        effectiveGate: "writes_paused",
+        recoveryState: "none",
+        writeState: "paused",
+      },
+    ],
+    residualCleanup: {
+      "vault-a": { recoveryState: "none", writeGate: "open", writeState: "writable" },
+      "vault-b": { recoveryState: "none", writeGate: "open", writeState: "writable" },
+    },
+    eventLog: [
+      { sequence: 1, kind: "assertion", name: "gate-isolation-corpus-began", detailSha256: DIGEST },
+    ],
+    assertions: ["gate-isolation-corpus-began"],
+    verdict: "passed",
+  };
+}
+
+function registeredReferenceRewriteEvidence(): NonNullable<
+  InstalledRuntimeEvidence["registeredReferenceRewriteCorpus"]
+> {
+  return {
+    corpusId: "registered-reference-rewrite-proof",
+    seedManifestSha256: DIGEST,
+    scenarioManifestSha256: DIGEST,
+    beforeInventory: {
+      scope: "Notes/*.md",
+      entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+      digest: DIGEST,
+    },
+    afterInventory: {
+      scope: "Notes/*.md",
+      entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+      digest: DIGEST,
+    },
+    moves: [
+      {
+        scenario: "move/wikilink-destination-only",
+        profile: "wikilink",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-w",
+        sourcePath: "ReferenceProof/Grammar/Wikilink.md",
+        destinationPath: "ReferenceProof/Grammar/Wikilink Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/WikilinkRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+      {
+        scenario: "move/embed-destination-only",
+        profile: "embed",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-e",
+        sourcePath: "ReferenceProof/Grammar/Embed.md",
+        destinationPath: "ReferenceProof/Grammar/Embed Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/EmbedRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+      {
+        scenario: "move/markdown-inline-destination-only",
+        profile: "markdown_inline_link",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-i",
+        sourcePath: "ReferenceProof/Grammar/Inline.md",
+        destinationPath: "ReferenceProof/Grammar/Inline Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/InlineRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+      {
+        scenario: "move/markdown-embed-destination-only",
+        profile: "markdown_embed",
+        submissionKeySha256: DIGEST,
+        changeSetId: "change-set-m",
+        sourcePath: "ReferenceProof/Grammar/MdEmbed.md",
+        destinationPath: "ReferenceProof/Grammar/MdEmbed Moved.md",
+        derivedPaths: ["derived/move-1/references/ReferenceProof/Grammar/MdEmbedRef.md"],
+        destinationContentVersionSha256: DIGEST,
+        rewrittenContentVersionSha256: DIGEST,
+        oldPathAbsent: true,
+        destinationTypedMarkdown: true,
+        finalBytesReread: true,
+      },
+    ],
+    rawBytes: {
+      fixtures: [
+        {
+          scenario: "span/bom-crlf-cjk-astral-exact",
+          hostModes: ["bom", "crlf", "cjk", "astral"],
+          locatedReferences: 1,
+          everyReferenceExactlyOneVerifiedSpan: true,
+          everyUntouchedByteExact: true,
+          finalBytesHashReread: true,
+        },
+      ],
+      duplicateEqualSpellings: { referencesRewritten: 2, untouchedBytesExact: true },
+    },
+    rejections: [
+      {
+        scenario: "reject/stale-closure",
+        failureCode: "stale_observation",
+        registered: true,
+        noMutationDigestUnchanged: true,
+      },
+      {
+        scenario: "reject/literal-hash-destination",
+        failureCode: null,
+        registered: true,
+        noMutationDigestUnchanged: true,
+      },
+    ],
+    observer: {
+      enabledSecondObserver: true,
+      discoversIssued: 3,
+      privateStagingPathsObserved: 0,
+      halfWrittenMarkdownObserved: 0,
+    },
+    residualCleanup: {
+      recoveryState: "none",
+      queueLength: 0,
+      currentExecutionId: null,
+      writeGate: "open",
+    },
+    eventLog: [
+      {
+        sequence: 1,
+        kind: "assertion",
+        name: "registered-reference-corpus-began",
+        detailSha256: DIGEST,
+      },
+    ],
+    assertions: ["registered-reference-corpus-began"],
+    verdict: "passed",
+  };
+}
+
 function passingEvidence(): InstalledRuntimeEvidence {
   return {
     schemaVersion: 1,
@@ -93,6 +329,136 @@ function passingEvidence(): InstalledRuntimeEvidence {
         vaultPathSha256: DIGEST,
       },
     ],
+    publicWireCorpus: {
+      fixtureSeed: DIGEST,
+      canonicalManifestSha256: DIGEST,
+      tools: [
+        "vault_health",
+        "vault_discover",
+        "vault_read",
+        "vault_continue",
+        "vault_change_set_submit",
+        "vault_change_set_status",
+      ],
+      corpus: {
+        corpusId: "discovery-reads-continuation",
+        seedManifestSha256: DIGEST,
+        scenarioManifestSha256: DIGEST,
+      },
+      beforeInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      afterInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      retainedByteCleanup: {
+        chainsIssued: 1,
+        chainsConsumed: 1,
+        replayAfterConsumptionRejected: 1,
+        bytesReconstructed: 42,
+        residualChains: 0,
+      },
+      eventLog: [
+        {
+          sequence: 1,
+          kind: "assertion",
+          name: "public-tool-inventory",
+          detailSha256: DIGEST,
+        },
+      ],
+      assertions: ["public-tool-inventory"],
+      verdict: "passed",
+    },
+    changeSetCorpus: {
+      corpusId: "change-set-submission-proof",
+      seedManifestSha256: DIGEST,
+      scenarioManifestSha256: DIGEST,
+      beforeInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      afterInventory: {
+        scope: "Notes/*.md",
+        entries: [{ path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 }],
+        digest: DIGEST,
+      },
+      admission: {
+        submissions: [
+          {
+            submissionKeySha256: DIGEST,
+            changeSetId: "change-set-1",
+            state: "intent_applied",
+            failureCode: null,
+            executed: true,
+          },
+        ],
+        rejectionClasses: [
+          {
+            name: "rejection/stale-direct-target",
+            failureCode: "stale_observation",
+            noMutationDigestUnchanged: true,
+          },
+        ],
+        fifo: {
+          concurrentSubmissions: 2,
+          applied: 2,
+          distinctChangeSetIds: 2,
+          contendedTarget: {
+            submissions: 2,
+            winners: 1,
+            rejected: 1,
+            noPartialMutation: true,
+          },
+        },
+        recovery: [
+          {
+            name: "recovery/missing-response",
+            recoveredThroughOriginalKey: true,
+            changedContentRejected: true,
+            changedKeyCreatedNoChangeSet: true,
+          },
+        ],
+        immutableRecords: [
+          {
+            submissionKeySha256: DIGEST,
+            changeSetId: "change-set-1",
+            state: "intent_applied",
+            requestedEffectIds: ["op-1"],
+            derivedEffectIds: [],
+            pathCount: 2,
+          },
+        ],
+      },
+      replay: {
+        keysReplayed: 1,
+        identitiesPreserved: 1,
+        recordsUnchanged: 1,
+        conflictingReusesRejected: 1,
+      },
+      residualCleanup: {
+        recoveryState: "none",
+        queueLength: 0,
+        currentExecutionId: null,
+        writeGate: "open",
+      },
+      eventLog: [
+        {
+          sequence: 1,
+          kind: "assertion",
+          name: "change-set-corpus-began",
+          detailSha256: DIGEST,
+        },
+      ],
+      assertions: ["change-set-corpus-began"],
+      verdict: "passed",
+    },
+    gateIsolationCorpus: gateIsolationEvidence(),
+    registeredReferenceRewriteCorpus: registeredReferenceRewriteEvidence(),
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
@@ -116,6 +482,213 @@ describe("installed-runtime evidence record", () => {
     expect(() =>
       serializeEvidence(invalidInventory as unknown as InstalledRuntimeEvidence),
     ).toThrow();
+  });
+
+  it("refuses a passing verdict without a complete public-wire corpus", () => {
+    const missingCorpus = { ...passingEvidence(), publicWireCorpus: null };
+    expect(() => serializeEvidence(missingCorpus)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses a passing verdict without a complete change-set corpus", () => {
+    const missingWriteSide = { ...passingEvidence(), changeSetCorpus: null };
+    expect(() => serializeEvidence(missingWriteSide)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses passing change-set evidence whose seed inventory changed or proofs are missing", () => {
+    const changedSeedInventory: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      changeSetCorpus: {
+        ...passingEvidence().changeSetCorpus!,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [
+            { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+            { path: "Notes/Added.md", sha256: "f".repeat(64), sizeBytes: 7 },
+          ],
+          digest: "f".repeat(64),
+        },
+      },
+    };
+    expect(() => serializeEvidence(changedSeedInventory)).toThrow(/seed inventory unchanged/u);
+
+    const noExecutedProofs: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      changeSetCorpus: {
+        ...passingEvidence().changeSetCorpus!,
+        admission: {
+          ...passingEvidence().changeSetCorpus!.admission,
+          submissions: [
+            {
+              submissionKeySha256: DIGEST,
+              changeSetId: "change-set-1",
+              state: "intent_not_applied",
+              failureCode: "path_conflict",
+              executed: false,
+            },
+          ],
+        },
+      },
+    };
+    expect(() => serializeEvidence(noExecutedProofs)).toThrow(/executed proofs/u);
+  });
+
+  it("refuses passing evidence whose read-side corpus inventory changed or leaked chains", () => {
+    const changedInventory: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      publicWireCorpus: {
+        ...passingEvidence().publicWireCorpus!,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [
+            { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+            { path: "Notes/Added.md", sha256: DIGEST, sizeBytes: 7 },
+          ],
+          digest: "f".repeat(64),
+        },
+      },
+    };
+    expect(() => serializeEvidence(changedInventory)).toThrow(/inventory unchanged/u);
+
+    const abandonedChain: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      publicWireCorpus: {
+        ...passingEvidence().publicWireCorpus!,
+        retainedByteCleanup: {
+          chainsIssued: 2,
+          chainsConsumed: 1,
+          replayAfterConsumptionRejected: 1,
+          bytesReconstructed: 42,
+          residualChains: 0,
+        },
+      },
+    };
+    expect(() => serializeEvidence(abandonedChain)).toThrow(/consume every continuation chain/u);
+
+    const replayMismatch: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      publicWireCorpus: {
+        ...passingEvidence().publicWireCorpus!,
+        retainedByteCleanup: {
+          chainsIssued: 2,
+          chainsConsumed: 2,
+          replayAfterConsumptionRejected: 1,
+          bytesReconstructed: 42,
+          residualChains: 0,
+        },
+      },
+    };
+    expect(() => serializeEvidence(replayMismatch)).toThrow(/single-use replay rejection/u);
+  });
+
+  it("refuses a passing verdict when recorded gate-isolation evidence failed", () => {
+    const failedGateIsolation: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        verdict: "failed",
+      },
+    };
+    expect(() => serializeEvidence(failedGateIsolation)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses passing gate-isolation evidence whose Vault inventory changed or proofs are missing", () => {
+    const changedSeed: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        vaults: passingEvidence().gateIsolationCorpus!.vaults.map((vault, index) =>
+          index === 0
+            ? {
+                ...vault,
+                beforeInventory: {
+                  scope: "Notes/*.md",
+                  entries: [
+                    { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+                    { path: "Notes/Added.md", sha256: "f".repeat(64), sizeBytes: 7 },
+                  ],
+                  digest: "f".repeat(64),
+                },
+              }
+            : vault,
+        ),
+      },
+    };
+    expect(() => serializeEvidence(changedSeed)).toThrow(/vault-a seed inventory unchanged/u);
+
+    const noBind: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        recoveryBlocked: {
+          boundDispositions: 0,
+          replayAfterRecovery: 1,
+          conflictingReuseRejected: 1,
+          freshKeyRenewed: 1,
+          otherGatesLeftUnbound: 2,
+        },
+      },
+    };
+    expect(() => serializeEvidence(noBind)).toThrow(/recovery_blocked bind/u);
+
+    const inspectedRegistry: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: {
+        ...passingEvidence().gateIsolationCorpus!,
+        incompatible: {
+          registryInspected: 1,
+          submissionKeysBound: 0,
+          compatibleSessionUnaffected: true,
+        },
+      },
+    };
+    expect(() => serializeEvidence(inspectedRegistry)).toThrow(
+      /expected 0|uninspected incompatible client/u,
+    );
+  });
+
+  it("accepts a passing record with no gate-isolation corpus (the seam is optional)", () => {
+    const withoutGateIsolation: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      gateIsolationCorpus: null,
+    };
+    expect(parseEvidence(serializeEvidence(withoutGateIsolation))).toEqual(withoutGateIsolation);
+  });
+
+  it("accepts a passing record with no registered-reference rewrite corpus (the seam is optional)", () => {
+    const withoutRewrite: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      registeredReferenceRewriteCorpus: null,
+    };
+    expect(parseEvidence(serializeEvidence(withoutRewrite))).toEqual(withoutRewrite);
+  });
+
+  it("refuses a passing verdict when recorded registered-reference evidence failed", () => {
+    const failedRewrite: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      registeredReferenceRewriteCorpus: {
+        ...passingEvidence().registeredReferenceRewriteCorpus!,
+        verdict: "failed",
+      },
+    };
+    expect(() => serializeEvidence(failedRewrite)).toThrow(/passing verdict/u);
+  });
+
+  it("refuses passing registered-reference evidence whose seed inventory changed", () => {
+    const changedSeed: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      registeredReferenceRewriteCorpus: {
+        ...passingEvidence().registeredReferenceRewriteCorpus!,
+        beforeInventory: {
+          scope: "Notes/*.md",
+          entries: [
+            { path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+            { path: "Notes/Added.md", sha256: "f".repeat(64), sizeBytes: 7 },
+          ],
+          digest: "f".repeat(64),
+        },
+      },
+    };
+    expect(() => serializeEvidence(changedSeed)).toThrow(/seed inventory unchanged/u);
   });
 
   it("refuses a passing verdict without both lifecycle observations and clean cleanup", () => {
