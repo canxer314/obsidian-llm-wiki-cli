@@ -15,10 +15,10 @@ const startup = await readTargetWorkerStartup();
 const slices = await createSameSessionSpecSplitExtractor({
   sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
+  checkoutPath,
 }).split({
   specNumber: Number(specNumber),
   title,
-  checkoutPath,
   model,
 });
 console.log(JSON.stringify({ slices }));

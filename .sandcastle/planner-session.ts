@@ -1,5 +1,4 @@
 import {
-  Output,
   claudeCode,
   run,
   type SandboxHooks,
@@ -7,11 +6,17 @@ import {
 } from "@ai-hero/sandcastle";
 
 import { agentLogging } from "./agent-logging.ts";
+import type { CheckoutObserver } from "./checkout-safety.ts";
+import { inheritedJobLogView, type JobLog } from "./job-logs.ts";
 import type { PlannerAgentSession } from "./planner.js";
-import {
-  STRUCTURED_EXTRACTION_ATTEMPTS,
-  withStructuredOutputErrorClassification,
-} from "./same-session-structured-extraction.ts";
+import { createStructuredExtractionDriver } from "./structured-extraction-driver.ts";
+
+// The Planner's strict read-only contract. The complete planning prompt
+// carries it and every format-correction prompt repeats it verbatim.
+export const PLANNER_READ_ONLY_CONTRACT =
+  "Read-only contract: you must not modify, create, or delete any file in this checkout; " +
+  "you must not stage, commit, or otherwise change Git state (HEAD, the index, tracked files, " +
+  "or untracked files); run only read-only inspection commands.";
 
 const plannerPrompt = (
   issueNumber: number,
@@ -23,6 +28,8 @@ Use GitHub CLI to read the latest Issue directly with gh issue view ${issueNumbe
 ${specContext === undefined ? "" : `
 This Issue is one child of Spec #${specContext.parentSpec}, delivered on the shared accumulating branch ${specContext.branch}. This checkout is detached at the base revision and may not contain earlier completed children. If ${specContext.branch} already exists on origin, inspect the accumulated branch state with git fetch origin ${specContext.branch} and then read the relevant paths from it with git show origin/${specContext.branch}:<path> or git diff --stat master...origin/${specContext.branch}; otherwise plan from the bare base checkout. Plan against the accumulated branch state when it exists, not the bare base checkout.`}
 
+${PLANNER_READ_ONLY_CONTRACT}
+
 Return one JSON object inside <plan> tags. It must exactly match this strict schema; include no fields other than those listed:
 - top level: status ("ready" or "blocked"), implementationSummary (a non-empty string, never an array or object), blockingReason, allowsAutomationChanges (boolean), and issue.
 - when status is "ready", blockingReason must be null; when status is "blocked", blockingReason must be a non-empty string.
@@ -32,40 +39,49 @@ Return one JSON object inside <plan> tags. It must exactly match this strict sch
 Do not add scope, metadata, explanation, helper, or any other fields at the top level or inside issue or comments.
 `;
 
+// The Planner seam runs through the repository-owned structured extraction
+// driver (Spec #449): at most three completed structured attempts, each inside
+// one bounded invocation recovery window, with the Target Checkout observed
+// clean before attempt one and proven unchanged after every invocation. The
+// library's recursive output retry is never armed — run calls carry no
+// `output` definition — because the driver owns every structured attempt.
 export function createSandcastlePlannerSession(options: {
   readonly sandbox: SandboxProvider;
   readonly hooks: SandboxHooks;
-  readonly checkoutPath?: string;
+  readonly checkoutPath: string;
   readonly specContext?: { readonly parentSpec: number; readonly branch: string };
+  readonly observer?: CheckoutObserver;
+  readonly log?: JobLog;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
+  readonly now?: () => number;
+  readonly wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 }): PlannerAgentSession {
-  const runAgent = options.runAgent ?? run;
-  const createAgent = options.createAgent ?? claudeCode;
+  const log = options.log ?? inheritedJobLogView();
+  const driver = createStructuredExtractionDriver({
+    sandbox: options.sandbox,
+    hooks: options.hooks,
+    checkoutPath: options.checkoutPath,
+    role: "planner",
+    stage: "structured-extraction",
+    ...(options.observer === undefined ? {} : { observer: options.observer }),
+    ...(log === undefined ? {} : { log }),
+    ...(options.runAgent === undefined ? {} : { runAgent: options.runAgent }),
+    ...(options.createAgent === undefined ? {} : { createAgent: options.createAgent }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.wait === undefined ? {} : { wait: options.wait }),
+  });
   return {
     async run(request) {
       const logging = agentLogging();
-      // Classify at the seam boundary so a low-level parse fault escaping the
-      // library's armed retry guard still surfaces as the recognised
-      // recoverable output error; non-output failures propagate unchanged.
-      const classifiedRunAgent = withStructuredOutputErrorClassification(runAgent, request.output.tag);
-      const result = await classifiedRunAgent({
-        agent: createAgent(request.model),
-        sandbox: options.sandbox,
-        ...(options.checkoutPath === undefined ? {} : { cwd: options.checkoutPath }),
-        hooks: options.hooks,
-        branchStrategy: { type: "head" },
-        maxIterations: 1,
+      return driver.extract({
+        model: request.model,
         name: `planner-issue-${request.issueNumber}`,
+        initialPrompt: plannerPrompt(request.issueNumber, options.specContext),
+        readOnlyContract: PLANNER_READ_ONLY_CONTRACT,
         ...(logging === undefined ? {} : { logging }),
-        prompt: plannerPrompt(request.issueNumber, options.specContext),
-        output: Output.object({
-          tag: request.output.tag,
-          schema: request.output.schema,
-          maxRetries: STRUCTURED_EXTRACTION_ATTEMPTS - 1,
-        }),
+        output: { tag: request.output.tag, schema: request.output.schema },
       });
-      return result.output;
     },
   };
 }

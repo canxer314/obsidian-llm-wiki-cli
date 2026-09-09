@@ -304,6 +304,10 @@ describe("feedback implementation", () => {
       branch: "feature/feedback",
       expectedRevision: PRE,
     });
+    // Controlled publication and the canonical reply stay outside the Agent
+    // recovery window: each runs exactly once after the eventual success.
+    expect(subject.publisher.publish).toHaveBeenCalledTimes(1);
+    expect(subject.github.replyToReviewThread).toHaveBeenCalledTimes(1);
   });
 
   it("does not publish when a second current feedback root appears during execution", async () => {
@@ -693,6 +697,8 @@ describe("feedback implementation", () => {
         finalization: { blockedStateFailed: false, diagnosticFailed: true, inProgressCleanupFailed: false },
       });
 
+    expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
     expect(subject.github.addPullRequestLabel).toHaveBeenCalledWith(224, "agent:blocked");
     expect(subject.github.removePullRequestLabel).toHaveBeenCalledWith(224, "agent:in-progress");
   });
@@ -861,7 +867,10 @@ describe("feedback implementation", () => {
         finalization: CLEAN_FINALIZATION,
       });
 
+    // Agent exhaustion follows the feedback-execution path: the controlled
+    // publisher and the canonical reply execute zero times.
     expect(subject.publisher.publish).not.toHaveBeenCalled();
+    expect(subject.github.replyToReviewThread).not.toHaveBeenCalled();
     expect(subject.github.addFeedbackBlockedDiagnostic).toHaveBeenCalledWith(224, {
       reason: "feedback-execution",
       jobId: "feedback-job",

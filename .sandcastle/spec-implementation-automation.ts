@@ -198,15 +198,20 @@ export async function runSpecImplementationAutomationCommand(
         return await block("spec-implementation-execution", error);
       }
       try {
-        await ports.github.closeImplementedChild({
-          specNumber: spec.number,
-          childNumber: child.number,
-          revision: implemented.headSha,
-        });
+        // The recovered head is used to close the child only after the shared
+        // remote head and the single matching Draft Pull Request are verified
+        // against it (#459). PR assurance, child-close, continuation labels,
+        // and final-review labels stay outside invocation retry and execute at
+        // most once after Agent success.
         const pullRequest = await ports.pullRequests.ensureSpecDraftPullRequest({
           specNumber: spec.number,
           branch,
           headSha: implemented.headSha,
+        });
+        await ports.github.closeImplementedChild({
+          specNumber: spec.number,
+          childNumber: child.number,
+          revision: implemented.headSha,
         });
         const remaining = (await ports.github.listChildren(spec.number))
           .filter((candidate) => candidate.state === "OPEN");

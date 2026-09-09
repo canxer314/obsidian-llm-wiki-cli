@@ -1,8 +1,15 @@
-import { Output, claudeCode, run, type SandboxHooks, type SandboxProvider } from "@ai-hero/sandcastle";
+import {
+  claudeCode,
+  run,
+  type SandboxHooks,
+  type SandboxProvider,
+} from "@ai-hero/sandcastle";
 import { z } from "zod";
 
 import { agentLogging } from "./agent-logging.ts";
-import { STRUCTURED_EXTRACTION_ATTEMPTS } from "./same-session-structured-extraction.ts";
+import type { CheckoutObserver } from "./checkout-safety.ts";
+import { inheritedJobLogView, type JobLog } from "./job-logs.ts";
+import { createStructuredExtractionDriver } from "./structured-extraction-driver.ts";
 
 export interface SpecSlice {
   readonly title: string;
@@ -18,50 +25,76 @@ const sliceSchema = z.strictObject({
 
 export const specSplitSchema = z.strictObject({ slices: z.array(sliceSchema).min(1) });
 
-const producePrompt = (specNumber: number, title: string) => `
+// The Spec splitter's strict read-only and no-GitHub-write contract. The
+// complete split prompt carries it and every format-correction prompt repeats
+// it verbatim.
+export const SPEC_SPLITTER_READ_ONLY_CONTRACT =
+  "Read-only contract: you must not modify, create, or delete any file in this checkout; " +
+  "you must not stage, commit, or otherwise change Git state (HEAD, the index, tracked files, " +
+  "or untracked files); you must not create Issues, commit, push, or publish anything; " +
+  "run only read-only inspection commands.";
+
+// One complete prompt both produces the breakdown and emits the structured
+// result: the repository-owned driver owns every structured attempt, so there
+// is no separate produce pass to resume for formatting.
+const specSplitPrompt = (specNumber: number, title: string) => `
 Break Spec #${specNumber} — ${title} into an ordered, flat list of self-contained implementation Issues.
 
-Read the Spec with \`gh issue view ${specNumber} --comments\`, then read CONTEXT.md, relevant ADRs, and inspect the codebase. Each slice must be a realistic, independently implementable tracer-bullet vertical slice. Do not create Issues, modify files, commit, push, or publish anything. Keep the complete breakdown in this session for a formatting request.
+Read the Spec with \`gh issue view ${specNumber} --comments\`, then read CONTEXT.md, relevant ADRs, and inspect the codebase. Each slice must be a realistic, independently implementable tracer-bullet vertical slice.
+
+${SPEC_SPLITTER_READ_ONLY_CONTRACT}
+
+Return one JSON object inside <output> tags. It must have a non-empty slices array. Each slice requires title (1–200 characters), whatToBuild (non-empty), and a non-empty acceptanceCriteria array of non-empty strings. Include no other fields.
 `;
 
-const extractionPrompt = `
-Now emit the breakdown you just produced as one JSON object inside <output> tags. It must have a non-empty slices array. Each slice requires title (1–200 characters), whatToBuild (non-empty), and a non-empty acceptanceCriteria array of non-empty strings. Include no other fields.
-`;
-
+// The Spec splitter seam runs through the repository-owned structured
+// extraction driver (Spec #449): at most three completed structured attempts,
+// each inside one bounded invocation recovery window, with the Target
+// Checkout observed clean before attempt one and proven unchanged after every
+// invocation. The library's recursive output retry is never armed — run calls
+// carry no `output` definition — because the driver owns every structured
+// attempt.
 export function createSameSessionSpecSplitExtractor(options: {
   readonly sandbox: SandboxProvider;
   readonly hooks: SandboxHooks;
+  readonly checkoutPath: string;
+  readonly observer?: CheckoutObserver;
+  readonly log?: JobLog;
   readonly runAgent?: typeof run;
   readonly createAgent?: typeof claudeCode;
+  readonly now?: () => number;
+  readonly wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 }) {
-  const runAgent = options.runAgent ?? run;
-  const createAgent = options.createAgent ?? claudeCode;
+  const log = options.log ?? inheritedJobLogView();
+  const driver = createStructuredExtractionDriver({
+    sandbox: options.sandbox,
+    hooks: options.hooks,
+    checkoutPath: options.checkoutPath,
+    role: "spec-splitter",
+    stage: "structured-extraction",
+    ...(options.observer === undefined ? {} : { observer: options.observer }),
+    ...(log === undefined ? {} : { log }),
+    ...(options.runAgent === undefined ? {} : { runAgent: options.runAgent }),
+    ...(options.createAgent === undefined ? {} : { createAgent: options.createAgent }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.wait === undefined ? {} : { wait: options.wait }),
+  });
   return {
     async split(request: {
       readonly specNumber: number;
       readonly title: string;
-      readonly checkoutPath: string;
       readonly model: string;
     }): Promise<readonly SpecSlice[]> {
       const logging = agentLogging();
-      const produced = await runAgent({
-        agent: createAgent(request.model),
-        sandbox: options.sandbox,
-        hooks: options.hooks,
-        cwd: request.checkoutPath,
-        branchStrategy: { type: "head" },
-        maxIterations: 1,
+      const extracted = await driver.extract({
+        model: request.model,
+        name: `spec-split-${request.specNumber}`,
+        initialPrompt: specSplitPrompt(request.specNumber, request.title),
+        readOnlyContract: SPEC_SPLITTER_READ_ONLY_CONTRACT,
         ...(logging === undefined ? {} : { logging }),
-        prompt: producePrompt(request.specNumber, request.title),
+        output: { tag: "output", schema: specSplitSchema },
       });
-      if (produced.commits.length > 0) throw new Error("Spec splitter session must not create commits");
-      if (produced.resume === undefined) throw new Error("Spec splitter session identity is unavailable");
-      const extracted = await produced.resume(extractionPrompt, {
-        ...(logging === undefined ? {} : { logging }),
-        output: Output.object({ tag: "output", schema: specSplitSchema, maxRetries: STRUCTURED_EXTRACTION_ATTEMPTS - 1 }),
-      }) as unknown as { readonly commits: readonly unknown[]; readonly output: { readonly slices: readonly SpecSlice[] } };
-      if (extracted.commits.length > 0) throw new Error("Spec splitter session must not create commits");
-      return extracted.output.slices;
+      return extracted.slices;
     },
   };
 }

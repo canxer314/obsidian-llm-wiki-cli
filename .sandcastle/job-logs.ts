@@ -1,6 +1,6 @@
 import { appendFileSync } from "node:fs";
 import { chmod, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { INHERITED_JOB_PROCESS_GROUP } from "./worker-process.ts";
 
@@ -89,6 +89,25 @@ export function appendJobOutput(
   output: string | Buffer,
 ): void {
   appendFileSync(stream === "stdout" ? log.stdoutPath : log.stderrPath, output);
+}
+
+// A worker that inherited the Job Log environment can append through this
+// view. Only the two append paths are meaningful inside the child — the job
+// metadata is owned by the parent that created the log and is not
+// reconstructed here — so consumers must limit themselves to appendJobOutput.
+export function inheritedJobLogView(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): JobLog | undefined {
+  const stdoutPath = environment[JOB_STDOUT_LOG];
+  const stderrPath = environment[JOB_STDERR_LOG];
+  if (stdoutPath === undefined || stderrPath === undefined) return undefined;
+  return {
+    directory: dirname(stdoutPath),
+    stdoutPath,
+    stderrPath,
+    metadataPath: "",
+    metadata: { jobId: "", operation: "", revision: "", startedAt: 0 },
+  };
 }
 
 export async function completeJobLog(

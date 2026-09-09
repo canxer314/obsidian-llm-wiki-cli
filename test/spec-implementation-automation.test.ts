@@ -116,13 +116,15 @@ describe("Spec implementation automation command", () => {
       childNumber: 301,
       revision: childRevision,
     });
+    // The shared remote head and the one matching Draft Pull Request are
+    // verified before the recovered revision closes the child.
     expect(ports.events).toEqual([
       "add:226:agent:in-progress",
       "remove:226:agent:implement",
       `checkout:${revision}`,
       "implement:301:sandcastle/spec-226",
-      `close:301:${childRevision}`,
       "ensure-pr:sandcastle/spec-226",
+      `close:301:${childRevision}`,
       "add:226:agent:implement",
       "remove:226:agent:in-progress",
     ]);
@@ -405,6 +407,47 @@ describe("Spec implementation automation command", () => {
     });
 
     expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
+  });
+
+  it("blocks publication once when Draft Pull Request assurance fails after a recovered implementation", async () => {
+    const ports = portsFor({
+      pullRequests: {
+        ensureSpecDraftPullRequest: vi.fn().mockRejectedValue(
+          new Error("Pull Request #401 head does not match the Implementer commit"),
+        ),
+        addPullRequestLabel: vi.fn(),
+      },
+      createJobId: () => "job-226",
+    });
+    ports.github.listChildren
+      .mockResolvedValueOnce([child(301), child(302)])
+      .mockResolvedValueOnce([child(301, { state: "CLOSED" }), child(302)]);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await expect(runSpecImplementationAutomationCommand({ issueNumber: 226 }, ports)).resolves.toEqual({
+        status: "blocked",
+        reason: "spec-implementation-publication",
+        jobId: "job-226",
+      });
+    } finally {
+      errorLog.mockRestore();
+    }
+
+    // The recovered head is consumed by Draft Pull Request assurance, which
+    // runs before the child is closed; the assurance failure blocks without
+    // closing the child, re-running the child, or replaying any publication
+    // step.
+    expect(ports.implementer.implement).toHaveBeenCalledTimes(1);
+    expect(ports.pullRequests.ensureSpecDraftPullRequest).toHaveBeenCalledWith(expect.objectContaining({
+      specNumber: 226,
+      branch: "sandcastle/spec-226",
+      headSha: childRevision,
+    }));
+    expect(ports.github.closeImplementedChild).not.toHaveBeenCalled();
+    expect(ports.pullRequests.addPullRequestLabel).not.toHaveBeenCalled();
+    expect(ports.github.addIssueLabel).toHaveBeenCalledWith(226, "agent:blocked");
+    expect(ports.github.addIssueLabel).not.toHaveBeenCalledWith(226, "agent:implement");
   });
 
   it("refuses a concurrent command for the same Spec before another Agent can run", async () => {

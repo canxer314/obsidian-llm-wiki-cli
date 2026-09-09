@@ -70,11 +70,14 @@ describe("architecture review automation command", () => {
       `review:${revision}`,
       "publish:Deepen the search indexer",
     ]);
+    expect(reviewer.review).toHaveBeenCalledOnce();
     expect(reviewer.review).toHaveBeenCalledWith({
       revision,
       checkoutPath: "/safe/disposable-checkout",
       priorProposals,
     });
+    // An eventually successful review publishes its proposal exactly once.
+    expect(publisher.publishArchitectureProposal).toHaveBeenCalledOnce();
     expect(publisher.publishArchitectureProposal).toHaveBeenCalledWith({
       title: "Deepen the search indexer",
       body: "## Architecture review\n\n...",
@@ -145,40 +148,47 @@ describe("architecture review automation command", () => {
     expect(publisher.publishArchitectureProposal).not.toHaveBeenCalled();
   });
 
-  it("returns a classified failure when extraction exhausts its bounded retries", async () => {
+  it("publishes zero times when review recovery is exhausted", async () => {
+    const publisher = { publishArchitectureProposal: vi.fn() };
+
     await expect(runArchitectureReviewAutomationCommand({
       github: eligibleGithub(),
       checkout: {
         withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")),
       },
       reviewer: { review: vi.fn().mockRejectedValue(new Error("Structured output extraction failed")) },
-      publisher: { publishArchitectureProposal: vi.fn() },
+      publisher,
     })).resolves.toEqual({
       status: "blocked",
       reason: "architecture-review-execution",
       jobId: "local-architecture-review-job",
       summary: "Structured output extraction failed",
     });
+
+    expect(publisher.publishArchitectureProposal).not.toHaveBeenCalled();
   });
 
-  it("classifies publication failure after an accepted proposal without fabricating one", async () => {
+  it("does not wrap publication in invocation retry: a publication failure re-runs neither the review nor the publish", async () => {
+    const reviewer = {
+      review: vi.fn(async () => ({
+        status: "proposed" as const,
+        title: "Deepen the search indexer",
+        body: "body",
+        oneLineSummary: "summary",
+        candidatesConsidered: ["indexer"],
+      })),
+    };
+    const publisher = {
+      publishArchitectureProposal: vi.fn().mockRejectedValue(new Error("GitHub unavailable")),
+    };
+
     await expect(runArchitectureReviewAutomationCommand({
       github: eligibleGithub(),
       checkout: {
         withCheckout: vi.fn(async (_request, action) => action("/safe/disposable-checkout")),
       },
-      reviewer: {
-        review: vi.fn(async () => ({
-          status: "proposed" as const,
-          title: "Deepen the search indexer",
-          body: "body",
-          oneLineSummary: "summary",
-          candidatesConsidered: ["indexer"],
-        })),
-      },
-      publisher: {
-        publishArchitectureProposal: vi.fn().mockRejectedValue(new Error("GitHub unavailable")),
-      },
+      reviewer,
+      publisher,
       createJobId: () => "job-228",
     })).resolves.toEqual({
       status: "blocked",
@@ -186,6 +196,9 @@ describe("architecture review automation command", () => {
       jobId: "job-228",
       summary: "GitHub unavailable",
     });
+
+    expect(reviewer.review).toHaveBeenCalledOnce();
+    expect(publisher.publishArchitectureProposal).toHaveBeenCalledOnce();
   });
 
   it("returns a classified locally diagnosable failure when the Target Checkout cannot be created", async () => {

@@ -37,6 +37,7 @@ const pullRequest = await implementIssue({
   plan,
   model: implementerModel,
   session: implementerSession,
+  baseRevision,
   checkoutPath,
   github: new GithubCliPort(undefined, undefined, startup.githubEnvironment),
 });

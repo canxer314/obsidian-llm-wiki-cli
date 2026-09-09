@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createAutomationGithubPort } from "../.sandcastle/automation-github.js";
+import type { CheckoutObserver, CheckoutSnapshot } from "../.sandcastle/checkout-safety.js";
 import { MAX_GITHUB_ATTEMPTS, RETRY_DELAYS_MS } from "../.sandcastle/github-cli.js";
 import { runReviewAutomationCommand } from "../.sandcastle/review-automation.js";
 import { createSameSessionReviewExtractor } from "../.sandcastle/review-extraction.js";
@@ -9,6 +10,29 @@ import { createReviewPublisher } from "../.sandcastle/review-publisher.js";
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const improvedRevision = "abcdef0123456789abcdef0123456789abcdef01";
 const publicationRemote = "https://github.com/example/repository.git";
+
+// A clean-checkout observer fixture: the extractor's produce/formatting
+// proofs and the publisher's clean-checkout gate are injected seams here.
+function cleanObserver(head: string) {
+  const snapshot: CheckoutSnapshot = { head, entries: [] };
+  const observer = {
+    observe: vi.fn().mockResolvedValue(snapshot),
+    requireClean: vi.fn().mockResolvedValue(snapshot),
+    requireUnchanged: vi.fn().mockResolvedValue(snapshot),
+  } as CheckoutObserver;
+  return observer;
+}
+
+function extractorHarness(runAgent: ReturnType<typeof vi.fn>, head: string) {
+  return {
+    sandbox: { kind: "fake-sandbox" } as never,
+    hooks: { sandbox: { onSandboxReady: [] } },
+    observer: cleanObserver(head),
+    wait: vi.fn(async () => {}) as never,
+    runAgent: runAgent as never,
+    createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
+  };
+}
 
 function pullRequest(labels = ["agent:review"]) {
   return {
@@ -103,28 +127,27 @@ describe("review automation command", () => {
       if (arguments_[2] === "remote") return { stdout: `${publicationRemote}\n`, stderr: "" };
       return { stdout: "", stderr: "" };
     });
-    const extractor = createSameSessionReviewExtractor({
-      sandbox: { kind: "fake-sandbox" } as never,
-      hooks: { sandbox: { onSandboxReady: [] } },
-      runAgent: vi.fn(async (options: { readonly cwd: string; readonly branchStrategy: unknown }) => {
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      stdout: `<review>${JSON.stringify({ summary: "Reviewed.", inlineComments: [], replies: [] })}</review>`,
+    });
+    const extractor = createSameSessionReviewExtractor(extractorHarness(
+      vi.fn(async (options: { readonly cwd: string; readonly branchStrategy: unknown }) => {
         expect(checkoutBranch).toBe("feature/review");
         expect(checkoutRevision).toBe(revision);
         expect(options).toMatchObject({ cwd: "/safe/disposable-checkout", branchStrategy: { type: "head" } });
         checkoutRevision = reviewedRevision;
-        return {
-          commits: reviewedRevision === revision ? [] : [{}],
-          resume: vi.fn().mockResolvedValue({
-            commits: [],
-            stdout: `<review>${JSON.stringify({ summary: "Reviewed.", inlineComments: [], replies: [] })}</review>`,
-          }),
-        };
-      }) as never,
-      createAgent: vi.fn().mockReturnValue({ name: "fake-reviewer" }) as never,
-    });
+        return { commits: reviewedRevision === revision ? [] : [{}], resume };
+      }),
+      reviewedRevision,
+    ));
     const dependencies = ports(events, (request) =>
       extractor.review({ ...request, model: "reviewer-model" }),
     );
-    dependencies.publisher = createReviewPublisher({ execute });
+    dependencies.publisher = createReviewPublisher({
+      execute,
+      observer: cleanObserver(reviewedRevision),
+    });
 
     await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies))
       .resolves.toEqual({ status: "reviewed", revision: reviewedRevision, verdict });
@@ -139,6 +162,65 @@ describe("review automation command", () => {
       "-C", "/safe/disposable-checkout", "push", publicationRemote,
       `--force-with-lease=refs/heads/feature/review:${revision}`,
       "HEAD:refs/heads/feature/review",
+    ]);
+  });
+
+  it("recovers an interrupted produce attempt and executes every publication step exactly once", async () => {
+    const events: string[] = [];
+    const resume = vi.fn().mockResolvedValue({
+      commits: [],
+      stdout: `<review>${JSON.stringify({
+        summary: "Recovered the interrupted review.",
+        inlineComments: [],
+        replies: [{ commentId: "PRRC_1", body: "Fixed in the review commit." }],
+      })}</review>`,
+    });
+    // Attempt one committed an improvement and then rejected; the recovery
+    // attempt continued the checkout's state and returned without a new
+    // commit. Publication still happens exactly once, after recovery.
+    const runAgent = vi.fn()
+      .mockRejectedValueOnce(new Error("provider stream ended"))
+      .mockResolvedValueOnce({ commits: [], resume });
+    const extractor = createSameSessionReviewExtractor(extractorHarness(runAgent, improvedRevision));
+    const dependencies = ports(events, (request) =>
+      extractor.review({ ...request, model: "reviewer-model" }));
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, dependencies))
+      .resolves.toEqual({ status: "reviewed", revision: improvedRevision, verdict: "improved" });
+
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    expect(runAgent.mock.calls[1]![0].prompt).toContain("interrupted");
+    expect(dependencies.publisher.publish).toHaveBeenCalledOnce();
+    expect(dependencies.github.publishReview).toHaveBeenCalledOnce();
+    expect(dependencies.github.markPullRequestReady).toHaveBeenCalledOnce();
+    expect(dependencies.github.replyToReviewThread).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`, `push:${revision}`,
+      `review:${improvedRevision}`, "ready", "reply:PRRC_1", "remove:agent:in-progress",
+    ]);
+  });
+
+  it("publishes nothing when the bounded produce recovery exhausts", async () => {
+    const events: string[] = [];
+    const runAgent = vi.fn().mockRejectedValue(new Error("gateway unavailable"));
+    const extractor = createSameSessionReviewExtractor(extractorHarness(runAgent, improvedRevision));
+    const dependencies = ports(events, (request) =>
+      extractor.review({ ...request, model: "reviewer-model" }));
+
+    await expect(runReviewAutomationCommand({ pullRequestNumber: 220 }, { ...dependencies, createJobId: () => "job-220" }))
+      .resolves.toEqual({ status: "blocked", reason: "review-execution", jobId: "job-220" });
+
+    // Three bounded produce attempts, then the blocked path: the controlled
+    // push, the review submission, the readiness change, and every reply
+    // execute zero times on Agent exhaustion.
+    expect(runAgent).toHaveBeenCalledTimes(3);
+    expect(dependencies.publisher.publish).not.toHaveBeenCalled();
+    expect(dependencies.github.publishReview).not.toHaveBeenCalled();
+    expect(dependencies.github.markPullRequestReady).not.toHaveBeenCalled();
+    expect(dependencies.github.replyToReviewThread).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      "add:agent:in-progress", "remove:agent:review", `prepare:feature/review:${revision}`,
+      "add:agent:blocked", "blocked", "remove:agent:in-progress",
     ]);
   });
 

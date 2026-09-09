@@ -50,7 +50,7 @@ describe("branch update conflict process runner", () => {
     }
   });
 
-  it("uses the fixed worker protocol and parses its successful comment", async () => {
+  it("uses the fixed resolve worker protocol and parses its successful comment", async () => {
     const process = child(551);
     const start = vi.fn().mockReturnValue(process);
     const resolver = createProcessBranchUpdateConflictResolver({
@@ -65,15 +65,72 @@ describe("branch update conflict process runner", () => {
 
     await expect(resolved).resolves.toEqual({ comment: "Resolved both conflicts." });
     expect(start).toHaveBeenCalledWith([
+      "resolve",
       "219",
       "feature/conflict-resolution",
       "master",
       "0123456789abcdef0123456789abcdef01234567",
       "/jobs/conflict-resolution-219",
       "merger-model",
+      "initial",
       JSON.stringify(["notes/overview.md", "notes/plan.md"]),
     ]);
     expect(process.stdin?.end).toHaveBeenCalledWith("immutable startup payload");
+  });
+
+  it("marks a continued attempt with the recovery flag", async () => {
+    const process = child(554);
+    const start = vi.fn().mockReturnValue(process);
+    const resolver = createProcessBranchUpdateConflictResolver({
+      startup: "startup",
+      model: "merger-model",
+      start,
+    });
+    const resolved = resolver.resolve({ ...request, recovery: true });
+
+    process.stdout?.emit("data", `${JSON.stringify({ comment: "Continued the merge." })}\n`);
+    process.emit("close", 0);
+
+    await expect(resolved).resolves.toEqual({ comment: "Continued the merge." });
+    expect(start).toHaveBeenCalledWith([
+      "resolve",
+      "219",
+      "feature/conflict-resolution",
+      "master",
+      "0123456789abcdef0123456789abcdef01234567",
+      "/jobs/conflict-resolution-219",
+      "merger-model",
+      "recovery",
+      JSON.stringify(["notes/overview.md", "notes/plan.md"]),
+    ]);
+  });
+
+  it("uses the format worker protocol for an already completed merge", async () => {
+    const process = child(555);
+    const start = vi.fn().mockReturnValue(process);
+    const resolver = createProcessBranchUpdateConflictResolver({
+      startup: "startup",
+      model: "merger-model",
+      start,
+    });
+    const { conflicts: _conflicts, ...formatRequest } = request;
+    const formatted = resolver.format(formatRequest);
+
+    process.stdout?.emit("data", `${JSON.stringify({ comment: "Formatted the completed merge." })}\n`);
+    process.emit("close", 0);
+
+    await expect(formatted).resolves.toEqual({ comment: "Formatted the completed merge." });
+    expect(start).toHaveBeenCalledWith([
+      "format",
+      "219",
+      "feature/conflict-resolution",
+      "master",
+      "0123456789abcdef0123456789abcdef01234567",
+      "/jobs/conflict-resolution-219",
+      "merger-model",
+      "initial",
+      "[]",
+    ]);
   });
 
   it.each([

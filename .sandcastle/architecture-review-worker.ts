@@ -23,10 +23,10 @@ const startup = await readTargetWorkerStartup();
 const reviewer = createSameSessionArchitectureReviewExtractor({
   sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
+  checkoutPath,
 });
 const outcome = await reviewer.review({
   revision,
-  checkoutPath,
   priorProposals,
   model,
   artifactDirectory,

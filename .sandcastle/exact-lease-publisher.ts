@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { CheckoutObserver } from "./checkout-safety.ts";
+
 const executeFile = promisify(execFile);
 
 type Execute = (
@@ -28,6 +30,10 @@ interface ExactLeasePublisherOptions {
   readonly sourceRepositoryPath?: string;
   readonly gitEnvironment?: Readonly<Record<string, string>>;
   readonly configureCheckout?: (checkoutPath: string, git: Git) => Promise<void>;
+  // When present, publish proves the checkout clean (no staged, unstaged,
+  // unmerged, or non-ignored untracked residue) after head verification and
+  // before any push: the publisher never pushes from a dirty checkout.
+  readonly observer?: CheckoutObserver;
   readonly revisionPolicy:
     | { readonly requireNewRevision: false }
     | { readonly requireNewRevision: true; readonly unchangedRevisionDiagnostic: string };
@@ -82,6 +88,9 @@ export function createExactLeasePublisher(options: ExactLeasePublisherOptions) {
       if (options.revisionPolicy.requireNewRevision && revision === request.expectedRevision) {
         throw new Error(options.revisionPolicy.unchangedRevisionDiagnostic);
       }
+      // The exact head verification above is complemented by an observed
+      // clean checkout: a dirty Target Checkout never reaches the push.
+      await options.observer?.requireClean(request.checkoutPath);
       const remoteRepositoryPath = options.sourceRepositoryPath ?? request.checkoutPath;
       const remote = (await git([
         "-C", remoteRepositoryPath, "remote", "get-url", "origin",
