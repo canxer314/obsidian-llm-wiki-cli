@@ -125,14 +125,14 @@ const INVOCATION_SITES: readonly InvocationSite[] = [
   },
   {
     agentRole: "Spec splitter",
-    modules: ["spec-split-extraction.ts"],
+    modules: ["spec-split-extraction.ts", "spec-split-worker.ts"],
     seams: ["createStructuredExtractionDriver"],
     windows: [{ role: "spec-splitter", stage: "structured-extraction" }],
     exported: { "spec-split-extraction.ts": "createSameSessionSpecSplitExtractor" },
   },
   {
     agentRole: "Architecture reviewer",
-    modules: ["architecture-review-extraction.ts"],
+    modules: ["architecture-review-extraction.ts", "architecture-review-worker.ts"],
     seams: ["createStructuredExtractionDriver"],
     windows: [{ role: "architecture-reviewer", stage: "structured-extraction" }],
     exported: {
@@ -141,7 +141,7 @@ const INVOCATION_SITES: readonly InvocationSite[] = [
   },
   {
     agentRole: "Reviewer",
-    modules: ["review-recovery.ts", "review-extraction.ts"],
+    modules: ["review-recovery.ts", "review-extraction.ts", "review-worker.ts"],
     seams: ["invokeWithRecovery", "createStructuredExtractionDriver", "runAgent"],
     windows: [
       { role: "reviewer", stage: "produce" },
@@ -154,7 +154,7 @@ const INVOCATION_SITES: readonly InvocationSite[] = [
   },
   {
     agentRole: "Feedback Implementer",
-    modules: ["feedback-recovery.ts", "feedback-implementer-session.ts"],
+    modules: ["feedback-recovery.ts", "feedback-implementer-session.ts", "feedback-worker.ts"],
     seams: ["invokeWithRecovery", "createStructuredExtractionDriver", "runAgent"],
     windows: [
       { role: "feedback-implementer", stage: "produce" },
