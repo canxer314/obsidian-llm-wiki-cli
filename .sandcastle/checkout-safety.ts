@@ -102,7 +102,10 @@ function observationFailure(summary: string, cause?: unknown): StopRetryError {
 }
 
 const UNMERGED_INDEX_WORKTREE = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
-const STATUS_CODE = /^[ MADRCU?!]$/u;
+// Porcelain v1 status letters. `T` is a typechange (regular file to symlink or
+// vice versa) and may appear in either column; rename/copy entries are excluded
+// by the --no-renames status invocation.
+const STATUS_CODE = /^[ MADRCUT?!]$/u;
 
 // Parses `git status --porcelain=v1 -z --no-renames` output. Any record that
 // does not match the exact porcelain shape is malformed observer output and

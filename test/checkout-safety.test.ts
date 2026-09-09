@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -67,6 +67,55 @@ describe("checkout safety observer", () => {
 
     expect(isStopRetry(caught)).toBe(true);
     expect((caught as Error).message).toContain("unstaged=1");
+  });
+
+  it("treats a worktree typechange as ordinary unstaged residue", async () => {
+    const repository = initRepository();
+    writeFileSync(join(repository, "tracked.txt"), "target\n");
+    git(repository, ["add", "tracked.txt"]);
+    git(repository, ["commit", "--quiet", "-m", "make tracked.txt a blob target"]);
+    // Replace the tracked regular file with a symlink: porcelain status " T".
+    rmSync(join(repository, "tracked.txt"));
+    symlinkSync("target.txt", join(repository, "tracked.txt"));
+
+    const observer = createCheckoutObserver();
+    const snapshot = await observer.observe(repository);
+    expect(snapshot.entries.some((entry) => entry.worktree === "T")).toBe(true);
+
+    const caught = await observer.requireClean(repository).catch((error: unknown) => error);
+    expect(isStopRetry(caught)).toBe(true);
+    expect((caught as Error).message).toContain("unstaged=1");
+    expect((caught as Error).message).not.toContain("malformed");
+  });
+
+  it("treats a staged typechange as ordinary staged residue", async () => {
+    const repository = initRepository();
+    rmSync(join(repository, "tracked.txt"));
+    symlinkSync("target.txt", join(repository, "tracked.txt"));
+    git(repository, ["add", "tracked.txt"]);
+
+    const observer = createCheckoutObserver();
+    const snapshot = await observer.observe(repository);
+    expect(snapshot.entries.some((entry) => entry.index === "T")).toBe(true);
+
+    const caught = await observer.requireClean(repository).catch((error: unknown) => error);
+    expect(isStopRetry(caught)).toBe(true);
+    expect((caught as Error).message).toContain("staged=1");
+    expect((caught as Error).message).not.toContain("malformed");
+  });
+
+  it("detects a typechange as a read-only stage violation", async () => {
+    const repository = initRepository();
+    const observer = createCheckoutObserver();
+    const before = await observer.observe(repository);
+
+    rmSync(join(repository, "tracked.txt"));
+    symlinkSync("target.txt", join(repository, "tracked.txt"));
+
+    const caught = await observer.requireUnchanged(before, repository)
+      .catch((error: unknown) => error);
+    expect(isStopRetry(caught)).toBe(true);
+    expect((caught as Error).message).toContain("changed during a read-only stage");
   });
 
   it("rejects a non-ignored untracked file", async () => {
