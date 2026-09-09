@@ -1,34 +1,82 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { CheckoutObserver } from "../.sandcastle/checkout-safety.js";
-import { StopRetryError, isStopRetry } from "../.sandcastle/invocation-recovery.js";
 import { createFeedbackPublisher } from "../.sandcastle/feedback-publisher.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const REMOTE = "https://github.com/example/repository.git";
 
-// The publisher's clean-checkout proof is an injected seam in these tests;
-// production defaults to the real checkout observer.
-function cleanObserver() {
-  const snapshot = { head: SHA_B, entries: [] };
-  const requireClean = vi.fn().mockResolvedValue(snapshot);
-  const observer = {
-    observe: vi.fn().mockResolvedValue(snapshot),
-    requireClean,
-    requireUnchanged: vi.fn().mockResolvedValue(snapshot),
-  } as CheckoutObserver;
-  return { observer, requireClean };
-}
-
 describe("feedback publisher", () => {
-  it("pushes the feedback commit with an exact lease after proving the checkout clean", async () => {
+  it("starts at the acquired revision and publishes the local commit with an exact lease", async () => {
     const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${SHA_A}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: `${REMOTE}\n`, stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" });
-    const { observer, requireClean } = cleanObserver();
-    const publisher = createFeedbackPublisher({ execute, observer });
+    const publisher = createFeedbackPublisher({ execute });
+
+    await publisher.prepare("/checkout", "feature/feedback", SHA_A);
+    await expect(publisher.publish({
+      checkoutPath: "/checkout",
+      branch: "feature/feedback",
+      expectedRevision: SHA_A,
+    })).resolves.toBe(SHA_B);
+
+    expect(execute).toHaveBeenNthCalledWith(1, "git", ["-C", "/checkout", "checkout", "-B", "feature/feedback", SHA_A]);
+    expect(execute).toHaveBeenNthCalledWith(4, "git", [
+      "-C", "/checkout", "remote", "get-url", "origin",
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(5, "git", [
+      "-C", "/checkout", "push", REMOTE,
+      `--force-with-lease=refs/heads/feature/feedback:${SHA_A}`,
+      "HEAD:refs/heads/feature/feedback",
+    ]);
+  });
+
+  it.each([
+    {
+      name: "malformed acquired revision",
+      branch: "feature/feedback",
+      revision: "not-a-full-revision",
+      diagnostic: "Feedback publication requires a full expected revision",
+    },
+    {
+      name: "invalid branch",
+      branch: "-unsafe",
+      revision: SHA_A,
+      diagnostic: "Feedback publication branch is invalid",
+    },
+  ])("rejects $name before preparing the checkout", async ({ branch, revision, diagnostic }) => {
+    const execute = vi.fn();
+    const publisher = createFeedbackPublisher({ execute });
+
+    await expect(publisher.prepare("/checkout", branch, revision)).rejects.toThrow(diagnostic);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects when the prepared checkout does not resolve to the acquired revision", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" });
+    const publisher = createFeedbackPublisher({ execute });
+
+    await expect(publisher.prepare("/checkout", "feature/feedback", SHA_A))
+      .rejects.toThrow("Feedback checkout did not start at the acquired revision");
+    expect(execute).toHaveBeenNthCalledWith(1, "git", [
+      "-C", "/checkout", "checkout", "-B", "feature/feedback", SHA_A,
+    ]);
+    expect(execute).toHaveBeenNthCalledWith(2, "git", [
+      "-C", "/checkout", "rev-parse", "HEAD",
+    ]);
+  });
+
+  it("uses the source repository's credential-free origin rather than the local checkout remote", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: "https://github.com/canxer314/obsidian-llm-wiki-cli.git\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" });
+    const publisher = createFeedbackPublisher({ execute, sourceRepositoryPath: "/source" });
 
     await expect(publisher.publish({
       checkoutPath: "/checkout",
@@ -36,53 +84,100 @@ describe("feedback publisher", () => {
       expectedRevision: SHA_A,
     })).resolves.toBe(SHA_B);
 
-    // Head verification runs first, then the clean-checkout proof, then the
-    // remote lookup and leased push.
-    expect(execute).toHaveBeenNthCalledWith(1, "git", ["-C", "/checkout", "rev-parse", "HEAD"]);
-    expect(requireClean).toHaveBeenCalledOnce();
-    expect(requireClean).toHaveBeenCalledWith("/checkout");
-    expect(execute).toHaveBeenNthCalledWith(2, "git", ["-C", "/checkout", "remote", "get-url", "origin"]);
+    expect(execute).toHaveBeenNthCalledWith(2, "git", ["-C", "/source", "remote", "get-url", "origin"]);
     expect(execute).toHaveBeenNthCalledWith(3, "git", [
-      "-C", "/checkout", "push", REMOTE,
+      "-C", "/checkout", "push", "https://github.com/canxer314/obsidian-llm-wiki-cli.git",
       `--force-with-lease=refs/heads/feature/feedback:${SHA_A}`,
       "HEAD:refs/heads/feature/feedback",
     ]);
   });
 
-  it("never pushes from a dirty checkout: the clean-checkout proof gates the push", async () => {
+  it.each([
+    { name: "empty", remote: "\n" },
+    { name: "credential-bearing", remote: "https://token@example.test/repo.git\n" },
+  ])("refuses an $name source remote before push", async ({ remote }) => {
     const execute = vi.fn()
-      .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" });
-    const { observer, requireClean } = cleanObserver();
-    requireClean.mockRejectedValueOnce(
-      new StopRetryError("Target Checkout is not clean (staged=0, unstaged=1, unmerged=0, untracked=0)"),
-    );
-    const publisher = createFeedbackPublisher({ execute, observer });
+      .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: remote, stderr: "" });
+    const publisher = createFeedbackPublisher({ execute, sourceRepositoryPath: "/source" });
 
-    const failure = await publisher.publish({
+    await expect(publisher.publish({
       checkoutPath: "/checkout",
       branch: "feature/feedback",
       expectedRevision: SHA_A,
-    }).catch((error: unknown) => error);
+    })).rejects.toThrow("Feedback publication remote is invalid");
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    {
+      name: "malformed expected revision",
+      branch: "feature/feedback",
+      expectedRevision: "not-a-full-revision",
+      head: undefined,
+      diagnostic: "Feedback publication requires a full expected revision",
+    },
+    {
+      name: "invalid branch",
+      branch: "feature..feedback",
+      expectedRevision: SHA_A,
+      head: undefined,
+      diagnostic: "Feedback publication branch is invalid",
+    },
+    {
+      name: "malformed resulting revision",
+      branch: "feature/feedback",
+      expectedRevision: SHA_A,
+      head: "not-a-full-revision\n",
+      diagnostic: "Feedback implementation did not create a full local revision",
+    },
+  ])("uses the stable feedback diagnostic for $name", async ({
+    branch,
+    expectedRevision,
+    head,
+    diagnostic,
+  }) => {
+    const execute = head === undefined
+      ? vi.fn()
+      : vi.fn().mockResolvedValueOnce({ stdout: head, stderr: "" });
+    const publisher = createFeedbackPublisher({ execute });
 
-    expect(isStopRetry(failure)).toBe(true);
-    expect((failure as Error).message).toContain("Target Checkout is not clean");
-    // Head verification ran; the remote lookup and the push never did.
-    expect(execute).toHaveBeenCalledOnce();
-    expect(execute).toHaveBeenCalledWith("git", ["-C", "/checkout", "rev-parse", "HEAD"]);
+    await expect(publisher.publish({
+      checkoutPath: "/checkout",
+      branch,
+      expectedRevision,
+    })).rejects.toThrow(diagnostic);
+    expect(execute).toHaveBeenCalledTimes(head === undefined ? 0 : 1);
   });
 
-  it("rejects an unchanged revision before the clean-checkout proof runs", async () => {
-    const execute = vi.fn()
-      .mockResolvedValueOnce({ stdout: `${SHA_A}\n`, stderr: "" });
-    const { observer, requireClean } = cleanObserver();
-    const publisher = createFeedbackPublisher({ execute, observer });
+  it("does not resolve a remote when the agent left HEAD unchanged", async () => {
+    const execute = vi.fn().mockResolvedValue({ stdout: `${SHA_A}\n`, stderr: "" });
+    const publisher = createFeedbackPublisher({ execute });
 
     await expect(publisher.publish({
       checkoutPath: "/checkout",
       branch: "feature/feedback",
       expectedRevision: SHA_A,
     })).rejects.toThrow("Feedback implementation did not create a new local revision");
-    expect(requireClean).not.toHaveBeenCalled();
-    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a rejected lease without attempting a retry", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ stdout: `${SHA_B}\n`, stderr: "" })
+      .mockResolvedValueOnce({ stdout: `${REMOTE}\n`, stderr: "" })
+      .mockRejectedValueOnce(new Error("stale info"));
+    const publisher = createFeedbackPublisher({ execute });
+
+    await expect(publisher.publish({
+      checkoutPath: "/checkout",
+      branch: "feature/feedback",
+      expectedRevision: SHA_A,
+    })).rejects.toThrow("stale info");
+    expect(execute).toHaveBeenNthCalledWith(3, "git", [
+      "-C", "/checkout", "push", REMOTE,
+      `--force-with-lease=refs/heads/feature/feedback:${SHA_A}`,
+      "HEAD:refs/heads/feature/feedback",
+    ]);
+    expect(execute).toHaveBeenCalledTimes(3);
   });
 });
