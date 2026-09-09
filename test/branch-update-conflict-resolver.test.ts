@@ -57,7 +57,7 @@ function harness(runAgent: ReturnType<typeof vi.fn>) {
     runAgent: runAgent as never,
     createAgent: createAgent as never,
   });
-  return { session, requireClean, requireUnchanged, snapshot, wait, createAgent };
+  return { session, observer, requireClean, requireUnchanged, snapshot, wait, createAgent };
 }
 
 function git(repository: string, arguments_: readonly string[]): string {
@@ -139,6 +139,30 @@ describe("branch update conflict resolver session produce stage", () => {
     await expect(session.resolve(request)).rejects.toBe(rejection);
     expect(requireClean).not.toHaveBeenCalled();
     expect(wait).not.toHaveBeenCalled();
+  });
+
+  it("treats a successful produce that left the merge unfinished as a recoverable failure, not a stop", async () => {
+    // The produce invocation returned with a resumable checkpoint but the
+    // agent never ran the final commit: staged resolutions and MERGE_HEAD are
+    // still present, so the checkout carries ordinary residue. This is a
+    // produce-contract failure that must spend a bounded produce attempt, not
+    // the formatting stage's fail-closed stop-retry sentinel (which would
+    // terminate the whole window with zero further Agent calls).
+    const resume = vi.fn();
+    const runAgent = vi.fn().mockResolvedValue(completedResult("", { resume }));
+    const { session, observer, requireClean } = harness(runAgent);
+    observer.observe.mockResolvedValue({
+      head: mergeRevision,
+      entries: [{ index: "M", worktree: " ", path: "src/index.ts", kind: "tracked" }],
+    });
+
+    const failure = await session.resolve(request).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("unclean checkout");
+    // Formatting never started: no clean-checkout proof, no resumed session.
+    expect(requireClean).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
   });
 });
 

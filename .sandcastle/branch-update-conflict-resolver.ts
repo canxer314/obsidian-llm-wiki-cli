@@ -7,7 +7,10 @@ import {
 import { z } from "zod";
 
 import { agentLogging } from "./agent-logging.ts";
-import type { CheckoutObserver } from "./checkout-safety.ts";
+import {
+  createCheckoutObserver,
+  type CheckoutObserver,
+} from "./checkout-safety.ts";
 import type { JobLog } from "./job-logs.ts";
 import { createStructuredExtractionDriver } from "./structured-extraction-driver.ts";
 
@@ -158,6 +161,7 @@ export function createBranchUpdateConflictResolverSession(options: {
 }): BranchUpdateConflictResolverSession {
   const runAgent = options.runAgent ?? run;
   const createAgent = options.createAgent ?? claudeCode;
+  const observer = options.observer ?? createCheckoutObserver();
 
   const formattingDriver = (checkoutPath: string) => createStructuredExtractionDriver({
     sandbox: options.sandbox,
@@ -165,7 +169,7 @@ export function createBranchUpdateConflictResolverSession(options: {
     checkoutPath,
     role: "merger",
     stage: "resolution-formatting",
-    ...(options.observer === undefined ? {} : { observer: options.observer }),
+    observer,
     ...(options.log === undefined ? {} : { log: options.log }),
     ...(options.runAgent === undefined ? {} : { runAgent: options.runAgent }),
     ...(options.createAgent === undefined ? {} : { createAgent: options.createAgent }),
@@ -196,6 +200,20 @@ export function createBranchUpdateConflictResolverSession(options: {
         // comment, so Sandcastle recursive output retry stays disabled. The
         // immutable formatting stage below owns comment extraction.
       });
+      // Produce-contract validation runs from observer state before the
+      // immutable formatting stage may start. A successful produce that left
+      // the merge unfinished — staged resolutions, MERGE_HEAD still present,
+      // or any other staged/unstaged/unmerged/non-ignored-untracked residue —
+      // is a recoverable produce-contract failure that spends one bounded
+      // attempt; the next attempt classifies the still-active in-progress
+      // merge and completes it in place. Raising the stop-retry sentinel here
+      // would instead stop the window with zero further Agent calls.
+      const snapshot = await observer.observe(request.checkoutPath);
+      if (snapshot.entries.some((entry) => entry.kind !== "ignored")) {
+        throw new Error(
+          "Branch update conflict resolution produce returned successfully with an unclean checkout",
+        );
+      }
       if (produced.resume === undefined) {
         throw new Error("Branch update conflict resolution session identity is unavailable");
       }
