@@ -303,11 +303,19 @@ async function runDurableImplementer(
     const observedRemote = await gitState.observeRemoteBranch(branch);
     if (observedRemote === undefined) return;
     const remote = requireWellFormed(observedRemote, "remote");
-    // Accepted: the interrupted attempt pushed its local head, or pushed a
-    // known ancestor on the frozen-baseline-to-local path before advancing
-    // further locally.
+    // Accepted only when the remote is a known ancestor on the frozen-baseline-
+    // to-local path (the interrupted attempt pushed its local head, or pushed
+    // an earlier commit on that same path before advancing further locally).
+    // A remote that predates the baseline or arrived through a side lineage is
+    // neither the local head nor on that path, so it is never adopted — the
+    // local branch is not reset to it and no further Agent call runs.
     if (remote === local) return;
-    if (await gitState.isAncestor(remote, local)) return;
+    if (
+      await gitState.isAncestor(baseline, remote) &&
+      await gitState.isAncestor(remote, local)
+    ) {
+      return;
+    }
     throw stopRetry("Implementer remote branch moved ahead or diverged from the local branch");
   });
 

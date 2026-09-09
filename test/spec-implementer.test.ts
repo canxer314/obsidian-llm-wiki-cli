@@ -223,6 +223,30 @@ describe("Spec-child durable Implementer", () => {
     expect(double.port.isAncestor).toHaveBeenCalledWith(sharedHead, childHead);
   });
 
+  it("stops further Agent calls when the shared remote moved to a commit outside the frozen-baseline-to-local path", async () => {
+    // The interrupted attempt rewound origin/<branch> to an ancestor of the
+    // frozen earlier-children baseline (baseRevision precedes sharedHead in
+    // the chain). Such a remote is an ancestor of the local current-child head
+    // but is NOT on the frozen-baseline-to-local path, so it must stop rather
+    // than be adopted: continuing could re-push a branch whose earlier-child
+    // history was reset or folded into foreign history.
+    const double = specChildDouble();
+    const run = vi.fn().mockImplementation(async () => {
+      double.state.local = childHead;
+      double.state.remote = baseRevision;
+      throw new Error("provider stream ended");
+    });
+    const { request, wait } = harness({ double, run });
+
+    const failure = await implementSpecChild(request).catch((error: unknown) => error);
+
+    expect(isStopRetry(failure)).toBe(true);
+    expect((failure as Error).message).toContain("moved ahead or diverged");
+    // Reconciliation stopped the window before a second Agent invocation.
+    expect(run).toHaveBeenCalledOnce();
+    expect(wait).toHaveBeenCalledOnce();
+  });
+
   it("stops further Agent calls when the shared remote branch moved ahead of the local accumulating branch", async () => {
     const double = specChildDouble({
       chain: [baseRevision, sharedHead, childHead, foreignHead],
