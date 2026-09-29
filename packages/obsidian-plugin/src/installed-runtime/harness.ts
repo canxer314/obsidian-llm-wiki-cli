@@ -22,6 +22,8 @@ import {
   type RegisteredReferenceRewriteCorpusEvidence,
   type PrivacyRecoveryAuthorityCorpusEvidence,
   type SemanticEvidenceCorpusEvidence,
+  type ReleaseLifecycleCorpusEvidence,
+  releaseLifecycleCorpusEvidenceSchema,
 } from "./evidence.js";
 import {
   createLoopbackMcpClient,
@@ -83,6 +85,11 @@ import {
   type SemanticEvidenceSearchSnapshotOutcome,
 } from "./semantic-evidence-corpus.js";
 import {
+  composeReleaseLifecycleCorpusEvidence,
+  ReleaseLifecycleCorpusError,
+  type ReleaseLifecycleCorpusOutcome,
+} from "./release-lifecycle-corpus.js";
+import {
   cleanupTestVault,
   compareInventories,
   provisionTestVault,
@@ -121,6 +128,7 @@ export type HarnessStage =
   | "registered_reference_rewrite_corpus"
   | "semantic_evidence_search_snapshot_corpus"
   | "privacy_recovery_authority_corpus"
+  | "release_lifecycle_corpus"
   | "inventory_after"
   | "cleanup";
 
@@ -170,6 +178,7 @@ export type HarnessFailureCode =
   | "registered_reference_rewrite_corpus_failed"
   | "semantic_evidence_search_snapshot_corpus_failed"
   | "privacy_recovery_authority_corpus_failed"
+  | "release_lifecycle_corpus_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -291,6 +300,25 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<PrivacyRecoveryAuthorityCorpusOutcome>;
+  /**
+   * Verified release-lifecycle corpus (issue #181): composes the installed
+   * install/repair, upgrade, uninstall, and purge scenarios. The caller supplies
+   * the self-contained runner so each scenario can use its own verified release
+   * identities and runtime-host seam; its result is release-blocking evidence.
+   */
+  readonly runReleaseLifecycleCorpus?: (options: {
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<ReleaseLifecycleCorpusOutcome>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -370,6 +398,7 @@ interface RunState {
   registeredReferenceRewrite: RegisteredReferenceRewriteOutcome | null;
   semanticEvidenceSearchSnapshot: SemanticEvidenceSearchSnapshotOutcome | null;
   privacyRecoveryAuthority: PrivacyRecoveryAuthorityCorpusOutcome | null;
+  releaseLifecycle: ReleaseLifecycleCorpusOutcome | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -405,6 +434,7 @@ export async function runInstalledRuntimeHarness(
     registeredReferenceRewrite: null,
     semanticEvidenceSearchSnapshot: null,
     privacyRecoveryAuthority: null,
+    releaseLifecycle: null,
     cleanup: null,
     failure: null,
   };
@@ -450,6 +480,8 @@ export async function runInstalledRuntimeHarness(
       fail(stage, "registered_reference_rewrite_corpus_failed", sanitize(error.message));
     } else if (error instanceof PrivacyRecoveryAuthorityCorpusError) {
       fail(stage, "privacy_recovery_authority_corpus_failed", sanitize(error.message));
+    } else if (error instanceof ReleaseLifecycleCorpusError) {
+      fail(stage, "release_lifecycle_corpus_failed", sanitize(error.message));
     } else if (error instanceof SemanticEvidenceSearchSnapshotCorpusError) {
       fail(stage, "semantic_evidence_search_snapshot_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
@@ -748,6 +780,23 @@ export async function runInstalledRuntimeHarness(
     privacyRecoveryAuthorityAssertions.push(name);
   };
 
+  const releaseLifecycleEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const releaseLifecycleAssertions: string[] = [];
+  const recordReleaseLifecycleEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    releaseLifecycleEvents.push({ kind, name, detail });
+  };
+  const recordReleaseLifecycleAssertion = (name: string): void => {
+    releaseLifecycleAssertions.push(name);
+  };
+
   if (state.failure === null) {
     await startAndObserve("obsidian_start", "health_initial", "initial", {
       stage: "public_wire_corpus",
@@ -919,6 +968,38 @@ export async function runInstalledRuntimeHarness(
       }
     }
   }
+  if (state.failure === null && options.runReleaseLifecycleCorpus !== undefined) {
+    const candidate = state.candidate;
+    if (candidate === null) {
+      fail(
+        "release_lifecycle_corpus",
+        "release_lifecycle_corpus_failed",
+        "Release-lifecycle corpus requires a verified candidate",
+      );
+    } else {
+      try {
+        state.releaseLifecycle = await options.runReleaseLifecycleCorpus({
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordReleaseLifecycleEvent,
+          assertion: recordReleaseLifecycleAssertion,
+        });
+      } catch (error) {
+        fail(
+          "release_lifecycle_corpus",
+          "release_lifecycle_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
+  }
   if (state.failure === null) {
     await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
       stage: "change_set_replay",
@@ -1036,6 +1117,16 @@ export async function runInstalledRuntimeHarness(
           }),
         )
       : null;
+  const releaseLifecycleCorpus: ReleaseLifecycleCorpusEvidence | null =
+    state.failure === null && state.releaseLifecycle !== null
+      ? releaseLifecycleCorpusEvidenceSchema.parse(
+          composeReleaseLifecycleCorpusEvidence({
+            outcome: state.releaseLifecycle,
+            events: releaseLifecycleEvents,
+            assertions: releaseLifecycleAssertions,
+          }),
+        )
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -1121,6 +1212,7 @@ export async function runInstalledRuntimeHarness(
     registeredReferenceRewriteCorpus,
     semanticEvidenceSearchSnapshotCorpus,
     privacyRecoveryAuthorityCorpus,
+    releaseLifecycleCorpus,
     verdict,
     failure:
       state.failure === null

@@ -304,6 +304,7 @@ export {
   parseEvidence,
   privacyRecoveryAuthorityCorpusEvidenceSchema,
   registeredReferenceRewriteCorpusEvidenceSchema,
+  releaseLifecycleCorpusEvidenceSchema,
   semanticEvidenceSearchSnapshotCorpusEvidenceSchema,
   serializeEvidence,
   writeEvidenceFile,
@@ -315,6 +316,7 @@ export {
   type PrivacyRecoveryAuthorityCorpusEvidence,
   type RegisteredReferenceRewriteCorpusEvidence,
   type SemanticEvidenceCorpusEvidence,
+  type ReleaseLifecycleCorpusEvidence,
 } from "./installed-runtime/evidence.js";
 export {
   runInstalledRuntimeHarness,
@@ -334,6 +336,19 @@ export {
   type LoopbackMcpClientOptions,
   type ObservedHealth,
 } from "./installed-runtime/loopback-client.js";
+export {
+  RELEASE_LIFECYCLE_CORPUS_ID,
+  RELEASE_LIFECYCLE_SCENARIO_PLAN,
+  ReleaseLifecycleCorpusError,
+  composeReleaseLifecycleCorpusEvidence,
+  runReleaseLifecycleCorpus,
+  type ReleaseLifecycleCorpusEvent,
+  type ReleaseLifecycleCorpusOutcome,
+  type ReleaseLifecycleInventoryEvidence,
+  type ReleaseLifecycleReleaseIdentity,
+  type ReleaseLifecycleScenarioName,
+  type RunReleaseLifecycleCorpusOptions,
+} from "./installed-runtime/release-lifecycle-corpus.js";
 export {
   CHANGE_SET_CORPUS_DIRECTORY,
   CHANGE_SET_SCENARIO_PLAN,

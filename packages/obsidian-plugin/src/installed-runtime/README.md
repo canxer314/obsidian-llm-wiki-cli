@@ -157,6 +157,17 @@ byte-exact state preservation → the identity-mismatch projection → cleanup
 with no residue. #44 composes this scenario into larger corpora; the harness
 corpus above is unchanged.
 
+The release-lifecycle corpus (issue #181) composes the existing real-runtime
+install/repair, upgrade, uninstall, and purge scenarios into one verified
+release-blocking program. Its closed evidence records only release identities
+and digests of before/after bundle and operational-state inventories, then
+proves verified preflight and staged per-Managed-Vault atomic replacement,
+same-version state preservation, drained fail-closed migration and maintenance
+pause until explicit Primary Operator resume, all lifecycle-state projections,
+guarded uninstall, backup-backed interactive purge, recovery refusal, and
+residual cleanup. The harness records this block only when its caller wires the
+scenario runner; any failed scenario fails the containing verification run.
+
 ## Purge scenario (issue #201)
 
 `purge-scenario.ts` exposes `runManagedVaultPurgeScenario(options)` on the

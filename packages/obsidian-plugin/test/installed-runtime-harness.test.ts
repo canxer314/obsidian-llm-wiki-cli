@@ -19,6 +19,7 @@ import {
   type BridgeHealthState,
   type GateIsolationOutcome,
   type PrivacyRecoveryAuthorityCorpusOutcome,
+  type ReleaseLifecycleCorpusOutcome,
   type SemanticEvidenceSearchSnapshotOutcome,
   type InstalledRuntimeHarnessOptions,
   type LoopbackMcpClient,
@@ -364,6 +365,12 @@ async function arrangeRun(
       assertion("stubbed-privacy-recovery-corpus");
       return stubPrivacyRecoveryAuthorityOutcome();
     },
+    runReleaseLifecycleCorpus: async ({ record, assertion }) => {
+      record("assertion", "stubbed-release-lifecycle", {});
+      record("cleanup", "stubbed-release-lifecycle-cleanup", {});
+      assertion("stubbed-release-lifecycle-corpus");
+      return stubReleaseLifecycleOutcome();
+    },
     runSemanticEvidenceSearchSnapshotCorpus: async ({ record, assertion }) => {
       record("transport", "stubbed-semantic-evidence-connected", {});
       record("assertion", "stubbed-semantic-evidence", {});
@@ -444,6 +451,62 @@ function stubPrivacyRecoveryAuthorityOutcome(): PrivacyRecoveryAuthorityCorpusOu
     secondVaultUnaffected: true,
     residualPaths: [],
     assertions: ["stubbed-privacy-recovery-corpus"],
+  };
+}
+
+function stubReleaseLifecycleOutcome(): ReleaseLifecycleCorpusOutcome {
+  const release = {
+    pluginId: "candidate-bridge",
+    pluginVersion: "0.2.0",
+    bundleSha256: "a".repeat(64),
+    filesSha256: "b".repeat(64),
+  };
+  const inventory = {
+    beforeBundleSha256: "c".repeat(64),
+    afterBundleSha256: "d".repeat(64),
+    beforeStateSha256: "e".repeat(64),
+    afterStateSha256: "f".repeat(64),
+  };
+  return {
+    scenarioManifestSha256: "a".repeat(64),
+    releases: { install: release, previous: release, upgrade: release },
+    inventories: {
+      install: inventory,
+      repair: inventory,
+      upgrade: inventory,
+      uninstall: inventory,
+      purge: inventory,
+    },
+    migration: {
+      completedPhases: ["replace", "reload", "migrate", "recovery", "health"],
+      drainedCurrentItem: true,
+      healthRechecked: true,
+      maintenancePaused: true,
+      newSubmissionsRejected: true,
+      explicitOperatorResumeRequired: true,
+    },
+    rollback: {
+      verifiedStagingBeforeReplacement: true,
+      perVaultAtomicReplacement: true,
+      unverifiedReleaseExecutable: false,
+    },
+    lifecycleStatus: {
+      notInstalled: true,
+      installedNotEnabled: true,
+      bridgeOffline: true,
+      mcpNotRegistered: true,
+      identityMismatch: true,
+      ready: true,
+    },
+    removal: {
+      uninstallGuarded: true,
+      purgeQueuedWorkRefused: true,
+      purgeRecoveryRefused: true,
+      purgeInteractive: true,
+      backupVerified: true,
+    },
+    cleanup: { scenarios: ["install", "upgrade", "uninstall", "purge"], residualPaths: [] },
+    assertions: ["stubbed-release-lifecycle-corpus"],
   };
 }
 
@@ -553,6 +616,8 @@ describe("installed-runtime harness orchestration", () => {
     expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(1);
     expect(evidence.privacyRecoveryAuthorityCorpus?.verdict).toBe("passed");
     expect(evidence.privacyRecoveryAuthorityCorpus?.authority.agentStateMutations).toBe(0);
+    expect(evidence.releaseLifecycleCorpus?.verdict).toBe("passed");
+    expect(evidence.releaseLifecycleCorpus?.migration.maintenancePaused).toBe(true);
     expect(evidence.cleanup).toEqual({ attempted: true, residualPaths: [] });
 
     // The generated roots are gone and nothing private leaked into evidence.

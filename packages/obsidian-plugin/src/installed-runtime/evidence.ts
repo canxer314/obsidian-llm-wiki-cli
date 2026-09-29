@@ -80,6 +80,15 @@ const candidateEvidenceSchema = z
   })
   .strict();
 
+const releaseLifecycleReleaseIdentitySchema = z
+  .object({
+    pluginId: z.string().min(1),
+    pluginVersion: z.string().min(1),
+    bundleSha256: sha256Schema,
+    filesSha256: sha256Schema,
+  })
+  .strict();
+
 const bridgeIdentityEvidenceSchema = z
   .object({
     vaultId: z.string().min(1),
@@ -873,6 +882,100 @@ export const semanticEvidenceSearchSnapshotCorpusEvidenceSchema = z
     }
   });
 
+const releaseLifecycleInventorySchema = z
+  .object({
+    beforeBundleSha256: sha256Schema,
+    afterBundleSha256: sha256Schema,
+    beforeStateSha256: sha256Schema,
+    afterStateSha256: sha256Schema,
+  })
+  .strict();
+
+export const releaseLifecycleCorpusEvidenceSchema = z
+  .object({
+    corpusId: z.literal("verified-release-lifecycle-proof"),
+    scenarioManifestSha256: sha256Schema,
+    releases: z
+      .object({
+        install: releaseLifecycleReleaseIdentitySchema,
+        previous: releaseLifecycleReleaseIdentitySchema,
+        upgrade: releaseLifecycleReleaseIdentitySchema,
+      })
+      .strict(),
+    inventories: z
+      .object({
+        install: releaseLifecycleInventorySchema,
+        repair: releaseLifecycleInventorySchema,
+        upgrade: releaseLifecycleInventorySchema,
+        uninstall: releaseLifecycleInventorySchema,
+        purge: releaseLifecycleInventorySchema,
+      })
+      .strict(),
+    migration: z
+      .object({
+        completedPhases: z.array(z.string().min(1)).min(1),
+        drainedCurrentItem: z.literal(true),
+        healthRechecked: z.literal(true),
+        maintenancePaused: z.literal(true),
+        newSubmissionsRejected: z.literal(true),
+        explicitOperatorResumeRequired: z.literal(true),
+      })
+      .strict(),
+    rollback: z
+      .object({
+        verifiedStagingBeforeReplacement: z.literal(true),
+        perVaultAtomicReplacement: z.literal(true),
+        unverifiedReleaseExecutable: z.literal(false),
+      })
+      .strict(),
+    lifecycleStatus: z
+      .object({
+        notInstalled: z.literal(true),
+        installedNotEnabled: z.literal(true),
+        bridgeOffline: z.literal(true),
+        mcpNotRegistered: z.literal(true),
+        identityMismatch: z.literal(true),
+        ready: z.literal(true),
+      })
+      .strict(),
+    removal: z
+      .object({
+        uninstallGuarded: z.literal(true),
+        purgeQueuedWorkRefused: z.literal(true),
+        purgeRecoveryRefused: z.literal(true),
+        purgeInteractive: z.literal(true),
+        backupVerified: z.literal(true),
+      })
+      .strict(),
+    cleanup: z
+      .object({
+        scenarios: z.array(z.enum(["install", "upgrade", "uninstall", "purge"])).length(4),
+        residualPaths: z.array(z.string()).length(0),
+      })
+      .strict(),
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)).min(1),
+    verdict: z.literal("passed"),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({ code: "custom", message: "Release-lifecycle event sequences must be monotonic" });
+    }
+    if (new Set(corpus.cleanup.scenarios).size !== 4) {
+      context.addIssue({ code: "custom", message: "Release-lifecycle cleanup requires every scenario" });
+    }
+    if (corpus.migration.completedPhases.join(" ") !== [
+      "replace",
+      "reload",
+      "migrate",
+      "recovery",
+      "health",
+    ].join(" ")) {
+      context.addIssue({ code: "custom", message: "Release-lifecycle migration phases must remain fail-closed and ordered" });
+    }
+  });
+
 export const installedRuntimeEvidenceSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -900,6 +1003,7 @@ export const installedRuntimeEvidenceSchema = z
     semanticEvidenceSearchSnapshotCorpus:
       semanticEvidenceSearchSnapshotCorpusEvidenceSchema.nullable(),
     privacyRecoveryAuthorityCorpus: privacyRecoveryAuthorityCorpusEvidenceSchema.nullable().optional(),
+    releaseLifecycleCorpus: releaseLifecycleCorpusEvidenceSchema.nullable().optional(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -955,6 +1059,7 @@ export type PrivacyRecoveryAuthorityCorpusEvidence = z.infer<
 export type SemanticEvidenceCorpusEvidence = z.infer<
   typeof semanticEvidenceSearchSnapshotCorpusEvidenceSchema
 >;
+export type ReleaseLifecycleCorpusEvidence = z.infer<typeof releaseLifecycleCorpusEvidenceSchema>;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];
 
