@@ -130,6 +130,8 @@ export async function buildSandcastleImage(options: {
     "docker",
     [
       "build",
+      "--network",
+      "host",
       "--build-arg",
       `AGENT_UID=${options.uid}`,
       "--build-arg",
