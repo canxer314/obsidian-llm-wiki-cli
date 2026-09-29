@@ -30,6 +30,8 @@ await esbuild.build({
 for (const [entry, outfile] of [
   ["src/release/assemble-cli.ts", "dist/release-assemble.mjs"],
   ["src/release/verify-cli.ts", "dist/release-verify.mjs"],
+  ["src/performance-fixture-cli.ts", "dist/performance-fixture.mjs"],
+  ["src/performance-evaluator-cli.ts", "dist/performance-evaluator.mjs"],
 ]) {
   await esbuild.build({
     entryPoints: [entry],
