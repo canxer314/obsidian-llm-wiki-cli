@@ -84,8 +84,9 @@ export function waitForInvocationBackoff(
       signal?.removeEventListener("abort", onAbort);
       resolve();
     }, milliseconds);
-    // A pending backoff must never keep the process alive on its own.
-    timer.unref?.();
+    // This timer is the worker's progress while the caller awaits backoff. Keep
+    // it referenced so a standalone worker cannot exit with an unsettled
+    // top-level await before the retry or cancellation has a chance to run.
     const onAbort = (): void => {
       clearTimeout(timer);
       reject(abortReason(signal as AbortSignal));

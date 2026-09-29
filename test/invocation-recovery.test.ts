@@ -1,6 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -312,6 +314,25 @@ describe("rate-limit delay selection", () => {
     expect(stderr).toContain("\"delayClass\":\"rate-limit\"");
     expect(stderr).toContain("\"delayMilliseconds\":30000");
     for (const secret of forbiddenSecrets) expect(stderr).not.toContain(secret);
+  });
+});
+
+describe("default backoff lifecycle", () => {
+  it("keeps a standalone worker alive until an awaited backoff settles", () => {
+    const moduleUrl = pathToFileURL(
+      resolve(import.meta.dirname, "../.sandcastle/invocation-recovery.ts"),
+    ).href;
+    const result = spawnSync(process.execPath, [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "--eval",
+      `import { waitForInvocationBackoff } from ${JSON.stringify(moduleUrl)}; await waitForInvocationBackoff(20); console.log("settled");`,
+    ], { encoding: "utf8", timeout: 2_000 });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("settled");
+    expect(result.stderr).not.toContain("unsettled top-level await");
   });
 });
 
