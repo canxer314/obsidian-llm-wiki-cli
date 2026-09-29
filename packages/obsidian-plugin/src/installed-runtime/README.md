@@ -117,6 +117,19 @@ process-control, candidate-install, and real loopback MCP seams); when the seam
 is absent the harness records no gate-isolation block and the passing verdict
 accepts its absence.
 
+The privacy-and-recovery-authority corpus (issue #180) extends that same envelope
+with a closed `privacy-recovery-authority-proof` identity. It retains no raw Vault
+IDs, Submission Keys, note bodies, Frontmatter values, attachment bytes, absolute
+or Vault-relative paths, credentials, usernames, environment values, requests, or
+before images: standard local diagnostic bundles are verified for opaque aliases
+and checksums before only proof counts/digests are emitted. Each Agent Session is
+proven to see exactly the existing six MCP tools and a closed `vault_health` result;
+content-inclusive diagnostics and trusted recovery baseline acceptance remain
+explicit local Primary Operator actions. The corpus records rejected remote authority
+attempts without state mutation, Recovery Journal preconditions, explicit local
+resume after acceptance, two-Vault isolation, residual cleanup, and a passing
+release-blocking verdict.
+
 ## Scenario seams
 
 Later lifecycle tickets inject behavior through `InstalledRuntimeHarnessOptions`

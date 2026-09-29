@@ -18,7 +18,9 @@ import {
   type GateIsolationCorpusEvidence,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
+  privacyRecoveryAuthorityCorpusEvidenceSchema,
   type RegisteredReferenceRewriteCorpusEvidence,
+  type PrivacyRecoveryAuthorityCorpusEvidence,
   type SemanticEvidenceCorpusEvidence,
 } from "./evidence.js";
 import {
@@ -70,6 +72,11 @@ import {
   type RegisteredReferenceRewriteOutcome,
 } from "./registered-reference-rewrite-corpus.js";
 import {
+  composePrivacyRecoveryAuthorityCorpusEvidence,
+  PrivacyRecoveryAuthorityCorpusError,
+  type PrivacyRecoveryAuthorityCorpusOutcome,
+} from "./privacy-recovery-authority-corpus.js";
+import {
   composeSemanticEvidenceSearchSnapshotCorpusEvidence,
   SemanticEvidenceSearchSnapshotCorpusError,
   runSemanticEvidenceSearchSnapshotCorpusAtEndpoint,
@@ -113,6 +120,7 @@ export type HarnessStage =
   | "gate_isolation_corpus"
   | "registered_reference_rewrite_corpus"
   | "semantic_evidence_search_snapshot_corpus"
+  | "privacy_recovery_authority_corpus"
   | "inventory_after"
   | "cleanup";
 
@@ -161,6 +169,7 @@ export type HarnessFailureCode =
   | "gate_isolation_corpus_failed"
   | "registered_reference_rewrite_corpus_failed"
   | "semantic_evidence_search_snapshot_corpus_failed"
+  | "privacy_recovery_authority_corpus_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -269,6 +278,19 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<SemanticEvidenceSearchSnapshotOutcome>;
+  readonly runPrivacyRecoveryAuthorityCorpus?: (options: {
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<PrivacyRecoveryAuthorityCorpusOutcome>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -347,6 +369,7 @@ interface RunState {
   gateIsolation: GateIsolationOutcome | null;
   registeredReferenceRewrite: RegisteredReferenceRewriteOutcome | null;
   semanticEvidenceSearchSnapshot: SemanticEvidenceSearchSnapshotOutcome | null;
+  privacyRecoveryAuthority: PrivacyRecoveryAuthorityCorpusOutcome | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -381,6 +404,7 @@ export async function runInstalledRuntimeHarness(
     gateIsolation: null,
     registeredReferenceRewrite: null,
     semanticEvidenceSearchSnapshot: null,
+    privacyRecoveryAuthority: null,
     cleanup: null,
     failure: null,
   };
@@ -424,6 +448,8 @@ export async function runInstalledRuntimeHarness(
       fail(stage, "gate_isolation_corpus_failed", sanitize(error.message));
     } else if (error instanceof RegisteredReferenceRewriteCorpusError) {
       fail(stage, "registered_reference_rewrite_corpus_failed", sanitize(error.message));
+    } else if (error instanceof PrivacyRecoveryAuthorityCorpusError) {
+      fail(stage, "privacy_recovery_authority_corpus_failed", sanitize(error.message));
     } else if (error instanceof SemanticEvidenceSearchSnapshotCorpusError) {
       fail(stage, "semantic_evidence_search_snapshot_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
@@ -705,6 +731,23 @@ export async function runInstalledRuntimeHarness(
     semanticEvidenceSearchSnapshotAssertions.push(name);
   };
 
+  const privacyRecoveryAuthorityEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const privacyRecoveryAuthorityAssertions: string[] = [];
+  const recordPrivacyRecoveryAuthorityEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    privacyRecoveryAuthorityEvents.push({ kind, name, detail });
+  };
+  const recordPrivacyRecoveryAuthorityAssertion = (name: string): void => {
+    privacyRecoveryAuthorityAssertions.push(name);
+  };
+
   if (state.failure === null) {
     await startAndObserve("obsidian_start", "health_initial", "initial", {
       stage: "public_wire_corpus",
@@ -843,6 +886,39 @@ export async function runInstalledRuntimeHarness(
       }
     }
   }
+  if (state.failure === null && options.runPrivacyRecoveryAuthorityCorpus !== undefined) {
+    const vault = state.vault;
+    const candidate = state.candidate;
+    if (vault === null || candidate === null) {
+      fail(
+        "privacy_recovery_authority_corpus",
+        "privacy_recovery_authority_corpus_failed",
+        "Privacy/recovery corpus requires a provisioned candidate",
+      );
+    } else {
+      try {
+        state.privacyRecoveryAuthority = await options.runPrivacyRecoveryAuthorityCorpus({
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordPrivacyRecoveryAuthorityEvent,
+          assertion: recordPrivacyRecoveryAuthorityAssertion,
+        });
+      } catch (error) {
+        fail(
+          "privacy_recovery_authority_corpus",
+          "privacy_recovery_authority_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
+  }
   if (state.failure === null) {
     await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
       stage: "change_set_replay",
@@ -950,6 +1026,16 @@ export async function runInstalledRuntimeHarness(
           assertions: semanticEvidenceSearchSnapshotAssertions,
         })
       : null;
+  const privacyRecoveryAuthorityCorpus: PrivacyRecoveryAuthorityCorpusEvidence | null =
+    state.failure === null && state.privacyRecoveryAuthority !== null
+      ? privacyRecoveryAuthorityCorpusEvidenceSchema.parse(
+          composePrivacyRecoveryAuthorityCorpusEvidence({
+            outcome: state.privacyRecoveryAuthority,
+            events: privacyRecoveryAuthorityEvents,
+            assertions: privacyRecoveryAuthorityAssertions,
+          }),
+        )
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -1034,6 +1120,7 @@ export async function runInstalledRuntimeHarness(
     gateIsolationCorpus,
     registeredReferenceRewriteCorpus,
     semanticEvidenceSearchSnapshotCorpus,
+    privacyRecoveryAuthorityCorpus,
     verdict,
     failure:
       state.failure === null

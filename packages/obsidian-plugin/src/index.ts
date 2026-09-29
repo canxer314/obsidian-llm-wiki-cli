@@ -302,6 +302,7 @@ export {
   gateIsolationCorpusEvidenceSchema,
   installedRuntimeEvidenceSchema,
   parseEvidence,
+  privacyRecoveryAuthorityCorpusEvidenceSchema,
   registeredReferenceRewriteCorpusEvidenceSchema,
   semanticEvidenceSearchSnapshotCorpusEvidenceSchema,
   serializeEvidence,
@@ -311,6 +312,7 @@ export {
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
   type PublicWireCorpusEvidence,
+  type PrivacyRecoveryAuthorityCorpusEvidence,
   type RegisteredReferenceRewriteCorpusEvidence,
   type SemanticEvidenceCorpusEvidence,
 } from "./installed-runtime/evidence.js";
@@ -385,6 +387,20 @@ export {
   type RegisteredReferenceRewriteScenarioName,
   type RegisteredReferenceRewriteSession,
 } from "./installed-runtime/registered-reference-rewrite-corpus.js";
+export {
+  PRIVACY_RECOVERY_AUTHORITY_CORPUS_ID,
+  PRIVACY_RECOVERY_AUTHORITY_SCENARIO_PLAN,
+  PrivacyRecoveryAuthorityCorpusError,
+  composePrivacyRecoveryAuthorityCorpusEvidence,
+  runPrivacyRecoveryAuthorityCorpus,
+  type LocalRecoveryAuthority,
+  type LocalRecoveryState,
+  type PrivacyRecoveryAuthorityCorpusOutcome,
+  type PrivacyRecoveryAuthorityEvidenceDraft,
+  type PrivacyRecoveryAuthorityMcpSession,
+  type PrivacyRecoveryAuthorityToolResult,
+  type PrivacyRecoveryAuthorityVaultSession,
+} from "./installed-runtime/privacy-recovery-authority-corpus.js";
 export {
   SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_CORPUS_ID,
   SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_SCENARIO_PLAN,

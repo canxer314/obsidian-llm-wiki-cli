@@ -18,6 +18,7 @@ import {
   TEST_VAULT_DIRECTORY_PREFIX,
   type BridgeHealthState,
   type GateIsolationOutcome,
+  type PrivacyRecoveryAuthorityCorpusOutcome,
   type SemanticEvidenceSearchSnapshotOutcome,
   type InstalledRuntimeHarnessOptions,
   type LoopbackMcpClient,
@@ -356,6 +357,13 @@ async function arrangeRun(
       assertion("stubbed-gate-isolation-corpus");
       return stubGateIsolationOutcome();
     },
+    runPrivacyRecoveryAuthorityCorpus: async ({ record, assertion }) => {
+      record("transport", "stubbed-privacy-recovery-connected", {});
+      record("assertion", "stubbed-privacy-recovery", {});
+      record("cleanup", "stubbed-privacy-recovery-cleanup", {});
+      assertion("stubbed-privacy-recovery-corpus");
+      return stubPrivacyRecoveryAuthorityOutcome();
+    },
     runSemanticEvidenceSearchSnapshotCorpus: async ({ record, assertion }) => {
       record("transport", "stubbed-semantic-evidence-connected", {});
       record("assertion", "stubbed-semantic-evidence", {});
@@ -417,6 +425,25 @@ function stubSemanticEvidenceSearchSnapshotOutcome(): SemanticEvidenceSearchSnap
     },
     residualCleanup: { reportsRemoved: true, residualReportPaths: [] },
     assertions: ["stubbed-semantic-evidence-corpus"],
+  };
+}
+
+function stubPrivacyRecoveryAuthorityOutcome(): PrivacyRecoveryAuthorityCorpusOutcome {
+  return {
+    scenarioManifestSha256: "a".repeat(64),
+    vaultIdSha256s: { "vault-a": "b".repeat(64), "vault-b": "c".repeat(64) },
+    healthSummarySha256s: { "vault-a": "d".repeat(64), "vault-b": "e".repeat(64) },
+    standardDiagnosticChecksums: 2,
+    privateMarkersRejected: 4,
+    contentInclusiveLocalOnly: true,
+    rejectedAgentAuthorityAttempts: 5,
+    agentAuthorityStateMutations: 0,
+    baselineAcceptanceLocalOnly: true,
+    journalPreconditionsProven: true,
+    explicitResumeRequired: true,
+    secondVaultUnaffected: true,
+    residualPaths: [],
+    assertions: ["stubbed-privacy-recovery-corpus"],
   };
 }
 
@@ -524,6 +551,8 @@ describe("installed-runtime harness orchestration", () => {
     expect(evidence.gateIsolationCorpus?.vaults).toHaveLength(2);
     expect(evidence.semanticEvidenceSearchSnapshotCorpus?.verdict).toBe("passed");
     expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(1);
+    expect(evidence.privacyRecoveryAuthorityCorpus?.verdict).toBe("passed");
+    expect(evidence.privacyRecoveryAuthorityCorpus?.authority.agentStateMutations).toBe(0);
     expect(evidence.cleanup).toEqual({ attempted: true, residualPaths: [] });
 
     // The generated roots are gone and nothing private leaked into evidence.
@@ -836,6 +865,24 @@ describe("installed-runtime harness failure projection", () => {
     const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
     expect(evidence.verdict).toBe("failed");
     expect(evidence.semanticEvidenceSearchSnapshotCorpus).toBeNull();
+    expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
+  });
+
+  it("records failed evidence when the privacy/recovery corpus fails", async () => {
+    const { root, options } = await arrangeRun("run-privacy-recovery-fails", {
+      runPrivacyRecoveryAuthorityCorpus: async () => {
+        throw new Error("privacy/recovery corpus failed");
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({
+      stage: "privacy_recovery_authority_corpus",
+      code: "privacy_recovery_authority_corpus_failed",
+    });
+    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    expect(evidence.verdict).toBe("failed");
+    expect(evidence.privacyRecoveryAuthorityCorpus).toBeNull();
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 

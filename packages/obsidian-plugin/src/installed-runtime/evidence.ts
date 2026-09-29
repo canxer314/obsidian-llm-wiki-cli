@@ -640,6 +640,79 @@ export const registeredReferenceRewriteCorpusEvidenceSchema = z
     }
   });
 
+export const privacyRecoveryAuthorityCorpusEvidenceSchema = z
+  .object({
+    corpusId: z.literal("privacy-recovery-authority-proof"),
+    scenarioManifestSha256: sha256Schema,
+    tools: z.array(z.string().min(1)).length(6),
+    vaults: z
+      .array(
+        z
+          .object({
+            label: z.enum(["vault-a", "vault-b"]),
+            vaultIdSha256: sha256Schema,
+            healthSummarySha256: sha256Schema,
+          })
+          .strict(),
+      )
+      .length(2),
+    diagnostics: z
+      .object({
+        standardBundles: z.literal(2),
+        validChecksums: z.literal(2),
+        privateMarkersRejected: z.number().int().positive(),
+        stableOpaqueAliases: z.literal(true),
+        contentInclusiveLocalOnly: z.literal(true),
+      })
+      .strict(),
+    authority: z
+      .object({
+        rejectedAgentAttempts: z.number().int().positive(),
+        agentStateMutations: z.literal(0),
+        baselineAcceptanceLocalOnly: z.literal(true),
+        journalPreconditionsProven: z.literal(true),
+        explicitResumeRequired: z.literal(true),
+      })
+      .strict(),
+    isolation: z.object({ secondVaultUnaffected: z.literal(true) }).strict(),
+    residualCleanup: z.object({ residualPaths: z.array(z.string()).length(0) }).strict(),
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)).min(1),
+    verdict: z.literal("passed"),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (
+      corpus.tools.length !== 6 ||
+      [...corpus.tools].sort().join(" ") !==
+        [
+          "vault_change_set_status",
+          "vault_change_set_submit",
+          "vault_continue",
+          "vault_discover",
+          "vault_health",
+          "vault_read",
+        ].join(" ")
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Privacy/recovery evidence must name exactly the six public tools",
+      });
+    }
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({
+        code: "custom",
+        message: "Privacy/recovery event sequences must be monotonic",
+      });
+    }
+    if (new Set(corpus.vaults.map((vault) => vault.label)).size !== 2) {
+      context.addIssue({
+        code: "custom",
+        message: "Privacy/recovery evidence requires two distinct Managed Vaults",
+      });
+    }
+  });
+
 export const publicWireCorpusEvidenceSchema = z
   .object({
     fixtureSeed: sha256Schema,
@@ -826,6 +899,7 @@ export const installedRuntimeEvidenceSchema = z
       registeredReferenceRewriteCorpusEvidenceSchema.nullable(),
     semanticEvidenceSearchSnapshotCorpus:
       semanticEvidenceSearchSnapshotCorpusEvidenceSchema.nullable(),
+    privacyRecoveryAuthorityCorpus: privacyRecoveryAuthorityCorpusEvidenceSchema.nullable().optional(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -856,6 +930,9 @@ export const installedRuntimeEvidenceSchema = z
             evidence.registeredReferenceRewriteCorpus.verdict === "passed") &&
           evidence.semanticEvidenceSearchSnapshotCorpus !== null &&
           evidence.semanticEvidenceSearchSnapshotCorpus.verdict === "passed" &&
+          (evidence.privacyRecoveryAuthorityCorpus === undefined ||
+            evidence.privacyRecoveryAuthorityCorpus === null ||
+            evidence.privacyRecoveryAuthorityCorpus.verdict === "passed") &&
           evidence.cleanup !== null &&
           evidence.cleanup.residualPaths.length === 0 &&
           evidence.profile.mismatches.length === 0
@@ -871,6 +948,9 @@ export type ChangeSetCorpusEvidence = z.infer<typeof changeSetCorpusEvidenceSche
 export type GateIsolationCorpusEvidence = z.infer<typeof gateIsolationCorpusEvidenceSchema>;
 export type RegisteredReferenceRewriteCorpusEvidence = z.infer<
   typeof registeredReferenceRewriteCorpusEvidenceSchema
+>;
+export type PrivacyRecoveryAuthorityCorpusEvidence = z.infer<
+  typeof privacyRecoveryAuthorityCorpusEvidenceSchema
 >;
 export type SemanticEvidenceCorpusEvidence = z.infer<
   typeof semanticEvidenceSearchSnapshotCorpusEvidenceSchema
