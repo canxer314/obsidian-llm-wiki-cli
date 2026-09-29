@@ -19,6 +19,7 @@ import {
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
   type RegisteredReferenceRewriteCorpusEvidence,
+  type SemanticEvidenceCorpusEvidence,
 } from "./evidence.js";
 import {
   createLoopbackMcpClient,
@@ -69,6 +70,12 @@ import {
   type RegisteredReferenceRewriteOutcome,
 } from "./registered-reference-rewrite-corpus.js";
 import {
+  composeSemanticEvidenceSearchSnapshotCorpusEvidence,
+  SemanticEvidenceSearchSnapshotCorpusError,
+  runSemanticEvidenceSearchSnapshotCorpusAtEndpoint,
+  type SemanticEvidenceSearchSnapshotOutcome,
+} from "./semantic-evidence-corpus.js";
+import {
   cleanupTestVault,
   compareInventories,
   provisionTestVault,
@@ -105,6 +112,7 @@ export type HarnessStage =
   | "change_set_replay"
   | "gate_isolation_corpus"
   | "registered_reference_rewrite_corpus"
+  | "semantic_evidence_search_snapshot_corpus"
   | "inventory_after"
   | "cleanup";
 
@@ -152,6 +160,7 @@ export type HarnessFailureCode =
   | "change_set_replay_failed"
   | "gate_isolation_corpus_failed"
   | "registered_reference_rewrite_corpus_failed"
+  | "semantic_evidence_search_snapshot_corpus_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -246,6 +255,20 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<RegisteredReferenceRewriteOutcome>;
+  /**
+   * Semantic Evidence/Search Snapshot corpus seam (issue #179). It runs over
+   * the live installed Bridge's six-tool loopback transport and invokes the
+   * shared real Change Set/evidence/snapshot corpus. A failed proof is a
+   * release-blocking harness failure; the default is the production corpus and
+   * this seam exists only for harness tests.
+   */
+  readonly runSemanticEvidenceSearchSnapshotCorpus?: (options: {
+    readonly endpoint: URL;
+    readonly expectedVaultId: string;
+    readonly workingDirectory: string;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<SemanticEvidenceSearchSnapshotOutcome>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -323,6 +346,7 @@ interface RunState {
   changeSetReplay: ChangeSetReplayOutcome | null;
   gateIsolation: GateIsolationOutcome | null;
   registeredReferenceRewrite: RegisteredReferenceRewriteOutcome | null;
+  semanticEvidenceSearchSnapshot: SemanticEvidenceSearchSnapshotOutcome | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -356,6 +380,7 @@ export async function runInstalledRuntimeHarness(
     changeSetReplay: null,
     gateIsolation: null,
     registeredReferenceRewrite: null,
+    semanticEvidenceSearchSnapshot: null,
     cleanup: null,
     failure: null,
   };
@@ -399,6 +424,8 @@ export async function runInstalledRuntimeHarness(
       fail(stage, "gate_isolation_corpus_failed", sanitize(error.message));
     } else if (error instanceof RegisteredReferenceRewriteCorpusError) {
       fail(stage, "registered_reference_rewrite_corpus_failed", sanitize(error.message));
+    } else if (error instanceof SemanticEvidenceSearchSnapshotCorpusError) {
+      fail(stage, "semantic_evidence_search_snapshot_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof BridgeIdentityError) {
@@ -661,6 +688,23 @@ export async function runInstalledRuntimeHarness(
     registeredReferenceRewriteAssertions.push(name);
   };
 
+  const semanticEvidenceSearchSnapshotEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const semanticEvidenceSearchSnapshotAssertions: string[] = [];
+  const recordSemanticEvidenceSearchSnapshotEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    semanticEvidenceSearchSnapshotEvents.push({ kind, name, detail });
+  };
+  const recordSemanticEvidenceSearchSnapshotAssertion = (name: string): void => {
+    semanticEvidenceSearchSnapshotAssertions.push(name);
+  };
+
   if (state.failure === null) {
     await startAndObserve("obsidian_start", "health_initial", "initial", {
       stage: "public_wire_corpus",
@@ -695,6 +739,28 @@ export async function runInstalledRuntimeHarness(
             } else {
               failFromError("change_set_corpus", error);
             }
+          }
+        }
+        if (
+          state.failure === null &&
+          state.changeSetAdmission !== null
+        ) {
+          try {
+            state.semanticEvidenceSearchSnapshot =
+              await (options.runSemanticEvidenceSearchSnapshotCorpus ??
+                runSemanticEvidenceSearchSnapshotCorpusAtEndpoint)({
+                endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+                expectedVaultId: identity.vaultId,
+                workingDirectory: options.workingDirectory,
+                record: recordSemanticEvidenceSearchSnapshotEvent,
+                assertion: recordSemanticEvidenceSearchSnapshotAssertion,
+              });
+          } catch (error) {
+            fail(
+              "semantic_evidence_search_snapshot_corpus",
+              "semantic_evidence_search_snapshot_corpus_failed",
+              sanitize(error instanceof Error ? error.message : String(error)),
+            );
           }
         }
       },
@@ -876,6 +942,14 @@ export async function runInstalledRuntimeHarness(
           assertions: registeredReferenceRewriteAssertions,
         })
       : null;
+  const semanticEvidenceSearchSnapshotCorpus: SemanticEvidenceCorpusEvidence | null =
+    state.failure === null && state.semanticEvidenceSearchSnapshot !== null
+      ? composeSemanticEvidenceSearchSnapshotCorpusEvidence({
+          outcome: state.semanticEvidenceSearchSnapshot,
+          events: semanticEvidenceSearchSnapshotEvents,
+          assertions: semanticEvidenceSearchSnapshotAssertions,
+        })
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -959,6 +1033,7 @@ export async function runInstalledRuntimeHarness(
     changeSetCorpus,
     gateIsolationCorpus,
     registeredReferenceRewriteCorpus,
+    semanticEvidenceSearchSnapshotCorpus,
     verdict,
     failure:
       state.failure === null

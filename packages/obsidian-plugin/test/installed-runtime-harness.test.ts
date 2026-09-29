@@ -18,6 +18,7 @@ import {
   TEST_VAULT_DIRECTORY_PREFIX,
   type BridgeHealthState,
   type GateIsolationOutcome,
+  type SemanticEvidenceSearchSnapshotOutcome,
   type InstalledRuntimeHarnessOptions,
   type LoopbackMcpClient,
   type ObsidianProcessControl,
@@ -355,10 +356,68 @@ async function arrangeRun(
       assertion("stubbed-gate-isolation-corpus");
       return stubGateIsolationOutcome();
     },
+    runSemanticEvidenceSearchSnapshotCorpus: async ({ record, assertion }) => {
+      record("transport", "stubbed-semantic-evidence-connected", {});
+      record("assertion", "stubbed-semantic-evidence", {});
+      record("cleanup", "stubbed-semantic-evidence-cleanup", {});
+      assertion("stubbed-semantic-evidence-corpus");
+      return stubSemanticEvidenceSearchSnapshotOutcome();
+    },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 2_000 },
     ...overrides,
   };
   return { root, candidate, options };
+}
+
+function stubSemanticEvidenceSearchSnapshotOutcome(): SemanticEvidenceSearchSnapshotOutcome {
+  return {
+    scenarioManifestSha256: "e".repeat(64),
+    tools: [
+      "vault_health",
+      "vault_discover",
+      "vault_read",
+      "vault_continue",
+      "vault_change_set_submit",
+      "vault_change_set_status",
+    ],
+    scenarios: [
+      {
+        scenario: "create_note/clean_convergence",
+        mutationKind: "create_note",
+        proofState: "intent_applied",
+        statusProofState: "intent_applied",
+        journalPhase: "COMMITTED",
+        evidenceDeadlineMs: 5_000,
+        successBarrierDeadlineMs: 5_000,
+        evidenceSessions: [{ mode: "apply", outcome: "converged", virtualElapsedMs: 250 }],
+        quietWindowResets: 1,
+        acceptedSnapshotRounds: 1,
+        rejectedSnapshotRounds: 1,
+        successorSnapshot: {
+          baselineVersion: 1,
+          version: 2,
+          immutable: true,
+          publishedBeforeIntentApplied: true,
+        },
+        durableCommitBeforeIntentApplied: true,
+        writesBlocked: false,
+        beforeInventorySha256: "a".repeat(64),
+        afterInventorySha256: "b".repeat(64),
+        cleanupSucceeded: true,
+      },
+    ],
+    coverage: {
+      delayedOlderContentVersionRejected: true,
+      quietWindowStabilityProven: true,
+      createModifyRenameDeleteAndClosureProven: true,
+      hiddenTrashRestoreUsesTargetedProbes: true,
+      deadlineRollbackOrUnprovenProven: true,
+      contraryEvidenceResetsQuietWindow: true,
+      noPublicSearchSnapshotCapability: true,
+    },
+    residualCleanup: { reportsRemoved: true, residualReportPaths: [] },
+    assertions: ["stubbed-semantic-evidence-corpus"],
+  };
 }
 
 function stubGateIsolationOutcome(): GateIsolationOutcome {
@@ -463,6 +522,8 @@ describe("installed-runtime harness orchestration", () => {
     expect(evidence.gateIsolationCorpus?.verdict).toBe("passed");
     expect(evidence.gateIsolationCorpus?.corpusId).toBe("per-vault-gate-isolation-proof");
     expect(evidence.gateIsolationCorpus?.vaults).toHaveLength(2);
+    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.verdict).toBe("passed");
+    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(1);
     expect(evidence.cleanup).toEqual({ attempted: true, residualPaths: [] });
 
     // The generated roots are gone and nothing private leaked into evidence.
@@ -757,6 +818,24 @@ describe("installed-runtime harness failure projection", () => {
     const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
     expect(evidence.verdict).toBe("failed");
     expect(evidence.registeredReferenceRewriteCorpus).toBeNull();
+    expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
+  });
+
+  it("records failed evidence when the semantic-evidence corpus fails", async () => {
+    const { root, options } = await arrangeRun("run-semantic-evidence-fails", {
+      runSemanticEvidenceSearchSnapshotCorpus: async () => {
+        throw new Error("semantic-evidence corpus failed");
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({
+      stage: "semantic_evidence_search_snapshot_corpus",
+      code: "semantic_evidence_search_snapshot_corpus_failed",
+    });
+    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    expect(evidence.verdict).toBe("failed");
+    expect(evidence.semanticEvidenceSearchSnapshotCorpus).toBeNull();
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 

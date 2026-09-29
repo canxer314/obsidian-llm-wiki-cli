@@ -303,6 +303,7 @@ export {
   installedRuntimeEvidenceSchema,
   parseEvidence,
   registeredReferenceRewriteCorpusEvidenceSchema,
+  semanticEvidenceSearchSnapshotCorpusEvidenceSchema,
   serializeEvidence,
   writeEvidenceFile,
   type ChangeSetCorpusEvidence,
@@ -311,6 +312,7 @@ export {
   type InstalledRuntimeVerdict,
   type PublicWireCorpusEvidence,
   type RegisteredReferenceRewriteCorpusEvidence,
+  type SemanticEvidenceCorpusEvidence,
 } from "./installed-runtime/evidence.js";
 export {
   runInstalledRuntimeHarness,
@@ -383,6 +385,15 @@ export {
   type RegisteredReferenceRewriteScenarioName,
   type RegisteredReferenceRewriteSession,
 } from "./installed-runtime/registered-reference-rewrite-corpus.js";
+export {
+  SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_CORPUS_ID,
+  SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_SCENARIO_PLAN,
+  SemanticEvidenceSearchSnapshotCorpusError,
+  composeSemanticEvidenceSearchSnapshotCorpusEvidence,
+  runSemanticEvidenceSearchSnapshotCorpusAtEndpoint,
+  type SemanticEvidenceSearchSnapshotOutcome,
+  type SemanticEvidenceSearchSnapshotScenarioName,
+} from "./installed-runtime/semantic-evidence-corpus.js";
 export {
   PUBLIC_WIRE_TOOL_NAMES,
   READ_SIDE_CORPUS_ID,

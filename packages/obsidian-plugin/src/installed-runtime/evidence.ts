@@ -691,6 +691,115 @@ export const publicWireCorpusEvidenceSchema = z
     }
   });
 
+export const semanticEvidenceSearchSnapshotCorpusEvidenceSchema = z
+  .object({
+    corpusId: z.literal("semantic-evidence-search-snapshot-proof"),
+    scenarioManifestSha256: sha256Schema,
+    tools: z.array(z.string().min(1)).length(6),
+    scenarios: z
+      .array(
+        z
+          .object({
+            scenario: z.string().min(1),
+            mutationKind: z.string().min(1),
+            proofState: z
+              .enum(["intent_applied", "intent_not_applied", "result_unproven"])
+              .nullable(),
+            statusProofState: z
+              .enum(["intent_applied", "intent_not_applied", "result_unproven"])
+              .nullable(),
+            journalPhase: z.enum(["COMMITTED", "ROLLED_BACK", "FAILED"]).nullable(),
+            evidenceDeadlineMs: z.literal(5_000),
+            successBarrierDeadlineMs: z.literal(5_000),
+            evidenceSessions: z
+              .array(
+                z
+                  .object({
+                    mode: z.enum(["apply", "restore"]),
+                    outcome: z.enum(["converged", "timed_out", "failed", "not_awaited"]),
+                    virtualElapsedMs: z.number().int().nonnegative().nullable(),
+                  })
+                  .strict(),
+              )
+              .min(1),
+            quietWindowResets: z.number().int().nonnegative(),
+            acceptedSnapshotRounds: z.number().int().nonnegative(),
+            rejectedSnapshotRounds: z.number().int().nonnegative(),
+            successorSnapshot: z
+              .object({
+                baselineVersion: z.number().int().nonnegative(),
+                version: z.number().int().nonnegative().nullable(),
+                immutable: z.boolean(),
+                publishedBeforeIntentApplied: z.boolean(),
+              })
+              .strict(),
+            durableCommitBeforeIntentApplied: z.boolean(),
+            writesBlocked: z.boolean(),
+            beforeInventorySha256: sha256Schema,
+            afterInventorySha256: sha256Schema,
+            cleanupSucceeded: z.literal(true),
+          })
+          .strict(),
+      )
+      .min(1),
+    coverage: z
+      .object({
+        delayedOlderContentVersionRejected: z.literal(true),
+        quietWindowStabilityProven: z.literal(true),
+        createModifyRenameDeleteAndClosureProven: z.literal(true),
+        hiddenTrashRestoreUsesTargetedProbes: z.literal(true),
+        deadlineRollbackOrUnprovenProven: z.literal(true),
+        contraryEvidenceResetsQuietWindow: z.literal(true),
+        noPublicSearchSnapshotCapability: z.literal(true),
+      })
+      .strict(),
+    residualCleanup: z
+      .object({
+        reportsRemoved: z.literal(true),
+        residualReportPaths: z.array(z.string()).length(0),
+      })
+      .strict(),
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)).min(1),
+    verdict: z.literal("passed"),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({
+        code: "custom",
+        message: "Semantic Evidence event sequences must be monotonic",
+      });
+    }
+    if (new Set(corpus.tools).size !== 6) {
+      context.addIssue({
+        code: "custom",
+        message: "Semantic Evidence evidence must name six distinct public tools",
+      });
+    }
+    for (const scenario of corpus.scenarios) {
+      if (scenario.proofState !== scenario.statusProofState) {
+        context.addIssue({
+          code: "custom",
+          message: "Semantic Evidence status must match its submission proof state",
+        });
+      }
+      if (scenario.proofState === "intent_applied") {
+        if (
+          !scenario.successorSnapshot.publishedBeforeIntentApplied ||
+          !scenario.successorSnapshot.immutable ||
+          !scenario.durableCommitBeforeIntentApplied ||
+          scenario.journalPhase !== "COMMITTED"
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Applied Semantic Evidence requires immutable successor snapshot and durable COMMITTED",
+          });
+        }
+      }
+    }
+  });
+
 export const installedRuntimeEvidenceSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -715,6 +824,8 @@ export const installedRuntimeEvidenceSchema = z
     gateIsolationCorpus: gateIsolationCorpusEvidenceSchema.nullable(),
     registeredReferenceRewriteCorpus:
       registeredReferenceRewriteCorpusEvidenceSchema.nullable(),
+    semanticEvidenceSearchSnapshotCorpus:
+      semanticEvidenceSearchSnapshotCorpusEvidenceSchema.nullable(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -743,13 +854,15 @@ export const installedRuntimeEvidenceSchema = z
             evidence.gateIsolationCorpus.verdict === "passed") &&
           (evidence.registeredReferenceRewriteCorpus === null ||
             evidence.registeredReferenceRewriteCorpus.verdict === "passed") &&
+          evidence.semanticEvidenceSearchSnapshotCorpus !== null &&
+          evidence.semanticEvidenceSearchSnapshotCorpus.verdict === "passed" &&
           evidence.cleanup !== null &&
           evidence.cleanup.residualPaths.length === 0 &&
           evidence.profile.mismatches.length === 0
         : true,
     {
       message:
-        "A passing verdict requires a matched profile, candidate and Bridge identity, both health observations, clean read- and write-side corpus evidence, and any recorded gate-isolation evidence to pass",
+        "A passing verdict requires a matched profile, candidate and Bridge identity, both health observations, clean read- and write-side corpus evidence, and passing Semantic Evidence/Search Snapshot proof",
     },
   );
 
@@ -758,6 +871,9 @@ export type ChangeSetCorpusEvidence = z.infer<typeof changeSetCorpusEvidenceSche
 export type GateIsolationCorpusEvidence = z.infer<typeof gateIsolationCorpusEvidenceSchema>;
 export type RegisteredReferenceRewriteCorpusEvidence = z.infer<
   typeof registeredReferenceRewriteCorpusEvidenceSchema
+>;
+export type SemanticEvidenceCorpusEvidence = z.infer<
+  typeof semanticEvidenceSearchSnapshotCorpusEvidenceSchema
 >;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];

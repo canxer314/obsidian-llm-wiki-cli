@@ -15,6 +15,69 @@ import {
 
 const DIGEST = "a".repeat(64);
 
+function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
+  InstalledRuntimeEvidence["semanticEvidenceSearchSnapshotCorpus"]
+> {
+  return {
+    corpusId: "semantic-evidence-search-snapshot-proof",
+    scenarioManifestSha256: DIGEST,
+    tools: [
+      "vault_health",
+      "vault_discover",
+      "vault_read",
+      "vault_continue",
+      "vault_change_set_submit",
+      "vault_change_set_status",
+    ],
+    scenarios: [
+      {
+        scenario: "create_note/clean_convergence",
+        mutationKind: "create_note",
+        proofState: "intent_applied",
+        statusProofState: "intent_applied",
+        journalPhase: "COMMITTED",
+        evidenceDeadlineMs: 5_000,
+        successBarrierDeadlineMs: 5_000,
+        evidenceSessions: [{ mode: "apply", outcome: "converged", virtualElapsedMs: 250 }],
+        quietWindowResets: 1,
+        acceptedSnapshotRounds: 1,
+        rejectedSnapshotRounds: 1,
+        successorSnapshot: {
+          baselineVersion: 1,
+          version: 2,
+          immutable: true,
+          publishedBeforeIntentApplied: true,
+        },
+        durableCommitBeforeIntentApplied: true,
+        writesBlocked: false,
+        beforeInventorySha256: DIGEST,
+        afterInventorySha256: DIGEST,
+        cleanupSucceeded: true,
+      },
+    ],
+    coverage: {
+      delayedOlderContentVersionRejected: true,
+      quietWindowStabilityProven: true,
+      createModifyRenameDeleteAndClosureProven: true,
+      hiddenTrashRestoreUsesTargetedProbes: true,
+      deadlineRollbackOrUnprovenProven: true,
+      contraryEvidenceResetsQuietWindow: true,
+      noPublicSearchSnapshotCapability: true,
+    },
+    residualCleanup: { reportsRemoved: true, residualReportPaths: [] },
+    eventLog: [
+      {
+        sequence: 1,
+        kind: "assertion",
+        name: "semantic-evidence-corpus-began",
+        detailSha256: DIGEST,
+      },
+    ],
+    assertions: ["semantic-evidence-corpus-began"],
+    verdict: "passed",
+  };
+}
+
 function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsolationCorpus"]> {
   return {
     corpusId: "per-vault-gate-isolation-proof",
@@ -459,6 +522,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
     },
     gateIsolationCorpus: gateIsolationEvidence(),
     registeredReferenceRewriteCorpus: registeredReferenceRewriteEvidence(),
+    semanticEvidenceSearchSnapshotCorpus: semanticEvidenceSearchSnapshotEvidence(),
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
@@ -660,6 +724,30 @@ describe("installed-runtime evidence record", () => {
       registeredReferenceRewriteCorpus: null,
     };
     expect(parseEvidence(serializeEvidence(withoutRewrite))).toEqual(withoutRewrite);
+  });
+
+  it("refuses a passing record without semantic-evidence corpus proof", () => {
+    const missingSemanticEvidence = {
+      ...passingEvidence(),
+      semanticEvidenceSearchSnapshotCorpus: null,
+    };
+    expect(() => serializeEvidence(missingSemanticEvidence)).toThrow(/Semantic Evidence/u);
+  });
+
+  it("refuses a passing record with invalid semantic-evidence commit ordering", () => {
+    const invalidOrdering: InstalledRuntimeEvidence = {
+      ...passingEvidence(),
+      semanticEvidenceSearchSnapshotCorpus: {
+        ...passingEvidence().semanticEvidenceSearchSnapshotCorpus!,
+        scenarios: [
+          {
+            ...passingEvidence().semanticEvidenceSearchSnapshotCorpus!.scenarios[0]!,
+            durableCommitBeforeIntentApplied: false,
+          },
+        ],
+      },
+    };
+    expect(() => serializeEvidence(invalidOrdering)).toThrow(/durable COMMITTED/u);
   });
 
   it("refuses a passing verdict when recorded registered-reference evidence failed", () => {
