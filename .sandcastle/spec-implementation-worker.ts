@@ -1,3 +1,4 @@
+import { createImplementerGitState } from "./implementer-git-state.ts";
 import { implementSpecChild } from "./implementer.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { planIssue } from "./planner.ts";
@@ -19,6 +20,9 @@ if (
 }
 
 const startup = await readTargetWorkerStartup();
+if (startup.gitEnvironment === undefined) {
+  throw new Error("Spec implementation worker Git environment is missing");
+}
 const plannerSession = createSandcastlePlannerSession({
   sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
@@ -48,5 +52,9 @@ const result = await implementSpecChild({
   branch,
   baseRevision,
   checkoutPath,
+  gitState: createImplementerGitState({
+    checkoutPath,
+    gitEnvironment: startup.gitEnvironment,
+  }),
 });
 console.log(JSON.stringify({ branch: result.branch, headSha: result.headSha }));

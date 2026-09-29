@@ -141,7 +141,7 @@ export async function runTargetOperationWithDependencies(
       pullRequests: github,
       checkout,
       implementer: dependencies.createSpecImplementer({
-        startup: dependencies.targetWorkerStartup(startup, "github-agent"),
+        startup: dependencies.targetWorkerStartup(startup, "github-agent-with-git"),
         plannerModel: startup.models.planner,
         implementerModel: startup.models.implementer,
       }),

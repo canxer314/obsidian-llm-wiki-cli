@@ -35,7 +35,7 @@ const snapshot = {
 describe("Target operation startup", () => {
   it.each([
     ["implement-issue", "github-agent-with-cli", "implementer-model", "implementation"],
-    ["implement-spec", "github-agent", "implementer-model", "spec-implementation"],
+    ["implement-spec", "github-agent-with-git", "implementer-model", "spec-implementation"],
     ["implement-feedback", "github-agent", "implementer-model", "feedback"],
     ["review", "github-agent", "reviewer-model", "review"],
     ["update-branch", "claude-only", "implementer-model", "branch-update"],
@@ -139,6 +139,22 @@ describe("Target operation startup", () => {
     expect(githubAgent).not.toContain("PATH");
     expect(implementation).toContain("githubEnvironment");
     await expect(readTargetWorkerStartup(Readable.from([claudeOnly]))).resolves.toHaveProperty("sandbox");
+  });
+
+  it("delivers the host Git environment only to branch-coordinating workers", async () => {
+    const implementation = targetWorkerStartup(snapshot, "github-agent-with-cli");
+    const specImplementation = targetWorkerStartup(
+      snapshot,
+      "github-agent-with-git",
+    );
+    const ordinaryAgent = targetWorkerStartup(snapshot, "github-agent");
+
+    await expect(readTargetWorkerStartup(Readable.from([implementation])))
+      .resolves.toMatchObject({ gitEnvironment: snapshot.childEnvironments.git });
+    await expect(readTargetWorkerStartup(Readable.from([specImplementation])))
+      .resolves.toMatchObject({ gitEnvironment: snapshot.childEnvironments.git });
+    await expect(readTargetWorkerStartup(Readable.from([ordinaryAgent])))
+      .resolves.not.toHaveProperty("gitEnvironment");
   });
 
   it("fails closed instead of reloading private configuration when stdin is empty", async () => {

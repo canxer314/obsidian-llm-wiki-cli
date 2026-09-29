@@ -1,4 +1,5 @@
 import { GithubCliPort } from "./github-cli.ts";
+import { createImplementerGitState } from "./implementer-git-state.ts";
 import { createSandcastleImplementerSession } from "./implementer-session.ts";
 import { implementIssue } from "./implementer.ts";
 import { planIssue } from "./planner.ts";
@@ -18,6 +19,9 @@ if (
 }
 
 const startup = await readTargetWorkerStartup();
+if (startup.gitEnvironment === undefined) {
+  throw new Error("Implementation worker Git environment is missing");
+}
 const plannerSession = createSandcastlePlannerSession({
   sandbox: startup.sandbox,
   hooks: { sandbox: { onSandboxReady: [] } },
@@ -39,6 +43,10 @@ const pullRequest = await implementIssue({
   session: implementerSession,
   baseRevision,
   checkoutPath,
+  gitState: createImplementerGitState({
+    checkoutPath,
+    gitEnvironment: startup.gitEnvironment,
+  }),
   github: new GithubCliPort(undefined, undefined, startup.githubEnvironment),
 });
 if (pullRequest.headSha === baseRevision) {

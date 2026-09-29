@@ -73,11 +73,12 @@ export interface TargetWorkerStartupSnapshot {
   readonly imageName: string;
   readonly sandboxEnvironment: Readonly<Record<string, string>>;
   readonly githubEnvironment?: Readonly<Record<string, string>>;
+  readonly gitEnvironment?: Readonly<Record<string, string>>;
 }
 
 export function targetWorkerStartup(
   snapshot: TargetOperationStartupSnapshot,
-  profile: "github-agent" | "github-agent-with-cli" | "claude-only",
+  profile: "github-agent" | "github-agent-with-cli" | "github-agent-with-git" | "claude-only",
 ): string {
   return JSON.stringify({
     imageName: snapshot.imageName,
@@ -87,6 +88,9 @@ export function targetWorkerStartup(
     ...(profile === "github-agent-with-cli"
       ? { githubEnvironment: snapshot.childEnvironments.github }
       : {}),
+    ...(profile === "github-agent-with-cli" || profile === "github-agent-with-git"
+      ? { gitEnvironment: snapshot.childEnvironments.git }
+      : {}),
   } satisfies TargetWorkerStartupSnapshot);
 }
 
@@ -95,6 +99,7 @@ export async function readTargetWorkerStartup(
 ): Promise<{
   readonly sandbox: ReturnType<typeof createSandboxProvider>;
   readonly githubEnvironment?: Readonly<Record<string, string>>;
+  readonly gitEnvironment?: Readonly<Record<string, string>>;
 }> {
   let serialized = "";
   for await (const chunk of input) serialized += String(chunk);
@@ -104,16 +109,21 @@ export async function readTargetWorkerStartup(
   const githubEnvironment = candidate.githubEnvironment === undefined
     ? undefined
     : frozenStringRecord(candidate.githubEnvironment);
+  const gitEnvironment = candidate.gitEnvironment === undefined
+    ? undefined
+    : frozenStringRecord(candidate.gitEnvironment);
   if (
     typeof candidate.imageName !== "string" || candidate.imageName.length === 0 ||
     sandboxEnvironment === undefined ||
-    (candidate.githubEnvironment !== undefined && githubEnvironment === undefined)
+    (candidate.githubEnvironment !== undefined && githubEnvironment === undefined) ||
+    (candidate.gitEnvironment !== undefined && gitEnvironment === undefined)
   ) {
     throw new Error("Target worker startup snapshot is invalid");
   }
   return {
     sandbox: createSandboxProvider(sandboxEnvironment, candidate.imageName),
     ...(githubEnvironment === undefined ? {} : { githubEnvironment }),
+    ...(gitEnvironment === undefined ? {} : { gitEnvironment }),
   };
 }
 
