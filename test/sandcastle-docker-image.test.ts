@@ -56,6 +56,8 @@ describe("Sandcastle Docker image builder", () => {
       "docker",
       [
         "build",
+        "--network",
+        "host",
         "--build-arg",
         "AGENT_UID=1000",
         "--build-arg",
