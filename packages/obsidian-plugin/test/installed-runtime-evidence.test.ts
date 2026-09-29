@@ -314,6 +314,54 @@ function registeredReferenceRewriteEvidence(): NonNullable<
   };
 }
 
+function crashRestorationRetainedAuthorityEvidence(): NonNullable<
+  InstalledRuntimeEvidence["crashRestorationRetainedAuthorityCorpus"]
+> {
+  return {
+    corpusId: "crash-restoration-retained-authority-proof",
+    scenarioManifestSha256: DIGEST,
+    records: [
+      {
+        mutationKind: "move",
+        injectionPoint: "rollback:before_rollback",
+        fixtureSha256: DIGEST,
+        beforeInventorySha256: DIGEST,
+        afterInventorySha256: DIGEST,
+        proofState: "result_unproven",
+        gate: "recovery_blocked",
+        cleanupSucceeded: true,
+        verdict: "passed",
+      },
+    ],
+    coverage: {
+      everyMutationKindAtEveryDeclaredBoundary: true,
+      preparedRestoresWholeChangeSet: true,
+      committedSuppressesRestoration: true,
+      conflictingBytesPreservedAndWritesBlocked: true,
+      deterministicJournalStorageDestinationAndSemanticFaults: true,
+      callbackReorderAndSemanticTimeoutProven: true,
+      concurrentIdempotencyProven: true,
+    },
+    retainedAuthority: {
+      retentionMs: 7 * 24 * 60 * 60 * 1_000,
+      queryableAcrossCrashAndReconnect: true,
+      completeRecordsRetained: true,
+      requiredRecordsNeverBecomeOrdinaryUnknown: true,
+    },
+    cleanup: { residualPaths: [], vaultVisibleStaging: 0, managedTrashLeakage: 0, fixtureResidue: 0 },
+    eventLog: [
+      {
+        sequence: 1,
+        kind: "assertion",
+        name: "crash-restoration-corpus-began",
+        detailSha256: DIGEST,
+      },
+    ],
+    assertions: ["crash-restoration-corpus-began"],
+    verdict: "passed",
+  };
+}
+
 function passingEvidence(): InstalledRuntimeEvidence {
   return {
     schemaVersion: 1,
@@ -523,6 +571,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
     gateIsolationCorpus: gateIsolationEvidence(),
     registeredReferenceRewriteCorpus: registeredReferenceRewriteEvidence(),
     semanticEvidenceSearchSnapshotCorpus: semanticEvidenceSearchSnapshotEvidence(),
+    crashRestorationRetainedAuthorityCorpus: crashRestorationRetainedAuthorityEvidence(),
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },

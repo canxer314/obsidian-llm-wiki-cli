@@ -976,6 +976,72 @@ export const releaseLifecycleCorpusEvidenceSchema = z
     }
   });
 
+const crashRestorationRecordSchema = z
+  .object({
+    mutationKind: z.string().min(1),
+    injectionPoint: z.string().min(1),
+    fixtureSha256: sha256Schema,
+    beforeInventorySha256: sha256Schema,
+    afterInventorySha256: sha256Schema,
+    proofState: z.enum(["intent_applied", "intent_not_applied", "result_unproven"]).nullable(),
+    gate: z.string().nullable(),
+    cleanupSucceeded: z.literal(true),
+    verdict: z.literal("passed"),
+  })
+  .strict();
+
+export const crashRestorationRetainedAuthorityCorpusEvidenceSchema = z
+  .object({
+    corpusId: z.literal("crash-restoration-retained-authority-proof"),
+    scenarioManifestSha256: sha256Schema,
+    records: z.array(crashRestorationRecordSchema).min(1),
+    coverage: z
+      .object({
+        everyMutationKindAtEveryDeclaredBoundary: z.literal(true),
+        preparedRestoresWholeChangeSet: z.literal(true),
+        committedSuppressesRestoration: z.literal(true),
+        conflictingBytesPreservedAndWritesBlocked: z.literal(true),
+        deterministicJournalStorageDestinationAndSemanticFaults: z.literal(true),
+        callbackReorderAndSemanticTimeoutProven: z.literal(true),
+        concurrentIdempotencyProven: z.literal(true),
+      })
+      .strict(),
+    retainedAuthority: z
+      .object({
+        retentionMs: z.literal(7 * 24 * 60 * 60 * 1_000),
+        queryableAcrossCrashAndReconnect: z.literal(true),
+        completeRecordsRetained: z.literal(true),
+        requiredRecordsNeverBecomeOrdinaryUnknown: z.literal(true),
+      })
+      .strict(),
+    cleanup: z
+      .object({
+        residualPaths: z.array(z.string()).length(0),
+        vaultVisibleStaging: z.literal(0),
+        managedTrashLeakage: z.literal(0),
+        fixtureResidue: z.literal(0),
+      })
+      .strict(),
+    eventLog: z.array(publicWireEventSchema).min(1),
+    assertions: z.array(z.string().min(1)).min(1),
+    verdict: z.literal("passed"),
+  })
+  .strict()
+  .superRefine((corpus, context) => {
+    if (!corpus.eventLog.every((event, index) => event.sequence === index + 1)) {
+      context.addIssue({
+        code: "custom",
+        message: "Crash-restoration event sequences must be monotonic",
+      });
+    }
+    if (corpus.records.some((record) => !record.cleanupSucceeded)) {
+      context.addIssue({
+        code: "custom",
+        message: "Crash-restoration records require successful cleanup",
+      });
+    }
+  });
+
 export const installedRuntimeEvidenceSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -1004,6 +1070,8 @@ export const installedRuntimeEvidenceSchema = z
       semanticEvidenceSearchSnapshotCorpusEvidenceSchema.nullable(),
     privacyRecoveryAuthorityCorpus: privacyRecoveryAuthorityCorpusEvidenceSchema.nullable().optional(),
     releaseLifecycleCorpus: releaseLifecycleCorpusEvidenceSchema.nullable().optional(),
+    crashRestorationRetainedAuthorityCorpus:
+      crashRestorationRetainedAuthorityCorpusEvidenceSchema.nullable().optional(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -1034,6 +1102,9 @@ export const installedRuntimeEvidenceSchema = z
             evidence.registeredReferenceRewriteCorpus.verdict === "passed") &&
           evidence.semanticEvidenceSearchSnapshotCorpus !== null &&
           evidence.semanticEvidenceSearchSnapshotCorpus.verdict === "passed" &&
+          evidence.crashRestorationRetainedAuthorityCorpus !== undefined &&
+          evidence.crashRestorationRetainedAuthorityCorpus !== null &&
+          evidence.crashRestorationRetainedAuthorityCorpus.verdict === "passed" &&
           (evidence.privacyRecoveryAuthorityCorpus === undefined ||
             evidence.privacyRecoveryAuthorityCorpus === null ||
             evidence.privacyRecoveryAuthorityCorpus.verdict === "passed") &&
@@ -1060,6 +1131,9 @@ export type SemanticEvidenceCorpusEvidence = z.infer<
   typeof semanticEvidenceSearchSnapshotCorpusEvidenceSchema
 >;
 export type ReleaseLifecycleCorpusEvidence = z.infer<typeof releaseLifecycleCorpusEvidenceSchema>;
+export type CrashRestorationRetainedAuthorityCorpusEvidence = z.infer<
+  typeof crashRestorationRetainedAuthorityCorpusEvidenceSchema
+>;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];
 

@@ -23,6 +23,8 @@ import {
   type PrivacyRecoveryAuthorityCorpusEvidence,
   type SemanticEvidenceCorpusEvidence,
   type ReleaseLifecycleCorpusEvidence,
+  crashRestorationRetainedAuthorityCorpusEvidenceSchema,
+  type CrashRestorationRetainedAuthorityCorpusEvidence,
   releaseLifecycleCorpusEvidenceSchema,
 } from "./evidence.js";
 import {
@@ -90,6 +92,12 @@ import {
   type ReleaseLifecycleCorpusOutcome,
 } from "./release-lifecycle-corpus.js";
 import {
+  composeCrashRestorationRetainedAuthorityCorpusEvidence,
+  CrashRestorationRetainedAuthorityCorpusError,
+  runCrashRestorationRetainedAuthorityCorpus,
+  type CrashRestorationRetainedAuthorityCorpusOutcome,
+} from "./crash-restoration-retained-authority-corpus.js";
+import {
   cleanupTestVault,
   compareInventories,
   provisionTestVault,
@@ -129,6 +137,7 @@ export type HarnessStage =
   | "semantic_evidence_search_snapshot_corpus"
   | "privacy_recovery_authority_corpus"
   | "release_lifecycle_corpus"
+  | "crash_restoration_retained_authority_corpus"
   | "inventory_after"
   | "cleanup";
 
@@ -179,6 +188,7 @@ export type HarnessFailureCode =
   | "semantic_evidence_search_snapshot_corpus_failed"
   | "privacy_recovery_authority_corpus_failed"
   | "release_lifecycle_corpus_failed"
+  | "crash_restoration_retained_authority_corpus_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -319,6 +329,11 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<ReleaseLifecycleCorpusOutcome>;
+  readonly runCrashRestorationRetainedAuthorityCorpus?: (options: {
+    readonly workingDirectory: string;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<CrashRestorationRetainedAuthorityCorpusOutcome>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -399,6 +414,7 @@ interface RunState {
   semanticEvidenceSearchSnapshot: SemanticEvidenceSearchSnapshotOutcome | null;
   privacyRecoveryAuthority: PrivacyRecoveryAuthorityCorpusOutcome | null;
   releaseLifecycle: ReleaseLifecycleCorpusOutcome | null;
+  crashRestorationRetainedAuthority: CrashRestorationRetainedAuthorityCorpusOutcome | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -435,6 +451,7 @@ export async function runInstalledRuntimeHarness(
     semanticEvidenceSearchSnapshot: null,
     privacyRecoveryAuthority: null,
     releaseLifecycle: null,
+    crashRestorationRetainedAuthority: null,
     cleanup: null,
     failure: null,
   };
@@ -482,6 +499,8 @@ export async function runInstalledRuntimeHarness(
       fail(stage, "privacy_recovery_authority_corpus_failed", sanitize(error.message));
     } else if (error instanceof ReleaseLifecycleCorpusError) {
       fail(stage, "release_lifecycle_corpus_failed", sanitize(error.message));
+    } else if (error instanceof CrashRestorationRetainedAuthorityCorpusError) {
+      fail(stage, "crash_restoration_retained_authority_corpus_failed", sanitize(error.message));
     } else if (error instanceof SemanticEvidenceSearchSnapshotCorpusError) {
       fail(stage, "semantic_evidence_search_snapshot_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
@@ -786,6 +805,22 @@ export async function runInstalledRuntimeHarness(
     detail: unknown;
   }> = [];
   const releaseLifecycleAssertions: string[] = [];
+  const crashRestorationRetainedAuthorityEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const crashRestorationRetainedAuthorityAssertions: string[] = [];
+  const recordCrashRestorationRetainedAuthorityEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    crashRestorationRetainedAuthorityEvents.push({ kind, name, detail });
+  };
+  const recordCrashRestorationRetainedAuthorityAssertion = (name: string): void => {
+    crashRestorationRetainedAuthorityAssertions.push(name);
+  };
   const recordReleaseLifecycleEvent = (
     kind: "transport" | "tool" | "assertion" | "cleanup",
     name: string,
@@ -1001,6 +1036,23 @@ export async function runInstalledRuntimeHarness(
     }
   }
   if (state.failure === null) {
+    try {
+      state.crashRestorationRetainedAuthority =
+        await (options.runCrashRestorationRetainedAuthorityCorpus ??
+          runCrashRestorationRetainedAuthorityCorpus)({
+          workingDirectory: options.workingDirectory,
+          record: recordCrashRestorationRetainedAuthorityEvent,
+          assertion: recordCrashRestorationRetainedAuthorityAssertion,
+        });
+    } catch (error) {
+      fail(
+        "crash_restoration_retained_authority_corpus",
+        "crash_restoration_retained_authority_corpus_failed",
+        sanitize(error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+  if (state.failure === null) {
     await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
       stage: "change_set_replay",
       run: async (identity) => {
@@ -1127,6 +1179,16 @@ export async function runInstalledRuntimeHarness(
           }),
         )
       : null;
+  const crashRestorationRetainedAuthorityCorpus: CrashRestorationRetainedAuthorityCorpusEvidence | null =
+    state.failure === null && state.crashRestorationRetainedAuthority !== null
+      ? crashRestorationRetainedAuthorityCorpusEvidenceSchema.parse(
+          composeCrashRestorationRetainedAuthorityCorpusEvidence({
+            outcome: state.crashRestorationRetainedAuthority,
+            events: crashRestorationRetainedAuthorityEvents,
+            assertions: crashRestorationRetainedAuthorityAssertions,
+          }),
+        )
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -1213,6 +1275,7 @@ export async function runInstalledRuntimeHarness(
     semanticEvidenceSearchSnapshotCorpus,
     privacyRecoveryAuthorityCorpus,
     releaseLifecycleCorpus,
+    crashRestorationRetainedAuthorityCorpus,
     verdict,
     failure:
       state.failure === null

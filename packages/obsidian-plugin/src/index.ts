@@ -417,6 +417,17 @@ export {
   type PrivacyRecoveryAuthorityVaultSession,
 } from "./installed-runtime/privacy-recovery-authority-corpus.js";
 export {
+  CRASH_RESTORATION_RETAINED_AUTHORITY_CORPUS_ID,
+  CRASH_RESTORATION_RETAINED_AUTHORITY_SCENARIO_PLAN,
+  CrashRestorationRetainedAuthorityCorpusError,
+  composeCrashRestorationRetainedAuthorityCorpusEvidence,
+  runCrashRestorationRetainedAuthorityCorpus,
+  type CrashRestorationRetainedAuthorityCorpusEvidenceDraft,
+  type CrashRestorationRetainedAuthorityCorpusOutcome,
+  type CrashRestorationRetainedAuthorityRecord,
+  type CrashRestorationRetainedAuthorityScenarioName,
+} from "./installed-runtime/crash-restoration-retained-authority-corpus.js";
+export {
   SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_CORPUS_ID,
   SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_SCENARIO_PLAN,
   SemanticEvidenceSearchSnapshotCorpusError,

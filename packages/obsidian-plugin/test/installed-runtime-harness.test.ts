@@ -17,6 +17,7 @@ import {
   runInstalledRuntimeHarness,
   TEST_VAULT_DIRECTORY_PREFIX,
   type BridgeHealthState,
+  type CrashRestorationRetainedAuthorityCorpusOutcome,
   type GateIsolationOutcome,
   type PrivacyRecoveryAuthorityCorpusOutcome,
   type ReleaseLifecycleCorpusOutcome,
@@ -365,6 +366,12 @@ async function arrangeRun(
       assertion("stubbed-privacy-recovery-corpus");
       return stubPrivacyRecoveryAuthorityOutcome();
     },
+    runCrashRestorationRetainedAuthorityCorpus: async ({ record, assertion }) => {
+      record("assertion", "stubbed-crash-restoration-retained-authority", {});
+      record("cleanup", "stubbed-crash-restoration-retained-authority-cleanup", {});
+      assertion("stubbed-crash-restoration-retained-authority-corpus");
+      return stubCrashRestorationRetainedAuthorityOutcome();
+    },
     runReleaseLifecycleCorpus: async ({ record, assertion }) => {
       record("assertion", "stubbed-release-lifecycle", {});
       record("cleanup", "stubbed-release-lifecycle-cleanup", {});
@@ -451,6 +458,42 @@ function stubPrivacyRecoveryAuthorityOutcome(): PrivacyRecoveryAuthorityCorpusOu
     secondVaultUnaffected: true,
     residualPaths: [],
     assertions: ["stubbed-privacy-recovery-corpus"],
+  };
+}
+
+function stubCrashRestorationRetainedAuthorityOutcome(): CrashRestorationRetainedAuthorityCorpusOutcome {
+  return {
+    scenarioManifestSha256: "a".repeat(64),
+    records: [
+      {
+        mutationKind: "create_note",
+        injectionPoint: "apply:after_prepared",
+        fixtureSha256: "b".repeat(64),
+        beforeInventorySha256: "c".repeat(64),
+        afterInventorySha256: "d".repeat(64),
+        proofState: "intent_not_applied",
+        gate: null,
+        cleanupSucceeded: true,
+        verdict: "passed",
+      },
+    ],
+    coverage: {
+      everyMutationKindAtEveryDeclaredBoundary: true,
+      preparedRestoresWholeChangeSet: true,
+      committedSuppressesRestoration: true,
+      conflictingBytesPreservedAndWritesBlocked: true,
+      deterministicJournalStorageDestinationAndSemanticFaults: true,
+      callbackReorderAndSemanticTimeoutProven: true,
+      concurrentIdempotencyProven: true,
+    },
+    retainedAuthority: {
+      retentionMs: 7 * 24 * 60 * 60 * 1_000,
+      queryableAcrossCrashAndReconnect: true,
+      completeRecordsRetained: true,
+      requiredRecordsNeverBecomeOrdinaryUnknown: true,
+    },
+    cleanup: { residualPaths: [], vaultVisibleStaging: 0, managedTrashLeakage: 0, fixtureResidue: 0 },
+    assertions: ["stubbed-crash-restoration-retained-authority-corpus"],
   };
 }
 
@@ -948,6 +991,24 @@ describe("installed-runtime harness failure projection", () => {
     const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
     expect(evidence.verdict).toBe("failed");
     expect(evidence.privacyRecoveryAuthorityCorpus).toBeNull();
+    expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
+  });
+
+  it("records failed evidence when the crash-restoration retained-authority corpus fails", async () => {
+    const { root, options } = await arrangeRun("run-crash-restoration-fails", {
+      runCrashRestorationRetainedAuthorityCorpus: async () => {
+        throw new Error("crash-restoration retained-authority corpus failed");
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({
+      stage: "crash_restoration_retained_authority_corpus",
+      code: "crash_restoration_retained_authority_corpus_failed",
+    });
+    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    expect(evidence.verdict).toBe("failed");
+    expect(evidence.crashRestorationRetainedAuthorityCorpus).toBeNull();
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 
