@@ -3,6 +3,12 @@ import { dirname, join } from "node:path";
 
 import { z } from "zod";
 
+import {
+  createAcceptanceMatrixReport,
+  validateAcceptanceMatrixReport,
+  type AcceptanceMatrixReport,
+} from "./acceptance-matrix.js";
+
 /**
  * Lifecycle-evidence seam (issue #197): one closed, machine-checkable record
  * per harness run. Evidence carries the registered runtime profile, candidate
@@ -14,6 +20,13 @@ import { z } from "zod";
  */
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
+
+function requireAcceptanceMatrix(value: AcceptanceMatrixReport | null | undefined): AcceptanceMatrixReport {
+  if (value === null || value === undefined) {
+    throw new Error("Passing installed-runtime evidence requires an acceptance matrix");
+  }
+  return validateAcceptanceMatrixReport(value);
+}
 
 const inventoryEntrySchema = z
   .object({
@@ -1072,6 +1085,7 @@ export const installedRuntimeEvidenceSchema = z
     releaseLifecycleCorpus: releaseLifecycleCorpusEvidenceSchema.nullable().optional(),
     crashRestorationRetainedAuthorityCorpus:
       crashRestorationRetainedAuthorityCorpusEvidenceSchema.nullable().optional(),
+    acceptanceMatrix: z.custom<AcceptanceMatrixReport>().nullable().optional(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
       .object({
@@ -1084,6 +1098,25 @@ export const installedRuntimeEvidenceSchema = z
     cleanup: cleanupEvidenceSchema.nullable(),
   })
   .strict()
+  .superRefine((evidence, context) => {
+    if (evidence.verdict === "passed") {
+      try {
+        const matrix = requireAcceptanceMatrix(evidence.acceptanceMatrix);
+        const expected = createAcceptanceMatrixReport({
+          ...evidence,
+          acceptanceMatrix: null,
+        });
+        if (matrix.canonicalManifestSha256 !== expected.canonicalManifestSha256) {
+          context.addIssue({ code: "custom", message: "Acceptance matrix does not bind this installed-runtime evidence" });
+        }
+      } catch (error) {
+        context.addIssue({
+          code: "custom",
+          message: error instanceof Error ? error.message : "Acceptance matrix is invalid",
+        });
+      }
+    }
+  })
   .refine(
     (evidence) =>
       evidence.verdict === "passed"
@@ -1096,21 +1129,26 @@ export const installedRuntimeEvidenceSchema = z
           evidence.publicWireCorpus.verdict === "passed" &&
           evidence.changeSetCorpus !== null &&
           evidence.changeSetCorpus.verdict === "passed" &&
-          (evidence.gateIsolationCorpus === null ||
-            evidence.gateIsolationCorpus.verdict === "passed") &&
-          (evidence.registeredReferenceRewriteCorpus === null ||
-            evidence.registeredReferenceRewriteCorpus.verdict === "passed") &&
+          evidence.gateIsolationCorpus !== null &&
+          evidence.gateIsolationCorpus.verdict === "passed" &&
+          evidence.registeredReferenceRewriteCorpus !== null &&
+          evidence.registeredReferenceRewriteCorpus.verdict === "passed" &&
           evidence.semanticEvidenceSearchSnapshotCorpus !== null &&
           evidence.semanticEvidenceSearchSnapshotCorpus.verdict === "passed" &&
           evidence.crashRestorationRetainedAuthorityCorpus !== undefined &&
           evidence.crashRestorationRetainedAuthorityCorpus !== null &&
           evidence.crashRestorationRetainedAuthorityCorpus.verdict === "passed" &&
-          (evidence.privacyRecoveryAuthorityCorpus === undefined ||
-            evidence.privacyRecoveryAuthorityCorpus === null ||
-            evidence.privacyRecoveryAuthorityCorpus.verdict === "passed") &&
+          evidence.privacyRecoveryAuthorityCorpus !== undefined &&
+          evidence.privacyRecoveryAuthorityCorpus !== null &&
+          evidence.privacyRecoveryAuthorityCorpus.verdict === "passed" &&
+          evidence.releaseLifecycleCorpus !== undefined &&
+          evidence.releaseLifecycleCorpus !== null &&
+          evidence.releaseLifecycleCorpus.verdict === "passed" &&
           evidence.cleanup !== null &&
           evidence.cleanup.residualPaths.length === 0 &&
-          evidence.profile.mismatches.length === 0
+          evidence.profile.mismatches.length === 0 &&
+          evidence.acceptanceMatrix !== undefined &&
+          evidence.acceptanceMatrix !== null
         : true,
     {
       message:
@@ -1134,6 +1172,7 @@ export type ReleaseLifecycleCorpusEvidence = z.infer<typeof releaseLifecycleCorp
 export type CrashRestorationRetainedAuthorityCorpusEvidence = z.infer<
   typeof crashRestorationRetainedAuthorityCorpusEvidenceSchema
 >;
+export type AcceptanceMatrixEvidence = AcceptanceMatrixReport;
 export type InstalledRuntimeEvidence = z.infer<typeof installedRuntimeEvidenceSchema>;
 export type InstalledRuntimeVerdict = InstalledRuntimeEvidence["verdict"];
 
@@ -1156,6 +1195,12 @@ export class EvidenceWriteError extends Error {
  * seeded note bodies, absolute Vault/profile roots, and anything else the
  * orchestrator marks — leaked into the record. A leak refuses serialization.
  */
+export function createInstalledRuntimeAcceptanceMatrix(
+  evidence: InstalledRuntimeEvidence,
+): AcceptanceMatrixReport {
+  return createAcceptanceMatrixReport({ ...evidence, acceptanceMatrix: null });
+}
+
 export function serializeEvidence(
   evidence: InstalledRuntimeEvidence,
   privateMarkers: readonly string[] = [],

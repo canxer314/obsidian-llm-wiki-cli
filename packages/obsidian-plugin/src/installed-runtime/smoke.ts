@@ -9,7 +9,7 @@
  *
  * Usage (from packages/obsidian-plugin):
  *   npm run smoke:installed-runtime -- \
- *     --registration <registration.json> --workdir <dir> [--candidate <dir>] \
+ *     --registration <registration.json> --workdir <dir> --acceptance-runners <module> [--candidate <dir>] \
  *     [--profile MVP-PERF-REF-1] [--evidence <path>]
  *
  * The registration JSON is created once per registered machine and pins the
@@ -44,6 +44,7 @@ interface SmokeArguments {
   registration?: string;
   workdir?: string;
   evidence?: string;
+  acceptanceRunners?: string;
   profile: string;
 }
 
@@ -65,6 +66,9 @@ function parseArguments(argv: readonly string[]): SmokeArguments {
       case "--evidence":
         parsed.evidence = value;
         break;
+      case "--acceptance-runners":
+        parsed.acceptanceRunners = value;
+        break;
       case "--profile":
         parsed.profile = value ?? MVP_PERF_REF_1.name;
         break;
@@ -81,6 +85,29 @@ interface SmokeRegistration {
   obsidianVersion: string;
   electronVersion: string;
   nodeVersion: string;
+}
+
+type AcceptanceRunners = Pick<
+  Parameters<typeof runInstalledRuntimeHarness>[0],
+  | "runGateIsolationCorpus"
+  | "runRegisteredReferenceRewriteCorpus"
+  | "runPrivacyRecoveryAuthorityCorpus"
+  | "runReleaseLifecycleCorpus"
+>;
+
+async function loadAcceptanceRunners(path: string): Promise<AcceptanceRunners> {
+  const runners = await import(resolve(path)) as Partial<AcceptanceRunners>;
+  for (const name of [
+    "runGateIsolationCorpus",
+    "runRegisteredReferenceRewriteCorpus",
+    "runPrivacyRecoveryAuthorityCorpus",
+    "runReleaseLifecycleCorpus",
+  ] as const) {
+    if (typeof runners[name] !== "function") {
+      throw new Error(`Acceptance runner module lacks ${name}`);
+    }
+  }
+  return runners as AcceptanceRunners;
 }
 
 async function readRegistration(path: string): Promise<SmokeRegistration> {
@@ -166,12 +193,13 @@ async function assembleLocalCandidate(destination: string): Promise<void> {
 
 async function main(): Promise<number> {
   const args = parseArguments(process.argv.slice(2));
-  if (args.registration === undefined || args.workdir === undefined) {
+  if (args.registration === undefined || args.workdir === undefined || args.acceptanceRunners === undefined) {
     process.stderr.write(
-      "Usage: run-installed-runtime-smoke --registration <file> --workdir <dir> [--candidate <dir>] [--profile <name>] [--evidence <path>]\n",
+      "Usage: run-installed-runtime-smoke --registration <file> --workdir <dir> --acceptance-runners <module> [--candidate <dir>] [--profile <name>] [--evidence <path>]\n",
     );
     return 2;
   }
+  const acceptanceRunners = await loadAcceptanceRunners(args.acceptanceRunners);
   const workdir = resolve(args.workdir);
   const registration = await readRegistration(resolve(args.registration));
   const candidate = resolve(args.candidate ?? join(workdir, "candidate-bundle"));
@@ -190,6 +218,7 @@ async function main(): Promise<number> {
     processControl: createWindowsObsidianProcessControl({
       executablePath: registration.obsidianExecutable,
     }),
+    ...acceptanceRunners,
   });
   process.stdout.write(
     `installed-runtime smoke verdict: ${result.verdict}\nevidence: ${result.evidencePath}\n`,

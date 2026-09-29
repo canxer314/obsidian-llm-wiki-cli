@@ -18,6 +18,7 @@ import {
   TEST_VAULT_DIRECTORY_PREFIX,
   type BridgeHealthState,
   type CrashRestorationRetainedAuthorityCorpusOutcome,
+  type RegisteredReferenceRewriteOutcome,
   type GateIsolationOutcome,
   type PrivacyRecoveryAuthorityCorpusOutcome,
   type ReleaseLifecycleCorpusOutcome,
@@ -359,6 +360,12 @@ async function arrangeRun(
       assertion("stubbed-gate-isolation-corpus");
       return stubGateIsolationOutcome();
     },
+    runRegisteredReferenceRewriteCorpus: async ({ record, assertion }) => {
+      record("assertion", "stubbed-registered-reference-rewrite", {});
+      record("cleanup", "stubbed-registered-reference-rewrite-cleanup", {});
+      assertion("stubbed-registered-reference-rewrite-corpus");
+      return stubRegisteredReferenceRewriteOutcome();
+    },
     runPrivacyRecoveryAuthorityCorpus: async ({ record, assertion }) => {
       record("transport", "stubbed-privacy-recovery-connected", {});
       record("assertion", "stubbed-privacy-recovery", {});
@@ -553,6 +560,39 @@ function stubReleaseLifecycleOutcome(): ReleaseLifecycleCorpusOutcome {
   };
 }
 
+function stubRegisteredReferenceRewriteOutcome(): RegisteredReferenceRewriteOutcome {
+  const entry = { path: "Notes/Welcome.md", sha256: "c".repeat(64), sizeBytes: 0 };
+  const move = (profile: "wikilink" | "embed" | "markdown_inline_link" | "markdown_embed") => ({
+    scenario: `move/${profile}`,
+    profile,
+    submissionKeySha256: "d".repeat(64),
+    changeSetId: `change-set-${profile}`,
+    sourcePath: "Proof/Source.md",
+    destinationPath: "Proof/Destination.md",
+    derivedPaths: ["Proof/Referrer.md"],
+    destinationContentVersionSha256: "e".repeat(64),
+    rewrittenContentVersionSha256: "f".repeat(64),
+    oldPathAbsent: true,
+    destinationTypedMarkdown: true,
+    finalBytesReread: true,
+  });
+  return {
+    scenarioManifestSha256: "a".repeat(64),
+    seedInventoryDigest: "b".repeat(64),
+    beforeInventory: [entry],
+    afterInventory: [entry],
+    moves: [move("wikilink"), move("embed"), move("markdown_inline_link"), move("markdown_embed")],
+    rawBytes: {
+      fixtures: [{ scenario: "span/exact", hostModes: ["bom"], locatedReferences: 1, everyReferenceExactlyOneVerifiedSpan: true, everyUntouchedByteExact: true, finalBytesHashReread: true }],
+      duplicateEqualSpellingsRewritten: 1,
+    },
+    rejections: [{ scenario: "reject/stale", failureCode: "stale_observation", registered: true, noMutationDigestUnchanged: true }],
+    observer: { enabledSecondObserver: true, discoversIssued: 1, privateStagingPathsObserved: 0, halfWrittenMarkdownObserved: 0 },
+    residualCleanup: { recoveryState: "none", queueLength: 0, currentExecutionId: null, writeGate: "open" },
+    assertions: ["stubbed-registered-reference-rewrite-corpus"],
+  };
+}
+
 function stubGateIsolationOutcome(): GateIsolationOutcome {
   const entry = { path: "Notes/Welcome.md", sha256: "c".repeat(64), sizeBytes: 0 };
   return {
@@ -622,6 +662,19 @@ function stubGateIsolationOutcome(): GateIsolationOutcome {
 }
 
 describe("installed-runtime harness orchestration", () => {
+  it("fails closed when a required acceptance corpus runner is not wired", async () => {
+    const { options } = await arrangeRun("run-missing-acceptance-runner", {
+      runRegisteredReferenceRewriteCorpus: undefined,
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({
+      stage: "registered_reference_rewrite_corpus",
+      code: "registered_reference_rewrite_corpus_failed",
+    });
+    expect(result.evidence.registeredReferenceRewriteCorpus).toBeNull();
+  });
+
   it("proves candidate load, health, restart, and cleanup with passing evidence", async () => {
     const { root, options } = await arrangeRun("run-pass");
     const processControl = options.processControl as ReturnType<

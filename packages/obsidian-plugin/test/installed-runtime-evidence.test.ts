@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  createInstalledRuntimeAcceptanceMatrix,
   EvidencePrivacyError,
   EvidenceWriteError,
   parseEvidence,
@@ -363,7 +364,7 @@ function crashRestorationRetainedAuthorityEvidence(): NonNullable<
 }
 
 function passingEvidence(): InstalledRuntimeEvidence {
-  return {
+  const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId: "run-evidence",
     startedAt: "2026-09-04T00:00:00.000Z",
@@ -571,21 +572,77 @@ function passingEvidence(): InstalledRuntimeEvidence {
     gateIsolationCorpus: gateIsolationEvidence(),
     registeredReferenceRewriteCorpus: registeredReferenceRewriteEvidence(),
     semanticEvidenceSearchSnapshotCorpus: semanticEvidenceSearchSnapshotEvidence(),
+    privacyRecoveryAuthorityCorpus: {
+      corpusId: "privacy-recovery-authority-proof",
+      scenarioManifestSha256: DIGEST,
+      tools: ["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_change_set_status"],
+      vaults: [
+        { label: "vault-a", vaultIdSha256: DIGEST, healthSummarySha256: DIGEST },
+        { label: "vault-b", vaultIdSha256: DIGEST, healthSummarySha256: DIGEST },
+      ],
+      diagnostics: { standardBundles: 2, validChecksums: 2, privateMarkersRejected: 1, stableOpaqueAliases: true, contentInclusiveLocalOnly: true },
+      authority: { rejectedAgentAttempts: 1, agentStateMutations: 0, baselineAcceptanceLocalOnly: true, journalPreconditionsProven: true, explicitResumeRequired: true },
+      isolation: { secondVaultUnaffected: true },
+      residualCleanup: { residualPaths: [] },
+      eventLog: [{ sequence: 1, kind: "assertion", name: "privacy", detailSha256: DIGEST }],
+      assertions: ["privacy"],
+      verdict: "passed",
+    },
+    releaseLifecycleCorpus: {
+      corpusId: "verified-release-lifecycle-proof",
+      scenarioManifestSha256: DIGEST,
+      releases: {
+        install: { pluginId: "candidate-bridge", pluginVersion: "0.2.0", bundleSha256: DIGEST, filesSha256: DIGEST },
+        previous: { pluginId: "candidate-bridge", pluginVersion: "0.1.0", bundleSha256: DIGEST, filesSha256: DIGEST },
+        upgrade: { pluginId: "candidate-bridge", pluginVersion: "0.2.0", bundleSha256: DIGEST, filesSha256: DIGEST },
+      },
+      inventories: { install: { beforeBundleSha256: DIGEST, afterBundleSha256: DIGEST, beforeStateSha256: DIGEST, afterStateSha256: DIGEST }, repair: { beforeBundleSha256: DIGEST, afterBundleSha256: DIGEST, beforeStateSha256: DIGEST, afterStateSha256: DIGEST }, upgrade: { beforeBundleSha256: DIGEST, afterBundleSha256: DIGEST, beforeStateSha256: DIGEST, afterStateSha256: DIGEST }, uninstall: { beforeBundleSha256: DIGEST, afterBundleSha256: DIGEST, beforeStateSha256: DIGEST, afterStateSha256: DIGEST }, purge: { beforeBundleSha256: DIGEST, afterBundleSha256: DIGEST, beforeStateSha256: DIGEST, afterStateSha256: DIGEST } },
+      migration: { completedPhases: ["replace", "reload", "migrate", "recovery", "health"], drainedCurrentItem: true, healthRechecked: true, maintenancePaused: true, newSubmissionsRejected: true, explicitOperatorResumeRequired: true },
+      rollback: { verifiedStagingBeforeReplacement: true, perVaultAtomicReplacement: true, unverifiedReleaseExecutable: false },
+      lifecycleStatus: { notInstalled: true, installedNotEnabled: true, bridgeOffline: true, mcpNotRegistered: true, identityMismatch: true, ready: true },
+      removal: { uninstallGuarded: true, purgeQueuedWorkRefused: true, purgeRecoveryRefused: true, purgeInteractive: true, backupVerified: true },
+      cleanup: { scenarios: ["install", "upgrade", "uninstall", "purge"], residualPaths: [] },
+      eventLog: [{ sequence: 1, kind: "assertion", name: "lifecycle", detailSha256: DIGEST }],
+      assertions: ["lifecycle"],
+      verdict: "passed",
+    },
     crashRestorationRetainedAuthorityCorpus: crashRestorationRetainedAuthorityEvidence(),
+    acceptanceMatrix: null,
     verdict: "passed",
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
   };
+  return evidence;
 }
 
 describe("installed-runtime evidence record", () => {
   it("round-trips a passing record through serialization and parsing", () => {
-    const evidence = passingEvidence();
+    const evidence = acceptedEvidence();
+    evidence.acceptanceMatrix = createInstalledRuntimeAcceptanceMatrix(evidence);
     expect(parseEvidence(serializeEvidence(evidence))).toEqual(evidence);
   });
 
-  it("rejects unknown fields and structural drift fail closed", () => {
+  it("refuses a passing record without a canonical acceptance matrix", () => {
+    expect(() => serializeEvidence(passingEvidence())).toThrow(/acceptance matrix/u);
+  });
+
+  function acceptedEvidence(): InstalledRuntimeEvidence {
     const evidence = passingEvidence();
+    evidence.acceptanceMatrix = createInstalledRuntimeAcceptanceMatrix(evidence);
+    return evidence;
+  }
+
+  it("refuses an acceptance matrix that does not bind its child evidence", () => {
+    const evidence = acceptedEvidence();
+    evidence.publicWireCorpus = {
+      ...evidence.publicWireCorpus!,
+      fixtureSeed: "f".repeat(64),
+    };
+    expect(() => serializeEvidence(evidence)).toThrow(/does not bind/u);
+  });
+
+  it("rejects unknown fields and structural drift fail closed", () => {
+    const evidence = acceptedEvidence();
     const tampered = { ...evidence, noteBodyPreview: "secret" };
     expect(() => serializeEvidence(tampered as InstalledRuntimeEvidence)).toThrow();
     const invalidInventory = {
@@ -598,20 +655,20 @@ describe("installed-runtime evidence record", () => {
   });
 
   it("refuses a passing verdict without a complete public-wire corpus", () => {
-    const missingCorpus = { ...passingEvidence(), publicWireCorpus: null };
+    const missingCorpus = { ...acceptedEvidence(), publicWireCorpus: null };
     expect(() => serializeEvidence(missingCorpus)).toThrow(/passing verdict/u);
   });
 
   it("refuses a passing verdict without a complete change-set corpus", () => {
-    const missingWriteSide = { ...passingEvidence(), changeSetCorpus: null };
+    const missingWriteSide = { ...acceptedEvidence(), changeSetCorpus: null };
     expect(() => serializeEvidence(missingWriteSide)).toThrow(/passing verdict/u);
   });
 
   it("refuses passing change-set evidence whose seed inventory changed or proofs are missing", () => {
     const changedSeedInventory: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       changeSetCorpus: {
-        ...passingEvidence().changeSetCorpus!,
+        ...acceptedEvidence().changeSetCorpus!,
         beforeInventory: {
           scope: "Notes/*.md",
           entries: [
@@ -625,11 +682,11 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(changedSeedInventory)).toThrow(/seed inventory unchanged/u);
 
     const noExecutedProofs: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       changeSetCorpus: {
-        ...passingEvidence().changeSetCorpus!,
+        ...acceptedEvidence().changeSetCorpus!,
         admission: {
-          ...passingEvidence().changeSetCorpus!.admission,
+          ...acceptedEvidence().changeSetCorpus!.admission,
           submissions: [
             {
               submissionKeySha256: DIGEST,
@@ -647,9 +704,9 @@ describe("installed-runtime evidence record", () => {
 
   it("refuses passing evidence whose read-side corpus inventory changed or leaked chains", () => {
     const changedInventory: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       publicWireCorpus: {
-        ...passingEvidence().publicWireCorpus!,
+        ...acceptedEvidence().publicWireCorpus!,
         beforeInventory: {
           scope: "Notes/*.md",
           entries: [
@@ -663,9 +720,9 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(changedInventory)).toThrow(/inventory unchanged/u);
 
     const abandonedChain: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       publicWireCorpus: {
-        ...passingEvidence().publicWireCorpus!,
+        ...acceptedEvidence().publicWireCorpus!,
         retainedByteCleanup: {
           chainsIssued: 2,
           chainsConsumed: 1,
@@ -678,9 +735,9 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(abandonedChain)).toThrow(/consume every continuation chain/u);
 
     const replayMismatch: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       publicWireCorpus: {
-        ...passingEvidence().publicWireCorpus!,
+        ...acceptedEvidence().publicWireCorpus!,
         retainedByteCleanup: {
           chainsIssued: 2,
           chainsConsumed: 2,
@@ -695,9 +752,9 @@ describe("installed-runtime evidence record", () => {
 
   it("refuses a passing verdict when recorded gate-isolation evidence failed", () => {
     const failedGateIsolation: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       gateIsolationCorpus: {
-        ...passingEvidence().gateIsolationCorpus!,
+        ...acceptedEvidence().gateIsolationCorpus!,
         verdict: "failed",
       },
     };
@@ -706,10 +763,10 @@ describe("installed-runtime evidence record", () => {
 
   it("refuses passing gate-isolation evidence whose Vault inventory changed or proofs are missing", () => {
     const changedSeed: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       gateIsolationCorpus: {
-        ...passingEvidence().gateIsolationCorpus!,
-        vaults: passingEvidence().gateIsolationCorpus!.vaults.map((vault, index) =>
+        ...acceptedEvidence().gateIsolationCorpus!,
+        vaults: acceptedEvidence().gateIsolationCorpus!.vaults.map((vault, index) =>
           index === 0
             ? {
                 ...vault,
@@ -729,9 +786,9 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(changedSeed)).toThrow(/vault-a seed inventory unchanged/u);
 
     const noBind: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       gateIsolationCorpus: {
-        ...passingEvidence().gateIsolationCorpus!,
+        ...acceptedEvidence().gateIsolationCorpus!,
         recoveryBlocked: {
           boundDispositions: 0,
           replayAfterRecovery: 1,
@@ -744,9 +801,9 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(noBind)).toThrow(/recovery_blocked bind/u);
 
     const inspectedRegistry: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       gateIsolationCorpus: {
-        ...passingEvidence().gateIsolationCorpus!,
+        ...acceptedEvidence().gateIsolationCorpus!,
         incompatible: {
           registryInspected: 1,
           submissionKeysBound: 0,
@@ -759,25 +816,25 @@ describe("installed-runtime evidence record", () => {
     );
   });
 
-  it("accepts a passing record with no gate-isolation corpus (the seam is optional)", () => {
+  it("refuses a passing record with an absent gate-isolation corpus", () => {
     const withoutGateIsolation: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       gateIsolationCorpus: null,
     };
-    expect(parseEvidence(serializeEvidence(withoutGateIsolation))).toEqual(withoutGateIsolation);
+    expect(() => serializeEvidence(withoutGateIsolation)).toThrow(/passing verdict/u);
   });
 
-  it("accepts a passing record with no registered-reference rewrite corpus (the seam is optional)", () => {
+  it("refuses a passing record with an absent registered-reference rewrite corpus", () => {
     const withoutRewrite: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       registeredReferenceRewriteCorpus: null,
     };
-    expect(parseEvidence(serializeEvidence(withoutRewrite))).toEqual(withoutRewrite);
+    expect(() => serializeEvidence(withoutRewrite)).toThrow(/passing verdict/u);
   });
 
   it("refuses a passing record without semantic-evidence corpus proof", () => {
     const missingSemanticEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       semanticEvidenceSearchSnapshotCorpus: null,
     };
     expect(() => serializeEvidence(missingSemanticEvidence)).toThrow(/Semantic Evidence/u);
@@ -785,12 +842,12 @@ describe("installed-runtime evidence record", () => {
 
   it("refuses a passing record with invalid semantic-evidence commit ordering", () => {
     const invalidOrdering: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       semanticEvidenceSearchSnapshotCorpus: {
-        ...passingEvidence().semanticEvidenceSearchSnapshotCorpus!,
+        ...acceptedEvidence().semanticEvidenceSearchSnapshotCorpus!,
         scenarios: [
           {
-            ...passingEvidence().semanticEvidenceSearchSnapshotCorpus!.scenarios[0]!,
+            ...acceptedEvidence().semanticEvidenceSearchSnapshotCorpus!.scenarios[0]!,
             durableCommitBeforeIntentApplied: false,
           },
         ],
@@ -801,9 +858,9 @@ describe("installed-runtime evidence record", () => {
 
   it("refuses a passing verdict when recorded registered-reference evidence failed", () => {
     const failedRewrite: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       registeredReferenceRewriteCorpus: {
-        ...passingEvidence().registeredReferenceRewriteCorpus!,
+        ...acceptedEvidence().registeredReferenceRewriteCorpus!,
         verdict: "failed",
       },
     };
@@ -812,9 +869,9 @@ describe("installed-runtime evidence record", () => {
 
   it("refuses passing registered-reference evidence whose seed inventory changed", () => {
     const changedSeed: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       registeredReferenceRewriteCorpus: {
-        ...passingEvidence().registeredReferenceRewriteCorpus!,
+        ...acceptedEvidence().registeredReferenceRewriteCorpus!,
         beforeInventory: {
           scope: "Notes/*.md",
           entries: [
@@ -830,21 +887,21 @@ describe("installed-runtime evidence record", () => {
 
   it("refuses a passing verdict without both lifecycle observations and clean cleanup", () => {
     const missingRestart = {
-      ...passingEvidence(),
-      observations: passingEvidence().observations.slice(0, 1),
+      ...acceptedEvidence(),
+      observations: acceptedEvidence().observations.slice(0, 1),
     };
     expect(() => serializeEvidence(missingRestart)).toThrow(/passing verdict/u);
 
     const residual = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       cleanup: { attempted: true as const, residualPaths: ["Notes/Welcome.md"] },
     };
     expect(() => serializeEvidence(residual)).toThrow(/passing verdict/u);
 
     const mismatched = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       profile: {
-        ...passingEvidence().profile,
+        ...acceptedEvidence().profile,
         mismatches: [{ field: "os.build" as const, expected: "26200", actual: "26100" }],
       },
     };
@@ -853,7 +910,7 @@ describe("installed-runtime evidence record", () => {
 
   it("accepts failed and invalid evidence with null sections", () => {
     const failed: InstalledRuntimeEvidence = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       candidate: null,
       bridgeIdentity: null,
       inputHashes: { candidateBundleSha256: null, vaultSeedManifestSha256: null },
@@ -864,14 +921,14 @@ describe("installed-runtime evidence record", () => {
       verdict: "failed",
       failure: { stage: "obsidian_start", code: "obsidian_start_failed" },
       cleanup: null,
-      profile: { ...passingEvidence().profile, observed: null },
+      profile: { ...acceptedEvidence().profile, observed: null },
     };
     expect(parseEvidence(serializeEvidence(failed))).toEqual(failed);
   });
 
   it("refuses serialization when private markers leak into the record", () => {
     const leaked = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       verdict: "failed" as const,
       failure: {
         stage: "health_initial",
@@ -890,7 +947,7 @@ describe("installed-runtime evidence record", () => {
     // (backslashes, newlines) that JSON string serialization escapes; the
     // guard must match the escaped form, not just the raw substring.
     const windowsLeak = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       verdict: "failed" as const,
       failure: {
         stage: "health_initial",
@@ -902,7 +959,7 @@ describe("installed-runtime evidence record", () => {
       EvidencePrivacyError,
     );
     const noteBodyLeak = {
-      ...passingEvidence(),
+      ...acceptedEvidence(),
       verdict: "failed" as const,
       failure: {
         stage: "cleanup",
@@ -919,7 +976,7 @@ describe("installed-runtime evidence record", () => {
   it("writes atomically, reads back through the schema, and never overwrites", async () => {
     const directory = await mkdtemp(join(tmpdir(), "installed-runtime-evidence-"));
     const evidencePath = join(directory, "nested", "run.json");
-    const evidence = passingEvidence();
+    const evidence = acceptedEvidence();
     await writeEvidenceFile(evidencePath, evidence, ["private-marker"]);
     expect(parseEvidence(await readFile(evidencePath, "utf8"))).toEqual(evidence);
     await expect(writeEvidenceFile(evidencePath, evidence)).rejects.toBeInstanceOf(

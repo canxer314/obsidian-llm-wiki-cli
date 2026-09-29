@@ -13,6 +13,10 @@ import {
 } from "../release/release-identity.js";
 import { verifyReleaseBundle } from "../release/verify-release-bundle.js";
 import {
+  createAcceptanceMatrixReport,
+  type AcceptanceMatrixReport,
+} from "./acceptance-matrix.js";
+import {
   writeEvidenceFile,
   type ChangeSetCorpusEvidence,
   type GateIsolationCorpusEvidence,
@@ -138,6 +142,7 @@ export type HarnessStage =
   | "privacy_recovery_authority_corpus"
   | "release_lifecycle_corpus"
   | "crash_restoration_retained_authority_corpus"
+  | "acceptance_matrix"
   | "inventory_after"
   | "cleanup";
 
@@ -189,6 +194,7 @@ export type HarnessFailureCode =
   | "privacy_recovery_authority_corpus_failed"
   | "release_lifecycle_corpus_failed"
   | "crash_restoration_retained_authority_corpus_failed"
+  | "acceptance_matrix_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -415,6 +421,7 @@ interface RunState {
   privacyRecoveryAuthority: PrivacyRecoveryAuthorityCorpusOutcome | null;
   releaseLifecycle: ReleaseLifecycleCorpusOutcome | null;
   crashRestorationRetainedAuthority: CrashRestorationRetainedAuthorityCorpusOutcome | null;
+  acceptanceMatrix: AcceptanceMatrixReport | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -452,6 +459,7 @@ export async function runInstalledRuntimeHarness(
     privacyRecoveryAuthority: null,
     releaseLifecycle: null,
     crashRestorationRetainedAuthority: null,
+    acceptanceMatrix: null,
     cleanup: null,
     failure: null,
   };
@@ -899,14 +907,18 @@ export async function runInstalledRuntimeHarness(
   // Obsidian window is live. When the caller does not wire the seam, the stage
   // is skipped and the closed evidence envelope records no gate-isolation
   // block (the top-level passing verdict accepts its absence).
-  if (state.failure === null && options.runGateIsolationCorpus !== undefined) {
+  if (state.failure === null) {
+    const runner = options.runGateIsolationCorpus;
+    if (runner === undefined) {
+      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate-isolation corpus runner is required for authoritative acceptance");
+    }
     const vault = state.vault;
     const candidate = state.candidate;
-    if (vault === null || candidate === null) {
-      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate-isolation corpus requires a provisioned candidate");
-    } else {
+    if (state.failure === null && (vault === null || candidate === null)) {
+    }
+    if (state.failure === null && runner !== undefined && vault !== null && candidate !== null) {
       try {
-        state.gateIsolation = await options.runGateIsolationCorpus({
+        state.gateIsolation = await runner!({
           runId,
           workingDirectory: options.workingDirectory,
           candidate,
@@ -920,8 +932,6 @@ export async function runInstalledRuntimeHarness(
           assertion: recordGateIsolationAssertion,
         });
       } catch (error) {
-        // The gate-isolation corpus seam is a self-contained scenario; any
-        // failure it reports projects to failed gate-isolation evidence.
         fail(
           "gate_isolation_corpus",
           "gate_isolation_corpus_failed",
@@ -937,18 +947,23 @@ export async function runInstalledRuntimeHarness(
   // top-level passing verdict accepts its absence). A real-runtime seam must
   // stand up its own generated Vault through the harness seams and drive the
   // move-rewrite program over the real loopback Bridge.
-  if (state.failure === null && options.runRegisteredReferenceRewriteCorpus !== undefined) {
+  if (state.failure === null) {
+    const runner = options.runRegisteredReferenceRewriteCorpus;
+    if (runner === undefined) {
+      fail("registered_reference_rewrite_corpus", "registered_reference_rewrite_corpus_failed", "Registered-reference rewrite corpus runner is required for authoritative acceptance");
+    }
     const vault = state.vault;
     const candidate = state.candidate;
-    if (vault === null || candidate === null) {
+    if (state.failure === null && (vault === null || candidate === null)) {
       fail(
         "registered_reference_rewrite_corpus",
         "registered_reference_rewrite_corpus_failed",
         "Registered-reference rewrite corpus requires a provisioned candidate",
       );
-    } else {
+    }
+    if (state.failure === null && runner !== undefined && vault !== null && candidate !== null) {
       try {
-        state.registeredReferenceRewrite = await options.runRegisteredReferenceRewriteCorpus({
+        state.registeredReferenceRewrite = await runner!({
           runId,
           workingDirectory: options.workingDirectory,
           candidate,
@@ -970,18 +985,23 @@ export async function runInstalledRuntimeHarness(
       }
     }
   }
-  if (state.failure === null && options.runPrivacyRecoveryAuthorityCorpus !== undefined) {
+  if (state.failure === null) {
+    const runner = options.runPrivacyRecoveryAuthorityCorpus;
+    if (runner === undefined) {
+      fail("privacy_recovery_authority_corpus", "privacy_recovery_authority_corpus_failed", "Privacy/recovery corpus runner is required for authoritative acceptance");
+    }
     const vault = state.vault;
     const candidate = state.candidate;
-    if (vault === null || candidate === null) {
+    if (state.failure === null && (vault === null || candidate === null)) {
       fail(
         "privacy_recovery_authority_corpus",
         "privacy_recovery_authority_corpus_failed",
         "Privacy/recovery corpus requires a provisioned candidate",
       );
-    } else {
+    }
+    if (state.failure === null && runner !== undefined && vault !== null && candidate !== null) {
       try {
-        state.privacyRecoveryAuthority = await options.runPrivacyRecoveryAuthorityCorpus({
+        state.privacyRecoveryAuthority = await runner!({
           runId,
           workingDirectory: options.workingDirectory,
           candidate,
@@ -1003,17 +1023,22 @@ export async function runInstalledRuntimeHarness(
       }
     }
   }
-  if (state.failure === null && options.runReleaseLifecycleCorpus !== undefined) {
+  if (state.failure === null) {
+    const runner = options.runReleaseLifecycleCorpus;
+    if (runner === undefined) {
+      fail("release_lifecycle_corpus", "release_lifecycle_corpus_failed", "Release-lifecycle corpus runner is required for authoritative acceptance");
+    }
     const candidate = state.candidate;
-    if (candidate === null) {
+    if (state.failure === null && candidate === null) {
       fail(
         "release_lifecycle_corpus",
         "release_lifecycle_corpus_failed",
         "Release-lifecycle corpus requires a verified candidate",
       );
-    } else {
+    }
+    if (state.failure === null && runner !== undefined && candidate !== null) {
       try {
-        state.releaseLifecycle = await options.runReleaseLifecycleCorpus({
+        state.releaseLifecycle = await runner!({
           runId,
           workingDirectory: options.workingDirectory,
           candidate,
@@ -1276,6 +1301,7 @@ export async function runInstalledRuntimeHarness(
     privacyRecoveryAuthorityCorpus,
     releaseLifecycleCorpus,
     crashRestorationRetainedAuthorityCorpus,
+    acceptanceMatrix: null,
     verdict,
     failure:
       state.failure === null
@@ -1289,6 +1315,28 @@ export async function runInstalledRuntimeHarness(
         : { attempted: true, residualPaths: [...state.cleanup.residualPaths] },
   };
 
+  if (evidence.verdict === "passed") {
+    try {
+      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence);
+      (evidence as InstalledRuntimeEvidence & { acceptanceMatrix: AcceptanceMatrixReport }).acceptanceMatrix =
+        state.acceptanceMatrix;
+    } catch (error) {
+      fail(
+        "acceptance_matrix",
+        "acceptance_matrix_failed",
+        sanitize(error instanceof Error ? error.message : String(error)),
+      );
+      const failure = state.failure;
+      if (failure === null) throw new Error("Acceptance matrix failure was not recorded");
+      evidence.verdict = "failed";
+      evidence.failure = {
+        stage: failure.stage,
+        code: failure.code,
+        ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+      };
+    }
+  }
+
   const privateMarkers = [
     ...(state.vault?.seedNotes.map((note) => note.content) ?? []),
     state.vault?.vaultPath ?? "",
@@ -1296,7 +1344,7 @@ export async function runInstalledRuntimeHarness(
     options.workingDirectory,
   ];
   await writeEvidenceFile(options.evidencePath, evidence, privateMarkers);
-  return { verdict, failure: state.failure, evidence, evidencePath: options.evidencePath };
+  return { verdict: evidence.verdict, failure: state.failure, evidence, evidencePath: options.evidencePath };
 }
 
 // The phase and its observation are recorded together so the evidence
