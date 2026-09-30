@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { assembleReleaseBundle } from "../release/assemble-release-bundle.js";
 import { currentSourceTreeTag } from "../release/release-identity.js";
 import { runInstalledRuntimeHarness } from "./harness.js";
-import { createWindowsObsidianProcessControl } from "./obsidian-process.js";
+import { createLinuxObsidianProcessControl, createWindowsObsidianProcessControl } from "./obsidian-process.js";
 import {
   hostOsBuild,
   type ObservedRuntimeEnvironment,
@@ -94,6 +94,8 @@ async function probeHost(registration: SmokeRegistration): Promise<ObservedRunti
   if (await provesLoopbackHttp()) capabilities.push("loopback_http");
   if (platform() === "win32") {
     capabilities.push("ntfs_fixtures", "process_control");
+  } else if (platform() === "linux") {
+    capabilities.push("posix_fixtures", "process_control");
   }
   if (executablePresent) capabilities.push("obsidian_gui");
   return {
@@ -163,7 +165,9 @@ async function main(): Promise<number> {
     evidencePath,
     runId,
     probe: { probe: () => probeHost(registration) },
-    processControl: createWindowsObsidianProcessControl({
+    processControl: (platform() === "linux"
+      ? createLinuxObsidianProcessControl
+      : createWindowsObsidianProcessControl)({
       executablePath: registration.obsidianExecutable,
     }),
     ...authoritativeRunners,

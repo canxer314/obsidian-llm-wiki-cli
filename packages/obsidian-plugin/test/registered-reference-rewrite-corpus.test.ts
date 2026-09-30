@@ -41,10 +41,12 @@ const EXPECTED_VAULT_ID = "vault-registered-reference-corpus";
 const BRIDGE_STATE_DIRECTORY_NAME = ".llm-wiki";
 
 const liveBridges: Array<ReturnType<typeof createBridgeInstance>> = [];
+const liveExecutions: Array<{ close(): Promise<void> }> = [];
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   await Promise.all(liveBridges.splice(0).map((bridge) => bridge.stop()));
+  await Promise.all(liveExecutions.splice(0).map((execution) => execution.close()));
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
@@ -532,6 +534,7 @@ async function createRewriteBridge(host: ArrangedSession, expectReady = true): P
     slotCapacity: 16 * 1024,
     host: fsHost,
   });
+  liveExecutions.push(execution);
   const readDataSource: VaultReadDataSource = {
     readBinary: host.readBinary,
     parseFrontmatter: () => null,

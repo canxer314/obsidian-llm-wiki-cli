@@ -208,7 +208,7 @@ describe("read-side public-wire corpus over a real loopback Bridge", () => {
     expect(outcome.retainedByteCleanup).toEqual({
       chainsIssued: 9,
       chainsConsumed: 9,
-      replayAfterConsumptionRejected: 1,
+      replayAfterConsumptionRejected: 9,
       bytesReconstructed: expect.any(Number),
       residualChains: 0,
     });

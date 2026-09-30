@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 
 import { describe, expect, it } from "vitest";
 
@@ -10,6 +11,27 @@ import {
   registerHealthPublicWireFragment,
   runPublicWireCorpus,
 } from "../src/index.js";
+
+it("sends the literal unsafe Host header when probing the connection boundary", async () => {
+  const hosts: string[] = [];
+  const server = createServer((request, response) => {
+    hosts.push(request.headers.host ?? "");
+    response.writeHead(hosts.length <= 4 ? 403 : 500);
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("Server unavailable");
+    await runPublicWireCorpus({
+      endpoint: new URL(`http://127.0.0.1:${address.port}/mcp`),
+      expectedVaultId: "fixture-vault", fixtureSeed: "fixture",
+    }).catch(() => undefined);
+    expect(hosts[2]).toBe("outside.example:80");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
 
 const SHA256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
@@ -85,24 +107,27 @@ describe("read-side corpus deterministic plan", () => {
 
 describe("public-wire corpus boundary evidence", () => {
   it("rejects unsafe connection initialization before opening an MCP session", async () => {
-    const endpoint = new URL("http://127.0.0.1:1/mcp");
-    const fetch = globalThis.fetch;
-    const requests: Request[] = [];
-    globalThis.fetch = async (input, init) => {
-      requests.push(new Request(input, init));
-      return new Response(null, { status: 403 });
-    };
+    const requests: import("node:http").IncomingHttpHeaders[] = [];
+    const server = createServer((request, response) => {
+      requests.push(request.headers);
+      response.writeHead(403);
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("Server unavailable");
+      const endpoint = new URL(`http://127.0.0.1:${address.port}/mcp`);
       await expect(
         runPublicWireCorpus({ endpoint, expectedVaultId: "vault-a", fixtureSeed: "seed" }),
       ).rejects.toThrow("Streamable HTTP error");
       expect(requests.length).toBeGreaterThanOrEqual(4);
-      expect(requests[0]?.headers.get("x-expected-vault-id")).toBeNull();
-      expect(requests[1]?.headers.get("x-expected-vault-id")).toBe("vault-a-wrong");
-      expect(requests[2]?.headers.get("host")).toBe("outside.example:80");
-      expect(requests[3]?.headers.get("origin")).toBe("http://outside.example");
+      expect(requests[0]?.["x-expected-vault-id"]).toBeUndefined();
+      expect(requests[1]?.["x-expected-vault-id"]).toBe("vault-a-wrong");
+      expect(requests[2]?.host).toBe("outside.example:80");
+      expect(requests[3]?.origin).toBe("http://outside.example");
     } finally {
-      globalThis.fetch = fetch;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 

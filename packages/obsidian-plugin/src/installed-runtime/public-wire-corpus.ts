@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { request } from "node:http";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -814,6 +815,18 @@ export async function runReadSideCorpus(options: {
         continuation = page.continuation;
       }
       chainsConsumed += 1;
+      const replay = await call(
+        "continuation/quota-consumed-chain-replay-rejected",
+        "vault_continue",
+        { continuation: firstToken },
+        assertContinue,
+        true,
+      );
+      const replayResult = parseContinueResult(replay);
+      if (!("code" in replayResult) || replayResult.code !== "continuation_unavailable") {
+        throw new PublicWireCorpusError("A consumed quota continuation token was not single use");
+      }
+      replayAfterConsumptionRejected += 1;
     }
     options.assertion("continuation/quota-exhaustion:rejects-without-evicting-live-state");
   }
@@ -973,12 +986,20 @@ async function assertRejectedInitialization(endpoint: URL, expectedVaultId: stri
     ],
   ];
   for (const [label, headers] of cases) {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers as Record<string, string> },
+      }, (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode ?? 0));
+        response.once("error", reject);
+      });
+      req.setTimeout(10_000, () => req.destroy(new Error("Connection boundary probe timed out")));
+      req.once("error", reject);
+      req.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }));
     });
-    if (response.status !== 403) {
+    if (status !== 403) {
       throw new PublicWireCorpusError(`${label} did not fail at the connection boundary`);
     }
   }

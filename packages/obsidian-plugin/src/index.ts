@@ -482,6 +482,7 @@ export {
 export {
   BridgeIdentityError,
   createWindowsObsidianProcessControl,
+  createLinuxObsidianProcessControl,
   ObsidianProcessError,
   ReadinessTimeoutError,
   readPersistedBridgeIdentity,
@@ -496,6 +497,7 @@ export {
   hostOsBuild,
   lookupRegisteredRuntimeProfile,
   MVP_PERF_REF_1,
+  MVP_PERF_REF_LINUX_1,
   preflightRuntimeProfile,
   registeredRuntimeProfiles,
   type ObservedRuntimeEnvironment,

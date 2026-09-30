@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { relative, resolve, sep } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -321,6 +322,49 @@ function requireTerminalProofState(
   return state;
 }
 
+const installedLoopbackFetch: typeof fetch = async (input, init) => {
+  const request = new Request(input, init);
+  const url = new URL(request.url);
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") {
+    throw new Error("Installed Semantic Evidence transport requires loopback HTTP");
+  }
+  const body = request.body === null ? undefined : Buffer.from(await request.arrayBuffer());
+  const outgoingHeaders: Record<string, string> = {};
+  request.headers.forEach((value, name) => { outgoingHeaders[name] = value; });
+  return await new Promise<Response>((resolvePromise, reject) => {
+    const outgoing = httpRequest(url, {
+      method: request.method,
+      headers: outgoingHeaders,
+      signal: request.signal,
+    }, (incoming) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (value !== undefined) {
+          for (const entry of Array.isArray(value) ? value : [value]) headers.append(name, entry);
+        }
+      }
+      const status = incoming.statusCode ?? 500;
+      const noBody = request.method === "HEAD" || [204, 205, 304].includes(status);
+      if (noBody) {
+        incoming.resume();
+        resolvePromise(new Response(null, { status, headers }));
+        return;
+      }
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          incoming.on("data", (chunk: Buffer) => controller.enqueue(Uint8Array.from(chunk)));
+          incoming.once("end", () => controller.close());
+          incoming.once("error", (error) => controller.error(error));
+        },
+        cancel() { incoming.destroy(); },
+      });
+      resolvePromise(new Response(stream, { status, headers }));
+    });
+    outgoing.once("error", reject);
+    outgoing.end(body);
+  });
+};
+
 export function createInstalledSemanticEvidenceWire(): InstalledSemanticEvidenceWire {
   const call = async (
     endpoint: URL,
@@ -333,6 +377,7 @@ export function createInstalledSemanticEvidenceWire(): InstalledSemanticEvidence
       version: "1.0.0",
     });
     const transport = new StreamableHTTPClientTransport(endpoint, {
+      fetch: installedLoopbackFetch,
       requestInit: {
         headers: { [EXPECTED_VAULT_ID_HEADER]: expectedVaultId },
       },
@@ -340,8 +385,21 @@ export function createInstalledSemanticEvidenceWire(): InstalledSemanticEvidence
     try {
       await client.connect(transport);
       const result = await client.callTool({ name: tool, arguments: arguments_ });
-      if (result.isError === true || result.structuredContent === undefined) {
+      if (result.structuredContent === undefined) {
         throw new Error(`${tool} did not return authoritative structured content`);
+      }
+      const expectedError = tool === "vault_change_set_submit"
+        ? (() => {
+            const submitted = parseChangeSetSubmitResult(result.structuredContent);
+            return submitted.outcome !== "registered" ||
+              submitted.changeSet.state === "intent_not_applied" ||
+              submitted.changeSet.state === "result_unproven";
+          })()
+        : tool === "vault_change_set_status"
+        ? parseChangeSetStatusResult(result.structuredContent).lookup === "operationally_blocked"
+        : false;
+      if ((result.isError === true) !== expectedError) {
+        throw new Error(`${tool} returned an unexpected MCP error disposition`);
       }
       return result.structuredContent;
     } finally {
@@ -403,11 +461,13 @@ export function createInstalledSemanticEvidenceScenarioControl(
   acceptMetadataCacheObservation(observation: {
     readonly path: string;
     readonly contentVersion?: string;
+    readonly bomPrefixedContentVersion?: string;
   }): boolean;
   acceptsMetadataCacheObservation(path: string): boolean;
   recordMetadataCacheObservation(observation: {
     readonly path: string;
     readonly contentVersion?: string;
+    readonly bomPrefixedContentVersion?: string;
   }): void;
   recordSearchSnapshotRefresh(observation: { readonly reset: boolean }): void;
   recordSearchSnapshotBarrierRound(
@@ -434,6 +494,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
   let active:
     | {
         readonly submissionKey: string;
+        readonly scenario: string;
         baselineVersion: number;
         startedAt: number;
         readonly targets: Map<
@@ -442,6 +503,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
             readonly expectedContentVersion: string;
             metadataCacheObserved: boolean;
             metadataContentVersion: string | null;
+            bomPrefixedContentVersion: string | null;
             committedMetadataReleased: boolean;
             vaultChangeObserved: boolean;
             vaultDeleteObserved: boolean;
@@ -509,21 +571,30 @@ export function createInstalledSemanticEvidenceScenarioControl(
     acceptMetadataCacheObservation(observation) {
       const target = active?.targets.get(observation.path);
       return target === undefined ||
-        observation.contentVersion !== target.expectedContentVersion ||
+        (observation.contentVersion !== target.expectedContentVersion &&
+          observation.bomPrefixedContentVersion !== target.expectedContentVersion) ||
         target.committedMetadataReleased ||
-        active!.rejectedSnapshotRounds > 0;
+        (active!.rejectedSnapshotRounds > 0 &&
+          active!.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO);
     },
     acceptsMetadataCacheObservation(path) {
       const target = active?.targets.get(path);
       return target === undefined ||
         target.committedMetadataReleased ||
-        active!.rejectedSnapshotRounds > 0;
+        (active!.scenario === STALE_OBSERVATION_DEADLINE_SCENARIO &&
+          target.metadataContentVersion !== null &&
+          target.metadataContentVersion !== target.expectedContentVersion) ||
+        (active!.rejectedSnapshotRounds > 0 &&
+          active!.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO);
     },
     recordMetadataCacheObservation(observation) {
       const target = active?.targets.get(observation.path);
       if (target !== undefined) {
         target.metadataCacheObserved = true;
-        target.metadataContentVersion = observation.contentVersion ?? null;
+        target.bomPrefixedContentVersion = observation.bomPrefixedContentVersion ?? null;
+        target.metadataContentVersion = observation.bomPrefixedContentVersion === target.expectedContentVersion
+          ? target.expectedContentVersion
+          : observation.contentVersion ?? null;
       }
     },
     recordSearchSnapshotRefresh(observation) {
@@ -553,7 +624,8 @@ export function createInstalledSemanticEvidenceScenarioControl(
       else if (
         !observation.matched &&
         observedTargets.every(({ target, observation: observed }) =>
-          target.metadataContentVersion === observed!.observedContentVersion ||
+          target.metadataContentVersion === (observed!.observedContentVersion ?? null) ||
+          target.bomPrefixedContentVersion === observed!.observedContentVersion ||
           (active!.withholdCommittedMetadataUntilRejected &&
             target.metadataContentVersion !== null &&
             target.metadataContentVersion !== target.expectedContentVersion),
@@ -598,7 +670,8 @@ export function createInstalledSemanticEvidenceScenarioControl(
     async waitForMetadataContentVersion(contentVersion) {
       await waitForInstalledObservation(
         () => active !== undefined && [...active.targets.values()].some(
-          (target) => target.metadataContentVersion === contentVersion,
+          (target) => target.metadataContentVersion === contentVersion ||
+            target.bomPrefixedContentVersion === contentVersion,
         ),
         "bound metadata Content Version",
       );
@@ -607,6 +680,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
       if (active !== undefined) {
         for (const target of active.targets.values()) {
           target.metadataContentVersion = null;
+          target.bomPrefixedContentVersion = null;
         }
       }
     },
@@ -818,6 +892,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
       const submissionKey = `installed-semantic-${options.createSubmissionKey?.() ?? randomUUID()}`;
       active = {
         submissionKey,
+        scenario: request.scenario,
         baselineVersion: baseline.version,
         startedAt: now(),
         targets: new Map(targetDefinitions.map(({ path, contentVersion }) => [
@@ -826,7 +901,9 @@ export function createInstalledSemanticEvidenceScenarioControl(
             expectedContentVersion: contentVersion,
             metadataCacheObserved: false,
             metadataContentVersion: null,
+            bomPrefixedContentVersion: null,
             committedMetadataReleased:
+              request.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO &&
               request.scenario !== EDIT_BODY_STALE_VERSION_SCENARIO &&
               request.scenario !== EDIT_BODY_QUIET_WINDOW_CONTRADICTION_SCENARIO &&
               request.scenario !== MULTI_FRONTMATTER_REORDERED_CALLBACKS_SCENARIO &&
@@ -852,6 +929,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
         releaseDelayedRename: !isMoveScenario,
         scenarioExecutionStarted: false,
         withholdCommittedMetadataUntilRejected:
+          request.scenario === STALE_OBSERVATION_DEADLINE_SCENARIO ||
           request.scenario === EDIT_BODY_STALE_VERSION_SCENARIO ||
           request.scenario === EDIT_BODY_QUIET_WINDOW_CONTRADICTION_SCENARIO ||
           request.scenario === MULTI_FRONTMATTER_REORDERED_CALLBACKS_SCENARIO ||
@@ -913,7 +991,8 @@ export function createInstalledSemanticEvidenceScenarioControl(
           const activeTarget = active.targets.get(seed.path);
           if (activeTarget !== undefined) {
             await waitForInstalledObservation(
-              () => active?.targets.get(seed.path)?.metadataContentVersion === seed.version,
+              () => active?.targets.get(seed.path)?.metadataContentVersion === seed.version ||
+                active?.targets.get(seed.path)?.bomPrefixedContentVersion === seed.version,
               "mutation baseline metadata Content Version",
             );
           }

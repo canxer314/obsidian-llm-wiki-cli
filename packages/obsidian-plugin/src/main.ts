@@ -358,6 +358,8 @@ export default class VaultOperationBridgePlugin extends Plugin {
             path: file.path,
             contentVersion:
               `sha256:${createHash("sha256").update(data, "utf8").digest("hex")}`,
+            bomPrefixedContentVersion:
+              `sha256:${createHash("sha256").update(Buffer.from([0xef, 0xbb, 0xbf])).update(data, "utf8").digest("hex")}`,
           };
           if (
             installedSemanticEvidence?.acceptMetadataCacheObservation(observation) !== false
@@ -489,13 +491,13 @@ export default class VaultOperationBridgePlugin extends Plugin {
           }
           await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
           installedSemanticEvidence!.releaseCommittedMetadataObservation();
-          const committed = await this.app.vault.read(file);
+          const committed = await this.app.vault.readBinary(file);
           const observedCommittedContentVersion =
-            `sha256:${createHash("sha256").update(committed, "utf8").digest("hex")}`;
+            `sha256:${createHash("sha256").update(Buffer.from(committed)).digest("hex")}`;
           if (observedCommittedContentVersion !== committedContentVersion) {
             throw new Error("Installed edit-body bytes do not match the committed Content Version");
           }
-          await this.app.vault.modify(file, committed);
+          await this.app.vault.modifyBinary(file, committed);
           await waitForCommittedMetadataContentVersion();
         },
         induceEditBodyMissingObservationDeadline: async () => {
@@ -515,7 +517,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
           }
           await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
           installedSemanticEvidence!.releaseCommittedMetadataObservation();
-          await this.app.vault.modify(file, await this.app.vault.read(file));
+          await this.app.vault.modifyBinary(file, await this.app.vault.readBinary(file));
           await installedSemanticEvidence!.waitForMetadataContentVersion(
             "sha256:657e5a4753c47b54776381b314eaeb783775235960c1b79c1970311652683cb2",
           );
@@ -723,6 +725,13 @@ export default class VaultOperationBridgePlugin extends Plugin {
           if (this.app.vault.getAbstractFileByPath(path) !== null) {
             throw new Error("Installed edit-body fixture path is not clean");
           }
+          const segments = path.split("/");
+          for (let length = 1; length < segments.length; length += 1) {
+            const parent = segments.slice(0, length).join("/");
+            if (this.app.vault.getAbstractFileByPath(parent) === null) {
+              await this.app.vault.createFolder(parent);
+            }
+          }
           await this.app.vault.createBinary(path, Uint8Array.from(bytes).buffer);
           const file = this.app.vault.getFileByPath(path);
           if (file === null) {
@@ -745,7 +754,15 @@ export default class VaultOperationBridgePlugin extends Plugin {
         },
         cleanupPath: async (path) => {
           const file = this.app.vault.getFileByPath(path);
-          if (file !== null) await this.app.vault.delete(file, true);
+          if (file !== null) {
+            try {
+              await this.app.vault.delete(file, true);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT" || await adapter.exists(path)) {
+                throw error;
+              }
+            }
+          }
         },
         refreshAfterCleanup: async () => {
           runtime.scheduleSearchSnapshotRefresh();

@@ -313,6 +313,8 @@ describe("installed Semantic Evidence executor", () => {
       readonly phase: "FAILED";
       readonly input: { readonly submissionKey: string };
     } | null = null;
+    let trashed!: () => void;
+    const trashObserved = new Promise<void>((resolve) => { trashed = resolve; });
     let control!: ReturnType<typeof createInstalledSemanticEvidenceScenarioControl>;
     control = createInstalledSemanticEvidenceScenarioControl({
       vaultPath,
@@ -339,7 +341,7 @@ describe("installed Semantic Evidence executor", () => {
       refreshSeedFixtures: async () => ({ version: 2, immutable: true }),
       induceTrashContraryThirdParty: async () => {
         const path = join(vaultPath, ...TRASH_NOTE_PATH.split("/"));
-        await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 0));
+        await trashObserved;
         await writeFile(path, foreignBytes);
         control.recordTrashProbeObservation({
           path: TRASH_NOTE_PATH,
@@ -353,6 +355,7 @@ describe("installed Semantic Evidence executor", () => {
           submissionKey = input.submissionKey;
           const path = join(vaultPath, ...TRASH_NOTE_PATH.split("/"));
           await rm(path, { force: true });
+          trashed();
           await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 0));
           latestFrame = { phase: "FAILED", input: { submissionKey } };
           control.recordRecoveryFrame(latestFrame);
@@ -1830,7 +1833,8 @@ describe("installed Semantic Evidence executor", () => {
         control.recordVaultEvent({ kind: "create", path });
         control.recordMetadataCacheObservation({
           path,
-          contentVersion: contentVersion(bytes),
+          contentVersion: contentVersion(bytes.slice(3)),
+          bomPrefixedContentVersion: contentVersion(bytes),
         });
       },
       induceEditBodyStaleThenFresh: async ({
@@ -1876,7 +1880,8 @@ describe("installed Semantic Evidence executor", () => {
           await writeFile(fixturePath, EXACT_COMMITTED_BYTES);
           const committedObservation = {
             path: EXACT_FIXTURE.path,
-            contentVersion: contentVersion(EXACT_COMMITTED_BYTES),
+            contentVersion: contentVersion(EXACT_COMMITTED_BYTES.slice(3)),
+            bomPrefixedContentVersion: contentVersion(EXACT_COMMITTED_BYTES),
           };
           expect(control.acceptMetadataCacheObservation(committedObservation)).toBe(false);
           expect(control.acceptsMetadataCacheObservation(EXACT_FIXTURE.path)).toBe(false);
@@ -1935,11 +1940,29 @@ describe("installed Semantic Evidence executor", () => {
         await rm(join(vaultPath, ...path.split("/")), { force: true });
       },
       induceStaleObservationDeadline: async () => {
+        expect(control.acceptMetadataCacheObservation({
+          path: CREATE_NOTE_PATH,
+          contentVersion: contentVersion(new TextEncoder().encode(CREATE_NOTE_CONTENT)),
+        })).toBe(false);
         control.recordMetadataCacheObservation({
           path: CREATE_NOTE_PATH,
           contentVersion:
             "sha256:7a30e1be393dd458c316cf18312475986671d3d89199480f7f00143d5a385b4f",
         });
+        expect(control.acceptsMetadataCacheObservation(CREATE_NOTE_PATH)).toBe(true);
+        control.recordSearchSnapshotBarrierRound({
+          targets: [{
+            path: CREATE_NOTE_PATH,
+            expectedContentVersion: contentVersion(new TextEncoder().encode(CREATE_NOTE_CONTENT)),
+            matched: false,
+          }],
+          matched: false,
+        });
+        await control.waitForRejectedSnapshotRounds(1);
+        expect(control.acceptMetadataCacheObservation({
+          path: CREATE_NOTE_PATH,
+          contentVersion: contentVersion(new TextEncoder().encode(CREATE_NOTE_CONTENT)),
+        })).toBe(false);
         control.recordSearchSnapshotBarrierRound({
           targets: [{
             path: CREATE_NOTE_PATH,
@@ -1951,6 +1974,10 @@ describe("installed Semantic Evidence executor", () => {
           }],
           matched: false,
         });
+        expect(control.acceptMetadataCacheObservation({
+          path: CREATE_NOTE_PATH,
+          contentVersion: contentVersion(new TextEncoder().encode(CREATE_NOTE_CONTENT)),
+        })).toBe(false);
         now = 5_000;
         await rm(join(vaultPath, ...CREATE_NOTE_PATH.split("/")), { force: true });
         control.recordVaultEvent({ kind: "delete", path: CREATE_NOTE_PATH });
@@ -1995,7 +2022,7 @@ describe("installed Semantic Evidence executor", () => {
         { mode: "restore", outcome: "converged" },
       ],
       acceptedSnapshotRounds: 1,
-      rejectedSnapshotRounds: 1,
+      rejectedSnapshotRounds: 2,
       durableCommitBeforeIntentApplied: false,
     });
   });
@@ -2050,7 +2077,6 @@ describe("installed Semantic Evidence executor", () => {
             path: CREATE_NOTE_PATH,
             expectedContentVersion:
               "sha256:a36f88ca2067ed0fd114674d7d142a15a4575b837b1bdd0155daa26e7a5ea3df",
-            observedContentVersion: null,
             matched: false,
           }],
           matched: false,
@@ -2278,5 +2304,39 @@ describe("installed Semantic Evidence executor", () => {
     await expect(
       readFile(join(vaultPath, ...CREATE_NOTE_PATH.split("/")), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("installed Semantic Evidence wire transport", () => {
+  it("uses Node loopback HTTP rather than the renderer fetch boundary", async () => {
+    const { createBridgeInstance } = await import("../src/index.js");
+    const { createInstalledSemanticEvidenceWire } = await import("../src/installed-runtime/installed-semantic-evidence.js");
+    const bridge = createBridgeInstance({ port: 0, health: {
+      vault: { id: "wire-proof", name: "Generated", path: "/tmp/generated" },
+      readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" },
+      recovery: { state: "none" },
+      write: { gate: "open", state: "writable", pauseSource: null },
+      queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
+      lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" },
+      effectiveGate: null, overall: "healthy", reasonCodes: [], operatorAction: "none",
+    }, changeSets: {
+      store: { load: async () => undefined, save: async () => undefined },
+      dataSource: { readBinary: async () => null, pathKind: async () => null, isContained: async () => false },
+      vaultId: "wire-proof",
+    } });
+    await bridge.start();
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error("Renderer fetch is unavailable"); };
+    try {
+      await expect(createInstalledSemanticEvidenceWire().health({
+        endpoint: bridge.endpoint, expectedVaultId: "wire-proof",
+      })).resolves.toMatchObject({ recoveryBlocked: false, writesBlocked: false });
+      await expect(createInstalledSemanticEvidenceWire().submit({
+        endpoint: bridge.endpoint, expectedVaultId: "wire-proof",
+        input: { submissionKey: "rejected-proof", operations: [{
+          operationId: "create", kind: "create_note", path: "Proof.md", content: "# Proof\n", ifExists: "reject",
+        }] },
+      })).resolves.toEqual({ proofState: "intent_not_applied" });
+    } finally { globalThis.fetch = original; await bridge.stop(); }
   });
 });

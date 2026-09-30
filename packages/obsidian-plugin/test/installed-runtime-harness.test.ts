@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createBridgeInstance,
+  createLoopbackMcpClient,
   HealthObservationError,
   ManagedVaultBridgeRuntime,
   ObsidianProcessError,
@@ -171,6 +172,10 @@ function createFakeObsidianProcessControl(
             await mkdir(join(dataPath, ".."), { recursive: true });
             await writeFile(dataPath, JSON.stringify(settings), "utf8");
           },
+        },
+        searchDataSource: {
+          listMarkdownPaths: async () => [],
+          readBinary: async () => null,
         },
         createBridge: (options) => createBridgeInstance(options),
       });
@@ -794,6 +799,41 @@ describe("installed-runtime harness orchestration", () => {
     const serialized = await readFile(result.evidencePath, "utf8");
     expect(serialized).not.toContain(root);
     expect(serialized).not.toContain("This generated note seeds the dedicated test Vault");
+  });
+
+  it("waits for Search Snapshot readiness before invoking acceptance corpora", async () => {
+    const wire = createLoopbackMcpClient();
+    let observations = 0;
+    let corpusStarted = false;
+    const { options } = await arrangeRun("run-delayed-snapshot");
+    const publicCorpus = options.runPublicWireCorpus!;
+    const result = await runInstalledRuntimeHarness({
+      ...options,
+      client: {
+        async observeHealth(endpoint, vaultId) {
+          const observation = await wire.observeHealth(endpoint, vaultId);
+          observations += 1;
+          if (observations === 1) {
+            return {
+              ...observation,
+              health: {
+                ...observation.health,
+                readiness: { ...observation.health.readiness, searchSnapshot: "building" },
+              },
+            };
+          }
+          return observation;
+        },
+      },
+      runPublicWireCorpus: async (request) => {
+        expect(observations).toBeGreaterThanOrEqual(2);
+        corpusStarted = true;
+        return publicCorpus(request);
+      },
+    });
+    expect(corpusStarted).toBe(true);
+    expect(result.verdict).toBe("passed");
+    expect(result.evidence.observations[0]?.readiness.searchSnapshot).toBe("ready");
   });
 
   it("keeps the Bridge identity stable across the controlled restart", async () => {

@@ -32,9 +32,11 @@ const EXPECTED_VAULT_ID = "vault-change-set-wire-corpus";
 
 const liveBridges: Array<ReturnType<typeof createBridgeInstance>> = [];
 const cleanups: Array<() => Promise<void>> = [];
+const liveExecutions: Array<{ close(): Promise<void> }> = [];
 
 afterEach(async () => {
   await Promise.all(liveBridges.splice(0).map((bridge) => bridge.stop()));
+  await Promise.all(liveExecutions.splice(0).map((execution) => execution.close()));
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
@@ -220,6 +222,7 @@ async function createCorpusBridge(host: ArrangedVault): Promise<BridgeHost> {
     slotCapacity: 16 * 1024,
     host: fsHost,
   });
+  liveExecutions.push(execution);
   const readDataSource: VaultReadDataSource = {
     readBinary: host.readBinary,
     parseFrontmatter: () => null,
@@ -324,7 +327,7 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
       expect(Buffer.from(bytes ?? new Uint8Array()).toString("utf8")).toBe(content);
     }
     // The corpus-created note exists exactly once with the deterministic bytes.
-    const welcome = await host.readBinary(`${CHANGE_SET_CORPUS_DIRECTORY}/Welcome.md`);
+    const welcome = await host.readBinary(`${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md`);
     expect(welcome).not.toBeNull();
 
     // Controlled restart over the same Vault and persisted registry.

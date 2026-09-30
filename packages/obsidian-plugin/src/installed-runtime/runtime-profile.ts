@@ -3,7 +3,7 @@ import { platform, release } from "node:os";
 /**
  * Installed-runtime profiles (spec §12.1): a candidate bundle may only
  * register passing lifecycle evidence on a specifically registered
- * Windows/Obsidian runtime. The registry is closed; an unknown profile name or
+ * Windows or Linux/Obsidian runtime. The registry is closed; an unknown profile name or
  * any mismatch between the registered expectation and the probed host fails
  * closed and can never produce passing evidence.
  */
@@ -18,7 +18,7 @@ export interface RegisteredRuntimeProfile {
   readonly name: string;
   readonly os: {
     readonly platform: string;
-    /** Windows build number, e.g. "26200" for the MVP reference machine. */
+    /** Windows build number or complete Linux kernel release. */
     readonly build: string;
   };
   readonly versions: RuntimeVersionExpectation;
@@ -39,8 +39,16 @@ export const MVP_PERF_REF_1: RegisteredRuntimeProfile = Object.freeze({
   profileRequirement: "dedicated_candidate_only",
 });
 
+export const MVP_PERF_REF_LINUX_1: RegisteredRuntimeProfile = Object.freeze({
+  name: "MVP-PERF-REF-LINUX-1",
+  os: { platform: "linux", build: "7.0.0-31-generic" },
+  versions: { obsidian: "1.13.7", electron: "43.3.0", node: "24.18.1" },
+  capabilities: ["loopback_http", "posix_fixtures", "obsidian_gui", "process_control"],
+  profileRequirement: "dedicated_candidate_only",
+});
+
 const REGISTERED_PROFILES: ReadonlyMap<string, RegisteredRuntimeProfile> = new Map(
-  [MVP_PERF_REF_1].map((profile) => [profile.name, profile]),
+  [MVP_PERF_REF_1, MVP_PERF_REF_LINUX_1].map((profile) => [profile.name, profile]),
 );
 
 export function registeredRuntimeProfiles(): ReadonlyMap<string, RegisteredRuntimeProfile> {
@@ -121,11 +129,12 @@ export function preflightRuntimeProfile(
 }
 
 /**
- * Derives the Windows build number from `os.release()` (`10.0.26200` →
- * `26200`). Any other platform or an unparseable release yields no build,
- * which preflight treats as a mismatch against a registered Windows profile.
+ * Derives the Windows build number (`10.0.26200` → `26200`) or preserves
+ * the complete Linux kernel release. Unsupported or unparseable releases
+ * yield no build and therefore fail registered-profile preflight.
  */
 export function hostOsBuild(platformName = platform(), osRelease = release()): string | undefined {
+  if (platformName === "linux") return osRelease || undefined;
   if (platformName !== "win32") return undefined;
   const parts = osRelease.split(".");
   const build = parts[2];

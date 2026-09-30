@@ -651,7 +651,11 @@ export async function runInstalledRuntimeHarness(
     }
     try {
       const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
-      const observation = await client.observeHealth(endpoint, identity.vaultId);
+      let observation!: BridgeHealthObservation;
+      await waitForCondition(async () => {
+        observation = await client.observeHealth(endpoint, identity.vaultId);
+        return observation.health.readiness.searchSnapshot === "ready";
+      }, { timeoutMs: timeouts.startupMs, intervalMs: 100 });
       state.observations.push({ phase, observation });
     } catch (error) {
       failFromError(healthStage, error);
@@ -818,7 +822,10 @@ export async function runInstalledRuntimeHarness(
         timeoutMs: timeouts.startupMs,
       });
       const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
-      await client.observeHealth(endpoint, identity.vaultId);
+      await waitForCondition(async () => {
+        const observation = await client.observeHealth(endpoint, identity.vaultId);
+        return observation.health.readiness.searchSnapshot === "ready";
+      }, { timeoutMs: timeouts.startupMs, intervalMs: 100 });
       await isolatedDriver.requestSemanticEvidenceScenario({
         scenario: request.scenario,
         expectedVaultId: identity.vaultId,

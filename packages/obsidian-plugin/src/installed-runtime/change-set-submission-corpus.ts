@@ -378,8 +378,16 @@ export async function runChangeSetSubmissionCorpus(options: {
   ): Promise<unknown> => {
     const result = await options.callTool(tool, arguments_);
     if ((result.isError === true) !== expectedError) {
+      const structured = result.structuredContent as {
+        outcome?: unknown;
+        code?: unknown;
+        changeSet?: { state?: unknown; failure?: { code?: unknown } };
+      } | undefined;
+      const disposition = [structured?.outcome, structured?.code, structured?.changeSet?.state, structured?.changeSet?.failure?.code]
+        .filter((value): value is string => typeof value === "string" && /^[a-z_]+$/u.test(value))
+        .join("/");
       throw new ChangeSetSubmissionCorpusError(
-        `${stepId} returned an unexpected MCP error disposition`,
+        `${stepId} returned an unexpected MCP error disposition${disposition === "" ? "" : ` (${disposition})`}`,
       );
     }
     if (result.structuredContent === undefined) {
@@ -531,7 +539,7 @@ export async function runChangeSetSubmissionCorpus(options: {
     const validCreate = createNoteInput(
       VALID_CREATE_KEY,
       "valid-create",
-      `${CHANGE_SET_CORPUS_DIRECTORY}/Welcome.md`,
+      `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md`,
       VALID_NOTE_CONTENT,
     );
     const value = await call(
@@ -564,7 +572,7 @@ export async function runChangeSetSubmissionCorpus(options: {
       );
     }
     const createdPath = record.paths.find(
-      (path) => path.path === `${CHANGE_SET_CORPUS_DIRECTORY}/Welcome.md`,
+      (path) => path.path === `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md`,
     );
     if (
       createdPath === undefined ||
@@ -742,7 +750,7 @@ export async function runChangeSetSubmissionCorpus(options: {
           {
             operationId: "stale-edit",
             kind: "edit_body",
-            path: `${CHANGE_SET_CORPUS_DIRECTORY}/Welcome.md`,
+            path: `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md`,
             targetVersion: stale,
             edit: { kind: "replace_whole", replacement: "# replaced\n" },
           },
@@ -800,7 +808,7 @@ export async function runChangeSetSubmissionCorpus(options: {
       createNoteInput(
         "cs-proof-derived-parent",
         "derived-create",
-        `${CHANGE_SET_CORPUS_DIRECTORY}/Welcome.md/Child.md`,
+        `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md/Child.md`,
         "# Child\n",
       ),
       "path_conflict",
@@ -812,7 +820,7 @@ export async function runChangeSetSubmissionCorpus(options: {
       createNoteInput(
         "cs-proof-absence",
         "absence-create",
-        `${CHANGE_SET_CORPUS_DIRECTORY}/Welcome.md`,
+        `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md`,
         "# Again\n",
       ),
       "path_conflict",
@@ -852,7 +860,7 @@ export async function runChangeSetSubmissionCorpus(options: {
           {
             operationId: "occupied-move",
             kind: "move",
-            sourcePath: `${CHANGE_SET_CORPUS_DIRECTORY}/Welcome.md`,
+            sourcePath: `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md`,
             destinationPath: `${CHANGE_SET_CORPUS_DIRECTORY}/Editable.md`,
             targetVersion: welcomeVersion,
             linkEffect: "update_resolved_references",

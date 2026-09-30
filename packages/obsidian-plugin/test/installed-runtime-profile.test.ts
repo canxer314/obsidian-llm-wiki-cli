@@ -30,6 +30,22 @@ describe("registered runtime profiles", () => {
     expect(registeredRuntimeProfiles().get("MVP-PERF-REF-1")).toBe(MVP_PERF_REF_1);
   });
 
+  it("registers the migrated Linux reference without weakening Windows preflight", () => {
+    const profile = lookupRegisteredRuntimeProfile("MVP-PERF-REF-LINUX-1");
+    expect(profile).toMatchObject({
+      os: { platform: "linux", build: "7.0.0-31-generic" },
+      versions: { obsidian: "1.13.7", electron: "43.3.0", node: "24.18.1" },
+      capabilities: ["loopback_http", "posix_fixtures", "obsidian_gui", "process_control"],
+      profileRequirement: "dedicated_candidate_only",
+    });
+    expect(preflightRuntimeProfile(profile!, {
+      platform: "linux", osBuild: "7.0.0-31-generic",
+      obsidianVersion: "1.13.7", electronVersion: "43.3.0", nodeVersion: "24.18.1",
+      capabilities: ["loopback_http", "posix_fixtures", "obsidian_gui", "process_control"],
+    })).toEqual([]);
+    expect(hostOsBuild("linux", "7.0.0-31-generic")).toBe("7.0.0-31-generic");
+  });
+
   it("fails closed for unregistered profile names", () => {
     expect(lookupRegisteredRuntimeProfile("MVP-PERF-REF-2")).toBeNull();
     expect(lookupRegisteredRuntimeProfile("")).toBeNull();
@@ -89,6 +105,6 @@ describe("runtime profile preflight", () => {
   it("derives the Windows build only from win32 release strings", () => {
     expect(hostOsBuild("win32", "10.0.26200")).toBe("26200");
     expect(hostOsBuild("win32", "10.0")).toBeUndefined();
-    expect(hostOsBuild("linux", "6.6.87.2-microsoft-standard-WSL2")).toBeUndefined();
+    expect(hostOsBuild("darwin", "25.0.0")).toBeUndefined();
   });
 });
