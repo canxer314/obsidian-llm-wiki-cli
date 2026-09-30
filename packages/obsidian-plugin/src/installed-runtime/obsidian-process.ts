@@ -211,6 +211,17 @@ export function createLinuxObsidianProcessControl(options: {
           try { process.kill(-pid, "SIGKILL"); } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
           }
+          const groupDeadline = Date.now() + (options.stopTimeoutMs ?? 30_000);
+          while (true) {
+            try { process.kill(-pid, 0); } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+              throw error;
+            }
+            if (Date.now() >= groupDeadline) {
+              throw new ObsidianProcessError("Obsidian process group did not exit within the stop deadline", "obsidian_stop_failed");
+            }
+            await delay(10);
+          }
           stopped = true;
         },
       };

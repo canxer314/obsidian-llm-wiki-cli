@@ -82,12 +82,20 @@ export async function activateInstalledRuntimeAcceptanceDriver(
       }
       if (command.action !== "run-semantic-evidence-scenario") return;
       lastSequence = command.sequence;
-      const summary = await executeSemanticEvidenceScenario({
-        descriptor: parsed,
-        scenario: command.scenario,
-        expectedVaultId: command.expectedVaultId,
-        endpoint: new URL(command.endpoint),
-      });
+      let result: { readonly summary: unknown } | {
+        readonly failure: { readonly code: "scenario_execution_failed" };
+      };
+      try {
+        result = { summary: await executeSemanticEvidenceScenario({
+          descriptor: parsed,
+          scenario: command.scenario,
+          expectedVaultId: command.expectedVaultId,
+          endpoint: new URL(command.endpoint),
+        }) };
+      } catch {
+        // Error messages may contain Vault content, paths, or credentials.
+        result = { failure: { code: "scenario_execution_failed" } };
+      }
       const reportPath = semanticEvidenceScenarioReportPath(
         parsed.reportDirectory,
         command.scenario,
@@ -105,7 +113,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
           candidateBundleSha256: parsed.candidateBundleSha256,
           installedMainSha256: parsed.installedMainSha256,
           capabilityToken: parsed.capabilityToken,
-          summary,
+          ...result,
         })}\n`,
         { encoding: "utf8", flag: "wx" },
       );

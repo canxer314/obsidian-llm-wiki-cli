@@ -737,20 +737,27 @@ export default class VaultOperationBridgePlugin extends Plugin {
           if (file === null) {
             throw new Error("Installed edit-body fixture seeding failed");
           }
-          if (path !== TRASH_NOTE_PATH && path !== TRASH_REFERENCE_PATH) {
-            await installedSemanticEvidence!.waitForMetadataContentVersion(
-              `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
-            );
+          const deadline = Date.now() + 5_000;
+          while (!semanticVersions.matches(path, bytes)) {
+            if (Date.now() >= deadline) {
+              throw new Error("Installed fixture seed metadata did not match its bytes");
+            }
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
           }
         },
         refreshSeedFixtures: async () => {
+          const baselineVersion = runtime.currentSearchSnapshotObservation?.version ?? 0;
           runtime.scheduleSearchSnapshotRefresh();
           await runtime.refreshSearchSnapshot();
-          const snapshot = runtime.currentSearchSnapshotObservation;
-          if (snapshot === null) {
-            throw new Error("Installed hidden-trash fixture Search Snapshot is unavailable");
+          const deadline = Date.now() + 5_000;
+          while (true) {
+            const snapshot = runtime.currentSearchSnapshotObservation;
+            if (snapshot !== null && snapshot.version > baselineVersion) return snapshot;
+            if (Date.now() >= deadline) {
+              throw new Error("Installed mutation fixture Search Snapshot is unavailable");
+            }
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
           }
-          return snapshot;
         },
         cleanupPath: async (path) => {
           const file = this.app.vault.getFileByPath(path);

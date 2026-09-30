@@ -613,6 +613,16 @@ export function createInstalledSemanticEvidenceScenarioControl(
         ),
       }));
       if (observedTargets.some(({ observation }) => observation === undefined)) return;
+      if (observation.move?.matched && active.renameObserved) {
+        const destination = active.expectedRename?.path;
+        const boundDestination = observedTargets.find(({ observation: observed }) =>
+          observed!.path === destination && observed!.matched &&
+          observed!.observedContentVersion === observed!.expectedContentVersion,
+        );
+        if (boundDestination !== undefined) {
+          boundDestination.target.metadataContentVersion = boundDestination.target.expectedContentVersion;
+        }
+      }
       const matchesInstalledObservation =
         observation.matched &&
         observedTargets.every(({ target, observation: observed }) =>
@@ -997,14 +1007,14 @@ export function createInstalledSemanticEvidenceScenarioControl(
             );
           }
         }
-        if (isTrashScenario) {
-          const seedSnapshot = await options.refreshSeedFixtures!();
+        if (options.refreshSeedFixtures !== undefined) {
+          const seedSnapshot = await options.refreshSeedFixtures();
           if (
             !seedSnapshot.immutable ||
             seedSnapshot.version <= active.baselineVersion
           ) {
             throw new Error(
-              "Installed hidden-trash fixtures lack an immutable successor Search Snapshot",
+              "Installed mutation fixtures lack an immutable successor Search Snapshot",
             );
           }
           active.baselineVersion = seedSnapshot.version;

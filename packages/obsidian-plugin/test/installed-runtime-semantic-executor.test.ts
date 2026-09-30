@@ -1174,10 +1174,6 @@ describe("installed Semantic Evidence executor", () => {
             contentVersion: closureVersions[index],
           });
         }
-        control.recordMetadataCacheObservation({
-          path: MOVE_DESTINATION_PATH,
-          contentVersion: sourceVersion,
-        });
         control.recordSearchSnapshotBarrierRound({
           targets: [
             {

@@ -175,14 +175,20 @@ const installedScenarioReportIdentitySchema = z
   })
   .passthrough();
 
-const installedScenarioReportSchema = installedScenarioReportIdentitySchema
-  .extend({
+const installedScenarioReportSchema = z.union([
+  installedScenarioReportIdentitySchema.extend({
     candidateBundleSha256: z.string().regex(/^[a-f0-9]{64}$/u),
     installedMainSha256: z.string().regex(/^[a-f0-9]{64}$/u),
     capabilityToken: z.string().regex(/^[a-f0-9]{64}$/u),
     summary: semanticScenarioSchema,
-  })
-  .strict();
+  }).strict(),
+  installedScenarioReportIdentitySchema.extend({
+    candidateBundleSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    installedMainSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    capabilityToken: z.string().regex(/^[a-f0-9]{64}$/u),
+    failure: z.object({ code: z.literal("scenario_execution_failed") }).strict(),
+  }).strict(),
+]);
 
 export const AUTHORITATIVE_INSTALLED_RUNTIME_RUNNER_NAMES = [
   "prepareInstalledRuntimeAcceptanceDriver",
@@ -312,6 +318,9 @@ function createInstalledSemanticEvidenceScenarioRunner(options: {
         report.capabilityToken !== binding.capabilityToken
       ) {
         throw new Error("Installed Semantic Evidence report has the wrong candidate binding");
+      }
+      if ("failure" in report) {
+        throw new Error(`Installed Semantic Evidence scenario failed: ${report.failure.code}`);
       }
       if (report.summary.scenario !== request.scenario) {
         throw new Error("Installed Semantic Evidence report has the wrong scenario identity");

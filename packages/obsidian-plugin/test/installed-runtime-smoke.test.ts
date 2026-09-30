@@ -415,6 +415,49 @@ describe("installed-runtime authoritative command", () => {
     activation?.dispose();
   });
 
+  it("reports a failed private scenario without leaking its error content", async () => {
+    const workingDirectory = await mkdtemp(join(tmpdir(), "installed-smoke-failure-"));
+    cleanups.push(() => rm(workingDirectory, { recursive: true, force: true }));
+    const vaultPath = join(workingDirectory, "installed-runtime-vault-failure");
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "llm-wiki");
+    await mkdir(pluginDirectory, { recursive: true });
+    await writeFile(join(pluginDirectory, "main.js"), "candidate entry point");
+    const runners = createAuthoritativeInstalledRuntimeRunners({
+      runId: "failure", reportDirectory: join(workingDirectory, "reports"),
+    });
+    const created = await runners.prepareInstalledRuntimeAcceptanceDriver({
+      vaultPath, pluginId: "llm-wiki", candidateBundleSha256: "a".repeat(64),
+    });
+    let executions = 0;
+    const activation = await activateInstalledRuntimeAcceptanceDriver({
+      vaultPath, pluginId: "llm-wiki",
+      executeSemanticEvidenceScenario: async () => {
+        executions += 1;
+        throw new Error("PRIVATE NOTE CONTENT /private/path token-secret");
+      },
+    });
+    try {
+      await requestInstalledSemanticEvidenceScenario({
+        descriptorPath: created.path, descriptor: created.descriptor,
+        scenario: "create_note/clean_convergence", expectedVaultId: "vault-123",
+        endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      });
+      const reportPath = join(workingDirectory, "reports", "semantic-evidence-create_note_clean_convergence.json");
+      await expect.poll(async () => readFile(reportPath, "utf8").catch(() => "")).not.toBe("");
+      const text = await readFile(reportPath, "utf8");
+      expect(JSON.parse(text)).toMatchObject({
+        runId: "failure", vaultId: "vault-123",
+        failure: { code: "scenario_execution_failed" },
+      });
+      expect(text).not.toMatch(/PRIVATE NOTE|private\/path|token-secret/u);
+      expect(executions).toBe(1);
+      await expect(runners.semanticEvidenceScenarioRunner.run({
+        scenario: "create_note/clean_convergence", expectedVaultId: "vault-123",
+        endpoint: new URL("http://127.0.0.1:32123/mcp"), workingDirectory,
+      })).rejects.toThrow("scenario failed: scenario_execution_failed");
+    } finally { activation?.dispose(); await created.cleanup(); }
+  });
+
   it("publishes a token-bound one-shot scenario command", async () => {
     const workingDirectory = await mkdtemp(join(tmpdir(), "installed-smoke-command-"));
     cleanups.push(() => rm(workingDirectory, { recursive: true, force: true }));
