@@ -1367,7 +1367,7 @@ export async function runInstalledRuntimeHarness(
         })
       : null;
   const semanticEvidenceSearchSnapshotCorpus: SemanticEvidenceCorpusEvidence | null =
-    state.failure === null && state.semanticEvidenceSearchSnapshot !== null
+    state.semanticEvidenceSearchSnapshot !== null
       ? composeSemanticEvidenceSearchSnapshotCorpusEvidence({
           outcome: state.semanticEvidenceSearchSnapshot,
           events: semanticEvidenceSearchSnapshotEvents,

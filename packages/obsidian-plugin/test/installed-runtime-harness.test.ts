@@ -1046,7 +1046,7 @@ describe("installed-runtime harness failure projection", () => {
     };
     const { options } = await arrangeRun("run-wrong-vault", { client });
     const result = await runInstalledRuntimeHarness(options);
-    expect(result.verdict).toBe("failed");
+    expect(result.verdict, JSON.stringify({ failure: result.failure, cleanup: result.evidence.cleanup })).toBe("failed");
     expect(result.failure).toMatchObject({
       stage: "health_initial",
       code: "identity_mismatch",
@@ -1146,6 +1146,8 @@ describe("installed-runtime harness failure projection", () => {
     const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
     expect(evidence.verdict).toBe("failed");
     expect(evidence.gateIsolationCorpus).toBeNull();
+    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.verdict).toBe("passed");
+    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(1);
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 
