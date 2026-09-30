@@ -148,6 +148,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       Object.values(this.app.metadataCache.resolvedLinks).some(
         (targets) => targets[path] !== undefined,
       );
+    let semanticEvidenceMode: "apply" | "restore" = "apply";
     const semanticEvidence = createChangeSetSemanticEvidenceTracker({
       publishSuccessorSearchSnapshot: async () => {
         await runtime.publishSuccessorSearchSnapshot();
@@ -156,9 +157,29 @@ export default class VaultOperationBridgePlugin extends Plugin {
       probes: {
         cacheVisible: async (path) => {
           const file = this.app.vault.getFileByPath(path);
-          return file !== null && this.app.metadataCache.getFileCache(file) !== null;
+          const cacheVisible = file !== null && this.app.metadataCache.getFileCache(file) !== null;
+          installedSemanticEvidence?.recordTrashProbeObservation({
+            path, cacheVisible, referenced: await referenced(path),
+          });
+          if (installedSemanticEvidence?.acceptsTrashProbeObservation(path, semanticEvidenceMode) === false) {
+            return true;
+          }
+          return cacheVisible;
         },
-        referenced,
+        referenced: async (path) => {
+          const actual = await referenced(path);
+          if (semanticEvidenceMode === "restore" &&
+              installedSemanticEvidence?.acceptsTrashProbeObservation(path, semanticEvidenceMode) === false) {
+            const file = this.app.vault.getFileByPath(path);
+            installedSemanticEvidence.recordTrashProbeObservation({
+              path,
+              cacheVisible: file !== null && this.app.metadataCache.getFileCache(file) !== null,
+              referenced: false,
+            });
+            return false;
+          }
+          return actual;
+        },
       },
     });
     const changeSetExecution =
@@ -199,6 +220,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
               },
               referenced,
               beginSemanticEvidence: async (request) => {
+                semanticEvidenceMode = request.mode;
                 semanticEvidence.begin(request);
               },
               awaitSemanticEvidence: async (request) => {
@@ -682,23 +704,19 @@ export default class VaultOperationBridgePlugin extends Plugin {
         },
         induceTrashProbeDeadlineThenRestored: async () => {
           const deadline = Date.now() + 5_000;
-          while (Date.now() < deadline) {
-            installedSemanticEvidence!.recordTrashProbeObservation({
-              path: TRASH_NOTE_PATH,
-              cacheVisible: true,
-              referenced: false,
-            });
+          while (semanticEvidenceMode !== "restore") {
+            if (Date.now() > deadline + 1_000) {
+              throw new Error("Installed trash apply did not reach restoration");
+            }
             await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
           }
         },
         induceTrashRestoreEvidenceDeadline: async () => {
-          const deadline = Date.now() + 10_000;
-          while (Date.now() < deadline) {
-            installedSemanticEvidence!.recordTrashProbeObservation({
-              path: TRASH_NOTE_PATH,
-              cacheVisible: true,
-              referenced: false,
-            });
+          const deadline = Date.now() + 15_000;
+          while ((await changeSetExecution?.loadRecoveryFrame())?.phase !== "FAILED") {
+            if (Date.now() >= deadline) {
+              throw new Error("Installed trash restoration did not fail closed");
+            }
             await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
           }
         },
@@ -715,11 +733,6 @@ export default class VaultOperationBridgePlugin extends Plugin {
             "# Third-party interference\n\nForeign 你好 🚀\n",
             "utf8",
           );
-          installedSemanticEvidence!.recordTrashProbeObservation({
-            path: TRASH_NOTE_PATH,
-            cacheVisible: true,
-            referenced: false,
-          });
         },
         seedPath: async (path, bytes) => {
           if (this.app.vault.getAbstractFileByPath(path) !== null) {

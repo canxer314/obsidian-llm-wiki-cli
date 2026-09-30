@@ -174,6 +174,8 @@ describe("installed Semantic Evidence executor", () => {
           submissionKey = input.submissionKey;
           const path = join(vaultPath, ...TRASH_NOTE_PATH.split("/"));
           await rm(path, { force: true });
+          expect(control.acceptsTrashProbeObservation(TRASH_NOTE_PATH, "apply")).toBe(false);
+          expect(control.acceptsTrashProbeObservation(TRASH_NOTE_PATH, "restore")).toBe(true);
           await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 0));
           await writeFile(path, TRASH_NOTE_BYTES);
           control.recordMetadataCacheObservation({
@@ -262,6 +264,8 @@ describe("installed Semantic Evidence executor", () => {
       wire: {
         async submit({ input }) {
           submissionKey = input.submissionKey;
+          expect(control.acceptsTrashProbeObservation(TRASH_NOTE_PATH, "apply")).toBe(false);
+          expect(control.acceptsTrashProbeObservation(TRASH_NOTE_PATH, "restore")).toBe(false);
           const path = join(vaultPath, ...TRASH_NOTE_PATH.split("/"));
           await rm(path, { force: true });
           await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 0));
@@ -355,6 +359,7 @@ describe("installed Semantic Evidence executor", () => {
           submissionKey = input.submissionKey;
           const path = join(vaultPath, ...TRASH_NOTE_PATH.split("/"));
           await rm(path, { force: true });
+          expect(control.acceptsTrashProbeObservation(TRASH_NOTE_PATH, "apply")).toBe(false);
           trashed();
           await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 0));
           latestFrame = { phase: "FAILED", input: { submissionKey } };
@@ -438,10 +443,6 @@ describe("installed Semantic Evidence executor", () => {
             contentVersion: closureVersions[index],
           });
         }
-        control.recordMetadataCacheObservation({
-          path: MOVE_DESTINATION_PATH,
-          contentVersion: sourceVersion,
-        });
         const targets = [
           {
             path: MOVE_DESTINATION_PATH,
@@ -572,13 +573,32 @@ describe("installed Semantic Evidence executor", () => {
         await rm(join(vaultPath, ...path.split("/")), { force: true });
       },
       seedPath: async (path, bytes) => {
+        if (path === staleFixture.path) {
+          expect(control.acceptsMetadataCacheObservation(path)).toBe(true);
+        }
         const absolute = join(vaultPath, ...path.split("/"));
         await mkdir(join(absolute, ".."), { recursive: true });
         await writeFile(absolute, bytes);
         control.recordVaultEvent({ kind: "create", path });
         control.recordMetadataCacheObservation({ path, contentVersion: contentVersion(bytes) });
+        if (path === staleFixture.path) {
+          control.recordSearchSnapshotBarrierRound({
+            targets: [
+              { path: MOVE_DESTINATION_PATH, expectedContentVersion: sourceVersion,
+                observedContentVersion: undefined, matched: false },
+              ...MOVE_DERIVED_FIXTURES.map((fixture, index) => ({
+                path: fixture.path,
+                expectedContentVersion: closureVersions[index]!,
+                observedContentVersion: originalClosureVersions[index]!,
+                matched: false,
+              })),
+            ],
+            matched: false,
+          });
+        }
       },
       induceMoveStaleClosureObservation: async () => {
+        expect(control.acceptsMetadataCacheObservation(staleFixture.path)).toBe(false);
         expect(control.recordVaultEvent({
           kind: "rename",
           oldPath: MOVE_SOURCE_PATH,
@@ -642,6 +662,7 @@ describe("installed Semantic Evidence executor", () => {
           matched: !stale,
         });
         control.recordSearchSnapshotBarrierRound(round(true));
+        await control.waitForRejectedSnapshotRounds(1);
         control.releaseCommittedMetadataObservation(staleFixture.path);
         control.recordMetadataCacheObservation({
           path: staleFixture.path,

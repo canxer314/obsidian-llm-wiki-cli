@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { assembleReleaseBundle } from "../src/release/assemble-release-bundle.js";
 import { verifyReleaseBundle } from "../src/release/verify-release-bundle.js";
@@ -580,10 +580,15 @@ describe("installed-runtime authoritative command", () => {
       afterInventorySha256: "d".repeat(64),
       cleanupSucceeded: true,
     } as const;
+    let releaseReport!: () => void;
+    const reportReady = new Promise<void>((resolve) => { releaseReport = resolve; });
     const activation = await activateInstalledRuntimeAcceptanceDriver({
       vaultPath,
       pluginId: "llm-wiki",
-      executeSemanticEvidenceScenario: async () => summary,
+      executeSemanticEvidenceScenario: async () => {
+        await reportReady;
+        return summary;
+      },
     });
     const endpoint = new URL("http://127.0.0.1:32123/mcp");
 
@@ -592,16 +597,29 @@ describe("installed-runtime authoritative command", () => {
       expectedVaultId: "vault-123",
       endpoint,
     });
-    const observed = await runners.semanticEvidenceScenarioRunner.run({
-      scenario: "create_note/clean_convergence",
-      endpoint,
-      expectedVaultId: "vault-123",
-      workingDirectory,
-    });
-
-    expect(observed).toEqual(summary);
-    activation?.dispose();
-    await handle.cleanup();
+    const startedAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(startedAt);
+    try {
+      const observation = runners.semanticEvidenceScenarioRunner.run({
+        scenario: "create_note/clean_convergence",
+        endpoint,
+        expectedVaultId: "vault-123",
+        workingDirectory,
+      });
+      const completed = observation.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      clock.mockReturnValue(startedAt + 10_001);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      releaseReport();
+      expect(await completed).toEqual({ value: summary });
+    } finally {
+      releaseReport();
+      clock.mockRestore();
+      activation?.dispose();
+      await handle.cleanup();
+    }
   });
 
   it("rejects Semantic Evidence reports that are not bound to the installed run", async () => {

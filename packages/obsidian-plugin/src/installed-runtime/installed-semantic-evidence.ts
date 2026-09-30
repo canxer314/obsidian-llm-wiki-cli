@@ -476,6 +476,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
   recordSearchSnapshotPublication(
     observation: InstalledSemanticEvidenceSnapshotObservation,
   ): void;
+  acceptsTrashProbeObservation(path: string, mode: "apply" | "restore"): boolean;
   recordTrashProbeObservation(observation: {
     readonly path: string;
     readonly cacheVisible: boolean;
@@ -580,6 +581,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
     acceptsMetadataCacheObservation(path) {
       const target = active?.targets.get(path);
       return target === undefined ||
+        !active!.scenarioExecutionStarted ||
         target.committedMetadataReleased ||
         (active!.scenario === STALE_OBSERVATION_DEADLINE_SCENARIO &&
           target.metadataContentVersion !== null &&
@@ -603,7 +605,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
       }
     },
     recordSearchSnapshotBarrierRound(observation) {
-      if (active === undefined) return;
+      if (active === undefined || !active.scenarioExecutionStarted) return;
       const observedTargets = [...active.targets].map(([path, target]) => ({
         target,
         observation: observation.targets.find(
@@ -613,7 +615,8 @@ export function createInstalledSemanticEvidenceScenarioControl(
         ),
       }));
       if (observedTargets.some(({ observation }) => observation === undefined)) return;
-      if (observation.move?.matched && active.renameObserved) {
+      if (observation.move?.absentPath.absent &&
+          observation.move.presentPath.matched && active.renameObserved) {
         const destination = active.expectedRename?.path;
         const boundDestination = observedTargets.find(({ observation: observed }) =>
           observed!.path === destination && observed!.matched &&
@@ -646,6 +649,14 @@ export function createInstalledSemanticEvidenceScenarioControl(
       if (active === undefined || observation.version <= active.baselineVersion) return;
       active.snapshot = { ...observation };
       active.snapshotObservedAt = now();
+    },
+    acceptsTrashProbeObservation(path, mode) {
+      return active?.trashProbe?.path !== path ||
+        !active.scenarioExecutionStarted ||
+        (active.scenario !== TRASH_RESTORE_EVIDENCE_DEADLINE_SCENARIO &&
+          active.scenario !== TRASH_CONTRARY_THIRD_PARTY_SCENARIO &&
+          (active.scenario !== TRASH_PROBE_DEADLINE_RESTORED_SCENARIO ||
+            mode === "restore"));
     },
     recordTrashProbeObservation(observation) {
       if (active?.trashProbe?.path !== observation.path) return;

@@ -259,7 +259,8 @@ function scenarioReportPath(
 }
 
 async function waitForScenarioReport(reportPath: string): Promise<unknown> {
-  const deadline = Date.now() + 10_000;
+  // Seeding, both 5-second evidence deadlines, and cleanup precede the report.
+  const deadline = Date.now() + 30_000;
   while (true) {
     try {
       return JSON.parse(await readFile(reportPath, "utf8")) as unknown;
