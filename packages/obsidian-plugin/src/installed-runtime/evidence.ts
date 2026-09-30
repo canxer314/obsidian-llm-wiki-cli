@@ -796,6 +796,7 @@ export const semanticEvidenceSearchSnapshotCorpusEvidenceSchema = z
         z
           .object({
             scenario: z.string().min(1),
+            source: z.literal("installed-obsidian"),
             mutationKind: z.string().min(1),
             proofState: z
               .enum(["intent_applied", "intent_not_applied", "result_unproven"])
@@ -830,6 +831,7 @@ export const semanticEvidenceSearchSnapshotCorpusEvidenceSchema = z
               .strict(),
             durableCommitBeforeIntentApplied: z.boolean(),
             writesBlocked: z.boolean(),
+            residueSha256: sha256Schema.optional(),
             beforeInventorySha256: sha256Schema,
             afterInventorySha256: sha256Schema,
             cleanupSucceeded: z.literal(true),
@@ -889,6 +891,22 @@ export const semanticEvidenceSearchSnapshotCorpusEvidenceSchema = z
           context.addIssue({
             code: "custom",
             message: "Applied Semantic Evidence requires immutable successor snapshot and durable COMMITTED",
+          });
+        }
+      }
+      if (scenario.proofState === "result_unproven") {
+        if (
+          scenario.journalPhase !== "FAILED" ||
+          !scenario.writesBlocked ||
+          scenario.acceptedSnapshotRounds !== 0 ||
+          scenario.successorSnapshot.version !== null ||
+          scenario.successorSnapshot.immutable ||
+          scenario.successorSnapshot.publishedBeforeIntentApplied ||
+          scenario.durableCommitBeforeIntentApplied
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Unproven Semantic Evidence requires FAILED, blocked writes, and no accepted successor snapshot",
           });
         }
       }

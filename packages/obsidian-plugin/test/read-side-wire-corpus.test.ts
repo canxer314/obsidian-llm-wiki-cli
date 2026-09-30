@@ -15,6 +15,7 @@ import {
   SearchSnapshotManager,
   VaultDiscoverService,
   type BridgeHealthState,
+  type ChangeSetRegistryState,
   type SearchSnapshotDataSource,
   type SearchSnapshotSemanticEvidence,
   type VaultReadDataSource,
@@ -126,12 +127,27 @@ async function arrangeReadSideBridge(): Promise<{
     headings: () => null,
   };
 
+  let changeSetState: ChangeSetRegistryState | undefined;
   const bridge = createBridgeInstance({
     port: 0,
     health: healthState(EXPECTED_VAULT_ID, "ReadSideCorpus"),
     readDataSource,
     discoverService: new VaultDiscoverService(snapshots),
     searchSnapshotReadiness: () => snapshots.readiness,
+    changeSets: {
+      store: {
+        load: async () => structuredClone(changeSetState),
+        save: async (state) => {
+          changeSetState = structuredClone(state);
+        },
+      },
+      dataSource: {
+        readBinary: readBytes,
+        pathKind: async (path) => knownPaths.has(path) ? "file" : null,
+        isContained: async () => true,
+      },
+      vaultId: EXPECTED_VAULT_ID,
+    },
   });
   liveBridges.push(bridge);
   await bridge.start();
@@ -154,7 +170,9 @@ function scenarioManifestSha256(): string {
           "read/multi-note-logical-grouping",
           "continuation/framing-reconstructs-frozen-result",
           "continuation/single-use-replay-rejected",
+          "continuation/quota-exhaustion-preserves-live-state",
           "continuation/never-issued-token-unavailable",
+          "content-version/canonical-markdown-and-attachment-distinction",
           "discovery/inventory-after",
         ],
       }),
@@ -188,12 +206,18 @@ describe("read-side public-wire corpus over a real loopback Bridge", () => {
     expect(outcome.seedInventoryDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(outcome.beforeInventory).toEqual(outcome.afterInventory);
     expect(outcome.retainedByteCleanup).toEqual({
-      chainsIssued: 1,
-      chainsConsumed: 1,
+      chainsIssued: 9,
+      chainsConsumed: 9,
       replayAfterConsumptionRejected: 1,
       bytesReconstructed: expect.any(Number),
       residualChains: 0,
     });
+    expect(assertions).toContain(
+      "continuation/quota-exhaustion:rejects-without-evicting-live-state",
+    );
+    expect(assertions).toContain(
+      "content-version:canonical-markdown-sha256-and-attachment-distinction",
+    );
     expect(outcome.retainedByteCleanup.bytesReconstructed).toBeGreaterThan(262_144);
     expect(assertions.length).toBeGreaterThan(15);
     expect(events.filter(({ kind }) => kind === "tool").length).toBeGreaterThan(10);

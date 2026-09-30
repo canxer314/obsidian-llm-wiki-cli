@@ -8,33 +8,97 @@ import {
 
 const DIGEST = "a".repeat(64);
 
-function corpus(assertions = ["proof"]): { scenarioManifestSha256: string; assertions: readonly string[] } {
+function corpus(
+  assertions = ["proof"],
+): { scenarioManifestSha256: string; assertions: readonly string[] } {
   return { scenarioManifestSha256: DIGEST, assertions };
 }
 
+const ASSERTIONS = {
+  publicWire: [
+    "connection-boundaries",
+    "public-tool-inventory",
+    "discovery/empty-result:complete-empty-collection",
+    "discovery/combined-graph:snapshot-bound-evidence",
+    "read/ordered-byte-exact:preserves-index-and-duplicates",
+    "read/ordered-byte-exact:no-section-fallback",
+    "read/ordered-byte-exact:bom-cjk-astral-exact-utf8",
+    "read/single-note-over-limit:refused-without-content",
+    "read/multi-note-logical-grouping:deterministic-contiguous-groups",
+    "continuation/framing:pages-within-256kib",
+    "continuation/single-use-replay-rejected:continuation-unavailable",
+    "continuation/quota-exhaustion:rejects-without-evicting-live-state",
+    "six-tool-invocation",
+    "content-version:canonical-markdown-sha256-and-attachment-distinction",
+  ],
+  changeSet: [
+    "submission/valid-create:no-validate-apply-handshake",
+    "rejection/stale-direct-target:no-mutation-inventory",
+    "rejection/non-unique-replacement:exact_match_count_mismatch",
+    "rejection/occupied-destination:path_conflict",
+    "submission/replay-identical-key:no-re-execution",
+    "submission/conflicting-key-reuse:no-new-change-set",
+    "concurrency/independent-batch:applied-exactly-once",
+    "recovery/missing-response:recovered-through-original-key",
+    "preview/final-status-replay:immutable-effect-evidence",
+  ],
+  gate: [
+    "isolation/shared-key-independent-registries:distinct-change-set-ids",
+    "recovery-blocked/atomic-bind-and-history:bound-intent-not-applied",
+    "manual-pause/drain-and-fifo-retention:queued-order-retained",
+    "incompatible/registry-never-inspected:no-key-bound",
+    "gates/recovery-blocked-precedence:single-effective-gate",
+  ],
+  rewrite: [
+    "span/bom-crlf-cjk-astral:single-verified-span",
+    "reject/stale-closure:no-mutation",
+    "span/duplicate-equal-spellings:untouched-bytes-exact",
+    "observer:no-half-written-markdown",
+  ],
+  semantic: [
+    "scenario:edit_body/stale_version_callback_after_newer_bytes:closed",
+    "scenario:create_note/clean_convergence:closed",
+    "scenario:edit_body/missing_observation_deadline:closed",
+    "scenario:trash_note/delayed_probes_converge:closed",
+    "transport:six-tool-inventory-without-search-snapshot",
+  ],
+  privacy: [
+    "health:closed-observed-summary-only",
+  ],
+  lifecycle: [
+    "upgrade:drain-stop-dequeue-reject-migrate-health-recheck-maintenance-pause",
+    "install:verified-identity-attestation-sha-runtime-target-capacity-preflight",
+  ],
+  crash: [
+    "recovery:durable-prepared-restores-whole-change-set-before-writes",
+    "recovery:compare-before-restore-preserves-third-party-bytes-and-blocks-writes",
+    "retention:seven-day-records-queryable-across-crash-and-reconnect",
+  ],
+} as const;
+
 function evidence(): InstalledRuntimeEvidence {
   const publicWire = {
-    ...corpus(),
+    ...corpus(ASSERTIONS.publicWire),
     canonicalManifestSha256: DIGEST,
     tools: ["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_change_set_status"],
   };
   const changeSet = {
-    ...corpus(),
+    ...corpus(ASSERTIONS.changeSet),
     admission: { submissions: [{ executed: true, state: "intent_applied" }] },
   };
   const gate = {
-    ...corpus(),
+    ...corpus(ASSERTIONS.gate),
     residualCleanup: {
       "vault-a": { writeGate: "open" },
       "vault-b": { writeGate: "open" },
     },
   };
   const semantic = {
-    ...corpus(),
+    ...corpus(ASSERTIONS.semantic),
     coverage: { noPublicSearchSnapshotCapability: true },
   };
   const privacy = {
-    ...corpus(),
+    ...corpus(ASSERTIONS.privacy),
     authority: { baselineAcceptanceLocalOnly: true },
   };
   return {
@@ -66,11 +130,11 @@ function evidence(): InstalledRuntimeEvidence {
     publicWireCorpus: publicWire as NonNullable<InstalledRuntimeEvidence["publicWireCorpus"]>,
     changeSetCorpus: changeSet as NonNullable<InstalledRuntimeEvidence["changeSetCorpus"]>,
     gateIsolationCorpus: gate as NonNullable<InstalledRuntimeEvidence["gateIsolationCorpus"]>,
-    registeredReferenceRewriteCorpus: corpus() as NonNullable<InstalledRuntimeEvidence["registeredReferenceRewriteCorpus"]>,
+    registeredReferenceRewriteCorpus: corpus(ASSERTIONS.rewrite) as NonNullable<InstalledRuntimeEvidence["registeredReferenceRewriteCorpus"]>,
     semanticEvidenceSearchSnapshotCorpus: semantic as NonNullable<InstalledRuntimeEvidence["semanticEvidenceSearchSnapshotCorpus"]>,
     privacyRecoveryAuthorityCorpus: privacy as NonNullable<InstalledRuntimeEvidence["privacyRecoveryAuthorityCorpus"]>,
-    releaseLifecycleCorpus: { ...corpus(), cleanup: { residualPaths: [] } } as NonNullable<InstalledRuntimeEvidence["releaseLifecycleCorpus"]>,
-    crashRestorationRetainedAuthorityCorpus: { ...corpus(), cleanup: { fixtureResidue: 0 } } as NonNullable<InstalledRuntimeEvidence["crashRestorationRetainedAuthorityCorpus"]>,
+    releaseLifecycleCorpus: { ...corpus(ASSERTIONS.lifecycle), cleanup: { residualPaths: [] } } as NonNullable<InstalledRuntimeEvidence["releaseLifecycleCorpus"]>,
+    crashRestorationRetainedAuthorityCorpus: { ...corpus(ASSERTIONS.crash), cleanup: { fixtureResidue: 0 } } as NonNullable<InstalledRuntimeEvidence["crashRestorationRetainedAuthorityCorpus"]>,
     acceptanceMatrix: null,
     verdict: "passed",
     failure: null,
@@ -86,6 +150,51 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     expect(report.childManifests).toHaveLength(8);
     expect(new Set(report.childManifests.map((child) => child.corpusId))).toHaveLength(8);
     expect(validateAcceptanceMatrixReport(report)).toEqual(report);
+  });
+
+  it("binds every acceptance ID to a concrete child assertion", () => {
+    const report = createAcceptanceMatrixReport(evidence());
+    for (const scenario of report.scenarios) {
+      const child = report.childManifests.find(
+        ({ corpusId }) => corpusId === scenario.corpusId,
+      );
+      expect(child).toBeDefined();
+      expect(scenario.evidencePointer).toMatch(
+        new RegExp(`^childManifests/${scenario.corpusId}/assertions/`),
+      );
+      const index = Number(
+        scenario.evidencePointer.split("/").at(-1)?.split("#")[0],
+      );
+      expect(child!.assertions[index]).toBe(scenario.assertion);
+    }
+    expect(new Set(report.scenarios.map(({ evidencePointer }) => evidencePointer))).toHaveLength(44);
+  });
+
+  it("binds quota, observer, and Content Version criteria to their direct proofs", () => {
+    const report = createAcceptanceMatrixReport(evidence());
+    expect(report.scenarios.find(({ id }) => id === "A-13")).toMatchObject({
+      corpusId: "public-wire",
+      assertion: "continuation/quota-exhaustion:rejects-without-evicting-live-state",
+    });
+    expect(report.scenarios.find(({ id }) => id === "A-37")).toMatchObject({
+      corpusId: "registered-reference-rewrite",
+      assertion: "observer:no-half-written-markdown",
+    });
+    expect(report.scenarios.find(({ id }) => id === "A-42")).toMatchObject({
+      corpusId: "public-wire",
+      assertion: "content-version:canonical-markdown-sha256-and-attachment-distinction",
+    });
+  });
+
+  it("fails closed when a mapped scenario assertion is absent", () => {
+    const missingScenarioEvidence = evidence();
+    missingScenarioEvidence.publicWireCorpus = {
+      ...missingScenarioEvidence.publicWireCorpus!,
+      assertions: ["unrelated-proof"],
+    };
+    expect(() => createAcceptanceMatrixReport(missingScenarioEvidence)).toThrow(
+      /A-02.*assertion/u,
+    );
   });
 
   it("is content-addressed independently of child-manifest input order", () => {

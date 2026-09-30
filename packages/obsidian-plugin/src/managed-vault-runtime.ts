@@ -98,6 +98,37 @@ export interface ManagedVaultBridgeRuntimeOptions {
   createVaultId?: () => string;
   selectInitialPort?: () => number;
   successBarrierTimeoutMs?: number;
+  onSearchSnapshotRefreshScheduled?(observation: {
+    readonly reset: boolean;
+  }): void;
+  onSuccessBarrierRound?(observation: {
+    readonly targets: readonly {
+      readonly path: string;
+      readonly expectedContentVersion: string;
+      readonly observedContentVersion: string | undefined;
+      readonly matched: boolean;
+    }[];
+    readonly move?: {
+      readonly absentPath: { readonly path: string; readonly absent: boolean };
+      readonly presentPath: {
+        readonly path: string;
+        readonly expectedContentVersion: string;
+        readonly observedContentVersion: string | undefined;
+        readonly matched: boolean;
+      };
+      readonly closure: readonly {
+        readonly path: string;
+        readonly expectedContentVersion: string;
+        readonly observedContentVersion: string | undefined;
+        readonly expectedResolvedPath: string;
+        readonly observedReferenceCount: number;
+        readonly expectedReferenceCount: number;
+        readonly matched: boolean;
+      }[];
+      readonly matched: boolean;
+    };
+    readonly matched: boolean;
+  }): void;
   crashInjector?: (point: string) => void | Promise<void>;
 }
 
@@ -234,6 +265,19 @@ export class ManagedVaultBridgeRuntime {
     return this.#settings;
   }
 
+  get currentSearchSnapshotVersion(): number | null {
+    return this.#snapshots?.current()?.version ?? null;
+  }
+
+  get currentSearchSnapshotObservation(): {
+    readonly version: number;
+    readonly immutable: true;
+  } | null {
+    const snapshot = this.#snapshots?.current();
+    if (snapshot === undefined || !Object.isFrozen(snapshot)) return null;
+    return { version: snapshot.version, immutable: true };
+  }
+
   get pendingPathChange(): PathChangeEvidence | undefined {
     return this.#pendingPathChange;
   }
@@ -258,40 +302,74 @@ export class ManagedVaultBridgeRuntime {
       const notes = new Map(
         snapshots.current()?.notes.map((note) => [note.path, note]) ?? [],
       );
-      const targetsMatch = targets.every(({ path, contentVersion, requireSemanticMatch }) => {
-        const note = notes.get(path);
-        if (note?.contentVersion !== contentVersion) return false;
-        // A semantic observation for a different version is stale/late and fails.
-        // For a changed note, absence of any observation is not yet proof.
-        if (requireSemanticMatch === true) {
-          return note.semanticContentVersion === contentVersion;
-        }
-        if (
-          note.semanticContentVersion !== undefined &&
-          note.semanticContentVersion !== contentVersion
-        ) return false;
-        return true;
+      const targetObservations = targets.map(
+        ({ path, contentVersion, requireSemanticMatch }) => {
+          const note = notes.get(path);
+          return {
+            path,
+            expectedContentVersion: contentVersion,
+            observedContentVersion: note?.semanticContentVersion,
+            matched:
+              note?.contentVersion === contentVersion &&
+              (requireSemanticMatch === true
+                ? note.semanticContentVersion === contentVersion
+                : note.semanticContentVersion === undefined ||
+                  note.semanticContentVersion === contentVersion),
+          };
+        },
+      );
+      const targetsMatch = targetObservations.every(({ matched }) => matched);
+      const moveObservation = moveBarrier === undefined
+        ? undefined
+        : (() => {
+            const present = notes.get(moveBarrier.presentPath);
+            const presentMatches =
+              present?.contentVersion === moveBarrier.presentVersion;
+            const closure = moveBarrier.closure.map((expected) => {
+              const note = notes.get(expected.path);
+              const observedReferenceCount =
+                note?.resolvedLinks[expected.resolvedPath] ?? 0;
+              const matched =
+                note?.contentVersion === expected.contentVersion &&
+                observedReferenceCount === expected.referenceCount &&
+                !Object.keys(note?.resolvedLinks ?? {}).some(
+                  (path) =>
+                    (path === moveBarrier.presentPath ||
+                      path === moveBarrier.absentPath) &&
+                    path !== expected.resolvedPath,
+                );
+              return {
+                path: expected.path,
+                expectedContentVersion: expected.contentVersion,
+                observedContentVersion: note?.contentVersion,
+                expectedResolvedPath: expected.resolvedPath,
+                observedReferenceCount,
+                expectedReferenceCount: expected.referenceCount,
+                matched,
+              };
+            });
+            const absent = !notes.has(moveBarrier.absentPath);
+            return {
+              absentPath: { path: moveBarrier.absentPath, absent },
+              presentPath: {
+                path: moveBarrier.presentPath,
+                expectedContentVersion: moveBarrier.presentVersion,
+                observedContentVersion: present?.contentVersion,
+                matched: presentMatches,
+              },
+              closure,
+              matched:
+                absent && presentMatches && closure.every(({ matched }) => matched),
+            };
+          })();
+      const roundMatches = targetsMatch && (moveObservation?.matched ?? true);
+      this.#options.onSuccessBarrierRound?.({
+        targets: targetObservations,
+        ...(moveObservation === undefined ? {} : { move: moveObservation }),
+        matched: roundMatches,
       });
-      if (!targetsMatch) return false;
-      if (moveBarrier === undefined) return true;
-      // A note move additionally requires the rename to be visible and every
-      // closure note to resolve its references to the moved note (issue #38).
-      if (
-        notes.has(moveBarrier.absentPath) ||
-        notes.get(moveBarrier.presentPath)?.contentVersion !== moveBarrier.presentVersion
-      ) return false;
-      return moveBarrier.closure.every((expected) => {
-        const note = notes.get(expected.path);
-        return (
-          note?.contentVersion === expected.contentVersion &&
-          note.resolvedLinks[expected.resolvedPath] === expected.referenceCount &&
-          !Object.keys(note.resolvedLinks).some(
-            (path) =>
-              (path === moveBarrier.presentPath || path === moveBarrier.absentPath) &&
-              path !== expected.resolvedPath,
-          )
-        );
-      });
+      if (!roundMatches) return false;
+      return true;
     };
     const deadline = Date.now() + (this.#options.successBarrierTimeoutMs ?? 5_000);
     refresh.schedule();
@@ -329,7 +407,10 @@ export class ManagedVaultBridgeRuntime {
   }
 
   scheduleSearchSnapshotRefresh(): void {
-    this.#snapshotRefresh?.schedule();
+    const observation = this.#snapshotRefresh?.schedule();
+    if (observation !== undefined) {
+      this.#options.onSearchSnapshotRefreshScheduled?.(observation);
+    }
     for (const signal of this.#snapshotSignals.splice(0)) signal();
   }
 

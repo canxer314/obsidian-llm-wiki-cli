@@ -52,7 +52,9 @@ describe("read-side corpus deterministic plan", () => {
       "read/multi-note-logical-grouping",
       "continuation/framing-reconstructs-frozen-result",
       "continuation/single-use-replay-rejected",
+      "continuation/quota-exhaustion-preserves-live-state",
       "continuation/never-issued-token-unavailable",
+      "content-version/canonical-markdown-and-attachment-distinction",
       "discovery/inventory-after",
     ]);
   });

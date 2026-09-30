@@ -41,6 +41,7 @@ export interface AcceptanceMatrixChildManifest {
 export interface AcceptanceMatrixScenario {
   readonly id: AcceptanceId;
   readonly corpusId: AcceptanceCorpusId;
+  readonly assertion: string;
   readonly evidencePointer: string;
   readonly verdict: "passed";
 }
@@ -88,25 +89,54 @@ const sixPublicTools = [
 ] as const;
 
 const matrixPlan = [
-  ["A-01", "gate-isolation"], ["A-02", "public-wire"], ["A-03", "public-wire"],
-  ["A-04", "public-wire"], ["A-05", "public-wire"], ["A-06", "public-wire"],
-  ["A-07", "public-wire"], ["A-08", "public-wire"], ["A-09", "public-wire"],
-  ["A-10", "public-wire"], ["A-11", "public-wire"], ["A-12", "public-wire"],
-  ["A-13", "public-wire"], ["A-14", "change-set-submission"], ["A-15", "change-set-submission"],
-  ["A-16", "change-set-submission"], ["A-17", "change-set-submission"], ["A-18", "change-set-submission"],
-  ["A-19", "change-set-submission"], ["A-20", "change-set-submission"], ["A-21", "crash-restoration-retained-authority"],
-  ["A-22", "crash-restoration-retained-authority"], ["A-23", "gate-isolation"], ["A-24", "registered-reference-rewrite"],
-  ["A-25", "registered-reference-rewrite"], ["A-26", "registered-reference-rewrite"], ["A-27", "semantic-evidence-search-snapshot"],
-  ["A-28", "semantic-evidence-search-snapshot"], ["A-29", "semantic-evidence-search-snapshot"], ["A-30", "gate-isolation"],
-  ["A-31", "release-lifecycle"], ["A-32", "release-lifecycle"], ["A-33", "privacy-recovery-authority"],
-  ["A-34", "change-set-submission"], ["A-35", "crash-restoration-retained-authority"], ["A-36", "gate-isolation"],
-  ["A-37", "privacy-recovery-authority"], ["A-38", "semantic-evidence-search-snapshot"], ["A-39", "public-wire"],
-  ["A-40", "gate-isolation"], ["A-41", "change-set-submission"], ["A-42", "public-wire"],
-  ["A-43", "change-set-submission"], ["A-44", "semantic-evidence-search-snapshot"],
-] as const satisfies readonly (readonly [AcceptanceId, AcceptanceCorpusId])[];
+  ["A-01", "gate-isolation", "isolation/shared-key-independent-registries:distinct-change-set-ids"],
+  ["A-02", "public-wire", "connection-boundaries"],
+  ["A-03", "public-wire", "connection-boundaries"],
+  ["A-04", "public-wire", "discovery/empty-result:complete-empty-collection"],
+  ["A-05", "public-wire", "discovery/combined-graph:snapshot-bound-evidence"],
+  ["A-06", "public-wire", "read/ordered-byte-exact:preserves-index-and-duplicates"],
+  ["A-07", "public-wire", "read/ordered-byte-exact:no-section-fallback"],
+  ["A-08", "public-wire", "read/ordered-byte-exact:bom-cjk-astral-exact-utf8"],
+  ["A-09", "public-wire", "read/single-note-over-limit:refused-without-content"],
+  ["A-10", "public-wire", "read/multi-note-logical-grouping:deterministic-contiguous-groups"],
+  ["A-11", "public-wire", "continuation/framing:pages-within-256kib"],
+  ["A-12", "public-wire", "continuation/single-use-replay-rejected:continuation-unavailable"],
+  ["A-13", "public-wire", "continuation/quota-exhaustion:rejects-without-evicting-live-state"],
+  ["A-14", "change-set-submission", "submission/valid-create:no-validate-apply-handshake"],
+  ["A-15", "change-set-submission", "rejection/stale-direct-target:no-mutation-inventory"],
+  ["A-16", "change-set-submission", "rejection/non-unique-replacement:exact_match_count_mismatch"],
+  ["A-17", "change-set-submission", "rejection/occupied-destination:path_conflict"],
+  ["A-18", "change-set-submission", "submission/replay-identical-key:no-re-execution"],
+  ["A-19", "change-set-submission", "submission/conflicting-key-reuse:no-new-change-set"],
+  ["A-20", "change-set-submission", "concurrency/independent-batch:applied-exactly-once"],
+  ["A-21", "crash-restoration-retained-authority", "recovery:durable-prepared-restores-whole-change-set-before-writes"],
+  ["A-22", "crash-restoration-retained-authority", "recovery:compare-before-restore-preserves-third-party-bytes-and-blocks-writes"],
+  ["A-23", "gate-isolation", "recovery-blocked/atomic-bind-and-history:bound-intent-not-applied"],
+  ["A-24", "registered-reference-rewrite", "span/bom-crlf-cjk-astral:single-verified-span"],
+  ["A-25", "registered-reference-rewrite", "reject/stale-closure:no-mutation"],
+  ["A-26", "registered-reference-rewrite", "span/duplicate-equal-spellings:untouched-bytes-exact"],
+  ["A-27", "semantic-evidence-search-snapshot", "scenario:edit_body/stale_version_callback_after_newer_bytes:closed"],
+  ["A-28", "semantic-evidence-search-snapshot", "scenario:create_note/clean_convergence:closed"],
+  ["A-29", "semantic-evidence-search-snapshot", "scenario:edit_body/missing_observation_deadline:closed"],
+  ["A-30", "gate-isolation", "manual-pause/drain-and-fifo-retention:queued-order-retained"],
+  ["A-31", "release-lifecycle", "upgrade:drain-stop-dequeue-reject-migrate-health-recheck-maintenance-pause"],
+  ["A-32", "release-lifecycle", "install:verified-identity-attestation-sha-runtime-target-capacity-preflight"],
+  ["A-33", "privacy-recovery-authority", "health:closed-observed-summary-only"],
+  ["A-34", "change-set-submission", "recovery/missing-response:recovered-through-original-key"],
+  ["A-35", "crash-restoration-retained-authority", "retention:seven-day-records-queryable-across-crash-and-reconnect"],
+  ["A-36", "gate-isolation", "incompatible/registry-never-inspected:no-key-bound"],
+  ["A-37", "registered-reference-rewrite", "observer:no-half-written-markdown"],
+  ["A-38", "semantic-evidence-search-snapshot", "scenario:trash_note/delayed_probes_converge:closed"],
+  ["A-39", "public-wire", "six-tool-invocation"],
+  ["A-40", "gate-isolation", "gates/recovery-blocked-precedence:single-effective-gate"],
+  ["A-41", "change-set-submission", "submission/valid-create:no-validate-apply-handshake"],
+  ["A-42", "public-wire", "content-version:canonical-markdown-sha256-and-attachment-distinction"],
+  ["A-43", "change-set-submission", "preview/final-status-replay:immutable-effect-evidence"],
+  ["A-44", "semantic-evidence-search-snapshot", "transport:six-tool-inventory-without-search-snapshot"],
+] as const satisfies readonly (readonly [AcceptanceId, AcceptanceCorpusId, string])[];
 
 export const ACCEPTANCE_MATRIX_PLAN = Object.freeze(
-  matrixPlan.map(([id, corpusId]) => ({ id, corpusId })),
+  matrixPlan.map(([id, corpusId, assertion]) => ({ id, corpusId, assertion })),
 );
 
 function canonicalJson(value: unknown): string {
@@ -214,12 +244,23 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence)
     throw new AcceptanceMatrixError("Acceptance matrix requires inventories and cleanup evidence");
   }
   const children = childManifests(evidence);
-  const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId }) => ({
-    id,
-    corpusId,
-    evidencePointer: `childManifests/${corpusId}`,
-    verdict: "passed" as const,
-  }));
+  const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
+    const childIndex = children.findIndex((child) => child.corpusId === corpusId);
+    const child = children[childIndex];
+    const assertionIndex = child?.assertions.indexOf(assertion) ?? -1;
+    if (childIndex < 0 || assertionIndex < 0) {
+      throw new AcceptanceMatrixError(
+        `${id} requires missing ${corpusId} assertion: ${assertion}`,
+      );
+    }
+    return {
+      id,
+      corpusId,
+      assertion,
+      evidencePointer: `childManifests/${corpusId}/assertions/${assertionIndex}#${id}`,
+      verdict: "passed" as const,
+    };
+  });
   const draft = canonicalReport({
     schemaVersion: ACCEPTANCE_MATRIX_SCHEMA_VERSION,
     matrixId: ACCEPTANCE_MATRIX_ID,
@@ -243,7 +284,7 @@ const acceptanceMatrixReportSchema = z.object({
   profile: z.object({ name: z.string().min(1), versions: z.object({ obsidian: z.string().min(1), electron: z.string().min(1), node: z.string().min(1) }).strict() }).strict(),
   candidate: z.object({ pluginId: z.string().min(1), pluginVersion: z.string().min(1), bundleSha256: z.string().regex(sha256Pattern) }).strict(),
   childManifests: z.array(z.object({ corpusId: z.enum(ACCEPTANCE_CORPUS_IDS), manifestSha256: z.string().regex(sha256Pattern), evidenceSha256: z.string().regex(sha256Pattern), assertions: z.array(z.string().min(1)).min(1), verdict: z.literal("passed") }).strict()).length(ACCEPTANCE_CORPUS_IDS.length),
-  scenarios: z.array(z.object({ id: z.string(), corpusId: z.enum(ACCEPTANCE_CORPUS_IDS), evidencePointer: z.string().min(1), verdict: z.literal("passed") }).strict()).length(ACCEPTANCE_IDS.length),
+  scenarios: z.array(z.object({ id: z.string(), corpusId: z.enum(ACCEPTANCE_CORPUS_IDS), assertion: z.string().min(1), evidencePointer: z.string().min(1), verdict: z.literal("passed") }).strict()).length(ACCEPTANCE_IDS.length),
   beforeInventorySha256: z.string().regex(sha256Pattern),
   afterInventorySha256: z.string().regex(sha256Pattern),
   cleanup: z.object({ residualPaths: z.array(z.string()).length(0) }).strict(),
@@ -255,6 +296,19 @@ const acceptanceMatrixReportSchema = z.object({
   const actualIds = report.scenarios.map((scenario) => scenario.id).sort();
   if (actualIds.join("\0") !== [...ACCEPTANCE_IDS].sort().join("\0")) context.addIssue({ code: "custom", message: "Acceptance matrix must contain every A-01 through A-44 exactly once" });
   if (new Set(report.childManifests.map((child) => child.corpusId)).size !== ACCEPTANCE_CORPUS_IDS.length) context.addIssue({ code: "custom", message: "Acceptance matrix must contain every child manifest exactly once" });
+  for (const scenario of report.scenarios) {
+    const child = report.childManifests.find(({ corpusId }) => corpusId === scenario.corpusId);
+    const assertionIndex = child?.assertions.indexOf(scenario.assertion) ?? -1;
+    if (
+      assertionIndex < 0 ||
+      scenario.evidencePointer !== `childManifests/${scenario.corpusId}/assertions/${assertionIndex}#${scenario.id}`
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: `${scenario.id} evidence pointer does not resolve to its child assertion`,
+      });
+    }
+  }
   const { canonicalManifestSha256: _canonicalManifestSha256, ...draft } = report;
   if (sha256(canonicalReport(draft)) !== report.canonicalManifestSha256) context.addIssue({ code: "custom", message: "Acceptance matrix canonical manifest hash does not match content" });
 });

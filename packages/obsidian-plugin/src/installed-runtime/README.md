@@ -27,10 +27,16 @@ these seams instead of building parallel harnesses.
 5. **Restart** — repeats the observation across a controlled Obsidian stop
    (verified: the loopback listener is gone) and restart, requiring the
    persisted Vault ID and port to remain stable.
-6. **Cleanup + evidence** — snapshots before/after inventories (paths, sizes,
-   SHA-256 only), removes the generated roots, reports residual paths, and
-   atomically writes one closed evidence record. Existing evidence files are
-   never overwritten.
+6. **Private acceptance driver** — before Obsidian starts, arms a descriptor
+   bound to the run ID, generated Vault, plugin ID, candidate/installed bundle
+   digests, report root, and a random capability token. The installed plugin
+   watches this one-shot command channel separately from `/mcp`, executes the
+   requested private acceptance scenario inside Obsidian, and atomically writes
+   a bound digest-only report. It adds no MCP route or seventh public tool.
+7. **Cleanup + evidence** — snapshots before/after inventories (paths, sizes,
+   SHA-256 only), removes the private descriptor and generated roots, reports
+   residual paths, and atomically writes one closed evidence record. Existing
+   evidence files are never overwritten.
 
 ## Verdicts — never a skipped green
 
@@ -111,11 +117,9 @@ results independent; and the protocol-incompatible client gets
 submission/status without inspecting the Change Set registry and without
 binding a new Submission Key. Only digest-only per-Vault seed inventories, the
 wire-observed gate-history digest, per-key proof digests, and a residual-cleanup
-report reach the evidence envelope. The corpus runs through a caller-supplied
-seam in the harness (a self-contained two-Vault scenario over the same
-process-control, candidate-install, and real loopback MCP seams); when the seam
-is absent the harness records no gate-isolation block and the passing verdict
-accepts its absence.
+report reach the evidence envelope. Authoritative composition requires this
+runner and fails closed while its installed adapter is unavailable; it never
+omits the evidence block or treats absence as a passing skip.
 
 The privacy-and-recovery-authority corpus (issue #180) extends that same envelope
 with a closed `privacy-recovery-authority-proof` identity. It retains no raw Vault
@@ -165,8 +169,9 @@ proves verified preflight and staged per-Managed-Vault atomic replacement,
 same-version state preservation, drained fail-closed migration and maintenance
 pause until explicit Primary Operator resume, all lifecycle-state projections,
 guarded uninstall, backup-backed interactive purge, recovery refusal, and
-residual cleanup. The harness records this block only when its caller wires the
-scenario runner; any failed scenario fails the containing verification run.
+residual cleanup. The authoritative smoke command must resolve and verify the
+previous release and wire this runner itself; absence or unavailable lifecycle
+evidence makes the run `invalid`.
 
 ## Purge scenario (issue #201)
 
@@ -191,7 +196,10 @@ On a registered Windows machine matching `MVP-PERF-REF-1`:
 cd packages/obsidian-plugin
 npm run smoke:installed-runtime -- \
   --registration registration.json --workdir <scratch-dir> \
-  [--candidate <bundle-dir>] [--evidence <path>]
+  [--candidate <bundle-dir>] [--evidence <path>] \
+  --previous-release <verified-older-bundle-dir> \
+  --previous-release-tag <immutable-vX.Y.Z> \
+  [--previous-release-attestation <claims-path>]
 ```
 
 The registration file pins the observed installation facts:
@@ -205,7 +213,20 @@ The registration file pins the observed installation facts:
 }
 ```
 
+The previous release is supplied as an existing bundle plus an immutable tag.
+It goes through `verifyReleaseBundle()` with checksum, identity, attestation, and
+runtime checks, and its version must be strictly lower than the candidate.
+The command never rebuilds or relabels candidate bytes as a previous release.
+Attestation defaults to `<bundle-dir>.attestation.json`; the optional flag selects
+an existing claims file. Valid release inputs do not bypass the still-unavailable
+installed lifecycle Operator adapter.
+
 Without `--candidate`, the smoke run assembles the locally built plugin
-(`manifest.json` + `dist/main.js`) as the candidate. The process exits zero
-only when the evidence verdict is `passed`; every other outcome writes
-failed/invalid evidence and exits non-zero.
+(`manifest.json` + `dist/main.js`) as the candidate. The command never loads a
+caller-supplied runner module. Its registered-reference runner and private
+Semantic Evidence driver are built in; gate/isolation, privacy/recovery, and
+release-lifecycle adapters currently fail closed until their installed
+composition is available. The process exits zero only when the complete
+A-01…A-44 evidence matrix is `passed`; missing private-driver binding, scenario
+reports, installed executors, or lifecycle inputs write failed/invalid evidence
+and exit non-zero.

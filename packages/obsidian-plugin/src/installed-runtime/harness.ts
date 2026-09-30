@@ -126,6 +126,7 @@ export type HarnessStage =
   | "preflight"
   | "provision"
   | "candidate"
+  | "acceptance_driver"
   | "inventory_before"
   | "obsidian_start"
   | "bridge_readiness"
@@ -158,6 +159,8 @@ export type HarnessFailureCode =
   | "candidate_checksum_manifest_missing"
   | "candidate_manifest_invalid"
   | "candidate_unverified_bundle"
+  | "acceptance_driver_unavailable"
+  | "acceptance_driver_cleanup_failed"
   | "release_tag_malformed"
   | "release_tag_mismatch"
   | "release_plugin_id_mismatch"
@@ -235,6 +238,23 @@ export interface InstalledRuntimeHarnessOptions {
   readonly evidencePath: string;
   readonly probe: RuntimeEnvironmentProbe;
   readonly processControl: ObsidianProcessControl;
+  /**
+   * Arms private installed-only acceptance control after verified installation
+   * and removes it before final inventory/cleanup. It is never part of MCP.
+   */
+  readonly prepareInstalledRuntimeAcceptanceDriver?: (options: {
+    readonly vaultPath: string;
+    readonly pluginId: string;
+    readonly candidateBundleSha256: string;
+    readonly configDirectoryName: string;
+  }) => Promise<{
+    requestSemanticEvidenceScenario(options: {
+      readonly scenario: import("./semantic-evidence-corpus.js").SemanticEvidenceSearchSnapshotScenarioName;
+      readonly expectedVaultId: string;
+      readonly endpoint: URL;
+    }): Promise<void>;
+    cleanup(): Promise<void>;
+  }>;
   readonly client?: LoopbackMcpClient;
   readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
   /**
@@ -250,9 +270,8 @@ export interface InstalledRuntimeHarnessOptions {
    * scenario that provisions and starts two dedicated generated test Vaults
    * through the harness seams and drives the six-tool gate algebra over real
    * loopback Bridges. It runs between the initial window and the controlled
-   * restart; when absent, the stage is skipped and no gate-isolation evidence
-   * is recorded (the closed envelope accepts its absence). When present, a
-   * non-passing corpus outcome projects failed evidence.
+   * restart. A missing runner or non-passing corpus outcome fails closed; it
+   * never produces passing evidence by skipping the stage.
    */
   readonly runGateIsolationCorpus?: (options: {
     readonly runId: string;
@@ -271,10 +290,8 @@ export interface InstalledRuntimeHarnessOptions {
    * Registered-reference rewrite corpus seam (issue #178): a self-contained
    * move-rewrite scenario that proves destination-only registered-reference
    * rewrites preserve exact bytes over the real transport. It runs between the
-   * initial window and the controlled restart; when absent, the stage is
-   * skipped and no registered-reference evidence is recorded (the closed
-   * envelope accepts its absence). When present, a non-passing corpus outcome
-   * projects failed evidence.
+   * initial window and the controlled restart. A missing runner or non-passing
+   * corpus outcome fails closed; required evidence cannot be omitted.
    */
   readonly runRegisteredReferenceRewriteCorpus?: (options: {
     readonly runId: string;
@@ -302,7 +319,16 @@ export interface InstalledRuntimeHarnessOptions {
     readonly workingDirectory: string;
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
+    readonly scenarioRunner: import("./semantic-evidence-corpus.js").InstalledSemanticEvidenceScenarioRunner;
   }) => Promise<SemanticEvidenceSearchSnapshotOutcome>;
+  readonly semanticEvidenceScenarioRunner?: import("./semantic-evidence-corpus.js").InstalledSemanticEvidenceScenarioRunner;
+  /**
+   * Runs each Semantic Evidence scenario in its own generated Vault/runtime.
+   * This is required for authoritative composition because a result_unproven
+   * scenario intentionally leaves its runtime recovery-blocked; the harness
+   * must never use trusted local recovery authority to continue the program.
+   */
+  readonly isolateSemanticEvidenceScenarios?: boolean;
   readonly runPrivacyRecoveryAuthorityCorpus?: (options: {
     readonly runId: string;
     readonly workingDirectory: string;
@@ -370,6 +396,8 @@ const INVALID_VERDICT_CODES: ReadonlySet<HarnessFailureCode> = new Set([
   "candidate_checksum_manifest_missing",
   "candidate_manifest_invalid",
   "candidate_unverified_bundle",
+  "acceptance_driver_unavailable",
+  "acceptance_driver_cleanup_failed",
   "release_tag_malformed",
   "release_tag_mismatch",
   "release_plugin_id_mismatch",
@@ -525,6 +553,15 @@ export async function runInstalledRuntimeHarness(
   };
 
   let handle: ObsidianProcessHandle | null = null;
+  let acceptanceDriver: {
+    requestSemanticEvidenceScenario(options: {
+      readonly scenario: import("./semantic-evidence-corpus.js").SemanticEvidenceSearchSnapshotScenarioName;
+      readonly expectedVaultId: string;
+      readonly endpoint: URL;
+    }): Promise<void>;
+    cleanup(): Promise<void>;
+  } | null = null;
+  let isolatedSemanticEvidenceSequence = 0;
   let firstIdentity = null as PersistedBridgeIdentity | null;
 
   class BridgeStillReachableError extends Error {}
@@ -708,6 +745,113 @@ export async function runInstalledRuntimeHarness(
   }
 
   if (state.failure === null) {
+    const prepare = options.prepareInstalledRuntimeAcceptanceDriver;
+    if (prepare === undefined) {
+      fail(
+        "acceptance_driver",
+        "acceptance_driver_unavailable",
+        "Installed acceptance driver is required for authoritative acceptance",
+      );
+    } else {
+      try {
+        acceptanceDriver = await prepare({
+          vaultPath: state.vault!.vaultPath,
+          pluginId: state.candidate!.identity.pluginId,
+          candidateBundleSha256: state.candidate!.identity.bundleSha256,
+          configDirectoryName,
+        });
+      } catch (error) {
+        fail(
+          "acceptance_driver",
+          "acceptance_driver_unavailable",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
+  }
+
+  const runIsolatedSemanticEvidenceScenario = async (
+    request: Parameters<NonNullable<InstalledRuntimeHarnessOptions["semanticEvidenceScenarioRunner"]>["run"]>[0],
+  ): Promise<Awaited<ReturnType<NonNullable<InstalledRuntimeHarnessOptions["semanticEvidenceScenarioRunner"]>["run"]>>> => {
+    const candidate = state.candidate;
+    const prepare = options.prepareInstalledRuntimeAcceptanceDriver;
+    const runner = options.semanticEvidenceScenarioRunner;
+    if (candidate === null || prepare === undefined || runner === undefined) {
+      throw new SemanticEvidenceSearchSnapshotCorpusError(
+        "Isolated installed Semantic Evidence runtime is unavailable",
+      );
+    }
+    isolatedSemanticEvidenceSequence += 1;
+    const isolated = await provisionTestVault({
+      workingDirectory: options.workingDirectory,
+      runId: `${runId}-semantic-${isolatedSemanticEvidenceSequence}`,
+      configDirectoryName,
+    });
+    let isolatedHandle: ObsidianProcessHandle | null = null;
+    let isolatedDriver: Awaited<ReturnType<typeof prepare>> | null = null;
+    try {
+      await installCandidateBundle(candidate, isolated.vaultPath, configDirectoryName);
+      isolatedDriver = await prepare({
+        vaultPath: isolated.vaultPath,
+        pluginId: candidate.identity.pluginId,
+        candidateBundleSha256: candidate.identity.bundleSha256,
+        configDirectoryName,
+      });
+      isolatedHandle = await options.processControl.start({
+        vaultPath: isolated.vaultPath,
+        profileDirectory: isolated.profileDirectory,
+      });
+      let observedIdentity: PersistedBridgeIdentity | null = null;
+      await waitForCondition(async () => {
+        observedIdentity = await readPersistedBridgeIdentity(
+          isolated.vaultPath,
+          candidate.identity.pluginId,
+          configDirectoryName,
+        );
+        return observedIdentity !== null;
+      }, { timeoutMs: timeouts.startupMs });
+      if (observedIdentity === null) {
+        throw new BridgeIdentityError("Isolated Semantic Evidence Bridge identity unavailable");
+      }
+      const identity: PersistedBridgeIdentity = observedIdentity;
+      await waitForCondition(() => isLoopbackPortOpen(identity.port), {
+        timeoutMs: timeouts.startupMs,
+      });
+      const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
+      await client.observeHealth(endpoint, identity.vaultId);
+      await isolatedDriver.requestSemanticEvidenceScenario({
+        scenario: request.scenario,
+        expectedVaultId: identity.vaultId,
+        endpoint,
+      });
+      return await runner.run({
+        ...request,
+        endpoint,
+        expectedVaultId: identity.vaultId,
+      });
+    } finally {
+      let cleanupFailure: unknown;
+      try {
+        await isolatedHandle?.stop();
+      } catch (error) {
+        cleanupFailure ??= error;
+      }
+      try {
+        await isolatedDriver?.cleanup();
+      } catch (error) {
+        cleanupFailure ??= error;
+      }
+      const cleanup = await cleanupVault(isolated);
+      if (cleanup.residualPaths.length > 0) {
+        throw new SemanticEvidenceSearchSnapshotCorpusError(
+          "Isolated Semantic Evidence runtime left generated content",
+        );
+      }
+      if (cleanupFailure !== undefined) throw cleanupFailure;
+    }
+  };
+
+  if (state.failure === null) {
     try {
       state.beforeInventory = await takeInventory(state.vault!.vaultPath);
     } catch (error) {
@@ -880,6 +1024,14 @@ export async function runInstalledRuntimeHarness(
           state.failure === null &&
           state.changeSetAdmission !== null
         ) {
+          if (options.semanticEvidenceScenarioRunner === undefined) {
+            fail(
+              "semantic_evidence_search_snapshot_corpus",
+              "semantic_evidence_search_snapshot_corpus_failed",
+              "Installed Semantic Evidence scenario runner is required for authoritative acceptance",
+            );
+            return;
+          }
           try {
             state.semanticEvidenceSearchSnapshot =
               await (options.runSemanticEvidenceSearchSnapshotCorpus ??
@@ -889,6 +1041,24 @@ export async function runInstalledRuntimeHarness(
                 workingDirectory: options.workingDirectory,
                 record: recordSemanticEvidenceSearchSnapshotEvent,
                 assertion: recordSemanticEvidenceSearchSnapshotAssertion,
+                scenarioRunner: {
+                  run: async (request) => {
+                    if (options.isolateSemanticEvidenceScenarios === true) {
+                      return runIsolatedSemanticEvidenceScenario(request);
+                    }
+                    if (acceptanceDriver === null) {
+                      throw new SemanticEvidenceSearchSnapshotCorpusError(
+                        "Installed acceptance driver is unavailable",
+                      );
+                    }
+                    await acceptanceDriver.requestSemanticEvidenceScenario({
+                      scenario: request.scenario,
+                      expectedVaultId: request.expectedVaultId,
+                      endpoint: request.endpoint,
+                    });
+                    return options.semanticEvidenceScenarioRunner!.run(request);
+                  },
+                },
               });
           } catch (error) {
             fail(
@@ -1110,6 +1280,19 @@ export async function runInstalledRuntimeHarness(
     } catch {
       // The primary failure is already recorded; cleanup still proceeds.
     }
+  }
+
+  if (acceptanceDriver !== null) {
+    try {
+      await acceptanceDriver.cleanup();
+    } catch (error) {
+      fail(
+        "acceptance_driver",
+        "acceptance_driver_cleanup_failed",
+        sanitize(error instanceof Error ? error.message : String(error)),
+      );
+    }
+    acceptanceDriver = null;
   }
 
   if (state.vault !== null) {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -24,6 +25,20 @@ import {
   performContentInclusiveDiagnosticCopy,
 } from "./content-inclusive-diagnostic-copy.js";
 import { BRIDGE_STATE_DIRECTORY_NAME } from "./change-set.js";
+import {
+  EXACT_COMMITTED_BYTES,
+  EXACT_ORIGINAL_BYTES,
+  FRONTMATTER_COMMITTED_BYTES,
+  FRONTMATTER_ORIGINAL_BYTES,
+} from "./corpus/edit-fixtures.js";
+import {
+  TRASH_NOTE_PATH,
+} from "./corpus/managed-trash-corpus.js";
+import {
+  MOVE_DERIVED_FIXTURES,
+  MOVE_DESTINATION_PATH,
+  MOVE_SOURCE_PATH,
+} from "./corpus/move-note-corpus.js";
 import { createFileSystemChangeSetDataSource } from "./file-system-change-set-data-source.js";
 import {
   createChangeSetSemanticEvidenceTracker,
@@ -42,6 +57,15 @@ import {
   isRegisteredSubpathResult,
 } from "./obsidian-search-data-source.js";
 import { RecoveryJournalIncompatibleError } from "./recovery-journal.js";
+import {
+  activateInstalledRuntimeAcceptanceDriver,
+  type InstalledRuntimeAcceptanceActivation,
+} from "./installed-runtime/acceptance-driver.js";
+import {
+  TRASH_REFERENCE_PATH,
+  createInstalledSemanticEvidenceScenarioControl,
+  createInstalledSemanticEvidenceWire,
+} from "./installed-runtime/installed-semantic-evidence.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -99,6 +123,7 @@ class ContentInclusiveDiagnosticsConfirmationModal extends Modal {
 
 export default class VaultOperationBridgePlugin extends Plugin {
   #runtime: ManagedVaultBridgeRuntime | undefined;
+  #installedRuntimeAcceptance: InstalledRuntimeAcceptanceActivation | undefined;
 
   override async onload(): Promise<void> {
     const adapter = this.app.vault.adapter;
@@ -112,6 +137,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStatePath = join(stateDirectory, "bridge-state.json");
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
+    const activateAcceptanceDriver = adapter instanceof FileSystemAdapter;
+    let installedSemanticEvidence:
+      | ReturnType<typeof createInstalledSemanticEvidenceScenarioControl>
+      | undefined;
     let runtime!: ManagedVaultBridgeRuntime;
     let incompatibleState = false;
     const semanticVersions = new ObsidianSemanticVersionTracker();
@@ -122,6 +151,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const semanticEvidence = createChangeSetSemanticEvidenceTracker({
       publishSuccessorSearchSnapshot: async () => {
         await runtime.publishSuccessorSearchSnapshot();
+        observeSnapshotPublication();
       },
       probes: {
         cacheVisible: async (path) => {
@@ -135,6 +165,9 @@ export default class VaultOperationBridgePlugin extends Plugin {
       adapter instanceof FileSystemAdapter
         ? await createFileSystemChangeSetExecutionAdapter({
             journalPath: recoveryJournalPath,
+            onRecoveryFramePersisted: (frame) => {
+              installedSemanticEvidence?.recordRecoveryFrame(frame);
+            },
             host: await createNodeFileSystemChangeSetHost({
               basePath,
               stateDirectory,
@@ -174,6 +207,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
               semanticEvidencePublishesSnapshot: true,
               publishSearchSnapshot: async (targets, moveBarrier) => {
                 await runtime.publishSuccessorSearchSnapshot(targets, moveBarrier);
+                observeSnapshotPublication();
               },
             }),
           }).catch((error: unknown) => {
@@ -220,7 +254,9 @@ export default class VaultOperationBridgePlugin extends Plugin {
           const file = this.app.vault.getFileByPath(path);
           return file === null ? null : this.app.metadataCache.getFileCache(file);
         },
-        semanticContentMatches: (path, bytes) => semanticVersions.matches(path, bytes),
+        semanticContentMatches: (path, bytes) =>
+          installedSemanticEvidence?.acceptsMetadataCacheObservation(path) !== false &&
+          semanticVersions.matches(path, bytes),
         resolveLink: (target, sourcePath) =>
           this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path ?? null,
         candidatePaths: (target, sourcePath) => {
@@ -294,9 +330,21 @@ export default class VaultOperationBridgePlugin extends Plugin {
       changeSetDataSource,
       changeSetExecution,
       incompatibleState,
+      onSearchSnapshotRefreshScheduled: (observation) => {
+        installedSemanticEvidence?.recordSearchSnapshotRefresh(observation);
+      },
+      onSuccessBarrierRound: (observation) => {
+        installedSemanticEvidence?.recordSearchSnapshotBarrierRound(observation);
+      },
       createBridge: createBridgeInstance,
     });
     this.#runtime = runtime;
+    const observeSnapshotPublication = (): void => {
+      const snapshot = runtime.currentSearchSnapshotObservation;
+      if (snapshot !== null) {
+        installedSemanticEvidence?.recordSearchSnapshotPublication(snapshot);
+      }
+    };
     const scheduleRefresh = (): void => {
       runtime.scheduleSearchSnapshotRefresh();
     };
@@ -306,7 +354,17 @@ export default class VaultOperationBridgePlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", (file, data) => {
         if (file instanceof TFile && file.extension === "md") {
-          semanticVersions.observe(file.path, data);
+          const observation = {
+            path: file.path,
+            contentVersion:
+              `sha256:${createHash("sha256").update(data, "utf8").digest("hex")}`,
+          };
+          if (
+            installedSemanticEvidence?.acceptMetadataCacheObservation(observation) !== false
+          ) {
+            semanticVersions.observe(file.path, data);
+            installedSemanticEvidence?.recordMetadataCacheObservation(observation);
+          }
           scheduleRefresh();
         }
       }),
@@ -315,12 +373,26 @@ export default class VaultOperationBridgePlugin extends Plugin {
     this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
     this.registerEvent(this.app.vault.on("create", (file) => {
       semanticEvidence.record({ kind: "create", path: file.path });
+      installedSemanticEvidence?.recordVaultEvent({
+        kind: "create",
+        path: file.path,
+      });
       scheduleMarkdownRefresh(file);
     }));
-    this.registerEvent(this.app.vault.on("modify", scheduleMarkdownRefresh));
+    this.registerEvent(this.app.vault.on("modify", (file) => {
+      installedSemanticEvidence?.recordVaultEvent({
+        kind: "create",
+        path: file.path,
+      });
+      scheduleMarkdownRefresh(file);
+    }));
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         semanticEvidence.record({ kind: "delete", path: file.path });
+        installedSemanticEvidence?.recordVaultEvent({
+          kind: "delete",
+          path: file.path,
+        });
         if (file instanceof TFile && file.extension === "md") {
           semanticVersions.remove(file.path);
           scheduleRefresh();
@@ -329,9 +401,14 @@ export default class VaultOperationBridgePlugin extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        semanticEvidence.record({ kind: "rename", oldPath, path: file.path });
+        const renameEvent = { kind: "rename" as const, oldPath, path: file.path };
+        if (installedSemanticEvidence?.recordVaultEvent(renameEvent) !== false) {
+          semanticEvidence.record(renameEvent);
+        }
         if (file instanceof TFile && file.extension === "md") {
-          semanticVersions.rename(oldPath, file.path);
+          if (installedSemanticEvidence?.acceptsMetadataCacheObservation(file.path) !== false) {
+            semanticVersions.rename(oldPath, file.path);
+          }
           scheduleRefresh();
         } else if (oldPath.endsWith(".md")) {
           scheduleRefresh();
@@ -343,6 +420,346 @@ export default class VaultOperationBridgePlugin extends Plugin {
       await runtime.load();
     } catch (error) {
       if (!(error instanceof VaultPathChangeRequiredError)) throw error;
+    }
+    if (
+      activateAcceptanceDriver &&
+      changeSetExecution !== undefined &&
+      runtime.bridge !== undefined
+    ) {
+      const installedSemanticEvidenceWire = createInstalledSemanticEvidenceWire();
+      installedSemanticEvidence = createInstalledSemanticEvidenceScenarioControl({
+        vaultPath: basePath,
+        wire: installedSemanticEvidenceWire,
+        observeHealth: (observation) =>
+          installedSemanticEvidenceWire.health(observation),
+        currentSnapshot: () => runtime.currentSearchSnapshotObservation,
+        loadRecoveryFrame: () => changeSetExecution.loadRecoveryFrame(),
+        induceQuietWindowResets: async () => {
+          const file = this.app.vault.getFileByPath("Corpus/Notes/Alpha.md");
+          if (file === null) {
+            throw new Error("Installed quiet-window reset fixture is unavailable");
+          }
+          const bytes = await this.app.vault.readBinary(file);
+          await this.app.vault.modifyBinary(file, bytes);
+          await this.app.vault.modifyBinary(file, bytes);
+        },
+        induceStaleObservationsThenFresh: async () => {
+          const file = this.app.vault.getFileByPath("Corpus/Notes/Alpha.md");
+          if (file === null) {
+            throw new Error("Installed stale-observation fixture is unavailable");
+          }
+          await this.app.vault.modify(file, "# Foreign cache observation 你好 🚀\n");
+          await installedSemanticEvidence!.waitForMetadataContentVersion(
+            "sha256:7a30e1be393dd458c316cf18312475986671d3d89199480f7f00143d5a385b4f",
+          );
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+          semanticVersions.remove(file.path);
+          installedSemanticEvidence!.markMetadataContentVersionMissing();
+          runtime.scheduleSearchSnapshotRefresh();
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(2);
+          await this.app.vault.modify(file, "# Corpus Alpha\n\n你好，世界 🚀\ncreated by the crash corpus\n");
+          await installedSemanticEvidence!.waitForMetadataContentVersion(
+            "sha256:a36f88ca2067ed0fd114674d7d142a15a4575b837b1bdd0155daa26e7a5ea3df",
+          );
+        },
+        induceStaleObservationDeadline: async () => {
+          const file = this.app.vault.getFileByPath("Corpus/Notes/Alpha.md");
+          if (file === null) {
+            throw new Error("Installed stale-observation fixture is unavailable");
+          }
+          await this.app.vault.modify(file, "# Foreign cache observation 你好 🚀\n");
+          await installedSemanticEvidence!.waitForMetadataContentVersion(
+            "sha256:7a30e1be393dd458c316cf18312475986671d3d89199480f7f00143d5a385b4f",
+          );
+          await writeFile(
+            join(basePath, ...file.path.split("/")),
+            "# Corpus Alpha\n\n你好，世界 🚀\ncreated by the crash corpus\n",
+            "utf8",
+          );
+          runtime.scheduleSearchSnapshotRefresh();
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+        },
+        induceEditBodyStaleThenFresh: async ({
+          committedContentVersion,
+          waitForCommittedMetadataContentVersion,
+        }) => {
+          const file = this.app.vault.getFileByPath("Corpus/Edits/Exact.md");
+          if (file === null) {
+            throw new Error("Installed edit-body fixture is unavailable");
+          }
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+          installedSemanticEvidence!.releaseCommittedMetadataObservation();
+          const committed = await this.app.vault.read(file);
+          const observedCommittedContentVersion =
+            `sha256:${createHash("sha256").update(committed, "utf8").digest("hex")}`;
+          if (observedCommittedContentVersion !== committedContentVersion) {
+            throw new Error("Installed edit-body bytes do not match the committed Content Version");
+          }
+          await this.app.vault.modify(file, committed);
+          await waitForCommittedMetadataContentVersion();
+        },
+        induceEditBodyMissingObservationDeadline: async () => {
+          const file = this.app.vault.getFileByPath("Corpus/Edits/Exact.md");
+          if (file === null) {
+            throw new Error("Installed edit-body fixture is unavailable");
+          }
+          semanticVersions.remove(file.path);
+          installedSemanticEvidence!.markMetadataContentVersionMissing();
+          runtime.scheduleSearchSnapshotRefresh();
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+        },
+        induceEditBodyQuietWindowContradiction: async () => {
+          const file = this.app.vault.getFileByPath("Corpus/Edits/Exact.md");
+          if (file === null) {
+            throw new Error("Installed edit-body fixture is unavailable");
+          }
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+          installedSemanticEvidence!.releaseCommittedMetadataObservation();
+          await this.app.vault.modify(file, await this.app.vault.read(file));
+          await installedSemanticEvidence!.waitForMetadataContentVersion(
+            "sha256:657e5a4753c47b54776381b314eaeb783775235960c1b79c1970311652683cb2",
+          );
+        },
+        induceEditBodyContraryThirdParty: async () => {
+          const file = this.app.vault.getFileByPath("Corpus/Edits/Exact.md");
+          if (file === null) {
+            throw new Error("Installed edit-body fixture is unavailable");
+          }
+          semanticVersions.remove(file.path);
+          installedSemanticEvidence!.markMetadataContentVersionMissing();
+          runtime.scheduleSearchSnapshotRefresh();
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+          await writeFile(
+            join(basePath, ...file.path.split("/")),
+            "# Third-party interference\n\nForeign 你好 🚀\n",
+            "utf8",
+          );
+        },
+        induceMultiFrontmatterReorderedCallbacks: async () => {
+          const cPath = "Corpus/Multi/NoteC.md";
+          const dPath = "Corpus/Multi/NoteD.md";
+          const c = this.app.vault.getFileByPath(cPath);
+          const d = this.app.vault.getFileByPath(dPath);
+          if (c === null || d === null) {
+            throw new Error("Installed multi-frontmatter fixtures are unavailable");
+          }
+          const cOriginal = Uint8Array.from(EXACT_ORIGINAL_BYTES);
+          const dOriginal = Uint8Array.from(FRONTMATTER_ORIGINAL_BYTES);
+          const cCommitted = Uint8Array.from(EXACT_COMMITTED_BYTES);
+          const dCommitted = Uint8Array.from(FRONTMATTER_COMMITTED_BYTES);
+          const cCommittedVersion =
+            `sha256:${createHash("sha256").update(cCommitted).digest("hex")}`;
+          const dCommittedVersion =
+            `sha256:${createHash("sha256").update(dCommitted).digest("hex")}`;
+
+          installedSemanticEvidence!.releaseCommittedMetadataObservation(cPath);
+          await this.app.vault.modifyBinary(c, cCommitted.buffer);
+          await installedSemanticEvidence!.waitForMetadataContentVersion(cCommittedVersion);
+          await this.app.vault.modifyBinary(d, dOriginal.buffer);
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+
+          await this.app.vault.modifyBinary(c, cOriginal.buffer);
+          installedSemanticEvidence!.releaseCommittedMetadataObservation(dPath);
+          await this.app.vault.modifyBinary(d, dCommitted.buffer);
+          await installedSemanticEvidence!.waitForMetadataContentVersion(dCommittedVersion);
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(2);
+
+          await this.app.vault.modifyBinary(c, cCommitted.buffer);
+          await installedSemanticEvidence!.waitForMetadataContentVersion(cCommittedVersion);
+        },
+        induceMoveDelayedRename: async () => {
+          await installedSemanticEvidence!.waitForRenameObservation();
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+          const renameEvent = installedSemanticEvidence!.releaseDelayedRenameEvent();
+          if (renameEvent !== null) semanticEvidence.record(renameEvent);
+          runtime.scheduleSearchSnapshotRefresh();
+        },
+        induceMoveStalePreBeginCallback: async () => {
+          installedSemanticEvidence!.recordVaultEvent({
+            kind: "rename",
+            oldPath: MOVE_SOURCE_PATH,
+            path: MOVE_DESTINATION_PATH,
+          });
+        },
+        induceMoveStaleAndWrongPathCallbacks: async () => {
+          installedSemanticEvidence!.recordVaultEvent({
+            kind: "rename",
+            oldPath: "Corpus/Move/Wrong.md",
+            path: MOVE_DESTINATION_PATH,
+          });
+          await installedSemanticEvidence!.waitForRenameObservation();
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+          const renameEvent = installedSemanticEvidence!.releaseDelayedRenameEvent();
+          if (renameEvent !== null) semanticEvidence.record(renameEvent);
+          runtime.scheduleSearchSnapshotRefresh();
+        },
+        induceMoveGraphMismatchThenConverged: async () => {
+          await installedSemanticEvidence!.waitForRenameObservation();
+          const renameEvent = installedSemanticEvidence!.releaseDelayedRenameEvent();
+          if (renameEvent !== null) semanticEvidence.record(renameEvent);
+          const closure = MOVE_DERIVED_FIXTURES[0];
+          if (closure === undefined) {
+            throw new Error("Installed move closure fixture is unavailable");
+          }
+          const resolvedLinks = this.app.metadataCache.resolvedLinks[closure.path];
+          if (resolvedLinks === undefined) {
+            throw new Error("Installed move closure graph is unavailable");
+          }
+          const convergedGraph = { ...resolvedLinks };
+          for (const path of Object.keys(resolvedLinks)) delete resolvedLinks[path];
+          resolvedLinks[MOVE_SOURCE_PATH] = 1;
+          try {
+            runtime.scheduleSearchSnapshotRefresh();
+            await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+          } finally {
+            for (const path of Object.keys(resolvedLinks)) delete resolvedLinks[path];
+            Object.assign(resolvedLinks, convergedGraph);
+            runtime.scheduleSearchSnapshotRefresh();
+          }
+        },
+        induceMoveStaleClosureObservation: async () => {
+          await installedSemanticEvidence!.waitForRenameObservation();
+          const renameEvent = installedSemanticEvidence!.releaseDelayedRenameEvent();
+          if (renameEvent !== null) semanticEvidence.record(renameEvent);
+          const closure = MOVE_DERIVED_FIXTURES[1];
+          if (closure === undefined) {
+            throw new Error("Installed move closure fixture is unavailable");
+          }
+          const file = this.app.vault.getFileByPath(closure.path);
+          if (file === null) {
+            throw new Error("Installed move closure note is unavailable");
+          }
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+          installedSemanticEvidence!.releaseCommittedMetadataObservation(closure.path);
+          await this.app.vault.modifyBinary(
+            file,
+            Uint8Array.from(closure.committedBytes).buffer,
+          );
+        },
+        induceMoveGraphMismatchDeadline: async () => {
+          await installedSemanticEvidence!.waitForRenameObservation();
+          const renameEvent = installedSemanticEvidence!.releaseDelayedRenameEvent();
+          if (renameEvent !== null) semanticEvidence.record(renameEvent);
+          const closure = MOVE_DERIVED_FIXTURES[0];
+          if (closure === undefined) {
+            throw new Error("Installed move closure fixture is unavailable");
+          }
+          const resolvedLinks = this.app.metadataCache.resolvedLinks[closure.path];
+          if (resolvedLinks === undefined) {
+            throw new Error("Installed move closure graph is unavailable");
+          }
+          for (const path of Object.keys(resolvedLinks)) delete resolvedLinks[path];
+          resolvedLinks[MOVE_SOURCE_PATH] = 1;
+          runtime.scheduleSearchSnapshotRefresh();
+          await installedSemanticEvidence!.waitForRejectedSnapshotRounds(1);
+        },
+        induceTrashDelayedProbes: async () => {
+          const observe = (): void => {
+            const file = this.app.vault.getFileByPath(TRASH_NOTE_PATH);
+            installedSemanticEvidence!.recordTrashProbeObservation({
+              path: TRASH_NOTE_PATH,
+              cacheVisible:
+                file !== null && this.app.metadataCache.getFileCache(file) !== null,
+              referenced: Object.values(this.app.metadataCache.resolvedLinks).some(
+                (targets) => targets[TRASH_NOTE_PATH] !== undefined,
+              ),
+            });
+          };
+          observe();
+          while (true) {
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+            observe();
+            const file = this.app.vault.getFileByPath(TRASH_NOTE_PATH);
+            const cacheVisible =
+              file !== null && this.app.metadataCache.getFileCache(file) !== null;
+            const isReferenced = Object.values(
+              this.app.metadataCache.resolvedLinks,
+            ).some((targets) => targets[TRASH_NOTE_PATH] !== undefined);
+            if (!cacheVisible && !isReferenced) break;
+          }
+        },
+        induceTrashProbeDeadlineThenRestored: async () => {
+          const deadline = Date.now() + 5_000;
+          while (Date.now() < deadline) {
+            installedSemanticEvidence!.recordTrashProbeObservation({
+              path: TRASH_NOTE_PATH,
+              cacheVisible: true,
+              referenced: false,
+            });
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+          }
+        },
+        induceTrashRestoreEvidenceDeadline: async () => {
+          const deadline = Date.now() + 10_000;
+          while (Date.now() < deadline) {
+            installedSemanticEvidence!.recordTrashProbeObservation({
+              path: TRASH_NOTE_PATH,
+              cacheVisible: true,
+              referenced: false,
+            });
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+          }
+        },
+        induceTrashContraryThirdParty: async () => {
+          const deadline = Date.now() + 5_000;
+          while (this.app.vault.getFileByPath(TRASH_NOTE_PATH) !== null) {
+            if (Date.now() >= deadline) {
+              throw new Error("Installed trash mutation did not hide its public path");
+            }
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+          }
+          await writeFile(
+            join(basePath, ...TRASH_NOTE_PATH.split("/")),
+            "# Third-party interference\n\nForeign 你好 🚀\n",
+            "utf8",
+          );
+          installedSemanticEvidence!.recordTrashProbeObservation({
+            path: TRASH_NOTE_PATH,
+            cacheVisible: true,
+            referenced: false,
+          });
+        },
+        seedPath: async (path, bytes) => {
+          if (this.app.vault.getAbstractFileByPath(path) !== null) {
+            throw new Error("Installed edit-body fixture path is not clean");
+          }
+          await this.app.vault.createBinary(path, Uint8Array.from(bytes).buffer);
+          const file = this.app.vault.getFileByPath(path);
+          if (file === null) {
+            throw new Error("Installed edit-body fixture seeding failed");
+          }
+          if (path !== TRASH_NOTE_PATH && path !== TRASH_REFERENCE_PATH) {
+            await installedSemanticEvidence!.waitForMetadataContentVersion(
+              `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+            );
+          }
+        },
+        refreshSeedFixtures: async () => {
+          runtime.scheduleSearchSnapshotRefresh();
+          await runtime.refreshSearchSnapshot();
+          const snapshot = runtime.currentSearchSnapshotObservation;
+          if (snapshot === null) {
+            throw new Error("Installed hidden-trash fixture Search Snapshot is unavailable");
+          }
+          return snapshot;
+        },
+        cleanupPath: async (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          if (file !== null) await this.app.vault.delete(file, true);
+        },
+        refreshAfterCleanup: async () => {
+          runtime.scheduleSearchSnapshotRefresh();
+          await runtime.refreshSearchSnapshot();
+        },
+      });
+      this.#installedRuntimeAcceptance =
+        (await activateInstalledRuntimeAcceptanceDriver({
+          vaultPath: basePath,
+          pluginId: this.manifest.id,
+          configDirectoryName: this.app.vault.configDir,
+          executeSemanticEvidenceScenario: (request) =>
+            installedSemanticEvidence!.execute(request),
+        })) ?? undefined;
     }
     const addPathClassificationCommand = (
       classification: PathChangeClassification,
@@ -473,7 +890,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
 
   override async onunload(): Promise<void> {
     const runtime = this.#runtime;
+    const installedRuntimeAcceptance = this.#installedRuntimeAcceptance;
     this.#runtime = undefined;
+    this.#installedRuntimeAcceptance = undefined;
+    installedRuntimeAcceptance?.dispose();
     await runtime?.unload();
   }
 }

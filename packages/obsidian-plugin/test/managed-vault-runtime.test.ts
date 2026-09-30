@@ -1323,6 +1323,170 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await runtime.unload();
   });
 
+  it("reports whether a host schedule resets a pending quiet window", async () => {
+    const scheduled = vi.fn();
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => [],
+        readBinary: async () => null,
+      },
+      onSearchSnapshotRefreshScheduled: scheduled,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    runtime.scheduleSearchSnapshotRefresh();
+    runtime.scheduleSearchSnapshotRefresh();
+
+    expect(scheduled.mock.calls).toEqual([
+      [{ reset: false }],
+      [{ reset: true }],
+    ]);
+    await runtime.unload();
+  });
+
+  it("reports move-path and graph mismatches in the complete barrier round", async () => {
+    const observations = vi.fn();
+    const version = (content: string) =>
+      `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    const raw = new Map([
+      ["Corpus/Move/Beta.md", "# Beta\n"],
+      ["Corpus/Move/Derived.md", "[[Alpha]]\n"],
+    ]);
+    const semanticVersions = new Map([
+      ["Corpus/Move/Beta.md", version("# Beta\n")],
+      ["Corpus/Move/Derived.md", version("[[Alpha]]\n")],
+    ]);
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => [...raw.keys()],
+        readBinary: async (path) => new TextEncoder().encode(raw.get(path)!),
+        semanticEvidence: async (path) => ({
+          contentVersion: semanticVersions.get(path),
+          frontmatter: null,
+          tags: [],
+          headings: [],
+          references: [],
+          resolvedLinks: path.endsWith("Derived.md")
+            ? { "Corpus/Move/Alpha.md": 1 }
+            : {},
+          unresolvedLinks: {},
+        }),
+      },
+      onSuccessBarrierRound: observations,
+      successBarrierTimeoutMs: 1,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    await expect(
+      runtime.publishSuccessorSearchSnapshot([], {
+        absentPath: "Corpus/Move/Alpha.md",
+        presentPath: "Corpus/Move/Beta.md",
+        presentVersion: version("# Beta\n"),
+        closure: [{
+          path: "Corpus/Move/Derived.md",
+          contentVersion: version("[[Beta]]\n"),
+          resolvedPath: "Corpus/Move/Beta.md",
+          referenceCount: 1,
+        }],
+      }),
+    ).rejects.toThrow(/evidence|Content Version/u);
+
+    expect(observations).toHaveBeenCalledWith(expect.objectContaining({
+      matched: false,
+      move: {
+        absentPath: { path: "Corpus/Move/Alpha.md", absent: true },
+        presentPath: {
+          path: "Corpus/Move/Beta.md",
+          expectedContentVersion: version("# Beta\n"),
+          observedContentVersion: version("# Beta\n"),
+          matched: true,
+        },
+        closure: [{
+          path: "Corpus/Move/Derived.md",
+          expectedContentVersion: version("[[Beta]]\n"),
+          observedContentVersion: version("[[Alpha]]\n"),
+          expectedResolvedPath: "Corpus/Move/Beta.md",
+          observedReferenceCount: 0,
+          expectedReferenceCount: 1,
+          matched: false,
+        }],
+        matched: false,
+      },
+    }));
+    await runtime.unload();
+  });
+
+  it("reports one complete multi-target barrier round", async () => {
+    const version = (content: string) =>
+      `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    const semanticVersions = new Map([
+      ["a.md", version("new-a")],
+      ["b.md", version("old-b")],
+    ]);
+    const observations = vi.fn();
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["a.md", "b.md"],
+        readBinary: async (path) =>
+          new TextEncoder().encode(path === "a.md" ? "new-a" : "new-b"),
+        semanticEvidence: async (path) => ({
+          contentVersion: semanticVersions.get(path),
+          frontmatter: null,
+          tags: [],
+          headings: [],
+          references: [],
+          resolvedLinks: {},
+          unresolvedLinks: {},
+        }),
+      },
+      successBarrierTimeoutMs: 1,
+      onSuccessBarrierRound: observations,
+      createBridge: ({ port }) => fakeBridge(port),
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 27123,
+    });
+    await runtime.load();
+
+    await expect(
+      runtime.publishSuccessorSearchSnapshot([
+        { path: "a.md", contentVersion: version("new-a"), requireSemanticMatch: true },
+        { path: "b.md", contentVersion: version("new-b"), requireSemanticMatch: true },
+      ]),
+    ).rejects.toThrow(/evidence|Content Version/u);
+
+    expect(observations).toHaveBeenCalledOnce();
+    expect(observations).toHaveBeenCalledWith({
+      targets: [
+        {
+          path: "a.md",
+          expectedContentVersion: version("new-a"),
+          observedContentVersion: version("new-a"),
+          matched: true,
+        },
+        {
+          path: "b.md",
+          expectedContentVersion: version("new-b"),
+          observedContentVersion: version("old-b"),
+          matched: false,
+        },
+      ],
+      matched: false,
+    });
+    await runtime.unload();
+  });
+
   it("rejects a successor snapshot until target semantic evidence matches final bytes", async () => {
     const version = (content: string) =>
       `sha256:${createHash("sha256").update(content).digest("hex")}`;

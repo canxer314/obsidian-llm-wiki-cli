@@ -209,6 +209,10 @@ async function arrangeRun(
     evidencePath: join(root, "evidence", `${runId}.json`),
     probe: probe(),
     processControl: createFakeObsidianProcessControl(),
+    prepareInstalledRuntimeAcceptanceDriver: async () => ({
+      requestSemanticEvidenceScenario: async () => undefined,
+      cleanup: async () => undefined,
+    }),
     profiles: PROFILES,
     runId,
     runPublicWireCorpus: async ({ fixtureSeed }) => ({
@@ -253,7 +257,21 @@ async function arrangeRun(
             detailSha256: "b".repeat(64),
           },
         ],
-        assertions: ["stubbed-public-wire-corpus"],
+        assertions: [
+          "connection-boundaries",
+          "discovery/empty-result:complete-empty-collection",
+          "discovery/combined-graph:snapshot-bound-evidence",
+          "read/ordered-byte-exact:preserves-index-and-duplicates",
+          "read/ordered-byte-exact:no-section-fallback",
+          "read/ordered-byte-exact:bom-cjk-astral-exact-utf8",
+          "read/single-note-over-limit:refused-without-content",
+          "read/multi-note-logical-grouping:deterministic-contiguous-groups",
+          "continuation/framing:pages-within-256kib",
+          "continuation/single-use-replay-rejected:continuation-unavailable",
+          "continuation/quota-exhaustion:rejects-without-evicting-live-state",
+          "six-tool-invocation",
+          "content-version:canonical-markdown-sha256-and-attachment-distinction",
+        ],
         verdict: "passed",
       },
     }),
@@ -271,7 +289,18 @@ async function arrangeRun(
         currentExecutionId: null,
         writeGate: "open",
       });
-      assertion("stubbed-change-set-corpus");
+      const assertions = [
+        "submission/valid-create:no-validate-apply-handshake",
+        "rejection/stale-direct-target:no-mutation-inventory",
+        "rejection/non-unique-replacement:exact_match_count_mismatch",
+        "rejection/occupied-destination:path_conflict",
+        "submission/replay-identical-key:no-re-execution",
+        "submission/conflicting-key-reuse:no-new-change-set",
+        "concurrency/independent-batch:applied-exactly-once",
+        "recovery/missing-response:recovered-through-original-key",
+        "preview/final-status-replay:immutable-effect-evidence",
+      ];
+      for (const name of assertions) assertion(name);
       return {
         scenarioManifestSha256: "d".repeat(64),
         seedInventoryDigest: digest,
@@ -334,7 +363,7 @@ async function arrangeRun(
           currentExecutionId: null,
           writeGate: "open",
         },
-        assertions: ["stubbed-change-set-corpus"],
+        assertions,
       };
     },
     runChangeSetReplay: async ({ record, assertion }) => {
@@ -357,39 +386,65 @@ async function arrangeRun(
         corpusId: "per-vault-gate-isolation-proof",
       });
       record("cleanup", "stubbed-gate-isolation-residual", {});
-      assertion("stubbed-gate-isolation-corpus");
+      for (const name of [
+        "isolation/shared-key-independent-registries:distinct-change-set-ids",
+        "recovery-blocked/atomic-bind-and-history:bound-intent-not-applied",
+        "manual-pause/drain-and-fifo-retention:queued-order-retained",
+        "incompatible/registry-never-inspected:no-key-bound",
+        "gates/recovery-blocked-precedence:single-effective-gate",
+      ]) assertion(name);
       return stubGateIsolationOutcome();
     },
     runRegisteredReferenceRewriteCorpus: async ({ record, assertion }) => {
       record("assertion", "stubbed-registered-reference-rewrite", {});
       record("cleanup", "stubbed-registered-reference-rewrite-cleanup", {});
-      assertion("stubbed-registered-reference-rewrite-corpus");
+      for (const name of [
+        "span/bom-crlf-cjk-astral:single-verified-span",
+        "reject/stale-closure:no-mutation",
+        "span/duplicate-equal-spellings:untouched-bytes-exact",
+        "observer:no-half-written-markdown",
+      ]) assertion(name);
       return stubRegisteredReferenceRewriteOutcome();
     },
     runPrivacyRecoveryAuthorityCorpus: async ({ record, assertion }) => {
       record("transport", "stubbed-privacy-recovery-connected", {});
       record("assertion", "stubbed-privacy-recovery", {});
       record("cleanup", "stubbed-privacy-recovery-cleanup", {});
-      assertion("stubbed-privacy-recovery-corpus");
+      assertion("health:closed-observed-summary-only");
       return stubPrivacyRecoveryAuthorityOutcome();
     },
     runCrashRestorationRetainedAuthorityCorpus: async ({ record, assertion }) => {
       record("assertion", "stubbed-crash-restoration-retained-authority", {});
       record("cleanup", "stubbed-crash-restoration-retained-authority-cleanup", {});
-      assertion("stubbed-crash-restoration-retained-authority-corpus");
+      for (const name of [
+        "recovery:durable-prepared-restores-whole-change-set-before-writes",
+        "recovery:compare-before-restore-preserves-third-party-bytes-and-blocks-writes",
+        "retention:seven-day-records-queryable-across-crash-and-reconnect",
+      ]) assertion(name);
       return stubCrashRestorationRetainedAuthorityOutcome();
     },
     runReleaseLifecycleCorpus: async ({ record, assertion }) => {
       record("assertion", "stubbed-release-lifecycle", {});
       record("cleanup", "stubbed-release-lifecycle-cleanup", {});
-      assertion("stubbed-release-lifecycle-corpus");
+      assertion("upgrade:drain-stop-dequeue-reject-migrate-health-recheck-maintenance-pause");
+      assertion("install:verified-identity-attestation-sha-runtime-target-capacity-preflight");
       return stubReleaseLifecycleOutcome();
     },
+    semanticEvidenceScenarioRunner: {
+      run: async () => stubSemanticEvidenceSearchSnapshotOutcome().scenarios[0]!,
+    },
+    isolateSemanticEvidenceScenarios: false,
     runSemanticEvidenceSearchSnapshotCorpus: async ({ record, assertion }) => {
       record("transport", "stubbed-semantic-evidence-connected", {});
       record("assertion", "stubbed-semantic-evidence", {});
       record("cleanup", "stubbed-semantic-evidence-cleanup", {});
-      assertion("stubbed-semantic-evidence-corpus");
+      for (const name of [
+        "scenario:edit_body/stale_version_callback_after_newer_bytes:closed",
+        "scenario:create_note/clean_convergence:closed",
+        "scenario:edit_body/missing_observation_deadline:closed",
+        "scenario:trash_note/delayed_probes_converge:closed",
+        "transport:six-tool-inventory-without-search-snapshot",
+      ]) assertion(name);
       return stubSemanticEvidenceSearchSnapshotOutcome();
     },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 2_000 },
@@ -412,6 +467,7 @@ function stubSemanticEvidenceSearchSnapshotOutcome(): SemanticEvidenceSearchSnap
     scenarios: [
       {
         scenario: "create_note/clean_convergence",
+        source: "installed-obsidian",
         mutationKind: "create_note",
         proofState: "intent_applied",
         statusProofState: "intent_applied",
@@ -662,6 +718,21 @@ function stubGateIsolationOutcome(): GateIsolationOutcome {
 }
 
 describe("installed-runtime harness orchestration", () => {
+  it("fails closed before launch when the private acceptance driver is not wired", async () => {
+    const { options } = await arrangeRun("run-missing-acceptance-driver", {
+      prepareInstalledRuntimeAcceptanceDriver: undefined,
+    });
+
+    const result = await runInstalledRuntimeHarness(options);
+
+    expect(result.verdict).toBe("invalid");
+    expect(result.failure).toMatchObject({
+      stage: "acceptance_driver",
+      code: "acceptance_driver_unavailable",
+    });
+    expect(result.evidence.observations).toEqual([]);
+  });
+
   it("fails closed when a required acceptance corpus runner is not wired", async () => {
     const { options } = await arrangeRun("run-missing-acceptance-runner", {
       runRegisteredReferenceRewriteCorpus: undefined,
@@ -820,6 +891,51 @@ describe("installed-runtime harness failure projection", () => {
     await expect(stat(join(root, `${TEST_VAULT_DIRECTORY_PREFIX}run-unattested-candidate`))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("runs every installed Semantic Evidence scenario in a fresh generated runtime", async () => {
+    const processControl = createFakeObsidianProcessControl();
+    let scenarioRuns = 0;
+    const { options } = await arrangeRun("run-semantic-isolation", {
+      processControl,
+      isolateSemanticEvidenceScenarios: true,
+      semanticEvidenceScenarioRunner: {
+        run: async () => {
+          scenarioRuns += 1;
+          return stubSemanticEvidenceSearchSnapshotOutcome().scenarios[0]!;
+        },
+      },
+      runSemanticEvidenceSearchSnapshotCorpus: async ({ scenarioRunner, record, assertion }) => {
+        for (const name of [
+          "scenario:edit_body/stale_version_callback_after_newer_bytes:closed",
+          "scenario:create_note/clean_convergence:closed",
+          "scenario:edit_body/missing_observation_deadline:closed",
+          "scenario:trash_note/delayed_probes_converge:closed",
+          "transport:six-tool-inventory-without-search-snapshot",
+        ]) assertion(name);
+        record("assertion", "isolated-semantic-evidence", {});
+        const first = await scenarioRunner.run({
+          scenario: "edit_body/contrary_third_party_blocks_writes",
+          endpoint: new URL("http://127.0.0.1:1/mcp"),
+          expectedVaultId: "primary-vault",
+          workingDirectory: ".",
+        });
+        const second = await scenarioRunner.run({
+          scenario: "edit_multi_frontmatter/reordered_cache_callbacks",
+          endpoint: new URL("http://127.0.0.1:1/mcp"),
+          expectedVaultId: "primary-vault",
+          workingDirectory: ".",
+        });
+        const outcome = stubSemanticEvidenceSearchSnapshotOutcome();
+        return { ...outcome, scenarios: [first, second] };
+      },
+    });
+
+    const result = await runInstalledRuntimeHarness(options);
+
+    expect(result.failure).toBeNull();
+    expect(scenarioRuns).toBe(2);
+    expect(processControl.starts).toBe(4);
   });
 
   it("records failed evidence when Obsidian cannot start", async () => {

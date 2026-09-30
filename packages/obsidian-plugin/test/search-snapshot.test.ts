@@ -180,6 +180,24 @@ describe("Search Snapshot publication", () => {
     await expect(unknownProfile.rebuild()).rejects.toThrow("reference profile");
   });
 
+  it("reports only a pending quiet window as reset", async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new SearchSnapshotManager(source(new Map()));
+      const coordinator = new SearchSnapshotRefreshCoordinator(manager);
+
+      expect(coordinator.schedule()).toEqual({ reset: false });
+      expect(coordinator.schedule()).toEqual({ reset: true });
+      await vi.advanceTimersByTimeAsync(SEARCH_SNAPSHOT_QUIET_WINDOW_MS);
+      await coordinator.whenIdle();
+
+      expect(coordinator.schedule()).toEqual({ reset: false });
+      coordinator.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a pending barrier and cancels its scheduled rebuild when disposed", async () => {
     vi.useFakeTimers();
     try {

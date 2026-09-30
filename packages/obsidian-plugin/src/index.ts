@@ -451,6 +451,7 @@ export {
   composeSemanticEvidenceSearchSnapshotCorpusEvidence,
   runSemanticEvidenceSearchSnapshotCorpusAtEndpoint,
   type SemanticEvidenceSearchSnapshotOutcome,
+  type InstalledSemanticEvidenceScenarioRunner,
   type SemanticEvidenceSearchSnapshotScenarioName,
 } from "./installed-runtime/semantic-evidence-corpus.js";
 export {

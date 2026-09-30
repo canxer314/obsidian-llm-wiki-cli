@@ -288,7 +288,9 @@ export const READ_SIDE_SCENARIO_PLAN = [
   "read/multi-note-logical-grouping",
   "continuation/framing-reconstructs-frozen-result",
   "continuation/single-use-replay-rejected",
+  "continuation/quota-exhaustion-preserves-live-state",
   "continuation/never-issued-token-unavailable",
+  "content-version/canonical-markdown-and-attachment-distinction",
   "discovery/inventory-after",
 ] as const;
 
@@ -762,6 +764,60 @@ export async function runReadSideCorpus(options: {
     options.assertion("continuation/single-use-replay-rejected:continuation-unavailable");
   }
 
+  // Per-client continuation quota: eight live chains remain consumable after a
+  // ninth issuance is refused, proving the server does not evict live state
+  // to make room for another token (A-13).
+  {
+    const liveTokens: string[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      const value = await call(
+        `continuation/quota-live-chain-${index + 1}`,
+        "vault_read",
+        { items: [{ kind: "exact", path: "Notes/Transport.md" }] },
+        assertRead,
+        false,
+      );
+      const result = parseReadToolResult(value);
+      if (!("outcome" in result) || result.outcome !== "page" || result.continuation === null) {
+        throw new PublicWireCorpusError("Continuation quota setup did not retain eight live chains");
+      }
+      liveTokens.push(result.continuation);
+      chainsIssued += 1;
+    }
+
+    const refusedValue = await call(
+      "continuation/quota-ninth-chain-refused",
+      "vault_read",
+      { items: [{ kind: "exact", path: "Notes/Transport.md" }] },
+      assertRead,
+      true,
+    );
+    const refused = parseReadToolResult(refusedValue);
+    if (("outcome" in refused && refused.outcome === "page") || !("code" in refused) || refused.code !== "continuation_unavailable") {
+      throw new PublicWireCorpusError("Continuation quota did not refuse the ninth live chain");
+    }
+
+    for (const firstToken of liveTokens) {
+      let continuation: string | null = firstToken;
+      while (continuation !== null) {
+        const value = await call(
+          "continuation/quota-live-chain-consume",
+          "vault_continue",
+          { continuation },
+          assertContinue,
+          false,
+        );
+        const page = parseContinueResult(value);
+        if (!("outcome" in page) || page.outcome !== "page") {
+          throw new PublicWireCorpusError("Continuation quota refusal evicted a live chain");
+        }
+        continuation = page.continuation;
+      }
+      chainsConsumed += 1;
+    }
+    options.assertion("continuation/quota-exhaustion:rejects-without-evicting-live-state");
+  }
+
   // Malformed, lost, expired, and wrong-client continuations share the same
   // trusted failure when no content-blocking gate takes precedence (A-12).
   {
@@ -781,6 +837,74 @@ export async function runReadSideCorpus(options: {
       throw new PublicWireCorpusError("A never-issued continuation did not return the trusted failure");
     }
     options.assertion("continuation/never-issued-token:continuation-unavailable");
+  }
+
+  // Markdown Content Versions are exact-byte SHA-256 values while attachment
+  // evidence is a bare SHA-256 digest. Invalid Markdown version forms are
+  // rejected by the installed public contract before any Change Set binds
+  // (A-42).
+  {
+    const welcome = expectedContent.get("Notes/Welcome.md");
+    if (welcome === undefined) {
+      throw new PublicWireCorpusError("Content Version fixture is missing from the deterministic seed");
+    }
+    const canonicalVersion = contentVersionOf(welcome);
+    const digest = canonicalVersion.slice("sha256:".length);
+    const invalidVersions = [
+      digest,
+      `sha256:${digest.toUpperCase()}`,
+      ` ${canonicalVersion}`,
+      `sha256:${digest.slice(1)}`,
+      `sha256:${"g".repeat(64)}`,
+    ];
+    for (const [index, targetVersion] of invalidVersions.entries()) {
+      const value = await call(
+        `content-version/invalid-${index + 1}`,
+        "vault_change_set_submit",
+        {
+          submissionKey: `content-version-invalid-${index + 1}`,
+          operations: [
+            {
+              operationId: "invalid-content-version",
+              kind: "edit_body",
+              path: "Notes/Welcome.md",
+              targetVersion,
+              edit: { kind: "replace_whole", replacement: welcome },
+            },
+          ],
+        },
+        assertSubmit,
+        true,
+      );
+      const result = parseChangeSetSubmitResult(value);
+      if (result.outcome !== "request_invalid") {
+        throw new PublicWireCorpusError("A non-canonical Markdown Content Version was accepted");
+      }
+    }
+    const attachmentDigest = "a".repeat(64);
+    const attachmentValue = await call(
+      "content-version/attachment-bare-sha256-distinct",
+      "vault_change_set_submit",
+      {
+        submissionKey: "content-version-attachment-distinction",
+        operations: [
+          {
+            operationId: "attachment-evidence",
+            kind: "copy_attachment",
+            sourcePath: "Attachments/missing.bin",
+            destinationPath: "Attachments/copy.bin",
+            expectedSha256: attachmentDigest,
+          },
+        ],
+      },
+      assertSubmit,
+      true,
+    );
+    const attachmentResult = parseChangeSetSubmitResult(attachmentValue);
+    if (attachmentResult.outcome !== "registered") {
+      throw new PublicWireCorpusError("Bare attachment SHA-256 evidence was parsed as a Markdown Content Version");
+    }
+    options.assertion("content-version:canonical-markdown-sha256-and-attachment-distinction");
   }
 
   // Wire-observed inventory after every read/continuation scenario; a stable

@@ -510,6 +510,7 @@ export interface FileSystemChangeSetExecutionOptions {
   journalPath: string;
   host: ChangeSetExecutionHost;
   slotCapacity?: number;
+  onRecoveryFramePersisted?(frame: RecoveryJournalFrame): void;
   /**
    * Optional test-only seam that wraps the journal `FileHandle` after it is
    * opened so a storage fault can strike exactly one declared durable frame
@@ -526,6 +527,7 @@ export interface FileSystemChangeSetExecutionOptions {
  */
 export interface FileSystemChangeSetExecutionAdapter extends ChangeSetExecutionAdapter {
   diagnosticJournalFacts(): Promise<RecoveryJournalDiagnosticFacts>;
+  loadRecoveryFrame(): Promise<RecoveryJournalFrame | null>;
 }
 
 function isPrivateId(value: unknown): value is string {
@@ -762,6 +764,7 @@ export async function createFileSystemChangeSetExecutionAdapter(
         phase: frame.phase,
         payload: structuredClone(frame) as unknown as RecoveryJournalJson,
       });
+      options.onRecoveryFramePersisted?.(frame);
     },
     clearRecoveryFrame: () => journal.clear(),
     pathKind: options.host.pathKind,

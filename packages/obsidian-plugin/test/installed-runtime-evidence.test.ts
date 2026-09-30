@@ -33,6 +33,7 @@ function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
     scenarios: [
       {
         scenario: "create_note/clean_convergence",
+        source: "installed-obsidian",
         mutationKind: "create_note",
         proofState: "intent_applied",
         statusProofState: "intent_applied",
@@ -51,6 +52,32 @@ function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
         },
         durableCommitBeforeIntentApplied: true,
         writesBlocked: false,
+        beforeInventorySha256: DIGEST,
+        afterInventorySha256: DIGEST,
+        cleanupSucceeded: true,
+      },
+      {
+        scenario: "edit_body/contrary_third_party_blocks_writes",
+        source: "installed-obsidian",
+        mutationKind: "edit_body",
+        proofState: "result_unproven",
+        statusProofState: "result_unproven",
+        journalPhase: "FAILED",
+        evidenceDeadlineMs: 5_000,
+        successBarrierDeadlineMs: 5_000,
+        evidenceSessions: [{ mode: "apply", outcome: "timed_out", virtualElapsedMs: 5_000 }],
+        quietWindowResets: 0,
+        acceptedSnapshotRounds: 0,
+        rejectedSnapshotRounds: 1,
+        successorSnapshot: {
+          baselineVersion: 1,
+          version: null,
+          immutable: false,
+          publishedBeforeIntentApplied: false,
+        },
+        durableCommitBeforeIntentApplied: false,
+        writesBlocked: true,
+        residueSha256: DIGEST,
         beforeInventorySha256: DIGEST,
         afterInventorySha256: DIGEST,
         cleanupSucceeded: true,
@@ -74,7 +101,13 @@ function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
         detailSha256: DIGEST,
       },
     ],
-    assertions: ["semantic-evidence-corpus-began"],
+    assertions: [
+      "scenario:edit_body/stale_version_callback_after_newer_bytes:closed",
+      "scenario:create_note/clean_convergence:closed",
+      "scenario:edit_body/missing_observation_deadline:closed",
+      "scenario:trash_note/delayed_probes_converge:closed",
+      "transport:six-tool-inventory-without-search-snapshot",
+    ],
     verdict: "passed",
   };
 }
@@ -183,7 +216,13 @@ function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsol
     eventLog: [
       { sequence: 1, kind: "assertion", name: "gate-isolation-corpus-began", detailSha256: DIGEST },
     ],
-    assertions: ["gate-isolation-corpus-began"],
+    assertions: [
+      "isolation/shared-key-independent-registries:distinct-change-set-ids",
+      "recovery-blocked/atomic-bind-and-history:bound-intent-not-applied",
+      "manual-pause/drain-and-fifo-retention:queued-order-retained",
+      "incompatible/registry-never-inspected:no-key-bound",
+      "gates/recovery-blocked-precedence:single-effective-gate",
+    ],
     verdict: "passed",
   };
 }
@@ -310,7 +349,12 @@ function registeredReferenceRewriteEvidence(): NonNullable<
         detailSha256: DIGEST,
       },
     ],
-    assertions: ["registered-reference-corpus-began"],
+    assertions: [
+      "span/bom-crlf-cjk-astral:single-verified-span",
+      "reject/stale-closure:no-mutation",
+      "span/duplicate-equal-spellings:untouched-bytes-exact",
+      "observer:no-half-written-markdown",
+    ],
     verdict: "passed",
   };
 }
@@ -358,7 +402,11 @@ function crashRestorationRetainedAuthorityEvidence(): NonNullable<
         detailSha256: DIGEST,
       },
     ],
-    assertions: ["crash-restoration-corpus-began"],
+    assertions: [
+      "recovery:durable-prepared-restores-whole-change-set-before-writes",
+      "recovery:compare-before-restore-preserves-third-party-bytes-and-blocks-writes",
+      "retention:seven-day-records-queryable-across-crash-and-reconnect",
+    ],
     verdict: "passed",
   };
 }
@@ -482,7 +530,21 @@ function passingEvidence(): InstalledRuntimeEvidence {
           detailSha256: DIGEST,
         },
       ],
-      assertions: ["public-tool-inventory"],
+      assertions: [
+        "connection-boundaries",
+        "discovery/empty-result:complete-empty-collection",
+        "discovery/combined-graph:snapshot-bound-evidence",
+        "read/ordered-byte-exact:preserves-index-and-duplicates",
+        "read/ordered-byte-exact:no-section-fallback",
+        "read/ordered-byte-exact:bom-cjk-astral-exact-utf8",
+        "read/single-note-over-limit:refused-without-content",
+        "read/multi-note-logical-grouping:deterministic-contiguous-groups",
+        "continuation/framing:pages-within-256kib",
+        "continuation/single-use-replay-rejected:continuation-unavailable",
+        "continuation/quota-exhaustion:rejects-without-evicting-live-state",
+        "six-tool-invocation",
+        "content-version:canonical-markdown-sha256-and-attachment-distinction",
+      ],
       verdict: "passed",
     },
     changeSetCorpus: {
@@ -566,7 +628,17 @@ function passingEvidence(): InstalledRuntimeEvidence {
           detailSha256: DIGEST,
         },
       ],
-      assertions: ["change-set-corpus-began"],
+      assertions: [
+        "submission/valid-create:no-validate-apply-handshake",
+        "rejection/stale-direct-target:no-mutation-inventory",
+        "rejection/non-unique-replacement:exact_match_count_mismatch",
+        "rejection/occupied-destination:path_conflict",
+        "submission/replay-identical-key:no-re-execution",
+        "submission/conflicting-key-reuse:no-new-change-set",
+        "concurrency/independent-batch:applied-exactly-once",
+        "recovery/missing-response:recovered-through-original-key",
+        "preview/final-status-replay:immutable-effect-evidence",
+      ],
       verdict: "passed",
     },
     gateIsolationCorpus: gateIsolationEvidence(),
@@ -585,7 +657,9 @@ function passingEvidence(): InstalledRuntimeEvidence {
       isolation: { secondVaultUnaffected: true },
       residualCleanup: { residualPaths: [] },
       eventLog: [{ sequence: 1, kind: "assertion", name: "privacy", detailSha256: DIGEST }],
-      assertions: ["privacy"],
+      assertions: [
+        "health:closed-observed-summary-only",
+      ],
       verdict: "passed",
     },
     releaseLifecycleCorpus: {
@@ -603,7 +677,10 @@ function passingEvidence(): InstalledRuntimeEvidence {
       removal: { uninstallGuarded: true, purgeQueuedWorkRefused: true, purgeRecoveryRefused: true, purgeInteractive: true, backupVerified: true },
       cleanup: { scenarios: ["install", "upgrade", "uninstall", "purge"], residualPaths: [] },
       eventLog: [{ sequence: 1, kind: "assertion", name: "lifecycle", detailSha256: DIGEST }],
-      assertions: ["lifecycle"],
+      assertions: [
+        "upgrade:drain-stop-dequeue-reject-migrate-health-recheck-maintenance-pause",
+        "install:verified-identity-attestation-sha-runtime-target-capacity-preflight",
+      ],
       verdict: "passed",
     },
     crashRestorationRetainedAuthorityCorpus: crashRestorationRetainedAuthorityEvidence(),

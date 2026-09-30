@@ -16,10 +16,6 @@ import {
 } from "../file-system-change-set-execution.js";
 import {
   SEMANTIC_SUCCESS_BARRIER_DEADLINE_MS,
-  runSemanticEvidenceScenario,
-  semanticEvidenceScenarios,
-  type SemanticEvidenceReport,
-  type SemanticEvidenceScenario,
 } from "../corpus/semantic-evidence-corpus.js";
 import { PUBLIC_WIRE_TOOL_NAMES } from "./public-wire-corpus.js";
 import type { SemanticEvidenceCorpusEvidence } from "./evidence.js";
@@ -28,12 +24,11 @@ import type { SemanticEvidenceCorpusEvidence } from "./evidence.js";
  * Installed-runtime Semantic Evidence/Search Snapshot tracer (issue #179).
  *
  * The active candidate Bridge is reached through the same authenticated
- * loopback transport as the six-tool corpus. The scenario programs then run
- * through the shared semantic-evidence runner, which owns the real node-fs
- * Change Set host, evidence tracker, Search Snapshot manager, quiet-window
- * coordinator, recovery journal, and rollback path. This keeps the installed
- * transport proof and the byte/cache/graph proof in one closed envelope while
- * never exposing a Search Snapshot as a public tool capability.
+ * loopback transport as the six-tool corpus. Each scenario command is bound to
+ * an installed candidate descriptor and runs through the plugin-side Obsidian
+ * Vault, metadata-cache, graph, Search Snapshot, journal, and rollback paths.
+ * This keeps the installed transport proof and byte/cache/graph proof in one
+ * closed envelope while never exposing Search Snapshot as a public capability.
  */
 
 export const SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_CORPUS_ID =
@@ -123,66 +118,30 @@ function exactText(result: { readonly content?: readonly unknown[] }): string {
   return text.text;
 }
 
-function summarizeReport(
-  report: SemanticEvidenceReport,
-): SemanticEvidenceCorpusEvidence["scenarios"][number] {
-  const acceptedRounds = report.observations.snapshotRounds.filter((round) => round.matched).length;
-  const rejectedRounds = report.observations.snapshotRounds.length - acceptedRounds;
-  const intentApplied = report.proofState === "intent_applied";
-  const successorPublished =
-    intentApplied &&
-    report.snapshot !== null &&
-    report.snapshot.version > report.snapshotBaselineVersion &&
-    report.snapshot.frozen;
-  const durableCommitBeforeIntentApplied =
-    !intentApplied ||
-    (report.journalPhase === "COMMITTED" && report.statusProofState === "intent_applied");
-  return {
-    scenario: report.scenario,
-    mutationKind: report.mutationKind,
-    proofState: report.proofState,
-    statusProofState: report.statusProofState,
-    journalPhase:
-      report.journalPhase === "COMMITTED" ||
-      report.journalPhase === "ROLLED_BACK" ||
-      report.journalPhase === "FAILED"
-        ? report.journalPhase
-        : null,
-    evidenceDeadlineMs: CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS,
-    successBarrierDeadlineMs: SEMANTIC_SUCCESS_BARRIER_DEADLINE_MS,
-    evidenceSessions: report.observations.sessions.map((session) => ({
-      mode: session.mode,
-      outcome: session.outcome,
-      virtualElapsedMs: session.virtualElapsedMs,
-    })),
-    quietWindowResets: report.observations.quietWindows.reduce(
-      (total, window) => total + window.resets,
-      0,
-    ),
-    acceptedSnapshotRounds: acceptedRounds,
-    rejectedSnapshotRounds: rejectedRounds,
-    successorSnapshot: {
-      baselineVersion: report.snapshotBaselineVersion,
-      version: report.snapshot?.version ?? null,
-      immutable: report.snapshot?.frozen ?? false,
-      publishedBeforeIntentApplied: successorPublished,
-    },
-    durableCommitBeforeIntentApplied,
-    writesBlocked: report.gate.writesBlockedFor.length > 0,
-    beforeInventorySha256: inventorySha256(report.before),
-    afterInventorySha256: inventorySha256(report.after),
-    cleanupSucceeded: true,
-  };
-}
-
-function assertScenarioPlan(scenarios: readonly SemanticEvidenceScenario[]): void {
-  const actual = scenarios.map(({ id }) => id);
+function assertScenarioPlan(scenarios: readonly string[]): void {
+  const actual = [...scenarios];
   const expected = [...SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_SCENARIO_PLAN];
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new SemanticEvidenceSearchSnapshotCorpusError(
       "Semantic Evidence scenario program diverged from its installed-runtime manifest",
     );
   }
+}
+
+type InstalledSemanticEvidenceScenario = SemanticEvidenceCorpusEvidence["scenarios"][number];
+
+export interface InstalledSemanticEvidenceScenarioRunner {
+  run(options: {
+    readonly scenario: SemanticEvidenceSearchSnapshotScenarioName;
+    readonly endpoint: URL;
+    readonly expectedVaultId: string;
+    readonly workingDirectory: string;
+  }): Promise<InstalledSemanticEvidenceScenario>;
+}
+
+interface InstalledRuntimeObservation {
+  readonly tools: readonly string[];
+  readonly vaultId: string;
 }
 
 export interface SemanticEvidenceSearchSnapshotOutcome {
@@ -205,14 +164,16 @@ export async function runSemanticEvidenceSearchSnapshotCorpusAtEndpoint(options:
   readonly workingDirectory: string;
   readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
   readonly assertion: (name: string) => void;
-  readonly scenarios?: readonly SemanticEvidenceScenario[];
+  readonly scenarioRunner: InstalledSemanticEvidenceScenarioRunner;
+  readonly scenarios?: readonly SemanticEvidenceSearchSnapshotScenarioName[];
+  readonly observeInstalledRuntime?: () => Promise<InstalledRuntimeObservation>;
 }): Promise<SemanticEvidenceSearchSnapshotOutcome> {
   if (options.endpoint.protocol !== "http:" || options.endpoint.hostname !== "127.0.0.1") {
     throw new SemanticEvidenceSearchSnapshotCorpusError(
       "Semantic-evidence corpus requires a 127.0.0.1 HTTP endpoint",
     );
   }
-  const scenarios = options.scenarios ?? semanticEvidenceScenarios();
+  const scenarios = options.scenarios ?? SEMANTIC_EVIDENCE_SEARCH_SNAPSHOT_SCENARIO_PLAN;
   assertScenarioPlan(scenarios);
   const assertions: string[] = [];
   const assertion = (name: string): void => {
@@ -228,11 +189,44 @@ export async function runSemanticEvidenceSearchSnapshotCorpusAtEndpoint(options:
   });
   const reportDirectory = await mkdtemp(join(options.workingDirectory, "semantic-evidence-proof-"));
   let reportDirectoryRemoved = false;
+  let tools: readonly string[];
   try {
-    await client.connect(transport);
-    options.record("transport", "streamable-http-connected", { endpoint: options.endpoint.pathname });
-    const inventory = await client.listTools();
-    const tools = inventory.tools.map(({ name }) => name).sort();
+    if (options.observeInstalledRuntime !== undefined) {
+      const observation = await options.observeInstalledRuntime();
+      tools = [...observation.tools].sort();
+      if (observation.vaultId !== options.expectedVaultId) {
+        throw new SemanticEvidenceSearchSnapshotCorpusError(
+          "Semantic-evidence corpus connected to the wrong Managed Vault",
+        );
+      }
+    } else {
+      await client.connect(transport);
+      options.record("transport", "streamable-http-connected", { endpoint: options.endpoint.pathname });
+      const inventory = await client.listTools();
+      tools = inventory.tools.map(({ name }) => name).sort();
+
+      const healthResult = (await client.callTool({
+        name: "vault_health",
+        arguments: {},
+      })) as { readonly isError?: boolean; readonly structuredContent?: unknown; readonly content?: readonly unknown[] };
+      if (healthResult.isError === true || healthResult.structuredContent === undefined) {
+        throw new SemanticEvidenceSearchSnapshotCorpusError(
+          "Semantic-evidence corpus could not observe installed runtime health",
+        );
+      }
+      const health = parseHealthResult(healthResult.structuredContent);
+      if (exactText(healthResult) !== serializeCompatibilityText(health)) {
+        throw new SemanticEvidenceSearchSnapshotCorpusError(
+          "Installed runtime health compatibility text diverged from structured content",
+        );
+      }
+      if (health.outcome !== "observed" || health.vault.id !== options.expectedVaultId) {
+        throw new SemanticEvidenceSearchSnapshotCorpusError(
+          "Semantic-evidence corpus connected to the wrong or incompatible Managed Vault",
+        );
+      }
+      options.record("tool", "vault_health", healthResult.structuredContent);
+    }
     const expectedTools = [...PUBLIC_WIRE_TOOL_NAMES].sort();
     if (JSON.stringify(tools) !== JSON.stringify(expectedTools)) {
       throw new SemanticEvidenceSearchSnapshotCorpusError(
@@ -241,56 +235,43 @@ export async function runSemanticEvidenceSearchSnapshotCorpusAtEndpoint(options:
     }
     options.record("assertion", "six-tool-inventory-without-search-snapshot", tools);
     assertion("transport:six-tool-inventory-without-search-snapshot");
-
-    const healthResult = (await client.callTool({
-      name: "vault_health",
-      arguments: {},
-    })) as { readonly isError?: boolean; readonly structuredContent?: unknown; readonly content?: readonly unknown[] };
-    if (healthResult.isError === true || healthResult.structuredContent === undefined) {
-      throw new SemanticEvidenceSearchSnapshotCorpusError(
-        "Semantic-evidence corpus could not observe installed runtime health",
-      );
-    }
-    const health = parseHealthResult(healthResult.structuredContent);
-    if (exactText(healthResult) !== serializeCompatibilityText(health)) {
-      throw new SemanticEvidenceSearchSnapshotCorpusError(
-        "Installed runtime health compatibility text diverged from structured content",
-      );
-    }
-    if (health.outcome !== "observed" || health.vault.id !== options.expectedVaultId) {
-      throw new SemanticEvidenceSearchSnapshotCorpusError(
-        "Semantic-evidence corpus connected to the wrong or incompatible Managed Vault",
-      );
-    }
-    options.record("tool", "vault_health", healthResult.structuredContent);
     assertion("transport:installed-vault-health-observed");
 
-    const summaries: SemanticEvidenceCorpusEvidence["scenarios"][number][] = [];
+    const summaries: InstalledSemanticEvidenceScenario[] = [];
     for (const scenario of scenarios) {
-      const report = await runSemanticEvidenceScenario({ scenario, reportDir: reportDirectory });
-      if (report.verdict !== "pass" || report.failures.length > 0) {
+      const summary = await options.scenarioRunner.run({
+        scenario,
+        endpoint: options.endpoint,
+        expectedVaultId: options.expectedVaultId,
+        workingDirectory: reportDirectory,
+      });
+      if (summary.source !== "installed-obsidian") {
         throw new SemanticEvidenceSearchSnapshotCorpusError(
-          `Semantic Evidence scenario ${scenario.id} did not close its proof obligations`,
+          `Semantic Evidence scenario ${scenario} did not come from the installed Obsidian runtime`,
         );
       }
-      const summary = summarizeReport(report);
+      if (summary.scenario !== scenario) {
+        throw new SemanticEvidenceSearchSnapshotCorpusError(
+          `Semantic Evidence scenario runner returned ${summary.scenario} for ${scenario}`,
+        );
+      }
       if (
         summary.evidenceDeadlineMs !== CHANGE_SET_SEMANTIC_EVIDENCE_DEADLINE_MS ||
         summary.successBarrierDeadlineMs !== SEMANTIC_SUCCESS_BARRIER_DEADLINE_MS
       ) {
         throw new SemanticEvidenceSearchSnapshotCorpusError(
-          `Semantic Evidence scenario ${scenario.id} changed an installed deadline`,
+          `Semantic Evidence scenario ${scenario} changed an installed deadline`,
         );
       }
       if (summary.proofState === "intent_applied") {
         if (!summary.successorSnapshot.publishedBeforeIntentApplied) {
           throw new SemanticEvidenceSearchSnapshotCorpusError(
-            `Semantic Evidence scenario ${scenario.id} reported success without an immutable successor Search Snapshot`,
+            `Semantic Evidence scenario ${scenario} reported success without an immutable successor Search Snapshot`,
           );
         }
         if (!summary.durableCommitBeforeIntentApplied) {
           throw new SemanticEvidenceSearchSnapshotCorpusError(
-            `Semantic Evidence scenario ${scenario.id} reported success before durable COMMITTED`,
+            `Semantic Evidence scenario ${scenario} reported success before durable COMMITTED`,
           );
         }
       }
