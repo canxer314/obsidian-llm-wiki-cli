@@ -720,6 +720,13 @@ export default class VaultOperationBridgePlugin extends Plugin {
             await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
           }
         },
+        observeTrashProbes: async (path) => {
+          const file = this.app.vault.getFileByPath(path);
+          return {
+            cacheVisible: file !== null && this.app.metadataCache.getFileCache(file) !== null,
+            referenced: await referenced(path),
+          };
+        },
         induceTrashContraryThirdParty: async () => {
           const deadline = Date.now() + 5_000;
           while (this.app.vault.getFileByPath(TRASH_NOTE_PATH) !== null) {
@@ -728,6 +735,14 @@ export default class VaultOperationBridgePlugin extends Plugin {
             }
             await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
           }
+          const reference = this.app.vault.getFileByPath(TRASH_REFERENCE_PATH);
+          if (reference === null) {
+            throw new Error("Installed trash reference fixture is unavailable");
+          }
+          await this.app.vault.modifyBinary(
+            reference,
+            new TextEncoder().encode("# Trash reference\n\n").buffer,
+          );
           await writeFile(
             join(basePath, ...TRASH_NOTE_PATH.split("/")),
             "# Third-party interference\n\nForeign 你好 🚀\n",

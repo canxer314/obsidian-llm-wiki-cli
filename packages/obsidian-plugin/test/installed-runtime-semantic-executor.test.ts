@@ -317,6 +317,7 @@ describe("installed Semantic Evidence executor", () => {
       readonly phase: "FAILED";
       readonly input: { readonly submissionKey: string };
     } | null = null;
+    let residueProbeReads = 0;
     let trashed!: () => void;
     const trashObserved = new Promise<void>((resolve) => { trashed = resolve; });
     let control!: ReturnType<typeof createInstalledSemanticEvidenceScenarioControl>;
@@ -343,13 +344,18 @@ describe("installed Semantic Evidence executor", () => {
         });
       },
       refreshSeedFixtures: async () => ({ version: 2, immutable: true }),
+      observeTrashProbes: async (path) => {
+        expect(path).toBe(TRASH_NOTE_PATH);
+        residueProbeReads += 1;
+        return { cacheVisible: residueProbeReads > 1, referenced: residueProbeReads < 3 };
+      },
       induceTrashContraryThirdParty: async () => {
         const path = join(vaultPath, ...TRASH_NOTE_PATH.split("/"));
         await trashObserved;
         await writeFile(path, foreignBytes);
         control.recordTrashProbeObservation({
           path: TRASH_NOTE_PATH,
-          cacheVisible: true,
+          cacheVisible: false,
           referenced: false,
         });
         now = 5_000;

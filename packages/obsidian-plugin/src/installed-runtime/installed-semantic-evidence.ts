@@ -209,6 +209,10 @@ export interface InstalledSemanticEvidenceScenarioControlOptions {
   readonly induceTrashProbeDeadlineThenRestored?: () => Promise<void>;
   readonly induceTrashRestoreEvidenceDeadline?: () => Promise<void>;
   readonly induceTrashContraryThirdParty?: () => Promise<void>;
+  readonly observeTrashProbes?: (path: string) => Promise<{
+    readonly cacheVisible: boolean;
+    readonly referenced: boolean;
+  }>;
   readonly seedPath?: (path: string, bytes: Uint8Array) => Promise<void>;
   readonly refreshSeedFixtures?: () =>
     Promise<InstalledSemanticEvidenceSnapshotObservation>;
@@ -1318,6 +1322,20 @@ export function createInstalledSemanticEvidenceScenarioControl(
           ({ expectedContentVersion, metadataContentVersion }) =>
             metadataContentVersion === expectedContentVersion,
         );
+        if (request.scenario === TRASH_CONTRARY_THIRD_PARTY_SCENARIO &&
+            options.observeTrashProbes !== undefined) {
+          const deadline = Date.now() + 5_000;
+          while (true) {
+            const observation = await options.observeTrashProbes(TRASH_NOTE_PATH);
+            active.trashProbe!.cacheVisible = observation.cacheVisible;
+            active.trashProbe!.referenced = observation.referenced;
+            if (observation.cacheVisible && !observation.referenced) break;
+            if (Date.now() >= deadline) {
+              throw new Error("Installed foreign trash residue lacks cache/reference observation");
+            }
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+          }
+        }
         const trashProbeConverged = !isTrashScenario ||
           (request.scenario === TRASH_RESTORE_EVIDENCE_DEADLINE_SCENARIO ||
               request.scenario === TRASH_CONTRARY_THIRD_PARTY_SCENARIO
