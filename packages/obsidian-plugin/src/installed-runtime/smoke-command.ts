@@ -31,6 +31,7 @@ import type {
   SemanticEvidenceSearchSnapshotScenarioName,
 } from "./semantic-evidence-corpus.js";
 import { runInstalledRegisteredReferenceRewriteCorpus } from "./registered-reference-installed-runner.js";
+import { runInstalledGateIsolationCorpus } from "./gate-installed-runner.js";
 import { MVP_PERF_REF_1 } from "./runtime-profile.js";
 
 export {
@@ -374,7 +375,12 @@ export function createAuthoritativeInstalledRuntimeRunners(
         },
       };
     },
-    runGateIsolationCorpus: async () => unavailableRunner("Gate-isolation corpus"),
+    runGateIsolationCorpus: async (request) => {
+      if (request.probe === undefined || request.profile === undefined || request.candidate === undefined) {
+        return unavailableRunner("Gate-isolation corpus");
+      }
+      return runInstalledGateIsolationCorpus(request);
+    },
     runRegisteredReferenceRewriteCorpus:
       runInstalledRegisteredReferenceRewriteCorpus,
     runPrivacyRecoveryAuthorityCorpus: async () =>

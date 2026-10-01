@@ -156,6 +156,19 @@ describe("installed-runtime authoritative command", () => {
     } as never)).rejects.toThrow("Previous release directory and immutable tag are required");
   });
 
+  it("invokes the built-in installed gate runner and fails closed without a running-runtime probe", async () => {
+    const runners = createAuthoritativeInstalledRuntimeRunners();
+    const outcome = await runners.runGateIsolationCorpus({
+      probe: {}, profile: { name: "missing-probe" }, profileName: "missing-probe",
+      candidate: { identity: { bundleSha256: "a".repeat(64) } },
+      record: () => undefined, assertion: () => undefined,
+    } as never);
+    expect(outcome).toMatchObject({
+      scope: "two-vault-registry-isolation", verdict: "failed", failure: "installed_gate_slice_failed",
+      result: null, provenance: { vaults: [] },
+    });
+  });
+
   it("provisions the built-in installed registered-reference runner", async () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
     const provisionAttempt = new Error("registered-reference provision attempted");

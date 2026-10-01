@@ -325,6 +325,8 @@ export async function runInstalledCrashRestorationSlice(
       if (processHandle !== null) {
         const stopping = processHandle;
         await stopping.stop();
+        identity ??= await readPersistedBridgeIdentity(vault.vaultPath,
+          options.candidate.identity.pluginId, configDirectoryName);
         await waitForCondition(async () => identity === null || !await isPortOpen(identity.port), {
           timeoutMs: options.timeouts.portClosedMs,
           intervalMs: POLL_MS,

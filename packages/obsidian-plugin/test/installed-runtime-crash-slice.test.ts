@@ -8,7 +8,47 @@ import { crashRestorationBoundaryPath, loadCrashBoundaryReport, writeCrashRestor
 import { openRecoveryJournal } from "../src/recovery-journal.js";
 import { readInstalledCrashJournal, runInstalledCrashRestorationSlice } from "../src/installed-runtime/installed-crash-restoration-slice.js";
 import { brandVerifiedCandidateBundle, inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
+import { ObsidianProcessError } from "../src/installed-runtime/obsidian-process.js";
 import type { InstalledCrashRestorationSliceOptions } from "../src/installed-runtime/installed-crash-restoration-slice.js";
+
+it("checks a persisted crash listener before deleting roots after a preflight failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-preflight-stop-"));
+  const candidateDirectory = join(root, "candidate");
+  await mkdir(candidateDirectory);
+  await writeFile(join(candidateDirectory, "manifest.json"), JSON.stringify({ id: "crash-plugin", version: "0.1.0", minAppVersion: "1.0.0" }));
+  await writeFile(join(candidateDirectory, "main.js"), "candidate");
+  const candidate = brandVerifiedCandidateBundle({
+    bundleDirectory: candidateDirectory, identity: await inspectCandidateBundle(candidateDirectory),
+    tag: "v0.1.0", repository: "test/crash", workflowRef: "test", attestationSource: "local-candidate",
+  });
+  const { createServer } = await import("node:net");
+  const server = createServer();
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  let vaultPath = "";
+  let cleanedDescriptor = false;
+  try {
+    await expect(runInstalledCrashRestorationSlice({
+      runId: "preflight-stop", workingDirectory: root, reportDirectory: join(root, "reports"), candidate,
+      processControl: { start: async request => {
+        vaultPath = request.vaultPath;
+        await writeFile(join(vaultPath, ".obsidian", "plugins", "crash-plugin", "data.json"), JSON.stringify({ vaultId: "preflight-vault", port }));
+        return { stop: async () => undefined };
+      } },
+      client: {}, profile: {}, probe: { probeRunning: async () => { throw new Error("Runtime preflight refused"); } },
+      timeouts: { startupMs: 10, stopMs: 10, portClosedMs: 30 },
+      prepareAcceptanceDriver: async request => {
+        const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "preflight-stop", reportDirectory: join(root, "reports") });
+        return { ...created, cleanup: async () => { cleanedDescriptor = true; } };
+      }, record: () => undefined, assertion: () => undefined,
+    } as InstalledCrashRestorationSliceOptions)).rejects.toBeInstanceOf(ObsidianProcessError);
+    expect(cleanedDescriptor).toBe(false);
+    expect(await readdir(vaultPath)).toContain(".obsidian");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 it("rejects a crash descriptor for a foreign Vault, plugin, or installed entry point before startup", async () => {
   const root = await mkdtemp(join(tmpdir(), "installed-crash-binding-"));
