@@ -6,6 +6,7 @@ import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  ObsidianProcessError,
   createBridgeInstance,
   ManagedVaultBridgeRuntime,
   RELEASE_MANAGED_CHECKSUM_FILE,
@@ -126,6 +127,23 @@ function createFakeObsidianProcessControl(): ObsidianProcessControl {
 }
 
 describe("installed-runtime lifecycle scenario", () => {
+  it("retains generated roots when startup shutdown cannot be confirmed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lifecycle-start-residue-"));
+    const candidate = await writeVerifiedBundle(root);
+    let cleaned = false;
+    const result = await runLifecycleInstallScenario({
+      candidate, obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root,
+      processControl: { start: async () => {
+        throw new ObsidianProcessError("shutdown unconfirmed", "obsidian_stop_failed");
+      } },
+      cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+      runId: "start-residue",
+    });
+    expect(result.verdict).toBe("failed");
+    expect(cleaned).toBe(false);
+    expect(result.cleanup?.residualPaths).toEqual(["/"]);
+  });
+
   it("retains generated roots when the owning process cannot stop", async () => {
     const root = await mkdtemp(join(tmpdir(), "lifecycle-stop-residue-"));
     const candidate = await writeVerifiedBundle(root);

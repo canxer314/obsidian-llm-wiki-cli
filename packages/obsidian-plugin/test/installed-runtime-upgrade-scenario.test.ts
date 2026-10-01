@@ -6,6 +6,7 @@ import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  ObsidianProcessError,
   createBridgeInstance,
   ManagedVaultBridgeRuntime,
   RELEASE_MANAGED_CHECKSUM_FILE,
@@ -178,6 +179,25 @@ function createFakeObsidian(): {
 }
 
 describe("installed-runtime upgrade scenario", () => {
+  it("retains generated roots when startup shutdown cannot be confirmed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "upgrade-start-residue-"));
+    const previousRelease = await writeVerifiedBundle(root, "old", OLD_VERSION);
+    const upgradeRelease = await writeVerifiedBundle(root, "new", NEW_VERSION);
+    let cleaned = false;
+    const result = await runManagedVaultUpgradeScenario({
+      previousRelease, upgradeRelease, obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root,
+      runtimeHost: { currentRuntime: () => null },
+      processControl: { start: async () => {
+        throw new ObsidianProcessError("shutdown unconfirmed", "obsidian_stop_failed");
+      } },
+      cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+      runId: "start-residue",
+    });
+    expect(result.verdict).toBe("failed");
+    expect(cleaned).toBe(false);
+    expect(result.cleanup?.residualPaths).toEqual(["/"]);
+  });
+
   it("retains generated roots when the upgrade process cannot stop", async () => {
     const root = await mkdtemp(join(tmpdir(), "upgrade-stop-residue-"));
     const previousRelease = await writeVerifiedBundle(root, "old", OLD_VERSION);

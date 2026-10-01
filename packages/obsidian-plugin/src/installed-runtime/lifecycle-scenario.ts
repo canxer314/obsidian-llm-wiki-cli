@@ -24,6 +24,7 @@ import {
   type LoopbackMcpClient,
 } from "./loopback-client.js";
 import {
+  ObsidianProcessError,
   readPersistedBridgeIdentity,
   waitForCondition,
   type ObsidianProcessControl,
@@ -166,6 +167,7 @@ export async function runLifecycleInstallScenario(
   const recorder = stageRecorder();
   let vault: { vaultPath: string; profileDirectory: string } | null = null;
   let handle: ObsidianProcessHandle | null = null;
+  let startupShutdownUnconfirmed = false;
   let identity: PersistedBridgeIdentity | null = null;
   let registrationCommand: string | null = null;
   let installResult: ReleaseInstallTargetResult | null = null;
@@ -309,6 +311,9 @@ export async function runLifecycleInstallScenario(
       identity = startedIdentity;
       recorder.pass("obsidian_start");
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       if (recorder.records.at(-1)?.stage !== "obsidian_start") {
         throw recorder.fail(
           "obsidian_start",
@@ -421,7 +426,7 @@ export async function runLifecycleInstallScenario(
       // Never delete a generated root still owned by a live process.
     }
   }
-  if (vault !== null && handle !== null) {
+  if (vault !== null && (handle !== null || startupShutdownUnconfirmed)) {
     cleanup = { attempted: true, residualPaths: ["/"] };
     recorder.fail("cleanup", "Generated runtime shutdown was not confirmed");
     failure ??= { stage: "cleanup", detail: "Generated runtime shutdown was not confirmed" };
