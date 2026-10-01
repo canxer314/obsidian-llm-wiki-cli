@@ -16,12 +16,13 @@ it("keeps each command's candidate separate without overwriting prior workdir ar
     await mkdir(join(workdir, "candidate-bundle"), { recursive: true });
     await writeFile(join(workdir, "candidate-bundle", "main.js"), "prior candidate");
     await writeFile(join(workdir, "candidate-bundle.attestation.json"), "prior attestation");
-    await writeFile(join(packageRoot, "manifest.json"), await readFile("manifest.json"));
-    await writeFile(join(packageRoot, "package.json"), await readFile("package.json"));
+    const sourcePackageRoot = resolve(import.meta.dirname, "..");
+    await writeFile(join(packageRoot, "manifest.json"), await readFile(join(sourcePackageRoot, "manifest.json")));
+    await writeFile(join(packageRoot, "package.json"), await readFile(join(sourcePackageRoot, "package.json")));
     await writeFile(join(dist, "main.js"), "// command fixture, never executed\n");
     const entry = join(dist, "smoke.mjs");
     await build({
-      entryPoints: [resolve("src/installed-runtime/smoke.ts")], outfile: entry,
+      entryPoints: [join(sourcePackageRoot, "src/installed-runtime/smoke.ts")], outfile: entry,
       bundle: true, platform: "node", format: "esm", target: "node24",
       banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
     });

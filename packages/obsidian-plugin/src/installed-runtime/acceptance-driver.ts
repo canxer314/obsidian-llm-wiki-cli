@@ -220,6 +220,9 @@ export async function activateInstalledRuntimeAcceptanceDriver(
           endpoint.toString() !== `http://127.0.0.1:${identity.port}/mcp`) {
         throw new Error("Local diagnostic report does not match the running Vault identity");
       }
+      if ((request.bundle as StandardDiagnosticBundle).listenerTimeline.some(entry => entry.port !== identity.port)) {
+        throw new Error("Local diagnostic listener does not match the running Vault endpoint");
+      }
       await requireBoundReportRoot();
       const reportPath = join(reportRealPath, "local-standard-diagnostic-copy.json");
       const temporaryPath = `${reportPath}.${randomBytes(16).toString("hex")}.next`;

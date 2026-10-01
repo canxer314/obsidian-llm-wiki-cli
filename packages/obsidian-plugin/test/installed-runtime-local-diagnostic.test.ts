@@ -41,6 +41,8 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     const bundle = createStandardDiagnosticBundle(evidence);
     await writeFile(join(pluginDirectory, "data.json"), JSON.stringify({ vaultId: "local-vault", port: 32123 }));
     await expect(activation!.recordStandardDiagnosticCopy({ vaultId: "foreign-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), bundle })).rejects.toThrow("running Vault identity");
+    const wrongListenerBundle = createStandardDiagnosticBundle({ ...evidence, listener: { address: "127.0.0.1", port: 32124 } });
+    await expect(activation!.recordStandardDiagnosticCopy({ vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), bundle: wrongListenerBundle })).rejects.toThrow("diagnostic listener");
     await writeFile(created.path, JSON.stringify({ ...created.descriptor, runId: "foreign-run" }));
     await expect(activation!.recordStandardDiagnosticCopy({ vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), bundle })).rejects.toThrow("descriptor identity changed");
     await writeFile(created.path, JSON.stringify(created.descriptor));
