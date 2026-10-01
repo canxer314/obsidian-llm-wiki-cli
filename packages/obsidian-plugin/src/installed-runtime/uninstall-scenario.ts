@@ -421,6 +421,15 @@ export async function runManagedVaultUninstallScenario(
           null,
         { timeoutMs: startupMs },
       );
+      await waitForCondition(async () => {
+        try {
+          await client.observeHealth(endpoint, vaultId);
+          return true;
+        } catch (error) {
+          if (error instanceof HealthObservationError && error.code !== "health_unreachable") throw error;
+          return false;
+        }
+      }, { timeoutMs: startupMs });
       recorder.pass("obsidian_restart");
     } catch (error) {
       throw recorder.fail(
@@ -512,11 +521,16 @@ export async function runManagedVaultUninstallScenario(
   if (handle !== null) {
     try {
       await handle.stop();
+      handle = null;
     } catch {
-      // The primary failure is already recorded; cleanup still proceeds.
+      // Never delete a generated root still owned by a live process.
     }
   }
-  if (vault !== null) {
+  if (vault !== null && handle !== null) {
+    cleanup = { attempted: true, residualPaths: ["/"] };
+    recorder.fail("cleanup", "Generated runtime shutdown was not confirmed");
+    failure ??= { stage: "cleanup", detail: "Generated runtime shutdown was not confirmed" };
+  } else if (vault !== null) {
     try {
       cleanup = await cleanupVault(vault);
       if (cleanup.residualPaths.length > 0) {

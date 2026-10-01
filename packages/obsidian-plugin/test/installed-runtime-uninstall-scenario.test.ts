@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createBridgeInstance,
+  createLoopbackMcpClient,
   createFileSystemChangeSetExecutionAdapter,
   createNodeFileSystemChangeSetHost,
   ManagedVaultBridgeRuntime,
@@ -184,6 +185,48 @@ function createFakeObsidian(): {
 }
 
 describe("installed-runtime uninstall scenario", () => {
+  it("retains generated roots when the uninstall process cannot stop", async () => {
+    const root = await mkdtemp(join(tmpdir(), "uninstall-stop-residue-"));
+    const candidate = await writeVerifiedBundle(root, "bundle", VERSION);
+    const fake = createFakeObsidian();
+    let cleaned = false;
+    const result = await runManagedVaultUninstallScenario({ candidate,
+      obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root,
+      processControl: { start: async request => {
+        const handle = await fake.processControl.start(request);
+        return { ...handle, stop: async () => { throw new Error("stop refused"); } };
+      } },
+      cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+      runId: "stop-residue", timeouts: { startupMs: 5_000, stopMs: 5_000 },
+    });
+    expect(result.verdict).toBe("failed");
+    expect(cleaned).toBe(false);
+    expect(result.cleanup?.residualPaths).not.toEqual([]);
+  }, 60_000);
+
+  it("waits for the restarted listener rather than trusting retained identity bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "uninstall-restart-readiness-"));
+    const candidate = await writeVerifiedBundle(root, "bundle", VERSION);
+    const fake = createFakeObsidian();
+    const client = createLoopbackMcpClient();
+    let transientFailures = 0;
+    const result = await runManagedVaultUninstallScenario({
+      candidate, obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root,
+      processControl: fake.processControl, runId: "restart-readiness",
+      client: { ...client, observeHealth: async (endpoint, vaultId) => {
+        if (fake.starts() === 2 && transientFailures < 1) {
+          transientFailures += 1;
+          throw new Error("listener not ready");
+        }
+        return client.observeHealth(endpoint, vaultId);
+      } },
+      timeouts: { startupMs: 5_000, stopMs: 5_000 },
+    });
+    expect(transientFailures).toBe(1);
+    expect(result.verdict).toBe("passed");
+    expect(result.failure).toBeNull();
+  }, 60_000);
+
   it(
     "proves offline uninstall, managed-file-only removal, lossless reinstall, and restored Bridge identity",
     { timeout: 60_000 },
