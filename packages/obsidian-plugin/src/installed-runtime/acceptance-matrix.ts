@@ -293,6 +293,9 @@ const acceptanceMatrixReportSchema = z.object({
   verdict: z.literal("passed"),
   canonicalManifestSha256: z.string().regex(sha256Pattern),
 }).strict().superRefine((report, context) => {
+  if ([...report.finalInspection.publicTools].sort().join("\0") !== [...sixPublicTools].sort().join("\0")) {
+    context.addIssue({ code: "custom", message: "Acceptance matrix requires exactly six public MCP tools" });
+  }
   const actualIds = report.scenarios.map((scenario) => scenario.id).sort();
   if (actualIds.join("\0") !== [...ACCEPTANCE_IDS].sort().join("\0")) context.addIssue({ code: "custom", message: "Acceptance matrix must contain every A-01 through A-44 exactly once" });
   if (new Set(report.childManifests.map((child) => child.corpusId)).size !== ACCEPTANCE_CORPUS_IDS.length) context.addIssue({ code: "custom", message: "Acceptance matrix must contain every child manifest exactly once" });

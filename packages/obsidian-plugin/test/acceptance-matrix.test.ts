@@ -226,6 +226,22 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     expect(() => validateAcceptanceMatrixReport(substituted)).toThrow(/A-21.*required proof/u);
   });
 
+  it("rejects a rehashed final inspection that replaces a public tool with recovery authority", () => {
+    const report = createAcceptanceMatrixReport(evidence());
+    report.finalInspection.publicTools = ["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_resume_writes"].sort();
+    const canonical = (value: unknown): string => {
+      if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+      if (typeof value === "object" && value !== null) {
+        const record = value as Record<string, unknown>;
+        return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+      }
+      return JSON.stringify(value);
+    };
+    const { canonicalManifestSha256: _checksum, ...draft } = report;
+    report.canonicalManifestSha256 = createHash("sha256").update(canonical(draft)).digest("hex");
+    expect(() => validateAcceptanceMatrixReport(report)).toThrow(/six public MCP tools/u);
+  });
+
   it("fails closed for an absent child, duplicate ID, invalid checksum, and residue", () => {
     const missingChild = evidence();
     missingChild.releaseLifecycleCorpus = null;
