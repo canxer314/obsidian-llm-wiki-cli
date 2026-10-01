@@ -764,6 +764,7 @@ describe("installed-runtime harness orchestration", () => {
     });
     expect(result.verdict).toBe("failed");
     expect(cleanupCalls).toBe(1);
+    expect(result.cleanup["vault-a"]).toEqual({ attempted: true, residualPaths: [] });
   });
 
   it("runs installed gate isolation on two generated Vaults and cleans both after process stop", async () => {

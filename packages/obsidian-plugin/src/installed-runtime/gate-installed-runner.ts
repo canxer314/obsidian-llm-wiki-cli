@@ -95,7 +95,7 @@ async function installedMainDigest(vaultPath: string, pluginId: string, configDi
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function startVault(options: GateSliceOptions, label: "vault-a" | "vault-b", runtimeMismatches: RuntimePreflightMismatch[]): Promise<LiveVault> {
+async function startVault(options: GateSliceOptions, label: "vault-a" | "vault-b", runtimeMismatches: RuntimePreflightMismatch[], cleanup: { "vault-a": CleanupReport | null; "vault-b": CleanupReport | null }): Promise<LiveVault> {
   const vault = await options.provisionVault({
     workingDirectory: options.workingDirectory,
     runId: `${options.runId}-gate-${label}`,
@@ -156,6 +156,7 @@ async function startVault(options: GateSliceOptions, label: "vault-a" | "vault-b
     };
     return { vault, process, identity: observedIdentity, client, session, runtime: observed, installedMainSha256 };
   } catch (error) {
+    cleanup[label] = { attempted: true, residualPaths: ["cleanup_unconfirmed"] };
     await client?.close().catch(() => undefined);
     if (process !== undefined) {
     try {
@@ -170,6 +171,7 @@ async function startVault(options: GateSliceOptions, label: "vault-a" | "vault-b
       throw error;
     }
     const report = await options.cleanupVault(vault);
+    cleanup[label] = report;
     if (report.residualPaths.length > 0) throw new Error("Startup failure cleanup left generated roots");
     throw error;
   }
@@ -206,9 +208,9 @@ export const runInstalledGateIsolationCorpus: GateSliceRunner = async (options) 
     if (options.profileName !== options.profile.name || (lookupRegisteredRuntimeProfile(options.profileName) !== null && lookupRegisteredRuntimeProfile(options.profileName) !== options.profile)) {
       throw new Error("Installed gate requires the matching registered runtime profile");
     }
-    a = await startVault(runtimeOptions, "vault-a", runtimeMismatches);
+    a = await startVault(runtimeOptions, "vault-a", runtimeMismatches, cleanup);
     aVaultIdSha256 = a.session.vaultIdSha256;
-    b = await startVault(runtimeOptions, "vault-b", runtimeMismatches);
+    b = await startVault(runtimeOptions, "vault-b", runtimeMismatches, cleanup);
     result = await runInstalledGateIsolationSlice({ vaultA: a.session, vaultB: b.session });
     sliceVerified = true;
   } catch {
