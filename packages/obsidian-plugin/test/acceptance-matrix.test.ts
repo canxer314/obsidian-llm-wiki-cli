@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -201,6 +202,28 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     const report = createAcceptanceMatrixReport(evidence());
     const reordered = { ...report, childManifests: [...report.childManifests].reverse() };
     expect(validateAcceptanceMatrixReport(reordered)).toEqual(reordered);
+  });
+
+  it("rejects a rehashed report that substitutes another valid child assertion for a criterion", () => {
+    const report = createAcceptanceMatrixReport(evidence());
+    const wrong = report.scenarios.find(({ id }) => id === "A-04")!;
+    const substituted = {
+      ...report,
+      scenarios: report.scenarios.map(scenario => scenario.id === "A-21" ? {
+        ...wrong, id: "A-21", evidencePointer: wrong.evidencePointer.replace("#A-04", "#A-21"),
+      } : scenario),
+    };
+    const canonical = (value: unknown): string => {
+      if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+      if (typeof value === "object" && value !== null) {
+        const record = value as Record<string, unknown>;
+        return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+      }
+      return JSON.stringify(value);
+    };
+    const { canonicalManifestSha256: _checksum, ...draft } = substituted;
+    substituted.canonicalManifestSha256 = createHash("sha256").update(canonical(draft)).digest("hex");
+    expect(() => validateAcceptanceMatrixReport(substituted)).toThrow(/A-21.*required proof/u);
   });
 
   it("fails closed for an absent child, duplicate ID, invalid checksum, and residue", () => {

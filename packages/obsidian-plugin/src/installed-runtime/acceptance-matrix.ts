@@ -297,6 +297,10 @@ const acceptanceMatrixReportSchema = z.object({
   if (actualIds.join("\0") !== [...ACCEPTANCE_IDS].sort().join("\0")) context.addIssue({ code: "custom", message: "Acceptance matrix must contain every A-01 through A-44 exactly once" });
   if (new Set(report.childManifests.map((child) => child.corpusId)).size !== ACCEPTANCE_CORPUS_IDS.length) context.addIssue({ code: "custom", message: "Acceptance matrix must contain every child manifest exactly once" });
   for (const scenario of report.scenarios) {
+    const required = ACCEPTANCE_MATRIX_PLAN.find(({ id }) => id === scenario.id);
+    if (required === undefined || required.corpusId !== scenario.corpusId || required.assertion !== scenario.assertion) {
+      context.addIssue({ code: "custom", message: `${scenario.id} does not bind its required proof` });
+    }
     const child = report.childManifests.find(({ corpusId }) => corpusId === scenario.corpusId);
     const assertionIndex = child?.assertions.indexOf(scenario.assertion) ?? -1;
     if (
