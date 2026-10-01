@@ -263,6 +263,28 @@ describe("installed-runtime authoritative command", () => {
     expect(observations).toBe(1);
     expect(stopped).toBe(true);
     expect(cleaned).toBe(true);
+    observations = 0;
+    stopped = false;
+    cleaned = false;
+    await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      ...referenceProfileFixture,
+      probe: { ...referenceProfileFixture.probe, probeRunning: async () => ({
+        ...await referenceProfileFixture.probe.probeRunning(), obsidianVersion: "0.0.0",
+      }) },
+      runId: "foreign-profile", workingDirectory: root, candidate, configDirectoryName: ".obsidian",
+      timeouts: { startupMs: 30, stopMs: 30, portClosedMs: 30 },
+      processControl: { start: async request => {
+        await writeFile(join(request.vaultPath, ".obsidian", "plugins", candidate.identity.pluginId, "data.json"), JSON.stringify({ vaultId: "reference-vault", port: 1 }));
+        return { pid: 1, vaultPath: request.vaultPath, profileDirectory: request.profileDirectory, stop: async () => { stopped = true; } };
+      } },
+      client: { observeHealth: async () => { observations += 1; throw foreign; } },
+      provisionVault: provisionTestVault,
+      cleanupVault: async vault => { cleaned = true; return cleanupTestVault(vault); },
+      record: () => undefined, assertion: () => undefined,
+    })).rejects.toThrow("does not match the registered profile");
+    expect(observations).toBe(0);
+    expect(stopped).toBe(true);
+    expect(cleaned).toBe(true);
   });
 
   it("preserves the generated Vault when registered-reference process shutdown fails", async () => {
