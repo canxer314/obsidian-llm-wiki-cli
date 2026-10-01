@@ -5,7 +5,8 @@ import { createServer } from "node:net";
 import { expect, it } from "vitest";
 import { brandVerifiedCandidateBundle, inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createContentInclusiveDiagnosticBundle } from "../src/content-inclusive-diagnostic-bundle.js";
 import { runInstalledPrivacyRecoveryAuthorityCorpus, type InstalledPrivacyBoundaryOptions } from "../src/installed-runtime/privacy-recovery-installed-runner.js";
 import { provisionTestVault, cleanupTestVault } from "../src/installed-runtime/test-vault.js";
 import { ObsidianProcessError } from "../src/installed-runtime/obsidian-process.js";
@@ -45,7 +46,7 @@ it("rejects a foreign privacy descriptor before starting the generated runtime",
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" = "missing", blockedSnapshotUnavailable = false) {
+async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" = "missing", blockedSnapshotUnavailable = false, content: "missing" | "real" | "cancel-only" = "missing") {
   const root = await mkdtemp(join(tmpdir(), "privacy-report-"));
   const candidateDirectory = join(root, "candidate");
   await mkdir(candidateDirectory);
@@ -165,6 +166,27 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
           try { await activation!.recordLocalWriteControl({ vaultId: vaultPath, endpoint: bridge.endpoint, invocationId: randomUUID(), action, outcome, before, after }); }
           finally { activation?.dispose(); }
           events.push(`${name}-published-${outcome}`);
+        })());
+      }
+      if ((content === "real" || content === "cancel-only" && name.includes("cancelled")) && name.endsWith("local-content-report-required")) {
+        const [vaultPath] = [...descriptors.entries()].find(([path]) => path.includes("vault-a"))!;
+        const bridge = bridges.get(vaultPath)!;
+        const outcome = name.includes("cancelled") ? "cancelled" : "copied";
+        writes.push((async () => {
+          expect(events).not.toContain("stop");
+          const observed = (await createLoopbackMcpClient().observeHealth(bridge.endpoint, vaultPath)).health;
+          if (observed.outcome !== "observed") throw new Error("Missing content fixture health");
+          const selection = "private explicit selection";
+          const evidence = { vaultId: vaultPath, versions: observed.versions,
+            health: { readiness: observed.readiness, recovery: observed.recovery.state, write: observed.write,
+              effectiveGate: observed.effectiveGate?.code ?? null, overall: observed.overall, reasonCodes: observed.reasonCodes, operatorAction: observed.operatorAction },
+            listener: observed.listener, queue: observed.queue, lifecycle: observed.lifecycle,
+            journal: { availability: "unavailable", frames: [] }, changeSets: [], machineEvents: [] };
+          const activation = await activateInstalledRuntimeAcceptanceDriver({ vaultPath, pluginId: "privacy-plugin" });
+          try { await activation!.recordContentInclusiveDiagnosticCopy({ vaultId: vaultPath, endpoint: bridge.endpoint,
+            confirmationId: randomUUID(), outcome, selection,
+            ...(outcome === "copied" ? { bundle: createContentInclusiveDiagnosticBundle(evidence, selection) } : {}) }); }
+          finally { activation?.dispose(); }
         })());
       }
       if (!name.endsWith("standard-local-report-required") || mode === "missing" || mode === "shared") return;
@@ -294,6 +316,45 @@ it("observes real blocked recovery handoff even when the post-cleanup Search Sna
     expect(result.recoveryHandoff).toHaveLength(1);
     expect(result.recoveryHandoff[0]).toMatchObject({ journalPhase: "FAILED", recovery: "blocked", effectiveGate: "recovery_blocked" });
     expect(fixture.events).toContain("vault-a-standard-local-report-required");
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects an invalid content selection digest before provisioning", async () => {
+  const fixture = await reportFixture("missing");
+  let provisions = 0;
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options,
+      contentConfirmation: { expectedSelectionSha256: "not-a-digest" },
+      provisionVault: async request => { provisions += 1; return provisionTestVault(request); },
+    } as InstalledPrivacyBoundaryOptions)).rejects.toThrow("Local content selection digest must be SHA-256");
+    expect(provisions).toBe(0);
+  } finally { await fixture.cleanup(); }
+});
+
+it("consumes cancelled then distinct copied local confirmations for the same selection while runtimes remain alive", async () => {
+  const fixture = await reportFixture("standard", "missing", false, "real");
+  try {
+    const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options,
+      contentConfirmation: { expectedSelectionSha256: createHash("sha256").update("private explicit selection").digest("hex") } });
+    expect(result.contentConfirmationObservations).toEqual([
+      expect.objectContaining({ outcome: "cancelled" }),
+      expect.objectContaining({ outcome: "copied", checksumVerified: true, bundleVersion: "1.0" }),
+    ]);
+    expect(result.contentConfirmationObservations[0]!.confirmationIdSha256).not.toBe(result.contentConfirmationObservations[1]!.confirmationIdSha256);
+    expect(JSON.stringify(result)).not.toContain("private explicit selection");
+    expect(result.verdict).toBe("partial");
+  } finally { await fixture.cleanup(); }
+});
+
+it("does not reuse a cancelled confirmation as copied evidence and cleans up after the copy report timeout", async () => {
+  const fixture = await reportFixture("standard", "missing", false, "cancel-only");
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options,
+      contentConfirmation: { expectedSelectionSha256: createHash("sha256").update("private explicit selection").digest("hex") },
+    })).rejects.toThrow("Local Primary Operator report is required for content-inclusive-diagnostic-copy");
+    expect(fixture.events).toContain("vault-a-copied-local-content-report-required");
+    expect(fixture.events.filter(event => event === "stop")).toHaveLength(2);
+    expect(fixture.events.filter(event => event === "clean-vault")).toHaveLength(2);
   } finally { await fixture.cleanup(); }
 });
 

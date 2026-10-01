@@ -146,11 +146,22 @@ queryable, and a fresh valid Submission Key binds the contract's terminal
 `intent_not_applied` disposition with `recovery_blocked` rather than executing.
 Missing or invalid local evidence fails
 closed, and runtime/listener shutdown must be confirmed before generated-root
-cleanup. The built-in adapter then observes Vault B's rejected baseline, Vault A's accepted
+cleanup. After the two standard copies, the built-in adapter observes two separate
+content confirmations in Vault A. Select the entire generated `Notes/Welcome.md`
+note without changing its bytes, invoke **Copy selected content-inclusive diagnostics**
+and cancel the first fresh modal; invoke it again with the same selection and
+confirm **Copy selection**. The expected selection SHA-256 is
+`8c683128e39b84e2261c09b4417d294ad8e0278cfd8203c3a618007c5cf74697`.
+Wait for each observation before invoking the next command; two pending reports
+are not ordered by file timestamps. The runner checks distinct confirmation IDs,
+selection binding, copy/version facts, and unchanged Vault B observations, not a
+substitute Agent click.
+
+The built-in adapter then observes Vault B's rejected baseline, Vault A's accepted
 baseline, and a separate Vault A resume report, in that order. It independently
 checks cleared Journal slots, live paused/writable health and status projections,
 unchanged complete historical Change Set records, and unaffected Vault B
 observations. It only asks for reports; the Primary Operator must perform each
-local command. These observations still remain partial: fresh content confirmations,
-complete corpus aggregation, and the remaining gate/crash/lifecycle cases are
+local command. These observations still remain partial: actual Primary Operator
+reports, complete corpus aggregation, and the remaining gate/crash/lifecycle cases are
 required for full acceptance.

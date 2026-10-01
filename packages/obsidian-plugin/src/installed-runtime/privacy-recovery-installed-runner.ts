@@ -12,7 +12,7 @@ import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { HealthObservationError } from "./loopback-client.js";
 import { observeInstalledBlockedGate } from "./installed-blocked-gate-observation.js";
 import { PUBLIC_WIRE_TOOL_NAMES } from "./public-wire-corpus.js";
-import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport } from "./local-operator-report.js";
+import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport } from "./local-operator-report.js";
 import { requestInstalledSemanticEvidenceScenario } from "./smoke-command.js";
 import { readInstalledCrashJournal } from "./installed-crash-restoration-slice.js";
 import { preflightRuntimeProfile } from "./runtime-profile.js";
@@ -43,6 +43,7 @@ export interface InstalledPrivacyBoundaryOptions {
   readonly operatorReportTimeoutMs: number;
   readonly recoveryFixture?: "trash_note/restore_evidence_deadline_blocks_writes";
   readonly recoveryControls?: true;
+  readonly contentConfirmation?: { readonly expectedSelectionSha256: string };
   readonly profileName: string;
   readonly profile: RegisteredRuntimeProfile;
   readonly probe: RuntimeEnvironmentProbe;
@@ -106,6 +107,13 @@ export interface InstalledPrivacyAuthorityBoundarySliceResult {
     readonly liveWriteState?: "paused" | "writable";
     readonly journalCleared?: true;
     readonly terminalStatusUnchanged?: true;
+  }[];
+  readonly contentConfirmationObservations: readonly {
+    readonly confirmationIdSha256: string;
+    readonly outcome: "cancelled" | "copied";
+    readonly bundleChecksum?: string;
+    readonly bundleVersion?: "1.0";
+    readonly checksumVerified?: true;
   }[];
   readonly humanRequired: readonly ["diagnostic-bundles", "recovery-baseline", "resume-writes"];
 }
@@ -330,6 +338,9 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
   if (!Number.isSafeInteger(rawOptions.operatorReportTimeoutMs) || rawOptions.operatorReportTimeoutMs < 1) {
     throw new Error("Local Primary Operator report timeout must be a positive integer");
   }
+  if (rawOptions.contentConfirmation !== undefined && !/^[a-f0-9]{64}$/u.test(rawOptions.contentConfirmation.expectedSelectionSha256)) {
+    throw new Error("Local content selection digest must be SHA-256");
+  }
   if (rawOptions.profileName !== rawOptions.profile.name || rawOptions.probe.probeRunning === undefined) {
     throw new Error("Privacy/recovery boundary slice requires a registered profile and running-runtime probe");
   }
@@ -464,6 +475,27 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       standardDiagnostics.push(facts);
       options.record("assertion", `${runtime.label}-standard-local-report-observed`, facts);
     }
+    const contentConfirmationObservations: InstalledPrivacyAuthorityBoundarySliceResult["contentConfirmationObservations"][number][] = [];
+    if (options.contentConfirmation !== undefined) {
+      const affected = runtimes[0]!;
+      const unaffected = runtimes[1]!;
+      const consumedConfirmationIds: string[] = [];
+      for (const outcome of ["cancelled", "copied"] as const) {
+        options.record("transport", `vault-a-${outcome}-local-content-report-required`, { label: "vault-a", action: "content-inclusive-diagnostic-copy", expectedSelectionSha256: options.contentConfirmation.expectedSelectionSha256 });
+        const report = await waitForNextInstalledLocalContentReport({ descriptor: affected.descriptor, vaultId: affected.identity.vaultId,
+          endpoint: affected.endpoint, configDirectoryName: options.configDirectoryName, consumedConfirmationIds,
+          expectedSelectionSha256: options.contentConfirmation.expectedSelectionSha256, timeoutMs: options.operatorReportTimeoutMs });
+        if (report.outcome !== outcome) throw new Error("Local content confirmations must observe cancellation before a distinct copy");
+        consumedConfirmationIds.push(report.confirmationId);
+        if ((await observeHealth(unaffected)).digest !== before[1]!.digest || await observeStatus(unaffected) !== statusBefore[1]) {
+          throw new Error("Local content confirmation changed Vault B health or status");
+        }
+        const facts = { confirmationIdSha256: digest(report.confirmationId), outcome: report.outcome,
+          ...(outcome === "copied" ? { bundleChecksum: report.bundleChecksum!, bundleVersion: report.bundleVersion!, checksumVerified: true as const } : {}) };
+        contentConfirmationObservations.push(facts);
+        options.record("assertion", `vault-a-${outcome}-local-content-report-observed`, facts);
+      }
+    }
     if (options.recoveryControls === true) {
       const affected = runtimes[0]!;
       const unaffected = runtimes[1]!;
@@ -528,6 +560,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       standardDiagnostics,
       recoveryHandoff,
       recoveryControlObservations,
+      contentConfirmationObservations,
       provenance: runtimes.map((runtime, index) => ({
         label: runtime.label, vaultIdSha256: digest(runtime.identity.vaultId),
         installedMainSha256: runtime.descriptor.installedMainSha256,
