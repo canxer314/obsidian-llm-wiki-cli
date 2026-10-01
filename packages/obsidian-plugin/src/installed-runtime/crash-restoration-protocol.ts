@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { link, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { z } from "zod";
@@ -104,7 +104,7 @@ export async function writeCrashRestorationBoundaryReport(options: {
   const path = crashRestorationBoundaryPath(reportRealPath);
   const temp = `${path}.${randomBytes(16).toString("hex")}.next`;
   await writeFile(temp, `${JSON.stringify(report)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  try { await rename(temp, path); }
+  try { await link(temp, path); }
   finally { await rm(temp, { force: true }); }
 }
 

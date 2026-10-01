@@ -128,6 +128,32 @@ it("does not leak a crash capability marker through a report-root symlink outsid
   } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });
 
+it("preserves the first durable crash marker when publication is repeated", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-one-shot-"));
+  const vaultPath = join(root, "installed-runtime-vault-one-shot");
+  const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "crash-plugin");
+  await mkdir(pluginDirectory, { recursive: true });
+  await writeFile(join(pluginDirectory, "main.js"), "candidate");
+  const created = await createInstalledRuntimeAcceptanceDescriptor({
+    runId: "one-shot", vaultPath, pluginId: "crash-plugin", reportDirectory: join(root, "reports"),
+    candidateBundleSha256: "a".repeat(64),
+  });
+  const command = { sequence: 1, capabilityToken: created.descriptor.capabilityToken,
+    action: "run-crash-restoration-scenario" as const, scenario: "create_note/after_prepared" as const,
+    expectedVaultId: "one-shot-vault", endpoint: "http://127.0.0.1:32123/mcp", submissionKey: "first-key", input: {} };
+  try {
+    await mkdir(created.descriptor.reportDirectory);
+    await writeCrashRestorationBoundaryReport({ descriptor: created.descriptor, command, journalPhase: "PREPARED" });
+    await expect(writeCrashRestorationBoundaryReport({
+      descriptor: created.descriptor, command: { ...command, submissionKey: "second-key" }, journalPhase: "PREPARED",
+    })).rejects.toMatchObject({ code: "EEXIST" });
+    const retained = await loadCrashBoundaryReport({ ...created.descriptor,
+      vaultId: command.expectedVaultId, endpoint: command.endpoint, submissionKey: command.submissionKey });
+    expect(retained.submissionKey).toBe("first-key");
+    expect(await readdir(created.descriptor.reportDirectory)).toEqual(["crash-restoration-after-prepared-boundary.json"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 it("rejects a crash marker bound to a foreign endpoint or submission", async () => {
   const root = await mkdtemp(join(tmpdir(), "installed-crash-marker-"));
   const binding = {
