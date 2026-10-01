@@ -43,3 +43,33 @@ installed-candidate provenance, concrete assertions, and confirmed cleanup must
 all pass. Missing adapters or previous-release inputs fail closed. Consult the
 written evidence verdict rather than treating a successful plugin unit-test run
 as installed-runtime acceptance.
+
+## Local Primary Operator observations
+
+An armed generated Vault records evidence from the existing local commands; the
+private acceptance channel does not dispatch any diagnostic, baseline, or resume
+operation. The Agent must not invoke these commands through the debugging
+connection or impersonate the Primary Operator.
+
+- **Copy standard diagnostic bundle** records
+  `local-standard-diagnostic-copy.json` only after the clipboard write succeeds.
+  It contains the closed redacted bundle, whose checksum can be independently
+  verified. The first report cannot be overwritten.
+- **Copy selected content-inclusive diagnostics** opens a fresh confirmation
+  modal for each invocation. Cancellation records no generation or copy;
+  successful copy records the verified bundle checksum, version facts, and
+  selection digest, not the selected text. Reports are named
+  `local-content-inclusive-diagnostic-copy-<confirmation-id-sha256>.json`.
+- **Pause Managed Vault writes**, **Accept trusted Managed Vault recovery
+  baseline**, and **Resume Managed Vault writes** record accepted or rejected
+  outcomes with verified before/after redacted diagnostic bundles in
+  `local-write-control-<invocation-id-sha256>.json`. Merely accepting a baseline
+  does not claim that a subsequent resume occurred.
+
+These reports are bound to the descriptor's run, candidate bundle, installed
+entry point, capability, Vault identity, endpoint, and pinned report directory.
+They use private file permissions and atomic no-replace publication. They remain
+local evidence containing a capability: do not publish the raw report files.
+No local command invocation means no local authority proof. Reports alone do not
+complete the full privacy/recovery corpus or A-01…A-44 aggregation; the installed
+runner must also verify scenario preconditions, history, isolation, and cleanup.
