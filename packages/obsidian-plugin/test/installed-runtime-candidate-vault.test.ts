@@ -219,7 +219,12 @@ describe("test Vault lifecycle", () => {
     const before = await snapshotInventory(vault.vaultPath);
     expect(before.map((entry) => entry.path)).toEqual([
       ".obsidian/app.json",
+      "Notes/Bom.md",
+      "Notes/CjkAstral.md",
+      "Notes/GroupLarge.md",
       "Notes/Linked.md",
+      "Notes/OverLimit.md",
+      "Notes/Transport.md",
       "Notes/Welcome.md",
     ]);
     for (const entry of before) {

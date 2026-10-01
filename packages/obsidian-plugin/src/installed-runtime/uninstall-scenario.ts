@@ -31,6 +31,7 @@ import {
   type LoopbackMcpClient,
 } from "./loopback-client.js";
 import {
+  ObsidianProcessError,
   readPersistedBridgeIdentity,
   waitForCondition,
   type ObsidianProcessControl,
@@ -215,6 +216,7 @@ export async function runManagedVaultUninstallScenario(
   const recorder = stageRecorder();
   let vault: { vaultPath: string; profileDirectory: string } | null = null;
   let handle: ObsidianProcessHandle | null = null;
+  let startupShutdownUnconfirmed = false;
   let identity: PersistedBridgeIdentity | null = null;
   let registrationCommand: string | null = null;
   let registrationRemovalCommand: string | null = null;
@@ -301,6 +303,9 @@ export async function runManagedVaultUninstallScenario(
       identity = startedIdentity;
       recorder.pass("obsidian_start");
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       throw recorder.fail(
         "obsidian_start",
         error instanceof Error ? error.message : String(error),
@@ -421,8 +426,20 @@ export async function runManagedVaultUninstallScenario(
           null,
         { timeoutMs: startupMs },
       );
+      await waitForCondition(async () => {
+        try {
+          await client.observeHealth(endpoint, vaultId);
+          return true;
+        } catch (error) {
+          if (error instanceof HealthObservationError && error.code !== "health_unreachable") throw error;
+          return false;
+        }
+      }, { timeoutMs: startupMs });
       recorder.pass("obsidian_restart");
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       throw recorder.fail(
         "obsidian_restart",
         error instanceof Error ? error.message : String(error),
@@ -512,11 +529,16 @@ export async function runManagedVaultUninstallScenario(
   if (handle !== null) {
     try {
       await handle.stop();
+      handle = null;
     } catch {
-      // The primary failure is already recorded; cleanup still proceeds.
+      // Never delete a generated root still owned by a live process.
     }
   }
-  if (vault !== null) {
+  if (vault !== null && (handle !== null || startupShutdownUnconfirmed)) {
+    cleanup = { attempted: true, residualPaths: ["/"] };
+    recorder.fail("cleanup", "Generated runtime shutdown was not confirmed");
+    failure ??= { stage: "cleanup", detail: "Generated runtime shutdown was not confirmed" };
+  } else if (vault !== null) {
     try {
       cleanup = await cleanupVault(vault);
       if (cleanup.residualPaths.length > 0) {

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, relative, sep, dirname } from "node:path";
@@ -15,16 +16,55 @@ import { sha256Hex } from "./candidate-bundle.js";
 export const TEST_VAULT_DIRECTORY_PREFIX = "installed-runtime-vault-";
 export const TEST_PROFILE_DIRECTORY_PREFIX = "installed-runtime-profile-";
 
-/** Deterministic seed notes so health/discovery observations are reproducible. */
+/**
+ * Deterministic seed notes so health/discovery observations are reproducible
+ * (issue #174). The byte-exact corpus fixtures are generated deterministically
+ * at provision time and never recorded in evidence — only their paths, Content
+ * Versions, and byte sizes are. They exercise the byte spellings the acceptance
+ * corpus must prove: UTF-8 BOM, LF/CRLF mixtures, CJK, astral Unicode (ZWJ and
+ * combining sequences), and exact UTF-8 — plus one note over 1 MiB and two
+ * accepted notes whose logical Exact Read total exceeds 1 MiB.
+ */
+const WELCOME_NOTE =
+  "---\ntags: [harness]\n---\n# Installed Runtime Harness\n\nThis generated note seeds the dedicated test Vault.\n";
+const LINKED_NOTE = "# Linked\n\nReferences [[Welcome]] for discovery warm-up.\n";
+const BOM_NOTE = "﻿# 位元組\r\nBOM 前綴與 CRLF 保留。\n第二行 LF 中文正文 😀。\r\n";
+const CJK_ASTRAL_NOTE =
+  "# 中文與星體\n\n線界 é 組合字元與 😀 星體字元。\r\n末行 LF 結尾。\n";
+
+const TRANSPORT_PREFIX = "﻿# 傳輸\r\n";
+const GROUP_PREFIX = "﻿# 分組\r\n";
+const OVER_LIMIT_PREFIX = "﻿# 超限\r\n";
+const TRANSPORT_LINE = "線界é😀abcdefghij\r\n";
+const GROUP_LINE = "組線😀🧑‍💻abcdefghij\r\n";
+const OVER_LIMIT_LINE = "超限正文😀éabcdefghij\r\n";
+
+function repeatedByteContent(prefix: string, line: string, minimumBytes: number): string {
+  const prefixBytes = Buffer.byteLength(prefix, "utf8");
+  const lineBytes = Buffer.byteLength(line, "utf8");
+  if (lineBytes === 0) {
+    throw new Error("A deterministic fixture line must carry at least one byte");
+  }
+  const repeat = Math.max(0, Math.ceil((minimumBytes - prefixBytes) / lineBytes));
+  return prefix + new Array(repeat).fill(line).join("");
+}
+
+/**
+ * Deterministic seed manifest for the installed-runtime read-side corpus
+ * (issue #174): the transport-framing note is under 1 MiB but large enough
+ * that its compact response exceeds the 256 KiB transport bound; the grouping
+ * note is also under 1 MiB; together their logical Exact Read total exceeds
+ * 1 MiB so a combined request returns deterministic contiguous groups. The
+ * over-limit note alone exceeds 1 MiB and must refuse Exact Read.
+ */
 const SEED_NOTES: ReadonlyArray<readonly [string, string]> = [
-  [
-    "Notes/Welcome.md",
-    "---\ntags: [harness]\n---\n# Installed Runtime Harness\n\nThis generated note seeds the dedicated test Vault.\n",
-  ],
-  [
-    "Notes/Linked.md",
-    "# Linked\n\nReferences [[Welcome]] for discovery warm-up.\n",
-  ],
+  ["Notes/Welcome.md", WELCOME_NOTE],
+  ["Notes/Linked.md", LINKED_NOTE],
+  ["Notes/Bom.md", BOM_NOTE],
+  ["Notes/CjkAstral.md", CJK_ASTRAL_NOTE],
+  ["Notes/Transport.md", repeatedByteContent(TRANSPORT_PREFIX, TRANSPORT_LINE, 420_000)],
+  ["Notes/GroupLarge.md", repeatedByteContent(GROUP_PREFIX, GROUP_LINE, 700_000)],
+  ["Notes/OverLimit.md", repeatedByteContent(OVER_LIMIT_PREFIX, OVER_LIMIT_LINE, 1_100_000)],
 ];
 
 export class TestVaultError extends Error {

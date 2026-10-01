@@ -317,12 +317,14 @@ export function createDiscoverResultJsonSchema(): Record<string, unknown> {
   };
 }
 
-const readEvidenceSchema = z.object({
-  index: z.number().int().nonnegative(),
-  path: canonicalMarkdownPathSchema,
-  contentVersion: contentVersionSchema,
-  sizeBytes: z.number().int().nonnegative(),
-});
+const readEvidenceSchema = z
+  .object({
+    index: z.number().int().nonnegative(),
+    path: canonicalMarkdownPathSchema,
+    contentVersion: contentVersionSchema,
+    sizeBytes: z.number().int().nonnegative(),
+  })
+  .strict();
 
 const metadataReadResultSchema = readEvidenceSchema
   .extend({

@@ -167,6 +167,38 @@ describe("Bridge Instance over loopback Streamable HTTP", () => {
     }
   });
 
+  it("keeps Trusted Recovery Baseline authority outside the six MCP tools", async () => {
+    const health = healthState("vault-a", "Alpha");
+    const bridge = createBridgeInstance({
+      port: 0,
+      health,
+      changeSets: {
+        store: { load: async () => undefined, save: async () => undefined },
+        dataSource: {
+          readBinary: async () => null,
+          pathKind: async () => null,
+          isContained: async () => true,
+        },
+      },
+    });
+    await bridge.start();
+    try {
+      const client = await connect(bridge.endpoint, "vault-a");
+      const tools = await client.listTools();
+      expect(tools.tools.map(({ name }) => name).sort()).toEqual([
+        "vault_change_set_status",
+        "vault_change_set_submit",
+        "vault_health",
+      ]);
+      await expect(
+        client.callTool({ name: "accept_trusted_recovery_baseline", arguments: {} }),
+      ).rejects.toThrow();
+      await client.close();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   it("keeps manual pause and maintenance local while observational tools remain available", async () => {
     const health = healthState("vault-a", "Alpha");
     const bridge = createBridgeInstance({

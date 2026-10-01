@@ -34,6 +34,7 @@ import {
   type LoopbackMcpClient,
 } from "./loopback-client.js";
 import {
+  ObsidianProcessError,
   readPersistedBridgeIdentity,
   waitForCondition,
   type ObsidianProcessControl,
@@ -259,6 +260,7 @@ export async function runManagedVaultPurgeScenario(
     seedNotes: readonly { path: string; content: string }[];
   } | null = null;
   let handle: ObsidianProcessHandle | null = null;
+  let startupShutdownUnconfirmed = false;
   let identity: PersistedBridgeIdentity | null = null;
   let registrationCommand: string | null = null;
   let drainedChangeSetId: string | null = null;
@@ -365,6 +367,9 @@ export async function runManagedVaultPurgeScenario(
       identity = startedIdentity;
       recorder.pass("obsidian_start");
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       throw recorder.fail(
         "obsidian_start",
         error instanceof Error ? error.message : String(error),
@@ -425,6 +430,9 @@ export async function runManagedVaultPurgeScenario(
       drainedChangeSetId = queued.changeSetId;
       recorder.pass("obsidian_restart_drain", `drained: ${drainedChangeSetId}`);
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       throw recorder.fail(
         "obsidian_restart_drain",
         error instanceof Error ? error.message : String(error),
@@ -592,11 +600,16 @@ export async function runManagedVaultPurgeScenario(
   if (handle !== null) {
     try {
       await handle.stop();
+      handle = null;
     } catch {
-      // The primary failure is already recorded; cleanup still proceeds.
+      // Never delete a generated root still owned by a live process.
     }
   }
-  if (vault !== null) {
+  if (vault !== null && (handle !== null || startupShutdownUnconfirmed)) {
+    cleanup = { attempted: true, residualPaths: ["/"] };
+    recorder.fail("cleanup", "Generated runtime shutdown was not confirmed");
+    failure ??= { stage: "cleanup", detail: "Generated runtime shutdown was not confirmed" };
+  } else if (vault !== null) {
     try {
       cleanup = await cleanupVault(vault);
       // The scenario's backups are removed too: no residue from the run.

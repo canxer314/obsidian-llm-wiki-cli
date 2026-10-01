@@ -387,10 +387,11 @@ export class SearchSnapshotRefreshCoordinator {
     this.#manager = manager;
   }
 
-  schedule(): void {
-    if (this.#disposed) return;
+  schedule(): { readonly reset: boolean } {
+    if (this.#disposed) return { reset: false };
     this.#manager.invalidate();
-    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    const reset = this.#timer !== undefined;
+    if (reset) clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
       if (this.#disposed) return;
@@ -405,6 +406,7 @@ export class SearchSnapshotRefreshCoordinator {
       );
     }, SEARCH_SNAPSHOT_QUIET_WINDOW_MS);
     this.#timer.unref?.();
+    return { reset };
   }
 
   async whenIdle(): Promise<void> {

@@ -61,6 +61,24 @@ describe("recovery journal", () => {
     await handle.close();
   });
 
+  it("clears eligible data and reuses the durable Journal", async () => {
+    const { handle } = await journalFile();
+    const journal = await openRecoveryJournal(handle, { slotCapacity: 1024 });
+    await journal.write({ phase: "FAILED", payload: { changeSetId: "blocked" } });
+
+    await journal.clear();
+    await expect(journal.recover()).resolves.toBeUndefined();
+
+    await expect(
+      journal.write({ phase: "PREPARED", payload: { changeSetId: "next" } }),
+    ).resolves.toEqual({
+      sequence: 1,
+      phase: "PREPARED",
+      payload: { changeSetId: "next" },
+    });
+    await handle.close();
+  });
+
   it("falls back to the older slot when the newest slot is corrupted", async () => {
     const { path, handle } = await journalFile();
     const journal = await openRecoveryJournal(handle, { slotCapacity: 1024 });
