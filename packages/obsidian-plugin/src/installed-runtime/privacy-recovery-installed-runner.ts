@@ -365,7 +365,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     const recoveryHandoff: InstalledPrivacyAuthorityBoundarySliceResult["recoveryHandoff"][number][] = [];
     const standardDiagnostics: InstalledPrivacyAuthorityBoundarySliceResult["standardDiagnostics"][number][] = [];
     for (const runtime of runtimes) {
-      if (options.recoveryFixture !== undefined) {
+      if (options.recoveryFixture !== undefined && runtime.label === "vault-a") {
         await requestInstalledSemanticEvidenceScenario({ descriptorPath: runtime.descriptorPath, descriptor: runtime.descriptor,
           scenario: options.recoveryFixture, expectedVaultId: runtime.identity.vaultId, endpoint: runtime.endpoint });
         const reportPath = semanticEvidenceScenarioReportPath(runtime.descriptor.reportDirectory, options.recoveryFixture);
@@ -409,12 +409,18 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         recoveryHandoff.push({ label: runtime.label, journalPhase: "FAILED", proofState: "result_unproven",
           recovery: "blocked", effectiveGate: "recovery_blocked", submissionKeySha256: digest(submissionKey) });
       }
+      if (options.recoveryFixture !== undefined && runtime.label === "vault-b") {
+        const health = await observeHealth(runtime);
+        if (health.digest !== before[1]!.digest || await observeStatus(runtime) !== statusBefore[1]) {
+          throw new Error("Vault A recovery fixture changed Vault B health or status observations");
+        }
+      }
       options.record("transport", `${runtime.label}-standard-local-report-required`, { action: "standard-diagnostic-copy" });
       const report = await waitForInstalledLocalOperatorReport({ descriptor: runtime.descriptor, vaultId: runtime.identity.vaultId,
         endpoint: runtime.endpoint, configDirectoryName: options.configDirectoryName,
         action: "standard-diagnostic-copy", timeoutMs: options.operatorReportTimeoutMs });
       if (report.action !== "standard-diagnostic-copy") throw new Error("Expected the standard local diagnostic report");
-      if (options.recoveryFixture !== undefined && (report.bundle.health.recovery !== "blocked" ||
+      if (options.recoveryFixture !== undefined && runtime.label === "vault-a" && (report.bundle.health.recovery !== "blocked" ||
           report.bundle.health.effectiveGate !== "recovery_blocked" || report.bundle.journal.availability !== "available" ||
           !report.bundle.journal.frames.some(frame => frame.state === "valid" && frame.phase === "FAILED"))) {
         throw new Error("Standard report does not preserve the real blocked recovery fixture");

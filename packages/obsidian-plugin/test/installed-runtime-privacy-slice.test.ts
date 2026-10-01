@@ -137,7 +137,7 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
     }, record: (_kind: string, name: string) => {
       events.push(name);
       if (!name.endsWith("standard-local-report-required") || mode === "missing" || mode === "shared") return;
-      if (mode === "blocked") expect(events.filter(event => event === "real-blocked-fixture-cleanup-completed").length).toBe(name.startsWith("vault-a") ? 1 : 2);
+      if (mode === "blocked") expect(events.filter(event => event === "real-blocked-fixture-cleanup-completed").length).toBe(1);
       const [vaultPath, { descriptor }] = [...descriptors.entries()].find(([path]) => path.includes(name.startsWith("vault-a") ? "vault-a" : "vault-b"))!;
       const bridge = bridges.get(vaultPath)!;
       const bundle = createStandardDiagnosticBundle({ vaultId: vaultPath,
@@ -226,9 +226,8 @@ it("hands off real disk FAILED journals and live blocked recovery without dispat
     const result = await runInstalledPrivacyRecoveryAuthorityCorpus(fixture.options);
     expect(result.recoveryHandoff).toEqual([
       expect.objectContaining({ label: "vault-a", journalPhase: "FAILED", proofState: "result_unproven", recovery: "blocked", effectiveGate: "recovery_blocked" }),
-      expect.objectContaining({ label: "vault-b", journalPhase: "FAILED", proofState: "result_unproven", recovery: "blocked", effectiveGate: "recovery_blocked" }),
     ]);
-    expect(fixture.events.filter(event => event === "real-blocked-fixture-completed")).toHaveLength(2);
+    expect(fixture.events.filter(event => event === "real-blocked-fixture-completed")).toHaveLength(1);
     expect(result.verdict).toBe("partial");
     expect(result.humanRequired).toContain("recovery-baseline");
   } finally { await fixture.cleanup(); }

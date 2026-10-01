@@ -121,7 +121,7 @@ corpus by waiting or by substituting an Agent invocation.
 The built-in privacy adapter uses independent report roots for its two generated
 Vaults and waits up to 180 seconds per local report. It first observes the six-tool
 Agent authority boundary, then runs the existing installed trash/restore evidence
-failure fixture. Before requesting a standard copy, it waits for the identity-bound
+failure fixture only in Vault A, retaining Vault B as an unaffected control. Before requesting a standard copy, it waits for the identity-bound
 scenario completion and cleanup, checks the durable Vault-bound `FAILED` frame,
 and observes the corresponding public `result_unproven` status and blocked health.
 It never invokes the local copy command. Missing or invalid local evidence fails
