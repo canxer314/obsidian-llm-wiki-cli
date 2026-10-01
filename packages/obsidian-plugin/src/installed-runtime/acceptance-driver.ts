@@ -100,6 +100,13 @@ export async function activateInstalledRuntimeAcceptanceDriver(
       if (command.capabilityToken !== loaded.descriptor.capabilityToken) {
         throw new Error("Installed acceptance command capability changed");
       }
+      if (command.action !== "idle") {
+        const endpoint = new URL(command.endpoint);
+        if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" ||
+            endpoint.username !== "" || endpoint.password !== "") {
+          throw new Error("Installed acceptance commands require a credential-free loopback endpoint");
+        }
+      }
       const crashCommand = parseCrashRestorationCommand(command);
       if (crashCommand !== null) {
         if (executeCrashRestorationScenario === undefined) return;

@@ -82,6 +82,39 @@ it("rejects a crash descriptor for a foreign Vault, plugin, or installed entry p
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+it("rejects an installed crash command targeting a remote endpoint even with the correct capability", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-remote-"));
+  const vaultPath = join(root, "installed-runtime-vault-remote");
+  const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "crash-plugin");
+  await mkdir(pluginDirectory, { recursive: true });
+  await writeFile(join(pluginDirectory, "main.js"), "candidate");
+  const created = await createInstalledRuntimeAcceptanceDescriptor({
+    runId: "remote", vaultPath, pluginId: "crash-plugin", reportDirectory: join(root, "reports"),
+    candidateBundleSha256: "a".repeat(64),
+  });
+  let dispatched = 0;
+  const activation = await activateInstalledRuntimeAcceptanceDriver({
+    vaultPath, pluginId: "crash-plugin",
+    executeCrashRestorationScenario: async () => { dispatched += 1; return { boundary: "after_prepared", journalPhase: "PREPARED" }; },
+  });
+  try {
+    await writeFile(created.path, JSON.stringify({ ...created.descriptor, command: {
+      sequence: 1, capabilityToken: created.descriptor.capabilityToken,
+      action: "run-crash-restoration-scenario", scenario: "create_note/after_prepared",
+      expectedVaultId: "remote-vault", endpoint: "https://example.com/mcp", submissionKey: "remote-key", input: {},
+    } }));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(dispatched).toBe(0);
+    await writeFile(created.path, JSON.stringify(created.descriptor));
+    await requestInstalledCrashRestorationScenario({
+      descriptorPath: created.path, descriptor: created.descriptor,
+      expectedVaultId: "remote-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      input: { submissionKey: "local-key" }, crashPoint: "after_prepared",
+    });
+    await expect.poll(() => dispatched, { timeout: 1000 }).toBe(1);
+  } finally { activation?.dispose(); await rm(root, { recursive: true, force: true }); }
+});
+
 it("continues inspecting an authenticated command after rejecting a malformed descriptor update", async () => {
   const root = await mkdtemp(join(tmpdir(), "installed-crash-invalid-update-"));
   const vaultPath = join(root, "installed-runtime-vault-invalid-update");
