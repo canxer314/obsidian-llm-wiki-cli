@@ -123,7 +123,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
           capabilityToken: parsed.capabilityToken,
           ...result,
         })}\n`,
-        { encoding: "utf8", flag: "wx" },
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
       );
       try {
         await rename(temporaryPath, reportPath);

@@ -580,7 +580,8 @@ export function createInstalledSemanticEvidenceScenarioControl(
           observation.bomPrefixedContentVersion !== target.expectedContentVersion) ||
         target.committedMetadataReleased ||
         (active!.rejectedSnapshotRounds > 0 &&
-          active!.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO);
+          active!.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO &&
+          active!.scenario !== EDIT_BODY_MISSING_OBSERVATION_DEADLINE_SCENARIO);
     },
     acceptsMetadataCacheObservation(path) {
       const target = active?.targets.get(path);
@@ -591,7 +592,8 @@ export function createInstalledSemanticEvidenceScenarioControl(
           target.metadataContentVersion !== null &&
           target.metadataContentVersion !== target.expectedContentVersion) ||
         (active!.rejectedSnapshotRounds > 0 &&
-          active!.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO);
+          active!.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO &&
+          active!.scenario !== EDIT_BODY_MISSING_OBSERVATION_DEADLINE_SCENARIO);
     },
     recordMetadataCacheObservation(observation) {
       const target = active?.targets.get(observation.path);
@@ -928,6 +930,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
             metadataContentVersion: null,
             bomPrefixedContentVersion: null,
             committedMetadataReleased:
+              request.scenario !== EDIT_BODY_MISSING_OBSERVATION_DEADLINE_SCENARIO &&
               request.scenario !== STALE_OBSERVATION_DEADLINE_SCENARIO &&
               request.scenario !== EDIT_BODY_STALE_VERSION_SCENARIO &&
               request.scenario !== EDIT_BODY_QUIET_WINDOW_CONTRADICTION_SCENARIO &&

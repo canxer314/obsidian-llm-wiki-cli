@@ -106,7 +106,7 @@ export async function createInstalledRuntimeAcceptanceDescriptor(
     },
   });
   const path = join(pluginDirectory, INSTALLED_RUNTIME_ACCEPTANCE_DESCRIPTOR);
-  await writeFile(path, `${JSON.stringify(descriptor)}\n`, { flag: "wx" });
+  await writeFile(path, `${JSON.stringify(descriptor)}\n`, { flag: "wx", mode: 0o600 });
   return { path, descriptor };
 }
 

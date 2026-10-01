@@ -1723,6 +1723,7 @@ describe("installed Semantic Evidence executor", () => {
     let now = 0;
     let snapshotVersion = 1;
     let submissionKey = "";
+    let committedObservationAccepted: boolean | undefined;
     let resolveSubmit!: (value: { proofState: "intent_not_applied" }) => void;
     const submitted = new Promise<{ proofState: "intent_not_applied" }>((resolve) => {
       resolveSubmit = resolve;
@@ -1787,6 +1788,12 @@ describe("installed Semantic Evidence executor", () => {
         async submit({ input }) {
           submissionKey = input.submissionKey;
           await writeFile(fixturePath, EXACT_COMMITTED_BYTES);
+          const committedObservation = {
+            path: EXACT_FIXTURE.path,
+            contentVersion: contentVersion(EXACT_COMMITTED_BYTES.slice(3)),
+            bomPrefixedContentVersion: contentVersion(EXACT_COMMITTED_BYTES),
+          };
+          committedObservationAccepted = control.acceptMetadataCacheObservation(committedObservation);
           control.recordVaultEvent({ kind: "create", path: EXACT_FIXTURE.path });
           return submitted;
         },
@@ -1803,6 +1810,7 @@ describe("installed Semantic Evidence executor", () => {
       endpoint: new URL("http://127.0.0.1:32123/mcp"),
     });
 
+    expect(committedObservationAccepted).toBe(false);
     expect(summary).toMatchObject({
       scenario: "edit_body/missing_observation_deadline",
       mutationKind: "edit_body",

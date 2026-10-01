@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -303,6 +303,19 @@ describe("installed-runtime authoritative command", () => {
     expect(descriptor.path.startsWith(`${vaultPath}/.obsidian/plugins/llm-wiki/`)).toBe(true);
   });
 
+  it("stores the private capability descriptor with owner-only permissions", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "private-descriptor-mode-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const vaultPath = join(root, "installed-runtime-vault-mode");
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "llm-wiki");
+    await mkdir(pluginDirectory, { recursive: true });
+    await writeFile(join(pluginDirectory, "main.js"), "candidate");
+    const created = await createInstalledRuntimeAcceptanceDescriptor({ runId: "mode", vaultPath,
+      pluginId: "llm-wiki", candidateBundleSha256: "a".repeat(64), reportDirectory: join(root, "reports") });
+    expect((await stat(created.path)).mode & 0o777).toBe(0o600);
+  });
+
   it("loads the descriptor only when Vault and installed candidate bytes still match", async () => {
     const workingDirectory = await mkdtemp(join(tmpdir(), "installed-smoke-command-"));
     cleanups.push(() => rm(workingDirectory, { recursive: true, force: true }));
@@ -423,6 +436,9 @@ describe("installed-runtime authoritative command", () => {
       "installed-runtime-acceptance-run-123",
       "semantic-evidence-create_note_clean_convergence.json",
     );
+    if (process.platform !== "win32") {
+      expect((await stat(reportPath)).mode & 0o777).toBe(0o600);
+    }
     expect(JSON.parse(await readFile(reportPath, "utf8"))).toMatchObject({
       runId: "run-123",
       vaultId: "vault-123",
