@@ -9,6 +9,7 @@ import { parseDiscoverResult } from "@llm-wiki/vault-contracts";
 
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { installCandidateBundle } from "./candidate-bundle.js";
+import { HealthObservationError } from "./loopback-client.js";
 import type { InstalledRuntimeHarnessOptions } from "./harness.js";
 import {
   ObsidianProcessError,
@@ -180,8 +181,9 @@ async function startRuntime(
         try {
           await options.client.observeHealth(endpoint, identity.vaultId);
           return true;
-        } catch {
-          return false;
+        } catch (error) {
+          if (error instanceof HealthObservationError && error.code === "health_unreachable") return false;
+          throw error;
         }
       },
       { timeoutMs: options.timeouts.startupMs },

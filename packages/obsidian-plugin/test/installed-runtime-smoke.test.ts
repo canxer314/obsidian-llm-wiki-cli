@@ -192,6 +192,40 @@ describe("installed-runtime authoritative command", () => {
     ).rejects.toBe(provisionAttempt);
   });
 
+  it("does not retry a registered-reference health observation from a foreign Vault", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reference-foreign-health-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const packageRoot = join(root, "pkg");
+    await mkdir(join(packageRoot, "dist"), { recursive: true });
+    await writeFile(join(packageRoot, "manifest.json"), JSON.stringify({
+      id: "llm-wiki-vault-bridge", name: "Verifier fixture", version: "0.2.0", minAppVersion: "1.13.4", isDesktopOnly: true,
+    }));
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "0.2.0" }));
+    await writeFile(join(packageRoot, "dist", "main.js"), "// verifier fixture\n");
+    const bundleDirectory = join(root, "bundle");
+    await assembleReleaseBundle({ tag: "v0.2.0", packageRoot, bundleDirectory });
+    const candidate = await verifyReleaseBundle({ bundleDirectory, expectedTag: "v0.2.0" });
+    const foreign = new Error("Foreign Vault identity observed");
+    let observations = 0;
+    let stopped = false;
+    let cleaned = false;
+    await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      runId: "foreign-health", workingDirectory: root, candidate, configDirectoryName: ".obsidian",
+      timeouts: { startupMs: 30, stopMs: 30, portClosedMs: 30 },
+      processControl: { start: async request => {
+        await writeFile(join(request.vaultPath, ".obsidian", "plugins", candidate.identity.pluginId, "data.json"), JSON.stringify({ vaultId: "reference-vault", port: 1 }));
+        return { pid: 1, vaultPath: request.vaultPath, profileDirectory: request.profileDirectory, stop: async () => { stopped = true; } };
+      } },
+      client: { observeHealth: async () => { observations += 1; throw foreign; } },
+      provisionVault: provisionTestVault,
+      cleanupVault: async vault => { cleaned = true; return cleanupTestVault(vault); },
+      record: () => undefined, assertion: () => undefined,
+    })).rejects.toBe(foreign);
+    expect(observations).toBe(1);
+    expect(stopped).toBe(true);
+    expect(cleaned).toBe(true);
+  });
+
   it("preserves the generated Vault when registered-reference process shutdown fails", async () => {
     // This proves cleanup orchestration, not installed-runtime authority.
     const root = await mkdtemp(join(tmpdir(), "reference-shutdown-"));
