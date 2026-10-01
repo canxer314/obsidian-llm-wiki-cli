@@ -761,6 +761,7 @@ export class ManagedVaultBridgeRuntime {
       this.#snapshots === undefined
         ? undefined
         : () => this.#snapshots?.readiness ?? "unavailable",
+      execution !== undefined,
     );
     if (projected.outcome !== "observed") {
       throw new Error("Diagnostic evidence is unavailable from this runtime");

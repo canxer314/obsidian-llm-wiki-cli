@@ -1345,6 +1345,14 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
           operatorAction: executorReady ? "none" : "wait_for_readiness",
           reasonCodes: executorReady ? [] : ["mutation_executor_not_ready"],
         });
+      const diagnostic = await runtime.createStandardDiagnosticBundle();
+      expect(verifyStandardDiagnosticBundle(diagnostic)).toBe(true);
+      expect(diagnostic.health).toMatchObject({
+        readiness: { searchSnapshot: "ready", index: "ready", cache: "unavailable" },
+        overall: executorReady ? "healthy" : "degraded",
+        operatorAction: executorReady ? "none" : "wait_for_readiness",
+        reasonCodes: executorReady ? [] : ["mutation_executor_not_ready"],
+      });
       if (executorReady) {
         await runtime.pauseWrites();
         expect((await client.callTool({ name: "vault_health", arguments: {} })).structuredContent)
