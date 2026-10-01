@@ -169,6 +169,15 @@ describe("installed-runtime authoritative command", () => {
     });
   });
 
+  it("provisions the built-in privacy boundary runner without caller-supplied modules", async () => {
+    const runners = createAuthoritativeInstalledRuntimeRunners();
+    const provisionAttempt = new Error("privacy provision attempted");
+    await expect(runners.runPrivacyRecoveryAuthorityCorpus({
+      profileName: "test", profile: { name: "test" }, probe: { probeRunning: async () => { throw new Error("Must not probe"); } },
+      provisionVault: async () => { throw provisionAttempt; }, candidate: {},
+    } as never)).rejects.toBe(provisionAttempt);
+  });
+
   it("provisions the built-in installed registered-reference runner", async () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
     const provisionAttempt = new Error("registered-reference provision attempted");

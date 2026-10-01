@@ -96,6 +96,7 @@ import {
   ReleaseLifecycleCorpusError,
   type ReleaseLifecycleCorpusOutcome,
 } from "./release-lifecycle-corpus.js";
+import type { InstalledPrivacyAuthorityBoundarySliceResult } from "./privacy-recovery-installed-runner.js";
 import {
   composeCrashRestorationRetainedAuthorityCorpusEvidence,
   CrashRestorationRetainedAuthorityCorpusError,
@@ -344,7 +345,11 @@ export interface InstalledRuntimeHarnessOptions {
     readonly cleanupVault: typeof cleanupTestVault;
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
-  }) => Promise<PrivacyRecoveryAuthorityCorpusOutcome>;
+    readonly profileName: string;
+    readonly profile: RegisteredRuntimeProfile;
+    readonly probe: RuntimeEnvironmentProbe;
+    readonly prepareInstalledRuntimeAcceptanceDriver: import("./privacy-recovery-installed-runner.js").InstalledPrivacyBoundaryOptions["prepareInstalledRuntimeAcceptanceDriver"];
+  }) => Promise<PrivacyRecoveryAuthorityCorpusOutcome | InstalledPrivacyAuthorityBoundarySliceResult>;
   /**
    * Verified release-lifecycle corpus (issue #181): composes the installed
    * install/repair, upgrade, uninstall, and purge scenarios. The caller supplies
@@ -1244,7 +1249,7 @@ export async function runInstalledRuntimeHarness(
     }
     if (state.failure === null && runner !== undefined && vault !== null && candidate !== null) {
       try {
-        state.privacyRecoveryAuthority = await runner!({
+        const outcome = await runner!({
           runId,
           workingDirectory: options.workingDirectory,
           candidate,
@@ -1256,7 +1261,23 @@ export async function runInstalledRuntimeHarness(
           cleanupVault,
           record: recordPrivacyRecoveryAuthorityEvent,
           assertion: recordPrivacyRecoveryAuthorityAssertion,
+          profileName: options.profileName,
+          profile: profile!,
+          probe: options.probe,
+          prepareInstalledRuntimeAcceptanceDriver: async request => {
+            const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+            if (!("path" in prepared) || !("descriptor" in prepared)) {
+              throw new Error("Installed privacy descriptor binding is unavailable");
+            }
+            return prepared as Awaited<ReturnType<import("./privacy-recovery-installed-runner.js").InstalledPrivacyBoundaryOptions["prepareInstalledRuntimeAcceptanceDriver"]>>;
+          },
         });
+        if ("scope" in outcome) {
+          recordPrivacyRecoveryAuthorityEvent("assertion", "installed-privacy-boundary-partial", outcome);
+          fail("privacy_recovery_authority_corpus", "privacy_recovery_authority_corpus_failed", "Installed Agent authority boundary is partial; local diagnostics and recovery acceptance are still required");
+        } else {
+          state.privacyRecoveryAuthority = outcome;
+        }
       } catch (error) {
         fail(
           "privacy_recovery_authority_corpus",

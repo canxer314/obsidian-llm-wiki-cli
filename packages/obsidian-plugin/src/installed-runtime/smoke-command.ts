@@ -32,6 +32,7 @@ import type {
 } from "./semantic-evidence-corpus.js";
 import { runInstalledRegisteredReferenceRewriteCorpus } from "./registered-reference-installed-runner.js";
 import { runInstalledGateIsolationCorpus } from "./gate-installed-runner.js";
+import { runInstalledPrivacyRecoveryAuthorityCorpus } from "./privacy-recovery-installed-runner.js";
 import { MVP_PERF_REF_1 } from "./runtime-profile.js";
 
 export {
@@ -383,8 +384,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
     },
     runRegisteredReferenceRewriteCorpus:
       runInstalledRegisteredReferenceRewriteCorpus,
-    runPrivacyRecoveryAuthorityCorpus: async () =>
-      unavailableRunner("Privacy/recovery authority corpus"),
+    runPrivacyRecoveryAuthorityCorpus: runInstalledPrivacyRecoveryAuthorityCorpus,
     runReleaseLifecycleCorpus: async (request) => {
       await resolveInstalledRuntimePreviousRelease({
         arguments: options.releaseArguments ?? { profile: MVP_PERF_REF_1.name },

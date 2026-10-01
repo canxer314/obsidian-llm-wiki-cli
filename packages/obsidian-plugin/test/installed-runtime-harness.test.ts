@@ -1503,6 +1503,21 @@ describe("installed-runtime harness failure projection", () => {
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 
+  it("does not promote an installed privacy boundary slice to full authority evidence", async () => {
+    const { options } = await arrangeRun("run-privacy-partial", {
+      runPrivacyRecoveryAuthorityCorpus: async () => ({
+        scope: "two-vault-agent-authority-boundary", verdict: "partial", candidateBundleSha256: "a".repeat(64), profileName: INNER_PROFILE.name,
+        vaultIdsSha256: { "vault-a": "b".repeat(64), "vault-b": "c".repeat(64) }, rejectedAuthorityAttempts: 8,
+        observedHealthUnchanged: true, provenance: [], humanRequired: ["diagnostic-bundles", "recovery-baseline", "resume-writes"],
+      }),
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.failure).toMatchObject({ stage: "privacy_recovery_authority_corpus", code: "privacy_recovery_authority_corpus_failed" });
+    expect(result.evidence.privacyRecoveryAuthorityCorpus).toBeNull();
+    expect(result.evidence.acceptanceMatrix).toBeNull();
+    expect(result.evidence.cleanup?.residualPaths).toEqual([]);
+  });
+
   it("fails closed without an installed crash runner instead of invoking the Node crash corpus", async () => {
     const simulator = vi.spyOn(crashCorpus, "runCrashRestorationRetainedAuthorityCorpus").mockRejectedValue(new Error("Node simulator invoked"));
     try {
