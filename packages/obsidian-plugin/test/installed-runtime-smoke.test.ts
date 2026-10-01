@@ -209,6 +209,16 @@ describe("installed-runtime authoritative command", () => {
     } as never)).rejects.toBe(provisionAttempt);
   });
 
+  it("rejects an invalid local report wait through the built-in privacy runner before provisioning", async () => {
+    const runners = createAuthoritativeInstalledRuntimeRunners();
+    let provisions = 0;
+    await expect(runners.runPrivacyRecoveryAuthorityCorpus({
+      operatorReportTimeoutMs: 0,
+      provisionVault: async () => { provisions += 1; throw new Error("Must not provision"); },
+    } as never)).rejects.toThrow("Local Primary Operator report timeout must be a positive integer");
+    expect(provisions).toBe(0);
+  });
+
   it("provisions the built-in installed registered-reference runner", async () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
     const provisionAttempt = new Error("registered-reference provision attempted");
