@@ -142,6 +142,11 @@ scenario completion and cleanup, checks the durable Vault-bound `FAILED` frame,
 and observes the corresponding public `result_unproven` status and blocked health.
 It never invokes the local copy command. Missing or invalid local evidence fails
 closed, and runtime/listener shutdown must be confirmed before generated-root
-cleanup. The returned standard-copy and blocked-handoff facts remain partial:
-ordered baseline/resume, fresh content confirmations, complete historical identity
-preservation, and cross-Vault recovery isolation are still required.
+cleanup. The built-in adapter then observes Vault B's rejected baseline, Vault A's accepted
+baseline, and a separate Vault A resume report, in that order. It independently
+checks cleared Journal slots, live paused/writable health and status projections,
+unchanged complete historical Change Set records, and unaffected Vault B
+observations. It only asks for reports; the Primary Operator must perform each
+local command. These observations still remain partial: fresh content confirmations,
+complete corpus aggregation, and the remaining gate/crash/lifecycle cases are
+required for full acceptance.
