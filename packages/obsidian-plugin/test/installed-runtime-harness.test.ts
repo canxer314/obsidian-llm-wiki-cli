@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as crashCorpus from "../src/installed-runtime/crash-restoration-retained-authority-corpus.js";
 
 import {
   createBridgeInstance,
@@ -1500,6 +1501,21 @@ describe("installed-runtime harness failure projection", () => {
     expect(evidence.verdict).toBe("failed");
     expect(evidence.privacyRecoveryAuthorityCorpus).toBeNull();
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
+  });
+
+  it("fails closed without an installed crash runner instead of invoking the Node crash corpus", async () => {
+    const simulator = vi.spyOn(crashCorpus, "runCrashRestorationRetainedAuthorityCorpus").mockRejectedValue(new Error("Node simulator invoked"));
+    try {
+      const { options } = await arrangeRun("run-crash-installed-missing");
+      const { runCrashRestorationRetainedAuthorityCorpus: _installed, ...withoutRunner } = options;
+      const result = await runInstalledRuntimeHarness(withoutRunner);
+      expect(result.failure).toMatchObject({
+        stage: "crash_restoration_retained_authority_corpus", code: "crash_restoration_retained_authority_corpus_failed",
+      });
+      expect(simulator).not.toHaveBeenCalled();
+      expect(result.evidence.crashRestorationRetainedAuthorityCorpus).toBeNull();
+      expect(result.evidence.cleanup?.residualPaths).toEqual([]);
+    } finally { simulator.mockRestore(); }
   });
 
   it("records failed evidence when the crash-restoration retained-authority corpus fails", async () => {

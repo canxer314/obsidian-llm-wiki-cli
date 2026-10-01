@@ -99,7 +99,6 @@ import {
 import {
   composeCrashRestorationRetainedAuthorityCorpusEvidence,
   CrashRestorationRetainedAuthorityCorpusError,
-  runCrashRestorationRetainedAuthorityCorpus,
   type CrashRestorationRetainedAuthorityCorpusOutcome,
 } from "./crash-restoration-retained-authority-corpus.js";
 import {
@@ -1306,9 +1305,11 @@ export async function runInstalledRuntimeHarness(
   }
   if (state.failure === null) {
     try {
-      state.crashRestorationRetainedAuthority =
-        await (options.runCrashRestorationRetainedAuthorityCorpus ??
-          runCrashRestorationRetainedAuthorityCorpus)({
+      const runner = options.runCrashRestorationRetainedAuthorityCorpus;
+      if (runner === undefined) {
+        throw new CrashRestorationRetainedAuthorityCorpusError("Installed crash runner is required; Node corpus evidence is not authoritative");
+      }
+      state.crashRestorationRetainedAuthority = await runner({
           workingDirectory: options.workingDirectory,
           record: recordCrashRestorationRetainedAuthorityEvent,
           assertion: recordCrashRestorationRetainedAuthorityAssertion,
