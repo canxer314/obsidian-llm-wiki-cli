@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
-import { loadInstalledLocalOperatorReport, waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport } from "../src/installed-runtime/local-operator-report.js";
+import { loadInstalledLocalOperatorReport, waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport } from "../src/installed-runtime/local-operator-report.js";
 import { createStandardDiagnosticBundle } from "../src/diagnostic-bundle.js";
 
 async function controlDiscoveryFixture() {
@@ -179,4 +179,65 @@ it("times out waiting for a real local operator report instead of dispatching th
       action: "accept-recovery-baseline", invocationId: "human-only", timeoutMs: 20,
     })).rejects.toMatchObject({ code: "ENOENT", path: join(pluginDirectory, "installed-runtime-acceptance.json") });
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+it("discovers random content confirmations and consumes cancel then copy without inferring order", async () => {
+  const fixture = await controlDiscoveryFixture();
+  const selectionSha256 = "b".repeat(64);
+  const writeContent = async (confirmationId: string, outcome: "cancelled" | "copied") => {
+    const { invocationId: _, before: __, after: ___, ...binding } = fixture.report("unused");
+    await writeFile(join(fixture.reportDirectory, `local-content-inclusive-diagnostic-copy-${createHash("sha256").update(confirmationId).digest("hex")}.json`), JSON.stringify({ ...binding,
+      action: "content-inclusive-diagnostic-copy", confirmationId, selectionSha256, outcome,
+      generated: outcome === "copied", copied: outcome === "copied", ...(outcome === "copied" ? {
+        checksumVerified: true, bundleChecksum: `sha256:${"c".repeat(64)}`, bundleVersion: "1.0",
+        versions: { bridge: "0.1.0", plugin: "0.1.0", protocol: "1.0", persistentStateSchema: 2, recoveryJournalSchema: 3 },
+      } : {}),
+    }), { mode: 0o600 });
+  };
+  const options = { ...fixture.options, consumedConfirmationIds: [] as string[], expectedSelectionSha256: selectionSha256 };
+  try {
+    const cancelId = randomUUID();
+    const pending = waitForNextInstalledLocalContentReport(options);
+    await writeContent(cancelId, "cancelled");
+    expect(await pending).toMatchObject({ confirmationId: cancelId, outcome: "cancelled", generated: false, copied: false });
+    const copyId = randomUUID();
+    await writeContent(copyId, "copied");
+    await expect(waitForNextInstalledLocalContentReport(options)).rejects.toThrow("order is ambiguous");
+    expect(await waitForNextInstalledLocalContentReport({ ...options, consumedConfirmationIds: [cancelId] })).toMatchObject({ confirmationId: copyId, outcome: "copied" });
+    await expect(waitForNextInstalledLocalContentReport({ ...options, consumedConfirmationIds: [cancelId, copyId], timeoutMs: 10 })).rejects.toThrow("report is required");
+  } finally { await fixture.cleanup(); }
+});
+
+
+it("validates every discovered content report even when consumed, selection-mismatched, or alongside a valid pending report", async () => {
+  const fixture = await controlDiscoveryFixture();
+  const id = randomUUID();
+  const { invocationId: _, before: __, after: ___, ...binding } = fixture.report("unused");
+  const valid = { ...binding, action: "content-inclusive-diagnostic-copy", confirmationId: id,
+    selectionSha256: "b".repeat(64), outcome: "copied", generated: true, copied: true,
+    checksumVerified: true, bundleChecksum: `sha256:${"c".repeat(64)}`, bundleVersion: "1.0",
+    versions: { bridge: "0.1.0", plugin: "0.1.0", protocol: "1.0", persistentStateSchema: 2, recoveryJournalSchema: 3 } };
+  const path = join(fixture.reportDirectory, `local-content-inclusive-diagnostic-copy-${createHash("sha256").update(id).digest("hex")}.json`);
+  const options = { ...fixture.options, consumedConfirmationIds: [id], expectedSelectionSha256: "b".repeat(64) };
+  const write = (value: unknown) => writeFile(path, JSON.stringify(value), { mode: 0o600 });
+  try {
+    for (const field of ["bridge", "plugin", "protocol", "persistentStateSchema", "recoveryJournalSchema"] as const) {
+      await write({ ...valid, versions: { ...valid.versions, [field]: typeof valid.versions[field] === "string" ? "forged" : 999 } });
+      await expect(waitForNextInstalledLocalContentReport(options)).rejects.toThrow("versions do not match");
+    }
+    await write({ ...valid, selectionSha256: "d".repeat(64) });
+    await expect(waitForNextInstalledLocalContentReport(options)).rejects.toThrow("selection binding");
+    await write({ ...valid, vaultId: "foreign" });
+    await expect(waitForNextInstalledLocalContentReport(options)).rejects.toThrow("identity does not match");
+    await write({ ...valid, confirmationId: randomUUID() });
+    await expect(waitForNextInstalledLocalContentReport(options)).rejects.toThrow("filename does not match");
+    await write({ ...valid, generated: false });
+    await expect(waitForNextInstalledLocalContentReport(options)).rejects.toThrow("contradict the outcome");
+    await write({ ...valid, outcome: "cancelled", generated: false, copied: false });
+    await expect(waitForNextInstalledLocalContentReport(options)).rejects.toThrow("contradict the outcome");
+    await write(valid);
+    await writeFile(join(fixture.reportDirectory, "local-content-inclusive-diagnostic-copy-malformed.json"), "{", { mode: 0o600 });
+    await expect(waitForNextInstalledLocalContentReport({ ...options, consumedConfirmationIds: [] })).rejects.toThrow();
+  } finally { await fixture.cleanup(); }
 });

@@ -4,6 +4,9 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
 import { isPathInside, loadInstalledRuntimeAcceptanceDescriptor, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
+import { BRIDGE_VERSION, PLUGIN_VERSION, PROTOCOL_VERSION } from "../version.js";
+import { PERSISTENT_STATE_SCHEMA_VERSION } from "../managed-vault-runtime.js";
+import { RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION } from "../change-set.js";
 
 const standardReportSchema = z.object({
   schemaVersion: z.literal(1), runId: z.string().min(1),
@@ -214,6 +217,52 @@ export async function waitForNextInstalledLocalControlReport(options: {
     if (candidates.length > 1) throw new Error("Local operator control report order is ambiguous");
     if (candidates.length === 1) return candidates[0]!;
     if (Date.now() >= deadline) throw new Error(`Local Primary Operator report is required for ${options.action}`);
+    await new Promise(resolvePromise => setTimeout(resolvePromise, Math.min(25, deadline - Date.now())));
+  }
+}
+
+/** Discovers evidence from fresh local confirmations; never opens a modal or copies content. */
+export async function waitForNextInstalledLocalContentReport(options: {
+  readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
+  readonly vaultId: string;
+  readonly endpoint: URL;
+  readonly configDirectoryName?: string;
+  readonly consumedConfirmationIds: readonly string[];
+  readonly expectedSelectionSha256: string;
+  readonly timeoutMs: number;
+}): Promise<z.infer<typeof contentReportSchema>> {
+  if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
+    throw new Error("Local Primary Operator report timeout must be a positive integer");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(options.expectedSelectionSha256)) throw new Error("Local content selection digest must be SHA-256");
+  const deadline = Date.now() + options.timeoutMs;
+  while (true) {
+    const root = await validateLocalReportBinding(options);
+    const candidates: z.infer<typeof contentReportSchema>[] = [];
+    for (const filename of (await readdir(root)).filter(name => name.startsWith("local-content-inclusive-diagnostic-copy-") && name.endsWith(".json")).sort()) {
+      const path = join(root, filename);
+      if (await realpath(path) !== path) throw new Error("Local operator report cannot be a symbolic link");
+      const facts = await stat(path);
+      if (!facts.isFile() || (process.platform !== "win32" && (facts.mode & 0o077) !== 0)) {
+        throw new Error("Local operator report is not a private regular file");
+      }
+      const discovered = contentReportSchema.parse(JSON.parse(await readFile(path, "utf8")));
+      if (filename !== `local-content-inclusive-diagnostic-copy-${createHash("sha256").update(discovered.confirmationId).digest("hex")}.json`) {
+        throw new Error("Local operator content filename does not match the confirmation");
+      }
+      const verified = await loadInstalledLocalOperatorReport({ ...options, action: "content-inclusive-diagnostic-copy", confirmationId: discovered.confirmationId });
+      if (verified.action !== "content-inclusive-diagnostic-copy") throw new Error("Expected local content diagnostic report");
+      if (verified.outcome === "copied" && (verified.versions?.bridge !== BRIDGE_VERSION ||
+          verified.versions.plugin !== PLUGIN_VERSION || verified.versions.protocol !== PROTOCOL_VERSION ||
+          verified.versions.persistentStateSchema !== PERSISTENT_STATE_SCHEMA_VERSION ||
+          verified.versions.recoveryJournalSchema !== RECOVERY_JOURNAL_FRAME_SCHEMA_VERSION)) {
+        throw new Error("Local content diagnostic versions do not match the installed runtime contract");
+      }
+      if (!options.consumedConfirmationIds.includes(verified.confirmationId)) candidates.push(verified);
+    }
+    if (candidates.length > 1) throw new Error("Local operator content report order is ambiguous");
+    if (candidates.length === 1) return candidates[0]!;
+    if (Date.now() >= deadline) throw new Error("Local Primary Operator report is required for content-inclusive-diagnostic-copy");
     await new Promise(resolvePromise => setTimeout(resolvePromise, Math.min(25, deadline - Date.now())));
   }
 }
