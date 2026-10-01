@@ -412,15 +412,17 @@ export function createAuthoritativeInstalledRuntimeRunners(
       if (request.installed === undefined) {
         throw new Error("Crash acceptance requires installed candidate, profile, process and descriptor inputs for the installed Obsidian acceptance driver");
       }
-      for (const crashPoint of ["after_prepared", "after_committed"] as const) {
-        const partial = await runInstalledCrashRestorationSlice({
-          ...request.installed,
-          crashPoint,
-          reportDirectory: options.reportDirectory ?? request.installed.reportDirectory,
-        });
-        request.record("assertion", `installed-crash-${crashPoint}-partial`, partial);
+      for (const mutationKind of ["create_note", "edit_body"] as const) {
+        for (const crashPoint of ["after_prepared", "after_committed"] as const) {
+          const partial = await runInstalledCrashRestorationSlice({
+            ...request.installed,
+            crashPoint, mutationKind,
+            reportDirectory: options.reportDirectory ?? request.installed.reportDirectory,
+          });
+          request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
+        }
       }
-      throw new Error("Installed PREPARED rollback and COMMITTED replay slices are partial; full crash and retained-authority acceptance are still required");
+      throw new Error("Installed create-note/edit-body PREPARED rollback and COMMITTED replay slices are partial; full crash and retained-authority acceptance are still required");
     },
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:

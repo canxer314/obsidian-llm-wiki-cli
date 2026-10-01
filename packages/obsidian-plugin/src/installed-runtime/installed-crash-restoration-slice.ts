@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
-import { open, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -11,6 +11,7 @@ import {
   parseChangeSetSubmitInput,
 } from "@llm-wiki/vault-contracts";
 
+import { replaceExactCorpusProfile } from "../corpus/edit-body-corpus.js";
 import { createNoteCorpusProfile } from "../corpus/create-note-corpus.js";
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { openRecoveryJournal } from "../recovery-journal.js";
@@ -30,6 +31,7 @@ import type { PersistedBridgeIdentity } from "./obsidian-process.js";
 
 export interface InstalledCrashRestorationSliceRecord {
   readonly source: "installed-obsidian";
+  readonly mutationKind: "create_note" | "edit_body";
   readonly runId: string;
   readonly vaultId: string;
   readonly candidateBundleSha256: string;
@@ -41,6 +43,7 @@ export interface InstalledCrashRestorationSliceRecord {
   readonly proofState: "intent_not_applied" | "intent_applied";
   readonly originalFileAbsentAfterRecovery: boolean;
   readonly committedFileBytesPreservedAfterRecovery?: true;
+  readonly originalFileBytesPreservedAfterRecovery?: true;
   readonly healthRecoveryState: "none";
   readonly cleanupSucceeded: true;
   readonly verdict: "passed";
@@ -56,6 +59,7 @@ export type InstalledCrashRestorationSliceRunner = (options: InstalledCrashResto
 
 export interface InstalledCrashRestorationSliceOptions {
   readonly crashPoint?: "after_prepared" | "after_committed";
+  readonly mutationKind?: "create_note" | "edit_body";
   readonly runId: string;
   readonly workingDirectory: string;
   readonly reportDirectory: string;
@@ -123,6 +127,8 @@ export async function runInstalledCrashRestorationSlice(
   options: InstalledCrashRestorationSliceOptions,
 ): Promise<InstalledCrashRestorationSliceOutcome> {
   const crashPoint = options.crashPoint ?? "after_prepared";
+  const mutationKind = options.mutationKind ?? "create_note";
+  const profile = mutationKind === "create_note" ? createNoteCorpusProfile() : replaceExactCorpusProfile();
   const committed = crashPoint === "after_committed";
   const durablePhase = committed ? "COMMITTED" : "PREPARED";
   const terminalPhase = committed ? "COMMITTED" : "ROLLED_BACK";
@@ -131,7 +137,7 @@ export async function runInstalledCrashRestorationSlice(
   const configDirectoryName = options.configDirectoryName ?? ".obsidian";
   const vault = await provisionTestVault({
     workingDirectory: options.workingDirectory,
-    runId: `${options.runId}-crash-${committed ? "committed" : "prepared"}`,
+    runId: `${options.runId}${mutationKind === "edit_body" ? "-edit-body" : ""}-crash-${committed ? "committed" : "prepared"}`,
     configDirectoryName,
   });
   let processHandle: ObsidianProcessHandle | null = null;
@@ -144,6 +150,12 @@ export async function runInstalledCrashRestorationSlice(
     "cleanupSucceeded" | "verdict"> | null = null;
   let failure: unknown;
   try {
+    if (mutationKind === "edit_body") {
+      const fixture = profile.files[0]!;
+      const path = join(vault.vaultPath, ...fixture.path.split("/"));
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, fixture.originalBytes!, { flag: "wx" });
+    }
     await installCandidateBundle(options.candidate, vault.vaultPath, configDirectoryName);
     const acceptanceDriver = await options.prepareAcceptanceDriver({
       vaultPath: vault.vaultPath,
@@ -194,7 +206,6 @@ export async function runInstalledCrashRestorationSlice(
       return health.health.readiness.searchSnapshot === "ready";
     }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
 
-    const profile = createNoteCorpusProfile();
     const seed = `${options.runId}-${label}`;
     const input = profile.buildSubmitInput(seed);
     const parsedInput = parseChangeSetSubmitInput(input);
@@ -208,7 +219,7 @@ export async function runInstalledCrashRestorationSlice(
       expectedVaultId: identity.vaultId,
       endpoint,
       input: parsedInput,
-      crashPoint,
+      crashPoint, mutationKind,
     });
 
     const journalPath = join(vault.vaultPath, ".llm-wiki", "recovery-journal.bin");
@@ -222,7 +233,7 @@ export async function runInstalledCrashRestorationSlice(
         await loadCrashBoundaryReport({ reportDirectory: options.reportDirectory,
           runId: options.runId, vaultId: identity!.vaultId, candidateBundleSha256: installed.candidateBundleSha256,
           installedMainSha256: installed.installedMainSha256, capabilityToken: installed.capabilityToken,
-          endpoint: endpoint.toString(), submissionKey: parsedInput.submissionKey, crashPoint });
+          endpoint: endpoint.toString(), submissionKey: parsedInput.submissionKey, crashPoint, mutationKind });
         return true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
@@ -254,9 +265,9 @@ export async function runInstalledCrashRestorationSlice(
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    const expectedBytes = profile.files[0]!.committedBytes;
-    if (committed ? beforeFile === null || !beforeFile.equals(expectedBytes!) : beforeFile !== null) {
-      throw new Error("Create-note fixture bytes do not match the durable crash boundary");
+    const expectedBytes = committed ? profile.files[0]!.committedBytes : profile.files[0]!.originalBytes;
+    if (expectedBytes === null ? beforeFile !== null : beforeFile === null || !beforeFile.equals(expectedBytes)) {
+      throw new Error("Mutation fixture bytes do not match the durable crash boundary");
     }
 
     await initialHandle.stop();
@@ -292,7 +303,7 @@ export async function runInstalledCrashRestorationSlice(
     if (recoveredHealth.health.recovery.state !== "none" ||
         recoveredStatus.lookup !== "found" || recoveredStatus.changeSet.state !== terminalState ||
         recoveredJournal.phase !== terminalPhase ||
-        (committed ? afterFile === null || !afterFile.equals(expectedBytes!) : afterFile !== null) ||
+        (expectedBytes === null ? afterFile !== null : afterFile === null || !afterFile.equals(expectedBytes)) ||
         typeof recoveredJournal.payload !== "object" || recoveredJournal.payload === null ||
         Array.isArray(recoveredJournal.payload) || recoveredJournal.payload.vaultId !== identity.vaultId ||
         recoveredJournal.payload.changeSetId !== preCrashStatus.changeSet.changeSetId ||
@@ -308,7 +319,7 @@ export async function runInstalledCrashRestorationSlice(
       throw new Error("Recovered Bridge did not replay the retained terminal record");
     }
     proof = {
-      source: "installed-obsidian",
+      source: "installed-obsidian", mutationKind,
       runId: options.runId,
       vaultId: identity.vaultId,
       candidateBundleSha256: options.candidate.identity.bundleSha256,
@@ -318,7 +329,8 @@ export async function runInstalledCrashRestorationSlice(
       preparedJournalPhase: preparedDiskFrame.phase,
       journalPhase: recoveredJournal.phase,
       proofState: terminalState,
-      originalFileAbsentAfterRecovery: !committed,
+      originalFileAbsentAfterRecovery: expectedBytes === null,
+      ...(!committed && mutationKind === "edit_body" ? { originalFileBytesPreservedAfterRecovery: true as const } : {}),
       ...(committed ? { committedFileBytesPreservedAfterRecovery: true as const } : {}),
       healthRecoveryState: "none",
     };
@@ -373,6 +385,7 @@ async function publishCrashCommand(options: {
   endpoint: URL;
   input: unknown;
   crashPoint: "after_prepared" | "after_committed";
+  mutationKind: "create_note" | "edit_body";
 }): Promise<void> {
   const protocol = await import("./crash-restoration-protocol.js");
   await protocol.requestInstalledCrashRestorationScenario({ ...options });

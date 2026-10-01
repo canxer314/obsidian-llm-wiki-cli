@@ -331,7 +331,7 @@ it("rejects a private crash command against a dirty durable journal without armi
 
 
 // Orchestration-only fixture. This is deliberately not installed-Obsidian evidence.
-async function arrangeCrashOrchestration(root: string, replayId: string, crashPoint: "after_prepared" | "after_committed" = "after_prepared") {
+async function arrangeCrashOrchestration(root: string, replayId: string, crashPoint: "after_prepared" | "after_committed" = "after_prepared", mutationKind: "create_note" | "edit_body" = "create_note") {
   const { createServer } = await import("node:http");
   const { readFile } = await import("node:fs/promises");
   const candidateDirectory = join(root, "candidate");
@@ -382,7 +382,7 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     finally { await handle.close(); }
   };
   const options = {
-    runId: "orchestration", crashPoint, workingDirectory: root, reportDirectory: join(root, "reports"), candidate,
+    runId: "orchestration", crashPoint, mutationKind, workingDirectory: root, reportDirectory: join(root, "reports"), candidate,
     profile, probe: { probeRunning: async () => ({ platform: "linux", osBuild: "test", obsidianVersion: "test", electronVersion: "test", nodeVersion: "test", capabilities: [] }) },
     processControl: { start: async request => {
       starts += 1; vaultPath = request.vaultPath;
@@ -406,14 +406,17 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
       if (descriptor.command.action === "idle") return;
       if (publishingPath === descriptorPath) return;
       publishingPath = descriptorPath;
-      crashPoint = descriptor.command.scenario === "create_note/after_prepared" ? "after_prepared" : "after_committed";
+      crashPoint = descriptor.command.scenario.endsWith("/after_prepared") ? "after_prepared" : "after_committed";
       publish = (async () => {
-        if (descriptor.command.scenario === "create_note/after_committed") {
+        if (descriptor.command.scenario.endsWith("/after_committed")) {
           await mkdir(join(vaultPath, "Corpus", "Notes"), { recursive: true });
           const { CREATE_NOTE_BYTES } = await import("../src/corpus/create-note-corpus.js");
-          await writeFile(join(vaultPath, "Corpus", "Notes", "Alpha.md"), CREATE_NOTE_BYTES);
+          if (descriptor.command.scenario.startsWith("edit_body/")) {
+            const { EXACT_COMMITTED_BYTES } = await import("../src/corpus/edit-fixtures.js");
+            await writeFile(join(vaultPath, "Corpus", "Edits", "Exact.md"), EXACT_COMMITTED_BYTES);
+          } else await writeFile(join(vaultPath, "Corpus", "Notes", "Alpha.md"), CREATE_NOTE_BYTES);
         }
-        const phase = descriptor.command.scenario === "create_note/after_prepared" ? "PREPARED" : "COMMITTED";
+        const phase = descriptor.command.scenario.endsWith("/after_prepared") ? "PREPARED" : "COMMITTED";
         await writeFrame(phase, descriptor.command.input);
         await writeCrashRestorationBoundaryReport({ descriptor, command: descriptor.command, journalPhase: phase }); })();
       await publish;
@@ -455,10 +458,35 @@ it("keeps both wired installed crash boundaries partial at the authoritative cor
       record: (_kind, name, detail) => { if (name.startsWith("installed-crash-")) records.push(detail); },
       assertion: () => undefined,
     })).rejects.toThrow("partial");
-    expect(records).toHaveLength(2);
+    expect(records).toHaveLength(4);
     expect(records).toMatchObject([
       { scope: "single-after-prepared-installed-rollback-slice" },
       { scope: "single-after-committed-installed-replay-slice" },
+      { scope: "single-after-prepared-installed-rollback-slice", records: [{ mutationKind: "edit_body" }] },
+      { scope: "single-after-committed-installed-replay-slice", records: [{ mutationKind: "edit_body" }] },
     ]);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
+
+
+it("orchestrates edit_body PREPARED with exact original bytes and full retained status replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-edit-prepared-"));
+  const fixture = await arrangeCrashOrchestration(root, "bound-change-set", "after_prepared", "edit_body");
+  try {
+    const outcome = await runInstalledCrashRestorationSlice(fixture.options);
+    expect(outcome.records).toMatchObject([{ mutationKind: "edit_body", crashPoint: "after_prepared",
+      proofState: "intent_not_applied", originalFileAbsentAfterRecovery: false, originalFileBytesPreservedAfterRecovery: true }]);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
+
+
+it("orchestrates edit_body COMMITTED with exact intended bytes and full retained status replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-edit-committed-"));
+  const fixture = await arrangeCrashOrchestration(root, "bound-change-set", "after_committed", "edit_body");
+  try {
+    const outcome = await runInstalledCrashRestorationSlice(fixture.options);
+    expect(outcome.records).toMatchObject([{ mutationKind: "edit_body", crashPoint: "after_committed",
+      proofState: "intent_applied", journalPhase: "COMMITTED", originalFileAbsentAfterRecovery: false,
+      committedFileBytesPreservedAfterRecovery: true }]);
   } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
 });

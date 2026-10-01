@@ -66,6 +66,7 @@ import {
   createInstalledSemanticEvidenceScenarioControl,
   createInstalledSemanticEvidenceWire,
 } from "./installed-runtime/installed-semantic-evidence.js";
+import { replaceExactCorpusProfile } from "./corpus/edit-body-corpus.js";
 import { createNoteCorpusProfile } from "./corpus/create-note-corpus.js";
 import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
 import {
@@ -366,7 +367,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       changeSetExecution,
       crashInjector: async (point) => {
         const armed = armedCrashBoundary;
-        if (armed === undefined || `create_note/${point}` !== armed.command.scenario) return;
+        if (armed === undefined || !armed.command.scenario.endsWith(`/${point}`)) return;
         const expectedPhase = point === "after_prepared" ? "PREPARED" : "COMMITTED";
         const frame = await changeSetExecution?.loadRecoveryFrame();
         if (frame?.phase !== expectedPhase || frame.vaultId !== armed.command.expectedVaultId ||
@@ -844,24 +845,42 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 parsed.endpoint !== runtime.bridge?.endpoint.toString()) {
               throw new Error("Installed crash-restoration command targets another runtime");
             }
-            const profile = createNoteCorpusProfile();
+            const profile = parsed.scenario.startsWith("edit_body/") ? replaceExactCorpusProfile() : createNoteCorpusProfile();
             if (!parsed.submissionKey.startsWith("submission-")) {
               throw new Error("Installed crash-restoration fixture key is invalid");
             }
             const expectedInput = profile.buildSubmitInput(parsed.submissionKey.slice("submission-".length));
             if (JSON.stringify(parsed.input) !== JSON.stringify(expectedInput)) {
-              throw new Error("Installed crash-restoration fixture does not match create-note program");
+              throw new Error("Installed crash-restoration fixture does not match the selected mutation program");
             }
             if (armedCrashBoundary !== undefined) throw new Error("Crash slice is already armed");
             const before = await changeSetExecution.loadRecoveryFrame();
             if (before !== null) throw new Error("Crash slice requires a clean Recovery Journal");
             const input = parseChangeSetSubmitInput(parsed.input);
+            if (parsed.scenario.startsWith("edit_body/")) {
+              const fixture = profile.files[0]!;
+              const bytes = await readFile(join(basePath, ...fixture.path.split("/")));
+              if (!bytes.equals(fixture.originalBytes!)) throw new Error("Installed edit-body seed bytes changed");
+              const file = this.app.vault.getFileByPath(fixture.path);
+              if (file === null) throw new Error("Installed edit-body seed is not visible to Obsidian");
+              // A cold-cache startup may have indexed the pre-seeded note before
+              // this plugin subscribed. Re-publish identical bytes through the
+              // real Vault API; only its metadata callback may satisfy matches.
+              await this.app.vault.modifyBinary(file, Uint8Array.from(bytes).buffer);
+              const deadline = Date.now() + 5_000;
+              while (!semanticVersions.matches(fixture.path, fixture.originalBytes!)) {
+                if (Date.now() >= deadline) throw new Error("Installed edit-body seed metadata is unavailable");
+                await new Promise(resolve => setTimeout(resolve, 10));
+              }
+              runtime.scheduleSearchSnapshotRefresh();
+              await runtime.refreshSearchSnapshot();
+            }
             armedCrashBoundary = { descriptor, command: parsed };
             void installedSemanticEvidenceWire.submit({ endpoint: new URL(parsed.endpoint),
               expectedVaultId: parsed.expectedVaultId, input })
               .finally(() => { armedCrashBoundary = undefined; })
               .catch(() => undefined);
-            return parsed.scenario === "create_note/after_prepared"
+            return parsed.scenario.endsWith("/after_prepared")
               ? { boundary: "after_prepared", journalPhase: "PREPARED" }
               : { boundary: "after_committed", journalPhase: "COMMITTED" };
           },
