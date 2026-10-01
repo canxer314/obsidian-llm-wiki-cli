@@ -183,6 +183,10 @@ it("preserves the first durable crash marker when publication is repeated", asyn
     expectedVaultId: "one-shot-vault", endpoint: "http://127.0.0.1:32123/mcp", submissionKey: "first-key", input: {} };
   try {
     await mkdir(created.descriptor.reportDirectory);
+    await expect(writeCrashRestorationBoundaryReport({
+      descriptor: created.descriptor, command: { ...command, capabilityToken: "f".repeat(64) }, journalPhase: "PREPARED",
+    })).rejects.toThrow("capability");
+    expect(await readdir(created.descriptor.reportDirectory)).toEqual([]);
     await writeCrashRestorationBoundaryReport({ descriptor: created.descriptor, command, journalPhase: "PREPARED" });
     await expect(writeCrashRestorationBoundaryReport({
       descriptor: created.descriptor, command: { ...command, submissionKey: "second-key" }, journalPhase: "PREPARED",

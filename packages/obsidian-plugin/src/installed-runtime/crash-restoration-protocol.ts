@@ -83,6 +83,9 @@ export async function writeCrashRestorationBoundaryReport(options: {
   readonly command: CrashRestorationCommand;
   readonly journalPhase: "PREPARED";
 }): Promise<void> {
+  if (options.command.capabilityToken !== options.descriptor.capabilityToken) {
+    throw new Error("Installed crash marker command capability changed");
+  }
   const report = crashRestorationBoundarySchema.parse({
     schemaVersion: 1,
     runId: options.descriptor.runId,
