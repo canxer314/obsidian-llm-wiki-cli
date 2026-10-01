@@ -211,6 +211,27 @@ describe("installed-runtime purge scenario", () => {
     expect(result.cleanup?.residualPaths).toEqual(["/"]);
   });
 
+  it("retains generated roots when restart shutdown cannot be confirmed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "purge-restart-residue-"));
+    const candidate = await writeVerifiedBundle(root, "bundle", VERSION);
+    const fake = createFakeObsidian();
+    let starts = 0;
+    let cleaned = false;
+    const result = await runManagedVaultPurgeScenario({
+      candidate, obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root,
+      processControl: { start: async request => {
+        if (++starts === 2) throw new ObsidianProcessError("shutdown unconfirmed", "obsidian_stop_failed");
+        return fake.processControl.start(request);
+      } },
+      cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+      runId: "restart-residue", timeouts: { startupMs: 5_000 },
+    });
+    expect(starts).toBe(2);
+    expect(result.verdict).toBe("failed");
+    expect(cleaned).toBe(false);
+    expect(result.cleanup?.residualPaths).toEqual(["/"]);
+  }, 30_000);
+
   it("retains generated roots when the purge process cannot stop", async () => {
     const root = await mkdtemp(join(tmpdir(), "purge-stop-residue-"));
     const candidate = await writeVerifiedBundle(root, "bundle", VERSION);

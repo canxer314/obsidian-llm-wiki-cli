@@ -198,6 +198,29 @@ describe("installed-runtime upgrade scenario", () => {
     expect(result.cleanup?.residualPaths).toEqual(["/"]);
   });
 
+  it("retains generated roots when upgrade reload shutdown cannot be confirmed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "upgrade-restart-residue-"));
+    const previousRelease = await writeVerifiedBundle(root, "old", OLD_VERSION);
+    const upgradeRelease = await writeVerifiedBundle(root, "new", NEW_VERSION);
+    const fake = createFakeObsidian();
+    let starts = 0;
+    let cleaned = false;
+    const result = await runManagedVaultUpgradeScenario({
+      previousRelease, upgradeRelease, obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root,
+      runtimeHost: fake.runtimeHost,
+      processControl: { start: async request => {
+        if (++starts === 2) throw new ObsidianProcessError("shutdown unconfirmed", "obsidian_stop_failed");
+        return fake.processControl.start(request);
+      } },
+      cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+      runId: "restart-residue", timeouts: { startupMs: 5_000 },
+    });
+    expect(starts).toBe(2);
+    expect(result.verdict).toBe("failed");
+    expect(cleaned).toBe(false);
+    expect(result.cleanup?.residualPaths).toEqual(["/"]);
+  }, 30_000);
+
   it("retains generated roots when the upgrade process cannot stop", async () => {
     const root = await mkdtemp(join(tmpdir(), "upgrade-stop-residue-"));
     const previousRelease = await writeVerifiedBundle(root, "old", OLD_VERSION);

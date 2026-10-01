@@ -312,10 +312,18 @@ export async function runManagedVaultUpgradeScenario(
         runtime,
         reloadRuntime: async () => {
           await handle!.stop();
-          handle = await options.processControl.start({
-            vaultPath: vault!.vaultPath,
-            profileDirectory: vault!.profileDirectory,
-          });
+          handle = null;
+          try {
+            handle = await options.processControl.start({
+              vaultPath: vault!.vaultPath,
+              profileDirectory: vault!.profileDirectory,
+            });
+          } catch (error) {
+            if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+              startupShutdownUnconfirmed = true;
+            }
+            throw error;
+          }
           const reloaded = options.runtimeHost.currentRuntime();
           if (reloaded === null) {
             throw new Error("The reloaded Obsidian did not load the plugin runtime");

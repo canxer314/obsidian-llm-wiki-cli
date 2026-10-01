@@ -430,6 +430,9 @@ export async function runManagedVaultPurgeScenario(
       drainedChangeSetId = queued.changeSetId;
       recorder.pass("obsidian_restart_drain", `drained: ${drainedChangeSetId}`);
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       throw recorder.fail(
         "obsidian_restart_drain",
         error instanceof Error ? error.message : String(error),
