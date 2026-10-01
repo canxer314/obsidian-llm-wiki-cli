@@ -86,5 +86,10 @@ it("times out waiting for a real local operator report instead of dispatching th
       descriptor, vaultId: "report-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "human-only", timeoutMs: 20,
     })).rejects.toThrow("Local Primary Operator report is required");
+    await rm(join(pluginDirectory, "installed-runtime-acceptance.json"));
+    await expect(waitForInstalledLocalOperatorReport({
+      descriptor, vaultId: "report-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "human-only", timeoutMs: 20,
+    })).rejects.toMatchObject({ code: "ENOENT", path: join(pluginDirectory, "installed-runtime-acceptance.json") });
   } finally { await rm(root, { recursive: true, force: true }); }
 });

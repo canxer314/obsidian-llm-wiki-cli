@@ -178,7 +178,9 @@ export async function waitForInstalledLocalOperatorReport(
     try {
       return await loadInstalledLocalOperatorReport(options);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const missing = error as NodeJS.ErrnoException;
+      if (missing.code !== "ENOENT" || typeof missing.path !== "string" ||
+          dirname(missing.path) !== resolve(options.descriptor.reportDirectory)) throw error;
       if (Date.now() >= deadline) {
         throw new Error(`Local Primary Operator report is required for ${options.action}`, { cause: error });
       }
