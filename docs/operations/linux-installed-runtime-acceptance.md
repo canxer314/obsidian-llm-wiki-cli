@@ -118,6 +118,14 @@ installed descriptor, changed bundle, malformed report, or failed validation is
 an immediate failure. Missing Primary Operator evidence cannot become a passed
 corpus by waiting or by substituting an Agent invocation.
 
+`waitForNextInstalledLocalControlReport` discovers the real local invocation ID
+from control report files. The runner consumes actions serially and records already
+consumed IDs; it does not invent IDs or infer invocation order from hashes or file
+modification times. Multiple pending reports for the requested action are ambiguous
+and fail closed. Every discovered control report is validated, including consumed
+reports and reports for other actions; neither category bypasses identity or
+checksum checks.
+
 The built-in privacy adapter uses independent report roots for its two generated
 Vaults and waits up to 180 seconds per local report. It first observes the six-tool
 Agent authority boundary, then runs the existing installed trash/restore evidence
