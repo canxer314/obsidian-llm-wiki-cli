@@ -44,6 +44,29 @@ all pass. Missing adapters or previous-release inputs fail closed. Consult the
 written evidence verdict rather than treating a successful plugin unit-test run
 as installed-runtime acceptance.
 
+## Installed partial slices and full acceptance
+
+The built-in crash adapter executes independently supervised create-note slices
+at `after_prepared` and `after_committed`. The former must restore an absent file
+and retain `intent_not_applied`; the latter must preserve exact committed bytes
+and retain `intent_applied`. Both bind the durable Journal, pre-crash status,
+post-restart status, and replayed complete Change Set record to the same identity.
+Their success does not cover every mutation/fault boundary or retention case, so
+the crash corpus still fails closed rather than promoting these slices.
+
+The built-in gate slice observes both Vaults' healthy open gate through actual
+MCP health, discovery inventory, metadata read, and unknown-key status before
+checking registry isolation. It does not prove blocked/paused/maintenance gate
+rows, FIFO, or a protocol-mismatch registry-inspection counter.
+
+The lifecycle adapter runs candidate installation/repair and offline
+uninstall/lossless reinstall before checking the external previous release.
+Each launched runtime is checked against the registered environment and installed
+candidate bytes. Generated registration commands and simulated registration
+flags in the underlying scenario are not installed authority. Upgrade, explicit
+local resume, Agent registration/removal, refusal cases, and confirmed purge
+remain required for full lifecycle acceptance.
+
 ## Local Primary Operator observations
 
 An armed generated Vault records evidence from the existing local commands; the
