@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createBridgeInstance,
   createLoopbackMcpClient,
+  HealthObservationError,
   createFileSystemChangeSetExecutionAdapter,
   createNodeFileSystemChangeSetHost,
   ManagedVaultBridgeRuntime,
@@ -202,6 +203,29 @@ describe("installed-runtime uninstall scenario", () => {
     expect(result.verdict).toBe("failed");
     expect(cleaned).toBe(false);
     expect(result.cleanup?.residualPaths).not.toEqual([]);
+  }, 60_000);
+
+  it("fails closed without retrying a restarted Vault identity mismatch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "uninstall-restart-identity-"));
+    const candidate = await writeVerifiedBundle(root, "bundle", VERSION);
+    const fake = createFakeObsidian();
+    const client = createLoopbackMcpClient();
+    let rejectedObservations = 0;
+    const result = await runManagedVaultUninstallScenario({
+      candidate, obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root,
+      processControl: fake.processControl, runId: "restart-identity",
+      client: { ...client, observeHealth: async (endpoint, vaultId) => {
+        if (fake.starts() === 2) {
+          rejectedObservations += 1;
+          throw new HealthObservationError("foreign Vault", "identity_mismatch");
+        }
+        return client.observeHealth(endpoint, vaultId);
+      } },
+      timeouts: { startupMs: 5_000, stopMs: 5_000 },
+    });
+    expect(rejectedObservations).toBe(1);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure?.stage).toBe("obsidian_restart");
   }, 60_000);
 
   it("waits for the restarted listener rather than trusting retained identity bytes", async () => {
