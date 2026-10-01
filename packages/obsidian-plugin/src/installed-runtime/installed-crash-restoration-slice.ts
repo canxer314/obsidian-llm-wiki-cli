@@ -378,7 +378,12 @@ export async function readInstalledCrashJournal(path: string) {
 async function isPortOpen(port: number): Promise<boolean> {
   return await new Promise((resolve) => {
     const socket = connect({ host: "127.0.0.1", port });
+    socket.setTimeout(1_000);
     socket.once("connect", () => { socket.destroy(); resolve(true); });
-    socket.once("error", () => resolve(false));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      socket.destroy();
+      resolve(error.code !== "ECONNREFUSED");
+    });
+    socket.once("timeout", () => { socket.destroy(); resolve(true); });
   });
 }
