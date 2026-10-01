@@ -1,8 +1,9 @@
 import { watch, type FSWatcher } from "node:fs";
+import { openRecoveryJournal } from "../recovery-journal.js";
 import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
 import { verifyContentInclusiveDiagnosticBundle, type ContentInclusiveDiagnosticBundle } from "../content-inclusive-diagnostic-bundle.js";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, realpath, link, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, link, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 import { parseCrashRestorationCommand } from "./crash-restoration-protocol.js";
@@ -50,7 +51,7 @@ export interface InstalledRuntimeAcceptanceDriverOptions {
   readonly executeCrashRestorationScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly command: import("./crash-restoration-protocol.js").CrashRestorationCommand;
-  }) => Promise<{ readonly boundary: "after_prepared"; readonly journalPhase: "PREPARED" }>;
+  }) => Promise<{ readonly boundary: "after_prepared" | "after_committed"; readonly journalPhase: "PREPARED" | "COMMITTED" }>;
   readonly executeSemanticEvidenceScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly scenario: string;
@@ -139,6 +140,20 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         if (executeCrashRestorationScenario === undefined) return;
         lastSequence = command.sequence;
         try {
+          // Reject before entering the installed handler: rejection must not arm
+          // a future Change Set's crash injector.
+          const handle = await open(join(parsed.vaultPath, ".llm-wiki", "recovery-journal.bin"), "r")
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return null;
+              throw error;
+            });
+          if (handle !== null) {
+            try {
+              if (await (await openRecoveryJournal(handle)).recover() !== undefined) {
+                throw new Error("Crash slice requires a clean Recovery Journal");
+              }
+            } finally { await handle.close(); }
+          }
           await executeCrashRestorationScenario({ descriptor: parsed, command: crashCommand });
         } catch {
           // Do not publish a success-shaped marker when the installed execution failed.

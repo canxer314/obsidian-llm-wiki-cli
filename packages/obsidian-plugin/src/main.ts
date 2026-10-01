@@ -366,10 +366,12 @@ export default class VaultOperationBridgePlugin extends Plugin {
       changeSetExecution,
       crashInjector: async (point) => {
         const armed = armedCrashBoundary;
-        if (armed === undefined || point !== "after_prepared") return;
+        if (armed === undefined || `create_note/${point}` !== armed.command.scenario) return;
+        const expectedPhase = point === "after_prepared" ? "PREPARED" : "COMMITTED";
         const frame = await changeSetExecution?.loadRecoveryFrame();
-        if (frame?.phase !== "PREPARED" || frame.input.submissionKey !== armed.command.submissionKey) {
-          throw new Error("Installed crash injector did not observe the armed PREPARED frame");
+        if (frame?.phase !== expectedPhase || frame.vaultId !== armed.command.expectedVaultId ||
+            JSON.stringify(frame.input) !== JSON.stringify(armed.command.input)) {
+          throw new Error("Installed crash injector did not observe the armed durable frame");
         }
         await writeCrashRestorationBoundaryReport({ descriptor: armed.descriptor,
           command: armed.command, journalPhase: frame.phase });
@@ -850,13 +852,18 @@ export default class VaultOperationBridgePlugin extends Plugin {
             if (JSON.stringify(parsed.input) !== JSON.stringify(expectedInput)) {
               throw new Error("Installed crash-restoration fixture does not match create-note program");
             }
-            armedCrashBoundary = { descriptor, command: parsed };
+            if (armedCrashBoundary !== undefined) throw new Error("Crash slice is already armed");
             const before = await changeSetExecution.loadRecoveryFrame();
             if (before !== null) throw new Error("Crash slice requires a clean Recovery Journal");
+            const input = parseChangeSetSubmitInput(parsed.input);
+            armedCrashBoundary = { descriptor, command: parsed };
             void installedSemanticEvidenceWire.submit({ endpoint: new URL(parsed.endpoint),
-              expectedVaultId: parsed.expectedVaultId, input: parseChangeSetSubmitInput(parsed.input) })
+              expectedVaultId: parsed.expectedVaultId, input })
+              .finally(() => { armedCrashBoundary = undefined; })
               .catch(() => undefined);
-            return { boundary: "after_prepared", journalPhase: "PREPARED" };
+            return parsed.scenario === "create_note/after_prepared"
+              ? { boundary: "after_prepared", journalPhase: "PREPARED" }
+              : { boundary: "after_committed", journalPhase: "COMMITTED" };
           },
         })) ?? undefined;
     }

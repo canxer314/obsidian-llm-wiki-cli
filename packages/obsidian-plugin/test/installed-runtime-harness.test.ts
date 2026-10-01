@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -778,6 +778,7 @@ describe("installed-runtime harness orchestration", () => {
       }),
     );
     const starts: string[] = [];
+    const gateAssertions: string[] = [];
     const processControl: ObsidianProcessControl = {
       async start({ vaultPath }) {
         starts.push(vaultPath);
@@ -805,9 +806,14 @@ describe("installed-runtime harness orchestration", () => {
               await writeFile(dataPath, JSON.stringify(settings), "utf8");
             },
           },
+          readDataSource: {
+            readBinary: execution.readBinary!,
+            parseFrontmatter: () => null,
+            headings: () => null,
+          },
           searchDataSource: {
-            listMarkdownPaths: async () => [],
-            readBinary: async () => null,
+            listMarkdownPaths: async () => (await readdir(join(vaultPath, "Notes"))).map(name => `Notes/${name}`),
+            readBinary: execution.readBinary!,
           },
           changeSetDataSource: {
             readBinary: execution.readBinary!,
@@ -836,9 +842,10 @@ describe("installed-runtime harness orchestration", () => {
       provisionVault: provisionTestVault,
       cleanupVault: cleanupTestVault,
       record: () => undefined,
-      assertion: () => undefined,
+      assertion: name => gateAssertions.push(name),
     });
     expect(result.verdict, result.failure).toBe("partial");
+    expect(gateAssertions).toEqual(["two-vault-installed-registry-isolation", "two-vault-installed-healthy-gate-row"]);
     expect(result.failure).toBeNull();
     expect(result.result?.scope).toBe("two-vault-registry-isolation");
     expect(result.result?.crossVaultLookupsAbsent).toBe(true);

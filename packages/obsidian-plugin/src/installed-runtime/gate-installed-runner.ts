@@ -187,8 +187,9 @@ async function stopVault(options: Pick<GateSliceOptions, "timeouts" | "cleanupVa
 /**
  * Installed two-Vault slice: install the verified candidate into independently
  * provisioned generated Vaults, start the configured Obsidian processes, and
- * prove registry isolation over public MCP. A partial verdict is intentional;
- * this is not the complete gate corpus and claims nothing about gates/FIFO.
+ * prove the healthy observational gate row and registry isolation over public
+ * MCP. A partial verdict is intentional; this is not the complete gate corpus
+ * and makes no blocked-gate, recovery, operator-control, or FIFO claims.
  */
 export const runInstalledGateIsolationCorpus: GateSliceRunner = async (options) => {
   let a: LiveVault | undefined;
@@ -232,6 +233,7 @@ export const runInstalledGateIsolationCorpus: GateSliceRunner = async (options) 
   if (sliceVerified && !failed && cleanup["vault-a"] !== null && cleanup["vault-b"] !== null) {
     options.record("assertion", "installed-gate-isolation-slice", { scope: "two-vault-registry-isolation", verdict });
     options.assertion("two-vault-installed-registry-isolation");
+    options.assertion("two-vault-installed-healthy-gate-row");
   }
   return {
     scope: "two-vault-registry-isolation",

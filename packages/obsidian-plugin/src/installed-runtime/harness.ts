@@ -361,6 +361,9 @@ export interface InstalledRuntimeHarnessOptions {
    * identities and runtime-host seam; its result is release-blocking evidence.
    */
   readonly runReleaseLifecycleCorpus?: (options: {
+    readonly profileName?: string;
+    readonly profile?: RegisteredRuntimeProfile;
+    readonly probe?: RuntimeEnvironmentProbe;
     readonly runId: string;
     readonly workingDirectory: string;
     readonly candidate: VerifiedCandidateBundle;
@@ -1310,6 +1313,7 @@ export async function runInstalledRuntimeHarness(
     if (state.failure === null && runner !== undefined && candidate !== null) {
       try {
         state.releaseLifecycle = await runner!({
+          profileName: options.profileName, profile: profile!, probe: options.probe,
           runId,
           workingDirectory: options.workingDirectory,
           candidate,

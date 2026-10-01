@@ -34,19 +34,20 @@ export interface InstalledCrashRestorationSliceRecord {
   readonly vaultId: string;
   readonly candidateBundleSha256: string;
   readonly installedMainSha256: string;
-  readonly crashPoint: "after_prepared";
+  readonly crashPoint: "after_prepared" | "after_committed";
   readonly processStoppedBeforeRestart: true;
-  readonly preparedJournalPhase: "PREPARED";
-  readonly journalPhase: "ROLLED_BACK";
-  readonly proofState: "intent_not_applied";
-  readonly originalFileAbsentAfterRecovery: true;
+  readonly preparedJournalPhase: "PREPARED" | "COMMITTED";
+  readonly journalPhase: "ROLLED_BACK" | "COMMITTED";
+  readonly proofState: "intent_not_applied" | "intent_applied";
+  readonly originalFileAbsentAfterRecovery: boolean;
+  readonly committedFileBytesPreservedAfterRecovery?: true;
   readonly healthRecoveryState: "none";
   readonly cleanupSucceeded: true;
   readonly verdict: "passed";
 }
 
 export interface InstalledCrashRestorationSliceOutcome {
-  readonly scope: "single-after-prepared-installed-rollback-slice";
+  readonly scope: "single-after-prepared-installed-rollback-slice" | "single-after-committed-installed-replay-slice";
   readonly records: readonly [InstalledCrashRestorationSliceRecord];
   readonly verdict: "passed";
 }
@@ -54,6 +55,7 @@ export interface InstalledCrashRestorationSliceOutcome {
 export type InstalledCrashRestorationSliceRunner = (options: InstalledCrashRestorationSliceOptions) => Promise<InstalledCrashRestorationSliceOutcome>;
 
 export interface InstalledCrashRestorationSliceOptions {
+  readonly crashPoint?: "after_prepared" | "after_committed";
   readonly runId: string;
   readonly workingDirectory: string;
   readonly reportDirectory: string;
@@ -120,10 +122,16 @@ async function waitForIdentity(check: () => Promise<PersistedBridgeIdentity | nu
 export async function runInstalledCrashRestorationSlice(
   options: InstalledCrashRestorationSliceOptions,
 ): Promise<InstalledCrashRestorationSliceOutcome> {
+  const crashPoint = options.crashPoint ?? "after_prepared";
+  const committed = crashPoint === "after_committed";
+  const durablePhase = committed ? "COMMITTED" : "PREPARED";
+  const terminalPhase = committed ? "COMMITTED" : "ROLLED_BACK";
+  const terminalState = committed ? "intent_applied" : "intent_not_applied";
+  const label = crashPoint.replace("_", "-");
   const configDirectoryName = options.configDirectoryName ?? ".obsidian";
   const vault = await provisionTestVault({
     workingDirectory: options.workingDirectory,
-    runId: `${options.runId}-crash-prepared`,
+    runId: `${options.runId}-crash-${committed ? "committed" : "prepared"}`,
     configDirectoryName,
   });
   let processHandle: ObsidianProcessHandle | null = null;
@@ -187,10 +195,10 @@ export async function runInstalledCrashRestorationSlice(
     }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
 
     const profile = createNoteCorpusProfile();
-    const seed = `${options.runId}-after-prepared`;
+    const seed = `${options.runId}-${label}`;
     const input = profile.buildSubmitInput(seed);
-  const parsedInput = parseChangeSetSubmitInput(input);
-  options.assertion("crash-after-prepared:verified-candidate-and-generated-vault");
+    const parsedInput = parseChangeSetSubmitInput(input);
+    options.assertion(`crash-${label}:verified-candidate-and-generated-vault`);
 
     // This initial request must be acknowledged by the installed private driver.
     await publishCrashCommand({
@@ -200,13 +208,13 @@ export async function runInstalledCrashRestorationSlice(
       expectedVaultId: identity.vaultId,
       endpoint,
       input: parsedInput,
-      crashPoint: "after_prepared",
+      crashPoint,
     });
 
     const journalPath = join(vault.vaultPath, ".llm-wiki", "recovery-journal.bin");
     const publicPath = join(vault.vaultPath, ...profile.primaryPath.split("/"));
 
-    // The runner needs an authenticated boundary marker emitted after durable PREPARED;
+    // The runner needs an authenticated marker emitted after the selected durable write;
     // without it, observing a journal alone does not prove the injected code has parked.
     const { loadCrashBoundaryReport } = await import("./crash-restoration-protocol.js");
     await waitForCondition(async () => {
@@ -214,7 +222,7 @@ export async function runInstalledCrashRestorationSlice(
         await loadCrashBoundaryReport({ reportDirectory: options.reportDirectory,
           runId: options.runId, vaultId: identity!.vaultId, candidateBundleSha256: installed.candidateBundleSha256,
           installedMainSha256: installed.installedMainSha256, capabilityToken: installed.capabilityToken,
-          endpoint: endpoint.toString(), submissionKey: parsedInput.submissionKey });
+          endpoint: endpoint.toString(), submissionKey: parsedInput.submissionKey, crashPoint });
         return true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
@@ -232,21 +240,24 @@ export async function runInstalledCrashRestorationSlice(
     });
     if (preCrashStatus.lookup !== "found" || preCrashStatus.changeSet.state !== "in_progress" ||
         preCrashHealth.health.recovery.state !== "none") {
-      throw new Error("Installed Change Set did not remain in progress at PREPARED boundary");
+      throw new Error("Installed Change Set did not remain in progress at durable boundary");
     }
     const preparedDiskFrame = await readInstalledCrashJournal(journalPath);
-    if (preparedDiskFrame.phase !== "PREPARED" ||
+    if (preparedDiskFrame.phase !== durablePhase ||
         typeof preparedDiskFrame.payload !== "object" || preparedDiskFrame.payload === null ||
         Array.isArray(preparedDiskFrame.payload) || preparedDiskFrame.payload.vaultId !== identity.vaultId ||
         preparedDiskFrame.payload.changeSetId !== preCrashStatus.changeSet.changeSetId ||
         JSON.stringify(preparedDiskFrame.payload.input) !== JSON.stringify(parsedInput)) {
-      throw new Error("Crash slice did not observe its bound durable PREPARED frame");
+      throw new Error("Crash slice did not observe its bound durable frame");
     }
     const beforeFile = await readFile(publicPath).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    if (beforeFile !== null) throw new Error("Create-note fixture was already visible before mutation");
+    const expectedBytes = profile.files[0]!.committedBytes;
+    if (committed ? beforeFile === null || !beforeFile.equals(expectedBytes!) : beforeFile !== null) {
+      throw new Error("Create-note fixture bytes do not match the durable crash boundary");
+    }
 
     await initialHandle.stop();
     await waitForCondition(async () => !await isPortOpen(identity!.port), {
@@ -254,7 +265,7 @@ export async function runInstalledCrashRestorationSlice(
     });
     processHandle = null;
     stopped = true;
-    options.assertion("crash-after-prepared:supervisor-confirmed-process-stop-before-restart");
+    options.assertion(`crash-${label}:supervisor-confirmed-process-stop-before-restart`);
 
     const restarted = await startRuntime();
     processHandle = restarted;
@@ -279,18 +290,21 @@ export async function runInstalledCrashRestorationSlice(
     const createHashHex = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
     const expectedDigest = createHashHex(new TextEncoder().encode(JSON.stringify(input)));
     if (recoveredHealth.health.recovery.state !== "none" ||
-        recoveredStatus.lookup !== "found" || recoveredStatus.changeSet.state !== "intent_not_applied" ||
-        recoveredJournal.phase !== "ROLLED_BACK" || afterFile !== null ||
+        recoveredStatus.lookup !== "found" || recoveredStatus.changeSet.state !== terminalState ||
+        recoveredJournal.phase !== terminalPhase ||
+        (committed ? afterFile === null || !afterFile.equals(expectedBytes!) : afterFile !== null) ||
         typeof recoveredJournal.payload !== "object" || recoveredJournal.payload === null ||
         Array.isArray(recoveredJournal.payload) || recoveredJournal.payload.vaultId !== identity.vaultId ||
         recoveredJournal.payload.changeSetId !== preCrashStatus.changeSet.changeSetId ||
         recoveredStatus.changeSet.changeSetId !== preCrashStatus.changeSet.changeSetId ||
         JSON.stringify(recoveredJournal.payload.input) !== JSON.stringify(parsedInput)) {
-      throw new Error("Installed restart did not recover PREPARED intent as not applied");
+      throw new Error("Installed restart did not recover the bound durable terminal intent");
     }
     const submitResult = await loopbackCall({ endpoint, vaultId: identity.vaultId,
-      name: "vault_change_set_submit", args: input, parse: parseChangeSetSubmitResult, expectedError: true });
-    if (submitResult.outcome !== "registered" || submitResult.changeSet.state !== "intent_not_applied") {
+      name: "vault_change_set_submit", args: input, parse: parseChangeSetSubmitResult, expectedError: !committed });
+    if (submitResult.outcome !== "registered" || submitResult.changeSet.state !== terminalState ||
+        submitResult.changeSet.changeSetId !== preCrashStatus.changeSet.changeSetId ||
+        JSON.stringify(submitResult.changeSet) !== JSON.stringify(recoveredStatus.changeSet)) {
       throw new Error("Recovered Bridge did not replay the retained terminal record");
     }
     proof = {
@@ -299,21 +313,22 @@ export async function runInstalledCrashRestorationSlice(
       vaultId: identity.vaultId,
       candidateBundleSha256: options.candidate.identity.bundleSha256,
       installedMainSha256: installed.installedMainSha256,
-      crashPoint: "after_prepared",
+      crashPoint,
       processStoppedBeforeRestart: stopped,
       preparedJournalPhase: preparedDiskFrame.phase,
       journalPhase: recoveredJournal.phase,
-      proofState: "intent_not_applied",
-      originalFileAbsentAfterRecovery: true,
+      proofState: terminalState,
+      originalFileAbsentAfterRecovery: !committed,
+      ...(committed ? { committedFileBytesPreservedAfterRecovery: true as const } : {}),
       healthRecoveryState: "none",
     };
-    options.record("assertion", "installed-crash-after-prepared-proof", {
+    options.record("assertion", `installed-crash-${label}-proof`, {
       ...proof,
       inputSha256: expectedDigest,
       preparedFrameSha256: createHashHex(new TextEncoder().encode(JSON.stringify(preparedDiskFrame))),
       recoveredFrameSha256: createHashHex(new TextEncoder().encode(JSON.stringify(recoveredJournal))),
     });
-    options.assertion("crash-after-prepared:recovery-restored-whole-change-set");
+    options.assertion(committed ? "crash-after-committed:recovery-preserved-committed-change-set" : "crash-after-prepared:recovery-restored-whole-change-set");
   } catch (error) {
     if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
       startupShutdownUnconfirmed = true;
@@ -342,11 +357,11 @@ export async function runInstalledCrashRestorationSlice(
     await acceptanceDriverCleanup?.();
     const cleanup = await cleanupTestVault(vault);
     if (cleanup.residualPaths.length > 0) throw new Error("Installed crash slice left generated Vault residue");
-    options.record("cleanup", "installed-crash-after-prepared-cleanup", { residualPaths: cleanup.residualPaths.length });
+    options.record("cleanup", `installed-crash-${label}-cleanup`, { residualPaths: cleanup.residualPaths.length });
     if (failure !== undefined) throw failure;
   }
   if (proof === null) throw new Error("Installed crash slice did not produce a proof record");
-  return { scope: "single-after-prepared-installed-rollback-slice",
+  return { scope: committed ? "single-after-committed-installed-replay-slice" : "single-after-prepared-installed-rollback-slice",
     records: [{ ...proof, cleanupSucceeded: true, verdict: "passed" }], verdict: "passed" };
 }
 
@@ -357,7 +372,7 @@ async function publishCrashCommand(options: {
   expectedVaultId: string;
   endpoint: URL;
   input: unknown;
-  crashPoint: "after_prepared";
+  crashPoint: "after_prepared" | "after_committed";
 }): Promise<void> {
   const protocol = await import("./crash-restoration-protocol.js");
   await protocol.requestInstalledCrashRestorationScenario({ ...options });

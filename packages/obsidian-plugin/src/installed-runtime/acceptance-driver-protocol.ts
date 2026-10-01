@@ -15,7 +15,7 @@ const crashRestorationCommandSchema = z.object({
   sequence: z.number().int().positive(),
   capabilityToken: digestSchema,
   action: z.literal("run-crash-restoration-scenario"),
-  scenario: z.literal("create_note/after_prepared"),
+  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed"]),
   expectedVaultId: z.string().min(1),
   endpoint: z.string().url(),
   submissionKey: z.string().min(1),

@@ -72,7 +72,7 @@ export class GateIsolationCorpusError extends Error {
   }
 }
 
-/** Small installed-runner result: proves only the two real registries are isolated. */
+/** Partial installed proof: the healthy observational gate row and two isolated registries. */
 export interface InstalledGateIsolationResult {
   readonly scope: "two-vault-registry-isolation";
   readonly vaultIdsSha256: Readonly<{ "vault-a": string; "vault-b": string }>;
@@ -87,8 +87,8 @@ export interface InstalledGateIsolationResult {
 
 /**
  * Execute the independently runnable two-Vault public-wire slice. This is not
- * the complete gate corpus: it deliberately makes no health, recovery, queue,
- * pause, maintenance, or FIFO claims.
+ * the complete gate corpus: it proves only the healthy open gate's observational
+ * tools and registry isolation, not recovery, queue, pause, maintenance, or FIFO.
  */
 export async function runInstalledGateIsolationSlice(options: {
   readonly vaultA: GateIsolationVaultSession;
@@ -100,6 +100,29 @@ export async function runInstalledGateIsolationSlice(options: {
   }
   if (vaultA.vaultIdSha256 === vaultB.vaultIdSha256) {
     throw new GateIsolationCorpusError("Installed Vault sessions have the same identity digest");
+  }
+  for (const session of [vaultA, vaultB]) {
+    const health = await observeHealth(session, `installed-gates/${session.label}/health`);
+    if (
+      health.outcome !== "observed" ||
+      sha256Hex(health.vault.id) !== session.vaultIdSha256 ||
+      health.effectiveGate !== null || health.recovery.state !== "none" ||
+      health.overall !== "healthy" || health.readiness.searchSnapshot !== "ready" ||
+      health.write.gate !== "open" || health.write.state !== "writable" ||
+      health.write.pauseSource !== null
+    ) {
+      throw new GateIsolationCorpusError("Installed gate slice requires a wire-observed healthy open gate");
+    }
+    const expected = expectedSeedInventory(session.seedNotes);
+    const inventory = await discoverInventory(session, "Notes/", `installed-gates/${session.label}/discover`, null);
+    if (expected.length === 0 || canonicalJson(inventory) !== canonicalJson(expected)) {
+      throw new GateIsolationCorpusError("Installed healthy gate did not expose the complete seed inventory");
+    }
+    await readSeedMetadata(session, `installed-gates/${session.label}/read`, expected[0]!.path, null);
+    const status = await callStatus(session, `installed-gates/${session.label}/status`, "installed-gate-unbound-probe");
+    if (status.lookup !== "unknown") {
+      throw new GateIsolationCorpusError("Installed healthy gate did not allow an unbound status lookup");
+    }
   }
   const key = "installed-gate-shared-key";
   const input = submitInput(
@@ -170,7 +193,7 @@ export async function runInstalledGateIsolationSlice(options: {
       "shared-key-on-a": { lookup: sharedOnA.lookup, changeSetId: sharedOnA.changeSet.changeSetId },
       "shared-key-on-b": { lookup: sharedOnB.lookup, changeSetId: sharedOnB.changeSet.changeSetId },
     },
-    assertions: ["distinct-change-set-identities", "cross-vault-key-lookup-absent"],
+    assertions: ["two-vault-healthy-gate-row", "distinct-change-set-identities", "cross-vault-key-lookup-absent"],
   };
 }
 

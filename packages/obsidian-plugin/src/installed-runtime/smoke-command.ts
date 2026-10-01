@@ -34,6 +34,7 @@ import { runInstalledRegisteredReferenceRewriteCorpus } from "./registered-refer
 import { runInstalledGateIsolationCorpus } from "./gate-installed-runner.js";
 import { runInstalledPrivacyRecoveryAuthorityCorpus } from "./privacy-recovery-installed-runner.js";
 import { runInstalledCrashRestorationSlice } from "./installed-crash-restoration-slice.js";
+import { runInstalledReleaseLifecycleSlice, runInstalledReleaseUninstallSlice } from "./installed-release-lifecycle-runner.js";
 import { MVP_PERF_REF_1 } from "./runtime-profile.js";
 
 export {
@@ -388,6 +389,14 @@ export function createAuthoritativeInstalledRuntimeRunners(
       runInstalledRegisteredReferenceRewriteCorpus,
     runPrivacyRecoveryAuthorityCorpus: runInstalledPrivacyRecoveryAuthorityCorpus,
     runReleaseLifecycleCorpus: async (request) => {
+      if (request.profile !== undefined && request.profileName !== undefined && request.probe !== undefined) {
+        const installed = { ...request, profile: request.profile, profileName: request.profileName,
+          probe: request.probe, candidate: request.candidate as VerifiedReleaseBundle };
+        const install = await runInstalledReleaseLifecycleSlice(installed);
+        if (install.verdict !== "partial") throw new Error("Installed lifecycle install/repair slice failed");
+        const uninstall = await runInstalledReleaseUninstallSlice(installed);
+        if (uninstall.verdict !== "partial") throw new Error("Installed lifecycle uninstall/reinstall slice failed");
+      }
       await resolveInstalledRuntimePreviousRelease({
         arguments: options.releaseArguments ?? { profile: MVP_PERF_REF_1.name },
         candidateVersion: request.candidate.identity.pluginVersion,
@@ -399,12 +408,15 @@ export function createAuthoritativeInstalledRuntimeRunners(
       if (request.installed === undefined) {
         throw new Error("Crash acceptance requires installed candidate, profile, process and descriptor inputs for the installed Obsidian acceptance driver");
       }
-      const partial = await runInstalledCrashRestorationSlice({
-        ...request.installed,
-        reportDirectory: options.reportDirectory ?? request.installed.reportDirectory,
-      });
-      request.record("assertion", "installed-crash-prepared-partial", partial);
-      throw new Error("Installed PREPARED rollback slice is partial; full crash and retained-authority acceptance are still required");
+      for (const crashPoint of ["after_prepared", "after_committed"] as const) {
+        const partial = await runInstalledCrashRestorationSlice({
+          ...request.installed,
+          crashPoint,
+          reportDirectory: options.reportDirectory ?? request.installed.reportDirectory,
+        });
+        request.record("assertion", `installed-crash-${crashPoint}-partial`, partial);
+      }
+      throw new Error("Installed PREPARED rollback and COMMITTED replay slices are partial; full crash and retained-authority acceptance are still required");
     },
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:

@@ -171,6 +171,22 @@ describe("installed-runtime authoritative command", () => {
     } as never)).rejects.toThrow("Previous release directory and immutable tag are required");
   });
 
+  it("runs installed lifecycle provisioning before requiring the external previous release", async () => {
+    const { MVP_PERF_REF_LINUX_1 } = await import("../src/installed-runtime/runtime-profile.js");
+    let provisions = 0;
+    const records: unknown[] = [];
+    await expect(createAuthoritativeInstalledRuntimeRunners().runReleaseLifecycleCorpus({
+      candidate: { identity: { pluginId: "llm-wiki", pluginVersion: "0.3.0" } },
+      profileName: MVP_PERF_REF_LINUX_1.name, profile: MVP_PERF_REF_LINUX_1,
+      probe: { probeRunning: async () => { throw new Error("Must not start"); } },
+      provisionVault: async () => { provisions += 1; throw new Error("Provision refused"); },
+      record: (_kind: unknown, _name: unknown, detail: unknown) => records.push(detail),
+      assertion: () => { throw new Error("Failed slice must not assert success"); },
+    } as never)).rejects.toThrow("Installed lifecycle install/repair slice failed");
+    expect(provisions).toBe(1);
+    expect(records).toContainEqual(expect.objectContaining({ scope: "installed-install-repair", verdict: "failed" }));
+  });
+
   it("invokes the built-in installed gate runner and fails closed without a running-runtime probe", async () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
     const outcome = await runners.runGateIsolationCorpus({

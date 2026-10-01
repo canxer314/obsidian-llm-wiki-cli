@@ -15,7 +15,7 @@ export const crashRestorationCommandSchema = z.object({
   sequence: z.number().int().positive(),
   capabilityToken: digestSchema,
   action: z.literal("run-crash-restoration-scenario"),
-  scenario: z.literal("create_note/after_prepared"),
+  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed"]),
   expectedVaultId: z.string().min(1),
   endpoint: z.string().url(),
   submissionKey: z.string().min(1),
@@ -26,20 +26,23 @@ const crashRestorationBoundarySchema = z.object({
   runId: z.string().min(1),
   vaultId: z.string().min(1),
   endpoint: z.string().url(),
-  scenario: z.literal("create_note/after_prepared"),
+  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed"]),
   candidateBundleSha256: digestSchema,
   installedMainSha256: digestSchema,
   capabilityToken: digestSchema,
   submissionKey: z.string().min(1),
-  point: z.literal("after_prepared"),
-  journalPhase: z.literal("PREPARED"),
-}).strict();
+  point: z.enum(["after_prepared", "after_committed"]),
+  journalPhase: z.enum(["PREPARED", "COMMITTED"]),
+}).strict().refine(report =>
+  report.scenario === `create_note/${report.point}` &&
+  report.journalPhase === (report.point === "after_prepared" ? "PREPARED" : "COMMITTED"),
+  "Crash boundary scenario, point and durable phase must agree");
 
 export type CrashRestorationCommand = z.infer<typeof crashRestorationCommandSchema>;
 export type CrashRestorationBoundaryReport = z.infer<typeof crashRestorationBoundarySchema>;
 
-export function crashRestorationBoundaryPath(reportDirectory: string): string {
-  return join(reportDirectory, "crash-restoration-after-prepared-boundary.json");
+export function crashRestorationBoundaryPath(reportDirectory: string, crashPoint: "after_prepared" | "after_committed" = "after_prepared"): string {
+  return join(reportDirectory, `crash-restoration-${crashPoint.replace("_", "-")}-boundary.json`);
 }
 
 export async function requestInstalledCrashRestorationScenario(options: {
@@ -48,7 +51,7 @@ export async function requestInstalledCrashRestorationScenario(options: {
   readonly expectedVaultId: string;
   readonly endpoint: URL;
   readonly input: unknown;
-  readonly crashPoint: "after_prepared";
+  readonly crashPoint: "after_prepared" | "after_committed";
 }): Promise<void> {
   if (options.endpoint.protocol !== "http:" || options.endpoint.hostname !== "127.0.0.1") {
     throw new Error("Installed acceptance commands require the loopback endpoint");
@@ -65,7 +68,7 @@ export async function requestInstalledCrashRestorationScenario(options: {
     sequence: current.command.sequence + 1,
     capabilityToken: current.capabilityToken,
     action: "run-crash-restoration-scenario",
-    scenario: "create_note/after_prepared",
+    scenario: `create_note/${options.crashPoint}`,
     expectedVaultId: options.expectedVaultId,
     endpoint: options.endpoint.toString(),
     submissionKey: parsedInput.submissionKey,
@@ -81,7 +84,7 @@ export async function requestInstalledCrashRestorationScenario(options: {
 export async function writeCrashRestorationBoundaryReport(options: {
   readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
   readonly command: CrashRestorationCommand;
-  readonly journalPhase: "PREPARED";
+  readonly journalPhase: "PREPARED" | "COMMITTED";
 }): Promise<void> {
   if (options.command.capabilityToken !== options.descriptor.capabilityToken) {
     throw new Error("Installed crash marker command capability changed");
@@ -96,7 +99,7 @@ export async function writeCrashRestorationBoundaryReport(options: {
     installedMainSha256: options.descriptor.installedMainSha256,
     capabilityToken: options.descriptor.capabilityToken,
     submissionKey: options.command.submissionKey,
-    point: "after_prepared",
+    point: options.command.scenario === "create_note/after_prepared" ? "after_prepared" : "after_committed",
     journalPhase: options.journalPhase,
   });
   const workspaceRealPath = await realpath(dirname(options.descriptor.vaultPath));
@@ -104,7 +107,7 @@ export async function writeCrashRestorationBoundaryReport(options: {
   if (!isPathInside(workspaceRealPath, reportRealPath)) {
     throw new Error("Installed crash report root escaped the real run workspace");
   }
-  const path = crashRestorationBoundaryPath(reportRealPath);
+  const path = crashRestorationBoundaryPath(reportRealPath, report.point);
   const temp = `${path}.${randomBytes(16).toString("hex")}.next`;
   await writeFile(temp, `${JSON.stringify(report)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
   try { await link(temp, path); }
@@ -120,11 +123,12 @@ export async function loadCrashBoundaryReport(options: {
   readonly capabilityToken: string;
   readonly endpoint: string;
   readonly submissionKey: string;
+  readonly crashPoint?: "after_prepared" | "after_committed";
 }): Promise<CrashRestorationBoundaryReport> {
   const report = crashRestorationBoundarySchema.parse(
-    JSON.parse(await readFile(crashRestorationBoundaryPath(options.reportDirectory), "utf8")) as unknown,
+    JSON.parse(await readFile(crashRestorationBoundaryPath(options.reportDirectory, options.crashPoint), "utf8")) as unknown,
   );
-  if (report.runId !== options.runId || report.vaultId !== options.vaultId ||
+  if (report.point !== (options.crashPoint ?? "after_prepared") || report.runId !== options.runId || report.vaultId !== options.vaultId ||
       report.candidateBundleSha256 !== options.candidateBundleSha256 ||
       report.installedMainSha256 !== options.installedMainSha256 ||
       report.capabilityToken !== options.capabilityToken ||

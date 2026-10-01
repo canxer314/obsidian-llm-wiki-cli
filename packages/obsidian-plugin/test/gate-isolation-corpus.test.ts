@@ -387,7 +387,7 @@ function scenarioManifestSha256(): string {
 }
 
 describe("per-Vault gate-and-isolation corpus over two real loopback Bridges", () => {
-  it("runs the installed public-wire registry isolation slice without claiming gate coverage", async () => {
+  it("proves the installed healthy gate row and registry isolation without claiming the complete gate corpus", async () => {
     const hostA = await createVaultHost("installed-vault-a");
     const hostB = await createVaultHost("installed-vault-b");
     const a = await sessionFor(hostA, "vault-a");
@@ -412,9 +412,34 @@ describe("per-Vault gate-and-isolation corpus over two real loopback Bridges", (
         },
       });
       expect(result.assertions).toEqual([
+        "two-vault-healthy-gate-row",
         "distinct-change-set-identities",
         "cross-vault-key-lookup-absent",
       ]);
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
+  it("rejects an installed healthy gate claim when an advertised seed cannot be read, before binding keys", async () => {
+    const hostA = await createVaultHost("installed-incomplete-a");
+    const hostB = await createVaultHost("installed-incomplete-b");
+    const a = await sessionFor(hostA, "vault-a");
+    const b = await sessionFor(hostB, "vault-b");
+    try {
+      const missing = hostA.vault.seedNotes.filter(({ path }) => path.startsWith("Notes/"))
+        .sort((left, right) => left.path.localeCompare(right.path))[0]!;
+      await rm(join(hostA.vault.vaultPath, missing.path));
+      // Replace neither health nor wire results: the discovery snapshot still
+      // advertises the original seed, while the read must observe its absence.
+      await expect(runInstalledGateIsolationSlice({ vaultA: a.session, vaultB: b.session }))
+        .rejects.toThrow("seed note metadata was not satisfied");
+      for (const session of [a.session, b.session]) {
+        const status = await session.callTool("vault_change_set_status", { submissionKey: "installed-gate-shared-key" });
+        expect(status.isError).toBe(false);
+        expect(status.structuredContent).toMatchObject({ lookup: "unknown" });
+      }
     } finally {
       await a.close();
       await b.close();
