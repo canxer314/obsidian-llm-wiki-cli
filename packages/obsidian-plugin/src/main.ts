@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -967,17 +967,31 @@ export default class VaultOperationBridgePlugin extends Plugin {
         const selection = editor?.getSelection() ?? "";
         if (!hasContentInclusiveSelection(selection)) return false;
         if (checking) return true;
+        const confirmationId = randomUUID();
+        let generatedBundle: Awaited<ReturnType<typeof runtime.createContentInclusiveDiagnosticBundle>> | undefined;
         void performContentInclusiveDiagnosticCopy({
           selection,
           confirm: () =>
             new Promise<boolean>((resolve) => {
               new ContentInclusiveDiagnosticsConfirmationModal(this.app, resolve).open();
             }),
-          generate: (selected) =>
-            runtime.createContentInclusiveDiagnosticBundle(selected),
+          generate: async (selected) => {
+            generatedBundle = await runtime.createContentInclusiveDiagnosticBundle(selected);
+            return generatedBundle;
+          },
           write: (text) => navigator.clipboard.writeText(text),
         })
-          .then((outcome) => {
+          .then(async (outcome) => {
+            const settings = runtime.persistedSettings;
+            const bridge = runtime.bridge;
+            if (this.#installedRuntimeAcceptance !== undefined && settings !== undefined && bridge !== undefined) {
+              const binding = { vaultId: settings.vaultId, endpoint: new URL(`http://127.0.0.1:${bridge.port}/mcp`), confirmationId, selection };
+              if (outcome.outcome === "cancelled") {
+                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "cancelled" });
+              } else if (outcome.outcome === "copied" && generatedBundle !== undefined) {
+                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "copied", bundle: generatedBundle });
+              }
+            }
             if (outcome.outcome === "copied") {
               new Notice(
                 "Selected content-inclusive diagnostics copied to the clipboard",

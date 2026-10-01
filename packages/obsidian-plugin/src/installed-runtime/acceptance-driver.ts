@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from "node:fs";
 import { verifyStandardDiagnosticBundle } from "../diagnostic-bundle.js";
-import { randomBytes } from "node:crypto";
+import { verifyContentInclusiveDiagnosticBundle, type ContentInclusiveDiagnosticBundle } from "../content-inclusive-diagnostic-bundle.js";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, realpath, link, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -21,6 +22,15 @@ export interface InstalledRuntimeAcceptanceActivation {
     readonly endpoint: URL;
     readonly bundle: unknown;
   }): Promise<void>;
+  recordContentInclusiveDiagnosticCopy(options: {
+    readonly vaultId: string;
+    readonly endpoint: URL;
+    readonly confirmationId: string;
+    readonly selection: string;
+  } & ({ readonly outcome: "cancelled" } | {
+    readonly outcome: "copied";
+    readonly bundle: ContentInclusiveDiagnosticBundle;
+  })): Promise<void>;
   dispose(): void;
 }
 
@@ -215,6 +225,50 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         action: "standard-diagnostic-copy",
         checksumVerified: true,
         bundle: request.bundle,
+      })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      try {
+        await requireBoundReportRoot();
+        await link(temporaryPath, reportPath);
+      } finally {
+        await rm(temporaryPath, { force: true });
+      }
+    },
+    async recordContentInclusiveDiagnosticCopy(request) {
+      if (request.outcome === "copied" && (!verifyContentInclusiveDiagnosticBundle(request.bundle) ||
+          request.bundle.selection.content !== request.selection)) {
+        throw new Error("Local acceptance requires a valid selection-bound content diagnostic bundle");
+      }
+      if (disposed) throw new Error("Installed acceptance activation is disposed");
+      const current = (await loadInstalledRuntimeAcceptanceDescriptor(options)).descriptor;
+      if (current.runId !== loaded.descriptor.runId || current.vaultPath !== loaded.descriptor.vaultPath ||
+          current.pluginId !== loaded.descriptor.pluginId || current.candidateBundleSha256 !== loaded.descriptor.candidateBundleSha256 ||
+          current.installedMainSha256 !== loaded.descriptor.installedMainSha256 ||
+          current.reportDirectory !== loaded.descriptor.reportDirectory || current.capabilityToken !== loaded.descriptor.capabilityToken) {
+        throw new Error("Installed acceptance descriptor identity changed");
+      }
+      const identity = await readPersistedBridgeIdentity(options.vaultPath, options.pluginId, options.configDirectoryName);
+      if (identity === null || identity.vaultId !== request.vaultId ||
+          request.endpoint.toString() !== `http://127.0.0.1:${identity.port}/mcp` ||
+          request.confirmationId.length === 0 || request.selection.length === 0) {
+        throw new Error("Local content diagnostic report does not match the running Vault identity or confirmation");
+      }
+      await requireBoundReportRoot();
+      const confirmationDigest = createHash("sha256").update(request.confirmationId).digest("hex");
+      const reportPath = join(reportRealPath, `local-content-inclusive-diagnostic-copy-${confirmationDigest}.json`);
+      const temporaryPath = `${reportPath}.${randomBytes(16).toString("hex")}.next`;
+      await writeFile(temporaryPath, `${JSON.stringify({
+        schemaVersion: 1, runId: loaded.descriptor.runId,
+        candidateBundleSha256: loaded.descriptor.candidateBundleSha256,
+        installedMainSha256: loaded.descriptor.installedMainSha256,
+        capabilityToken: loaded.descriptor.capabilityToken,
+        vaultId: request.vaultId, endpoint: request.endpoint.toString(),
+        action: "content-inclusive-diagnostic-copy", confirmationId: request.confirmationId,
+        outcome: request.outcome, generated: request.outcome === "copied", copied: request.outcome === "copied",
+        ...(request.outcome === "copied" ? {
+          checksumVerified: true, bundleChecksum: request.bundle.checksum.canonicalPayload,
+          bundleVersion: request.bundle.bundleVersion, versions: request.bundle.trace.versions,
+        } : {}),
+        selectionSha256: createHash("sha256").update(request.selection).digest("hex"),
       })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
       try {
         await requireBoundReportRoot();

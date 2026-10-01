@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile, rename, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { createStandardDiagnosticBundle } from "../src/diagnostic-bundle.js";
+import { createContentInclusiveDiagnosticBundle } from "../src/content-inclusive-diagnostic-bundle.js";
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
 
 it("publishes only a valid Vault-bound standard diagnostic copy and preserves its first evidence", async () => {
@@ -23,7 +25,7 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
       bundle: { checksum: { algorithm: "sha256", canonicalPayload: "forged" } },
     })).rejects.toThrow("valid standard diagnostic bundle");
     await expect(readFile(join(reports, "local-standard-diagnostic-copy.json"))).rejects.toMatchObject({ code: "ENOENT" });
-    const bundle = createStandardDiagnosticBundle({
+    const evidence = {
       vaultId: "local-vault",
       versions: { bridge: "0.1.0", plugin: "0.1.0", protocol: "1.0", persistentStateSchema: 2, recoveryJournalSchema: 3 },
       health: {
@@ -35,7 +37,8 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
       queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
       lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" },
       journal: { availability: "unavailable", frames: [] }, changeSets: [], machineEvents: [],
-    });
+    };
+    const bundle = createStandardDiagnosticBundle(evidence);
     await writeFile(join(pluginDirectory, "data.json"), JSON.stringify({ vaultId: "local-vault", port: 32123 }));
     await expect(activation!.recordStandardDiagnosticCopy({ vaultId: "foreign-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), bundle })).rejects.toThrow("running Vault identity");
     await writeFile(created.path, JSON.stringify({ ...created.descriptor, runId: "foreign-run" }));
@@ -50,6 +53,26 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     });
     await expect(activation!.recordStandardDiagnosticCopy({ vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), bundle })).rejects.toMatchObject({ code: "EEXIST" });
     expect(JSON.parse(await readFile(join(reports, "local-standard-diagnostic-copy.json"), "utf8"))).toEqual(report);
+    await activation!.recordContentInclusiveDiagnosticCopy({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      confirmationId: "fresh-local-confirmation", outcome: "cancelled", selection: "private selected text",
+    });
+    const cancelled = await readFile(join(reports, `local-content-inclusive-diagnostic-copy-${createHash("sha256").update("fresh-local-confirmation").digest("hex")}.json`), "utf8");
+    expect(JSON.parse(cancelled)).toMatchObject({
+      action: "content-inclusive-diagnostic-copy", outcome: "cancelled",
+      confirmationId: "fresh-local-confirmation", generated: false, copied: false,
+    });
+    expect(cancelled).not.toContain("private selected text");
+    const selectedBundle = createContentInclusiveDiagnosticBundle(evidence, "private selected text");
+    await activation!.recordContentInclusiveDiagnosticCopy({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      confirmationId: "another-fresh-confirmation", outcome: "copied", selection: "private selected text",
+      bundle: selectedBundle,
+    });
+    const copied = await readFile(join(reports, `local-content-inclusive-diagnostic-copy-${createHash("sha256").update("another-fresh-confirmation").digest("hex")}.json`), "utf8");
+    expect(JSON.parse(copied)).toMatchObject({ outcome: "copied", generated: true, copied: true,
+      checksumVerified: true, bundleChecksum: selectedBundle.checksum.canonicalPayload });
+    expect(copied).not.toContain("private selected text");
     const replacement = join(root, "replacement-reports");
     await mkdir(replacement);
     await rename(reports, `${reports}-original`);
