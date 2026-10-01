@@ -209,6 +209,11 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     await mkdir(replacement);
     await rename(reports, `${reports}-original`);
     await symlink(replacement, reports);
+    await writeFile(join(replacement, "local-standard-diagnostic-copy.json"), JSON.stringify(report), { mode: 0o600 });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "standard-diagnostic-copy" })).rejects.toThrow("report root changed");
+    await rm(join(replacement, "local-standard-diagnostic-copy.json"));
     await expect(activation!.recordStandardDiagnosticCopy({ vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), bundle })).rejects.toThrow("report root changed");
     await expect(readFile(join(replacement, "local-standard-diagnostic-copy.json"))).rejects.toMatchObject({ code: "ENOENT" });
   } finally {

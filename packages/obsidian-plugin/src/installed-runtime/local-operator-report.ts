@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
 import { isPathInside, loadInstalledRuntimeAcceptanceDescriptor, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
@@ -57,6 +57,9 @@ export async function loadInstalledLocalOperatorReport(options: {
     throw new Error("Local operator descriptor identity changed; identity does not match the installed run");
   }
   const root = await realpath(binding.reportDirectory);
+  if (root !== resolve(binding.reportDirectory)) {
+    throw new Error("Local operator report root changed from its bound directory");
+  }
   if (!isPathInside(await realpath(dirname(binding.vaultPath)), root)) {
     throw new Error("Local operator report root escaped the run workspace");
   }
