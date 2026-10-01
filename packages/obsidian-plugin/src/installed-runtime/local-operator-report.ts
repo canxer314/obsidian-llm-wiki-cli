@@ -3,7 +3,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
-import { isPathInside, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
+import { isPathInside, loadInstalledRuntimeAcceptanceDescriptor, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 
 const standardReportSchema = z.object({
   schemaVersion: z.literal(1), runId: z.string().min(1),
@@ -34,6 +34,7 @@ export async function loadInstalledLocalOperatorReport(options: {
   readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
   readonly vaultId: string;
   readonly endpoint: URL;
+  readonly configDirectoryName?: string;
 } & ({ readonly action: "standard-diagnostic-copy" } | {
   readonly action: "pause-writes" | "accept-recovery-baseline" | "resume-writes";
   readonly invocationId: string;
@@ -47,6 +48,14 @@ export async function loadInstalledLocalOperatorReport(options: {
   (z.infer<typeof controlReportSchema> & { readonly before: StandardDiagnosticBundle; readonly after: StandardDiagnosticBundle })
 > {
   const binding = options.descriptor;
+  const { descriptor: current } = await loadInstalledRuntimeAcceptanceDescriptor({ vaultPath: binding.vaultPath,
+    pluginId: binding.pluginId, configDirectoryName: options.configDirectoryName });
+  if (current.runId !== binding.runId || current.vaultPath !== binding.vaultPath ||
+      current.pluginId !== binding.pluginId || current.candidateBundleSha256 !== binding.candidateBundleSha256 ||
+      current.installedMainSha256 !== binding.installedMainSha256 ||
+      current.capabilityToken !== binding.capabilityToken || current.reportDirectory !== binding.reportDirectory) {
+    throw new Error("Local operator descriptor identity changed; identity does not match the installed run");
+  }
   const root = await realpath(binding.reportDirectory);
   if (!isPathInside(await realpath(dirname(binding.vaultPath)), root)) {
     throw new Error("Local operator report root escaped the run workspace");

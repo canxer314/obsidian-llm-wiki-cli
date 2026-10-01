@@ -195,6 +195,16 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "rejected-cleared-journal" })).rejects.toThrow("rejected baseline changed journal facts");
+    await writeFile(join(pluginDirectory, "main.js"), "replaced candidate");
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "standard-diagnostic-copy" })).rejects.toThrow("installed entry point");
+    await writeFile(join(pluginDirectory, "main.js"), "candidate");
+    await writeFile(created.path, JSON.stringify({ ...created.descriptor, runId: "superseding-run" }));
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "standard-diagnostic-copy" })).rejects.toThrow("descriptor identity changed");
+    await writeFile(created.path, JSON.stringify(created.descriptor));
     const replacement = join(root, "replacement-reports");
     await mkdir(replacement);
     await rename(reports, `${reports}-original`);
