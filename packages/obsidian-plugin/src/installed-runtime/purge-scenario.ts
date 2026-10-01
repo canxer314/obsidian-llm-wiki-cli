@@ -592,11 +592,16 @@ export async function runManagedVaultPurgeScenario(
   if (handle !== null) {
     try {
       await handle.stop();
+      handle = null;
     } catch {
-      // The primary failure is already recorded; cleanup still proceeds.
+      // Never delete a generated root still owned by a live process.
     }
   }
-  if (vault !== null) {
+  if (vault !== null && handle !== null) {
+    cleanup = { attempted: true, residualPaths: ["/"] };
+    recorder.fail("cleanup", "Generated runtime shutdown was not confirmed");
+    failure ??= { stage: "cleanup", detail: "Generated runtime shutdown was not confirmed" };
+  } else if (vault !== null) {
     try {
       cleanup = await cleanupVault(vault);
       // The scenario's backups are removed too: no residue from the run.

@@ -178,6 +178,26 @@ function createFakeObsidian(): {
 }
 
 describe("installed-runtime upgrade scenario", () => {
+  it("retains generated roots when the upgrade process cannot stop", async () => {
+    const root = await mkdtemp(join(tmpdir(), "upgrade-stop-residue-"));
+    const previousRelease = await writeVerifiedBundle(root, "old", OLD_VERSION);
+    const upgradeRelease = await writeVerifiedBundle(root, "new", NEW_VERSION);
+    const fake = createFakeObsidian();
+    let cleaned = false;
+    const result = await runManagedVaultUpgradeScenario({ previousRelease, upgradeRelease,
+      obsidianVersion: OBSIDIAN_VERSION, workingDirectory: root, runtimeHost: fake.runtimeHost,
+      processControl: { start: async request => {
+        const handle = await fake.processControl.start(request);
+        return { ...handle, stop: async () => { throw new Error("stop refused"); } };
+      } },
+      cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+      runId: "stop-residue", timeouts: { startupMs: 5_000, stopMs: 5_000 },
+    });
+    expect(result.verdict).toBe("failed");
+    expect(cleaned).toBe(false);
+    expect(result.cleanup?.residualPaths).not.toEqual([]);
+  }, 60_000);
+
   it(
     "proves a queued upgrade through a real reload, preserved state, maintenance pause, and explicit resume",
     { timeout: 60_000 },
