@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import { createStandardDiagnosticBundle } from "../src/diagnostic-bundle.js";
 import { createContentInclusiveDiagnosticBundle } from "../src/content-inclusive-diagnostic-bundle.js";
+import { loadInstalledLocalOperatorReport } from "../src/installed-runtime/local-operator-report.js";
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
 
 it("publishes only a valid Vault-bound standard diagnostic copy and preserves its first evidence", async () => {
@@ -53,6 +54,13 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
       vaultId: "local-vault", endpoint: "http://127.0.0.1:32123/mcp",
       action: "standard-diagnostic-copy", checksumVerified: true, bundle,
     });
+    const loadedReport = await loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), action: "standard-diagnostic-copy" });
+    expect(loadedReport.action).toBe("standard-diagnostic-copy");
+    if (loadedReport.action !== "standard-diagnostic-copy") throw new Error("Wrong local report action");
+    expect(loadedReport.bundle).toEqual(bundle);
+    await expect(loadInstalledLocalOperatorReport({ descriptor: { ...created.descriptor, runId: "foreign" },
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), action: "standard-diagnostic-copy" })).rejects.toThrow("identity does not match");
     await expect(activation!.recordStandardDiagnosticCopy({ vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), bundle })).rejects.toMatchObject({ code: "EEXIST" });
     expect(JSON.parse(await readFile(join(reports, "local-standard-diagnostic-copy.json"), "utf8"))).toEqual(report);
     await activation!.recordContentInclusiveDiagnosticCopy({
@@ -75,6 +83,15 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     expect(JSON.parse(copied)).toMatchObject({ outcome: "copied", generated: true, copied: true,
       checksumVerified: true, bundleChecksum: selectedBundle.checksum.canonicalPayload });
     expect(copied).not.toContain("private selected text");
+    const loadedContent = await loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "content-inclusive-diagnostic-copy", confirmationId: "another-fresh-confirmation",
+      expectedSelectionSha256: createHash("sha256").update("private selected text").digest("hex") });
+    expect(loadedContent).toMatchObject({ action: "content-inclusive-diagnostic-copy", outcome: "copied", copied: true });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "content-inclusive-diagnostic-copy", confirmationId: "another-fresh-confirmation",
+      expectedSelectionSha256: "f".repeat(64) })).rejects.toThrow("selection binding");
     await expect(activation!.recordLocalWriteControl({
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       invocationId: "foreign-listener-control", action: "resume-writes", outcome: "accepted",
@@ -91,6 +108,38 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
       before: { health: { recovery: "none" }, journal: { availability: "unavailable" } },
       after: { health: { recovery: "none" }, journal: { availability: "unavailable" } },
     });
+    const loadedControl = await loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "local-baseline-rejected" });
+    expect(loadedControl).toMatchObject({ action: "accept-recovery-baseline", outcome: "rejected", before: bundle, after: bundle });
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "false-baseline-accepted", action: "accept-recovery-baseline", outcome: "accepted",
+      before: bundle, after: bundle,
+    });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "false-baseline-accepted" })).rejects.toThrow("baseline transition");
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "false-pause-accepted", action: "pause-writes", outcome: "accepted",
+      before: bundle, after: bundle,
+    });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "pause-writes", invocationId: "false-pause-accepted" })).rejects.toThrow("pause transition");
+    const blocked = createStandardDiagnosticBundle({ ...evidence, health: {
+      ...evidence.health, recovery: "blocked", effectiveGate: "recovery_blocked",
+      write: { gate: "blocked", state: "paused", pauseSource: null },
+      overall: "blocked", reasonCodes: ["recovery_blocked"], operatorAction: "review_recovery",
+    } });
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "unsafe-resume", action: "resume-writes", outcome: "accepted", before: blocked, after: bundle,
+    });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "resume-writes", invocationId: "unsafe-resume" })).rejects.toThrow("resume transition");
     const replacement = join(root, "replacement-reports");
     await mkdir(replacement);
     await rename(reports, `${reports}-original`);
