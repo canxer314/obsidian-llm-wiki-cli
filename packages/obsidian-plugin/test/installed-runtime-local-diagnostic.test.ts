@@ -148,6 +148,53 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "mutating-rejected-baseline" })).rejects.toThrow("rejected baseline changed recovery state");
+    const paused = createStandardDiagnosticBundle({ ...evidence, health: {
+      ...evidence.health, effectiveGate: "writes_paused",
+      write: { gate: "blocked", state: "paused", pauseSource: "manual" },
+      overall: "blocked", reasonCodes: ["writes_paused"], operatorAction: "resume_writes",
+    }, journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
+      { slot: 0, state: "empty", checksum: "not_present" },
+      { slot: 1, state: "empty", checksum: "not_present" },
+    ] } });
+    const staleFailed = createStandardDiagnosticBundle({ ...evidence, health: blocked.health,
+      journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
+        { slot: 0, state: "valid", checksum: "valid", sequence: 1, phase: "FAILED", frameSchemaVersion: 1, changeSetId: "old-failure" },
+        { slot: 1, state: "valid", checksum: "valid", sequence: 2, phase: "COMMITTED", frameSchemaVersion: 1, changeSetId: "latest-commit" },
+      ] } });
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "stale-failed-baseline", action: "accept-recovery-baseline", outcome: "accepted",
+      before: staleFailed, after: paused,
+    });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "stale-failed-baseline" })).rejects.toThrow("baseline transition");
+    const currentFailed = createStandardDiagnosticBundle({ ...evidence, health: blocked.health,
+      journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
+        { slot: 0, state: "valid", checksum: "valid", sequence: 1, phase: "PREPARED", frameSchemaVersion: 1, changeSetId: "failed-change" },
+        { slot: 1, state: "valid", checksum: "valid", sequence: 2, phase: "FAILED", frameSchemaVersion: 1, changeSetId: "failed-change" },
+      ] } });
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "valid-baseline", action: "accept-recovery-baseline", outcome: "accepted",
+      before: currentFailed, after: paused,
+    });
+    expect(await loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "valid-baseline" })).toMatchObject({ outcome: "accepted" });
+    const clearedBlocked = createStandardDiagnosticBundle({ ...evidence, health: blocked.health,
+      journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
+        { slot: 0, state: "empty", checksum: "not_present" },
+        { slot: 1, state: "empty", checksum: "not_present" },
+      ] } });
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "rejected-cleared-journal", action: "accept-recovery-baseline", outcome: "rejected",
+      before: currentFailed, after: clearedBlocked,
+    });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "rejected-cleared-journal" })).rejects.toThrow("rejected baseline changed journal facts");
     const replacement = join(root, "replacement-reports");
     await mkdir(replacement);
     await rename(reports, `${reports}-original`);

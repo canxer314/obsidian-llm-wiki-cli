@@ -108,10 +108,23 @@ export async function loadInstalledLocalOperatorReport(options: {
        JSON.stringify(before.health.write) !== JSON.stringify(after.health.write))) {
     throw new Error("Local operator rejected baseline changed recovery state");
   }
+  if (report.action === "accept-recovery-baseline" && report.outcome === "rejected") {
+    const journalFacts = (bundle: StandardDiagnosticBundle) => ({
+      ...bundle.journal,
+      frames: bundle.journal.frames.map(frame => frame.state === "valid" ? {
+        slot: frame.slot, state: frame.state, checksum: frame.checksum,
+        sequence: frame.sequence, phase: frame.phase, frameSchemaVersion: frame.frameSchemaVersion,
+      } : frame),
+    });
+    if (JSON.stringify(journalFacts(before)) !== JSON.stringify(journalFacts(after))) {
+      throw new Error("Local operator rejected baseline changed journal facts");
+    }
+  }
   if (report.action === "accept-recovery-baseline" && report.outcome === "accepted" &&
       (before.health.recovery !== "blocked" || before.health.effectiveGate !== "recovery_blocked" ||
        before.journal.availability !== "available" ||
-       !before.journal.frames.some(frame => frame.state === "valid" && frame.phase === "FAILED") ||
+       !before.journal.frames.some(frame => frame.state === "valid" && frame.phase === "FAILED" &&
+         before.journal.frames.every(other => other.state !== "valid" || other === frame || other.sequence < frame.sequence)) ||
        after.health.recovery !== "none" || after.health.write.state !== "paused" ||
        after.health.effectiveGate !== "writes_paused" || after.journal.availability !== "available" ||
        after.journal.frames.some(frame => frame.state !== "empty"))) {
