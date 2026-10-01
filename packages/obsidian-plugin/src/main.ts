@@ -934,6 +934,15 @@ export default class VaultOperationBridgePlugin extends Plugin {
           .createStandardDiagnosticBundle()
           .then(async (bundle) => {
             await navigator.clipboard.writeText(JSON.stringify(bundle));
+            const settings = runtime.persistedSettings;
+            const bridge = runtime.bridge;
+            if (this.#installedRuntimeAcceptance !== undefined && settings !== undefined && bridge !== undefined) {
+              await this.#installedRuntimeAcceptance.recordStandardDiagnosticCopy({
+                vaultId: settings.vaultId,
+                endpoint: new URL(`http://127.0.0.1:${bridge.port}/mcp`),
+                bundle,
+              });
+            }
           })
           .catch((error: unknown) => {
             new Notice(

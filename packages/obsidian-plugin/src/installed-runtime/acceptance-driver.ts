@@ -1,8 +1,11 @@
 import { watch, type FSWatcher } from "node:fs";
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { verifyStandardDiagnosticBundle } from "../diagnostic-bundle.js";
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile, realpath, link, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import { parseCrashRestorationCommand } from "./crash-restoration-protocol.js";
+import { readPersistedBridgeIdentity } from "./obsidian-process.js";
 import {
   installedRuntimeAcceptanceDescriptorSchema,
   isPathInside,
@@ -13,6 +16,11 @@ import {
 
 export interface InstalledRuntimeAcceptanceActivation {
   readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
+  recordStandardDiagnosticCopy(options: {
+    readonly vaultId: string;
+    readonly endpoint: URL;
+    readonly bundle: unknown;
+  }): Promise<void>;
   dispose(): void;
 }
 
@@ -171,6 +179,50 @@ export async function activateInstalledRuntimeAcceptanceDriver(
   }
   return {
     descriptor: loaded.descriptor,
+    async recordStandardDiagnosticCopy(request) {
+      if (!verifyStandardDiagnosticBundle(request.bundle)) {
+        throw new Error("Local acceptance requires a valid standard diagnostic bundle");
+      }
+      if (disposed) throw new Error("Installed acceptance activation is disposed");
+      const current = (await loadInstalledRuntimeAcceptanceDescriptor(options)).descriptor;
+      if (current.runId !== loaded.descriptor.runId || current.vaultPath !== loaded.descriptor.vaultPath ||
+          current.pluginId !== loaded.descriptor.pluginId || current.candidateBundleSha256 !== loaded.descriptor.candidateBundleSha256 ||
+          current.installedMainSha256 !== loaded.descriptor.installedMainSha256 ||
+          current.reportDirectory !== loaded.descriptor.reportDirectory || current.capabilityToken !== loaded.descriptor.capabilityToken) {
+        throw new Error("Installed acceptance descriptor identity changed");
+      }
+      const endpoint = request.endpoint;
+      if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" ||
+          endpoint.username !== "" || endpoint.password !== "" || request.vaultId.length === 0) {
+        throw new Error("Local diagnostic acceptance requires a Vault-bound loopback endpoint");
+      }
+      const identity = await readPersistedBridgeIdentity(options.vaultPath, options.pluginId, options.configDirectoryName);
+      if (identity === null || identity.vaultId !== request.vaultId ||
+          endpoint.toString() !== `http://127.0.0.1:${identity.port}/mcp`) {
+        throw new Error("Local diagnostic report does not match the running Vault identity");
+      }
+      await requireBoundReportRoot();
+      const reportPath = join(reportRealPath, "local-standard-diagnostic-copy.json");
+      const temporaryPath = `${reportPath}.${randomBytes(16).toString("hex")}.next`;
+      await writeFile(temporaryPath, `${JSON.stringify({
+        schemaVersion: 1,
+        runId: loaded.descriptor.runId,
+        candidateBundleSha256: loaded.descriptor.candidateBundleSha256,
+        installedMainSha256: loaded.descriptor.installedMainSha256,
+        capabilityToken: loaded.descriptor.capabilityToken,
+        vaultId: request.vaultId,
+        endpoint: endpoint.toString(),
+        action: "standard-diagnostic-copy",
+        checksumVerified: true,
+        bundle: request.bundle,
+      })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      try {
+        await requireBoundReportRoot();
+        await link(temporaryPath, reportPath);
+      } finally {
+        await rm(temporaryPath, { force: true });
+      }
+    },
     dispose() {
       disposed = true;
       watcher?.close();
