@@ -187,6 +187,12 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     });
   });
 
+  it("rejects a mismatched observed runtime even when the supplied mismatch list is empty", () => {
+    const mismatched = evidence();
+    mismatched.profile.observed = { ...mismatched.profile.observed!, obsidianVersion: "1.0.0" };
+    expect(() => createAcceptanceMatrixReport(mismatched)).toThrow(/matched profile/u);
+  });
+
   it("fails closed when a mapped scenario assertion is absent", () => {
     const missingScenarioEvidence = evidence();
     missingScenarioEvidence.publicWireCorpus = {

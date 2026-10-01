@@ -237,7 +237,14 @@ function canonicalReport(report: Omit<AcceptanceMatrixReport, "canonicalManifest
 
 export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence): AcceptanceMatrixReport {
   if (evidence.verdict !== "passed" || evidence.failure !== null) throw new AcceptanceMatrixError("Acceptance matrix requires a passing installed-runtime run");
-  if (evidence.profile.mismatches.length !== 0 || evidence.candidate === null || evidence.bridgeIdentity === null) {
+  if (evidence.profile.mismatches.length !== 0 || evidence.profile.observed === null ||
+      evidence.profile.observed.obsidianVersion !== evidence.profile.registered.versions.obsidian ||
+      evidence.profile.observed.electronVersion !== evidence.profile.registered.versions.electron ||
+      evidence.profile.observed.nodeVersion !== evidence.profile.registered.versions.node ||
+      evidence.profile.observed.platform !== evidence.profile.registered.os.platform ||
+      evidence.profile.observed.osBuild !== evidence.profile.registered.os.build ||
+      evidence.profile.registered.capabilities.some(capability => !evidence.profile.observed!.capabilities.includes(capability)) ||
+      evidence.candidate === null || evidence.bridgeIdentity === null) {
     throw new AcceptanceMatrixError("Acceptance matrix requires matched profile and runtime identity");
   }
   if (evidence.beforeInventory === null || evidence.afterInventory === null || evidence.cleanup === null) {
