@@ -298,6 +298,8 @@ export interface InstalledRuntimeHarnessOptions {
    * corpus outcome fails closed; required evidence cannot be omitted.
    */
   readonly runRegisteredReferenceRewriteCorpus?: (options: {
+    readonly profile?: RegisteredRuntimeProfile;
+    readonly probe?: RuntimeEnvironmentProbe;
     readonly runId: string;
     readonly workingDirectory: string;
     readonly candidate: VerifiedCandidateBundle;
@@ -1223,6 +1225,8 @@ export async function runInstalledRuntimeHarness(
           cleanupVault,
           record: recordRegisteredReferenceRewriteEvent,
           assertion: recordRegisteredReferenceRewriteAssertion,
+          profile: profile!,
+          probe: options.probe,
         });
       } catch (error) {
         fail(

@@ -10,6 +10,7 @@ import { parseDiscoverResult } from "@llm-wiki/vault-contracts";
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { installCandidateBundle } from "./candidate-bundle.js";
 import { HealthObservationError } from "./loopback-client.js";
+import { preflightRuntimeProfile } from "./runtime-profile.js";
 import type { InstalledRuntimeHarnessOptions } from "./harness.js";
 import {
   ObsidianProcessError,
@@ -159,6 +160,15 @@ async function startRuntime(
       profileDirectory: vault.profileDirectory,
     });
 
+    const observed = await options.probe!.probeRunning!({
+      vaultPath: vault.vaultPath, profileDirectory: vault.profileDirectory,
+    });
+    if (preflightRuntimeProfile(options.profile!, observed).length !== 0) {
+      throw new Error("Installed registered-reference runtime does not match the registered profile");
+    }
+    options.record("transport", "registered-reference-runtime-profile-observed", {
+      label, profile: options.profile!.name, observed,
+    });
     let observedIdentity: PersistedBridgeIdentity | null = null;
     await waitForCondition(
       async () => {
@@ -368,6 +378,9 @@ async function cleanupRuntimes(
  */
 export const runInstalledRegisteredReferenceRewriteCorpus: RegisteredReferenceRunner =
   async (options) => {
+    if (options.profile === undefined || options.probe?.probeRunning === undefined) {
+      throw new Error("Installed registered-reference acceptance requires a registered profile and running-runtime probe");
+    }
     const runtimes: LiveRegisteredReferenceRuntime[] = [];
     try {
       const fixtures = registeredReferenceRewriteFixtures();

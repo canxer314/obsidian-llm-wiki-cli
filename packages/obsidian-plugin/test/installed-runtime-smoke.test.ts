@@ -9,6 +9,21 @@ import { ObsidianProcessError } from "../src/installed-runtime/obsidian-process.
 import { assembleReleaseBundle } from "../src/release/assemble-release-bundle.js";
 import { verifyReleaseBundle } from "../src/release/verify-release-bundle.js";
 import { provisionTestVault, cleanupTestVault } from "../src/installed-runtime/test-vault.js";
+import { MVP_PERF_REF_LINUX_1 } from "../src/installed-runtime/runtime-profile.js";
+
+const referenceProfileFixture = {
+  profile: MVP_PERF_REF_LINUX_1,
+  probe: {
+    probe: async () => ({ platform: "linux", capabilities: [] }),
+    probeRunning: async () => ({
+      platform: "linux", osBuild: MVP_PERF_REF_LINUX_1.os.build,
+      obsidianVersion: MVP_PERF_REF_LINUX_1.versions.obsidian,
+      electronVersion: MVP_PERF_REF_LINUX_1.versions.electron,
+      nodeVersion: MVP_PERF_REF_LINUX_1.versions.node,
+      capabilities: MVP_PERF_REF_LINUX_1.capabilities,
+    }),
+  },
+};
 
 import {
   activateInstalledRuntimeAcceptanceDriver,
@@ -184,6 +199,7 @@ describe("installed-runtime authoritative command", () => {
 
     await expect(
       runners.runRegisteredReferenceRewriteCorpus({
+        ...referenceProfileFixture,
         runId: "run-123",
         workingDirectory: ".",
         candidate: {} as never,
@@ -199,6 +215,19 @@ describe("installed-runtime authoritative command", () => {
         assertion: () => undefined,
       }),
     ).rejects.toBe(provisionAttempt);
+  });
+
+  it("rejects a registered-reference runtime without its own registered profile probe", async () => {
+    const runners = createAuthoritativeInstalledRuntimeRunners();
+    let provisioned = false;
+    await expect(runners.runRegisteredReferenceRewriteCorpus({
+      runId: "missing-reference-probe", workingDirectory: "/tmp", candidate: {} as never,
+      processControl: {} as never, client: {} as never, configDirectoryName: ".obsidian",
+      timeouts: { startupMs: 1, stopMs: 1, portClosedMs: 1 },
+      provisionVault: async () => { provisioned = true; throw new Error("Unexpected provision"); },
+      cleanupVault: cleanupTestVault, record: () => undefined, assertion: () => undefined,
+    })).rejects.toThrow("registered profile and running-runtime probe");
+    expect(provisioned).toBe(false);
   });
 
   it("does not retry a registered-reference health observation from a foreign Vault", async () => {
@@ -219,6 +248,7 @@ describe("installed-runtime authoritative command", () => {
     let stopped = false;
     let cleaned = false;
     await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      ...referenceProfileFixture,
       runId: "foreign-health", workingDirectory: root, candidate, configDirectoryName: ".obsidian",
       timeouts: { startupMs: 30, stopMs: 30, portClosedMs: 30 },
       processControl: { start: async request => {
@@ -253,6 +283,7 @@ describe("installed-runtime authoritative command", () => {
     const shutdownError = new Error("process tree did not exit");
     let cleanupCalls = 0;
     await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      ...referenceProfileFixture,
       runId: "shutdown-proof",
       workingDirectory: root,
       candidate,
@@ -294,6 +325,7 @@ describe("installed-runtime authoritative command", () => {
     const shutdownError = new ObsidianProcessError("startup shutdown unconfirmed", "obsidian_stop_failed");
     let cleanupCalls = 0;
     await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      ...referenceProfileFixture,
       runId: "startup-shutdown-proof", workingDirectory: root, candidate,
       processControl: { start: async () => { throw shutdownError; } },
       client: {} as never, configDirectoryName: ".obsidian",
@@ -327,6 +359,7 @@ describe("installed-runtime authoritative command", () => {
     const candidate = await verifyReleaseBundle({ bundleDirectory, expectedTag: "v0.2.0" });
     let cleanupCalls = 0;
     await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      ...referenceProfileFixture,
       runId: "listener-proof", workingDirectory: root, candidate,
       processControl: {
         start: async ({ vaultPath }) => {
