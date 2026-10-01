@@ -72,6 +72,96 @@ export class GateIsolationCorpusError extends Error {
   }
 }
 
+/** Small installed-runner result: proves only the two real registries are isolated. */
+export interface InstalledGateIsolationResult {
+  readonly scope: "two-vault-registry-isolation";
+  readonly vaultIdsSha256: Readonly<{ "vault-a": string; "vault-b": string }>;
+  readonly sharedKeyChangeSetIds: Readonly<{ "vault-a": string; "vault-b": string }>;
+  readonly crossVaultLookupsAbsent: true;
+  readonly assertions: readonly string[];
+}
+
+/**
+ * Execute the independently runnable two-Vault public-wire slice. This is not
+ * the complete gate corpus: it deliberately makes no health, recovery, queue,
+ * pause, maintenance, or FIFO claims.
+ */
+export async function runInstalledGateIsolationSlice(options: {
+  readonly vaultA: GateIsolationVaultSession;
+  readonly vaultB: GateIsolationVaultSession;
+}): Promise<InstalledGateIsolationResult> {
+  const { vaultA, vaultB } = options;
+  if (vaultA.label !== "vault-a" || vaultB.label !== "vault-b") {
+    throw new GateIsolationCorpusError("Installed gate slice requires distinct A and B sessions");
+  }
+  if (vaultA.vaultIdSha256 === vaultB.vaultIdSha256) {
+    throw new GateIsolationCorpusError("Installed Vault sessions have the same identity digest");
+  }
+  const key = "installed-gate-shared-key";
+  const input = submitInput(
+    key,
+    "installed-gate-shared-key-create",
+    `${GATE_ISOLATION_DIRECTORY}/Shared/Shared.md`,
+    "# Installed shared key proof\\n",
+  );
+  const [a, b] = await Promise.all([
+    callSubmit(vaultA, "installed-isolation/shared-key-a", input, false),
+    callSubmit(vaultB, "installed-isolation/shared-key-b", input, false),
+  ]);
+  if (a.outcome !== "registered" || b.outcome !== "registered") {
+    throw new GateIsolationCorpusError("Installed Vault shared-key submissions did not register");
+  }
+  if (a.changeSet.changeSetId === b.changeSet.changeSetId) {
+    throw new GateIsolationCorpusError("Installed Vault registries returned a shared Change Set identity");
+  }
+  const aOnlyKey = "installed-gate-vault-a-only";
+  const bOnlyKey = "installed-gate-vault-b-only";
+  const [aOnly, bOnly] = await Promise.all([
+    callSubmit(
+      vaultA,
+      "installed-isolation/bind-a-only-key",
+      submitInput(aOnlyKey, "installed-a-only-create", `${GATE_ISOLATION_DIRECTORY}/A/Only.md`, "# A only\\n"),
+      false,
+    ),
+    callSubmit(
+      vaultB,
+      "installed-isolation/bind-b-only-key",
+      submitInput(bOnlyKey, "installed-b-only-create", `${GATE_ISOLATION_DIRECTORY}/B/Only.md`, "# B only\\n"),
+      false,
+    ),
+  ]);
+  if (aOnly.outcome !== "registered" || bOnly.outcome !== "registered") {
+    throw new GateIsolationCorpusError("Installed Vault owner-only keys did not bind");
+  }
+  const [aOnA, aOnB, bOnA, bOnB, sharedOnA, sharedOnB] = await Promise.all([
+    callStatus(vaultA, "installed-isolation/a-key-status-on-a", aOnlyKey),
+    callStatus(vaultB, "installed-isolation/a-key-status-on-b", aOnlyKey),
+    callStatus(vaultA, "installed-isolation/b-key-status-on-a", bOnlyKey),
+    callStatus(vaultB, "installed-isolation/b-key-status-on-b", bOnlyKey),
+    callStatus(vaultA, "installed-isolation/shared-key-status-on-a", key),
+    callStatus(vaultB, "installed-isolation/shared-key-status-on-b", key),
+  ]);
+  if (
+    aOnA.lookup !== "found" || aOnA.changeSet?.changeSetId !== aOnly.changeSet.changeSetId ||
+    bOnB.lookup !== "found" || bOnB.changeSet?.changeSetId !== bOnly.changeSet.changeSetId ||
+    sharedOnA.lookup !== "found" || sharedOnA.changeSet?.changeSetId !== a.changeSet.changeSetId ||
+    sharedOnB.lookup !== "found" || sharedOnB.changeSet?.changeSetId !== b.changeSet.changeSetId ||
+    aOnB.lookup !== "unknown" || bOnA.lookup !== "unknown"
+  ) {
+    throw new GateIsolationCorpusError("Installed owner bindings or foreign-key lookups did not prove registry isolation");
+  }
+  return {
+    scope: "two-vault-registry-isolation",
+    vaultIdsSha256: { "vault-a": vaultA.vaultIdSha256, "vault-b": vaultB.vaultIdSha256 },
+    sharedKeyChangeSetIds: {
+      "vault-a": a.changeSet.changeSetId,
+      "vault-b": b.changeSet.changeSetId,
+    },
+    crossVaultLookupsAbsent: true,
+    assertions: ["distinct-change-set-identities", "cross-vault-key-lookup-absent"],
+  };
+}
+
 export type WireToolName =
   | "vault_health"
   | "vault_discover"

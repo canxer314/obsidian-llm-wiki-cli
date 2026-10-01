@@ -390,6 +390,8 @@ export {
   GateIsolationCorpusError,
   composeGateIsolationCorpusEvidence,
   runGateIsolationCorpus,
+  runInstalledGateIsolationSlice,
+  type InstalledGateIsolationResult,
   type ArrangedVaultHealth,
   type GateIsolationCorpusInventoryEntry,
   type GateIsolationOperatorControl,
@@ -400,6 +402,10 @@ export {
   type WireClient,
   type WireToolName,
 } from "./installed-runtime/gate-isolation-corpus.js";
+export {
+  runInstalledGateIsolationCorpus,
+  type InstalledGateIsolationRun,
+} from "./installed-runtime/gate-installed-runner.js";
 export {
   REFERENCE_REWRITE_CORPUS_DIRECTORY,
   REGISTERED_REFERENCE_REWRITE_CORPUS_ID,

@@ -16,6 +16,7 @@ import {
   GATE_ISOLATION_SCENARIO_PLAN,
   provisionTestVault,
   runGateIsolationCorpus,
+  runInstalledGateIsolationSlice,
   SearchSnapshotManager,
   VaultDiscoverService,
   type ArrangedVaultHealth,
@@ -386,6 +387,32 @@ function scenarioManifestSha256(): string {
 }
 
 describe("per-Vault gate-and-isolation corpus over two real loopback Bridges", () => {
+  it("runs the installed public-wire registry isolation slice without claiming gate coverage", async () => {
+    const hostA = await createVaultHost("installed-vault-a");
+    const hostB = await createVaultHost("installed-vault-b");
+    const a = await sessionFor(hostA, "vault-a");
+    const b = await sessionFor(hostB, "vault-b");
+
+    try {
+      const result = await runInstalledGateIsolationSlice({
+        vaultA: a.session,
+        vaultB: b.session,
+      });
+      expect(result.scope).toBe("two-vault-registry-isolation");
+      expect(result.vaultIdsSha256["vault-a"]).not.toBe(result.vaultIdsSha256["vault-b"]);
+      expect(result.vaultIdsSha256["vault-a"]).not.toBe(result.vaultIdsSha256["vault-b"]);
+      expect(result.sharedKeyChangeSetIds["vault-a"]).not.toBe(result.sharedKeyChangeSetIds["vault-b"]);
+      expect(result.crossVaultLookupsAbsent).toBe(true);
+      expect(result.assertions).toEqual([
+        "distinct-change-set-identities",
+        "cross-vault-key-lookup-absent",
+      ]);
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
   it(
     "proves independent Vaults, gate precedence, recovery_blocked dispositions, manual pause, and incompatible isolation",
     async () => {

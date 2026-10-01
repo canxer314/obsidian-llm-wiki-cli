@@ -74,6 +74,7 @@ import {
   GateIsolationCorpusError,
   type GateIsolationOutcome,
 } from "./gate-isolation-corpus.js";
+import type { InstalledGateIsolationRun } from "./gate-installed-runner.js";
 import {
   composeRegisteredReferenceRewriteCorpusEvidence,
   RegisteredReferenceRewriteCorpusError,
@@ -281,11 +282,14 @@ export interface InstalledRuntimeHarnessOptions {
     readonly client: LoopbackMcpClient;
     readonly configDirectoryName: string;
     readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly profileName: string;
+    readonly profile: RegisteredRuntimeProfile;
+    readonly probe: RuntimeEnvironmentProbe;
     readonly provisionVault: typeof provisionTestVault;
     readonly cleanupVault: typeof cleanupTestVault;
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
-  }) => Promise<GateIsolationOutcome>;
+  }) => Promise<GateIsolationOutcome | InstalledGateIsolationRun>;
   /**
    * Registered-reference rewrite corpus seam (issue #178): a self-contained
    * move-rewrite scenario that proves destination-only registered-reference
@@ -1136,35 +1140,49 @@ export async function runInstalledRuntimeHarness(
   if (state.failure === null) {
     const runner = options.runGateIsolationCorpus;
     if (runner === undefined) {
-      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate-isolation corpus runner is required for authoritative acceptance");
-    }
-    const vault = state.vault;
-    const candidate = state.candidate;
-    if (state.failure === null && (vault === null || candidate === null)) {
-    }
-    if (state.failure === null && runner !== undefined && vault !== null && candidate !== null) {
-      try {
-        state.gateIsolation = await runner!({
-          runId,
-          workingDirectory: options.workingDirectory,
-          candidate,
-          processControl: options.processControl,
-          client,
-          configDirectoryName,
-          timeouts,
-          provisionVault: provisionTestVault,
-          cleanupVault,
-          record: recordGateIsolationEvent,
-          assertion: recordGateIsolationAssertion,
-        });
-      } catch (error) {
-        fail(
-          "gate_isolation_corpus",
-          "gate_isolation_corpus_failed",
-          sanitize(error instanceof Error ? error.message : String(error)),
-        );
-      }
-    }
+      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate-isolation corpus runner is required");
+    } else if (profile === null) {
+      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Registered profile is required for gate isolation");
+    } else {
+          const vault = state.vault;
+          const candidate = state.candidate;
+          if (vault === null || candidate === null) {
+            fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate isolation requires a provisioned candidate");
+          } else {
+            try {
+              const slice = await runner({
+                runId,
+                profileName: options.profileName,
+                workingDirectory: options.workingDirectory,
+                candidate,
+                processControl: options.processControl,
+                client,
+                configDirectoryName,
+                timeouts,
+                profile,
+                probe: options.probe,
+                provisionVault: provisionTestVault,
+                cleanupVault,
+                record: recordGateIsolationEvent,
+                assertion: recordGateIsolationAssertion,
+              });
+              if ("scope" in slice) {
+                recordGateIsolationEvent("assertion", "installed_gate_isolation_partial_evidence", {
+                  scope: slice.scope,
+                  verdict: slice.verdict,
+                  candidateBundleSha256: slice.candidateBundleSha256,
+                  profileName: slice.profileName,
+                  provenance: slice.provenance,
+                });
+                fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Installed registry-isolation slice is partial evidence, not the full gate corpus");
+              } else {
+                state.gateIsolation = slice;
+              }
+            } catch (error) {
+              fail("gate_isolation_corpus", "gate_isolation_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
+            }
+          }
+        }
   }
   // The registered-reference rewrite corpus (issue #178) runs between the
   // initial window and the controlled restart, alongside the gate-isolation

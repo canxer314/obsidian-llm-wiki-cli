@@ -9,13 +9,17 @@ import {
   createBridgeInstance,
   createLoopbackMcpClient,
   HealthObservationError,
+  createFileSystemChangeSetExecutionAdapter,
+  createNodeFileSystemChangeSetHost,
   ManagedVaultBridgeRuntime,
   ObsidianProcessError,
   parseEvidence,
   provisionTestVault,
+  cleanupTestVault,
   RELEASE_REPOSITORY,
   RELEASE_WORKFLOW_PATH,
   runInstalledRuntimeHarness,
+  runInstalledGateIsolationCorpus,
   TEST_VAULT_DIRECTORY_PREFIX,
   type BridgeHealthState,
   type CrashRestorationRetainedAuthorityCorpusOutcome,
@@ -740,6 +744,109 @@ function stubGateIsolationOutcome(): GateIsolationOutcome {
 }
 
 describe("installed-runtime harness orchestration", () => {
+  it("cleans a stopped gate runtime when its running profile is rejected", async () => {
+    const { root, candidate } = await arrangeRun("gate-profile-cleanup");
+    const { verifyReleaseBundle } = await import("../src/release/verify-release-bundle.js");
+    const verified = await verifyReleaseBundle({ bundleDirectory: candidate,
+      expectedTag: CANDIDATE_TAG, expectedPluginId: "candidate-bridge" });
+    let stopped = false;
+    let cleanupCalls = 0;
+    const result = await runInstalledGateIsolationCorpus({
+      runId: "gate-profile-cleanup", workingDirectory: root, candidate: verified,
+      processControl: { start: async () => ({ pid: 50001, stop: async () => { stopped = true; } }) },
+      client: createLoopbackMcpClient(), configDirectoryName: ".obsidian",
+      timeouts: { startupMs: 10, stopMs: 10, portClosedMs: 10 },
+      profileName: INNER_PROFILE.name, profile: INNER_PROFILE,
+      probe: { ...probe(), probeRunning: async () => ({ ...MATCHING_OBSERVED, nodeVersion: "0.0.0" }) },
+      provisionVault: provisionTestVault,
+      cleanupVault: async vault => { expect(stopped).toBe(true); cleanupCalls += 1; return cleanupTestVault(vault); },
+      record: () => undefined, assertion: () => undefined,
+    });
+    expect(result.verdict).toBe("failed");
+    expect(cleanupCalls).toBe(1);
+  });
+
+  it("runs installed gate isolation on two generated Vaults and cleans both after process stop", async () => {
+    const { root, candidate } = await arrangeRun("run-gate-isolation-installed");
+    const verified = await import("../src/release/verify-release-bundle.js").then(({ verifyReleaseBundle }) =>
+      verifyReleaseBundle({
+        bundleDirectory: candidate,
+        expectedTag: CANDIDATE_TAG,
+        expectedPluginId: "candidate-bridge",
+      }),
+    );
+    const starts: string[] = [];
+    const processControl: ObsidianProcessControl = {
+      async start({ vaultPath }) {
+        starts.push(vaultPath);
+        const dataPath = join(vaultPath, ".obsidian", "plugins", "candidate-bridge", "data.json");
+        let stored: PersistedBridgeSettings | undefined;
+        const stateDirectory = join(vaultPath, ".llm-wiki");
+        const execution = await createFileSystemChangeSetExecutionAdapter({
+          journalPath: join(stateDirectory, "recovery-journal.bin"),
+          slotCapacity: 16 * 1024,
+          host: await createNodeFileSystemChangeSetHost({
+            basePath: vaultPath,
+            stateDirectory,
+            referenced: async () => false,
+            awaitSemanticEvidence: async () => undefined,
+            publishSearchSnapshot: async () => undefined,
+          }),
+        });
+        const runtime = new ManagedVaultBridgeRuntime({
+          vault: { name: basename(vaultPath), path: vaultPath },
+          settings: {
+            load: async () => stored,
+            save: async (settings) => {
+              stored = settings;
+              await mkdir(join(dataPath, ".."), { recursive: true });
+              await writeFile(dataPath, JSON.stringify(settings), "utf8");
+            },
+          },
+          searchDataSource: {
+            listMarkdownPaths: async () => [],
+            readBinary: async () => null,
+          },
+          changeSetDataSource: {
+            readBinary: execution.readBinary!,
+            pathKind: execution.pathKind,
+            isContained: async () => true,
+          },
+          changeSetExecution: execution,
+          createBridge: (options) => createBridgeInstance(options),
+        });
+        liveRuntimes.push(runtime);
+        await runtime.load();
+        return { pid: 50_000 + starts.length, stop: async () => runtime.unload() };
+      },
+    };
+    const result = await runInstalledGateIsolationCorpus({
+      runId: "run-gate-isolation-installed",
+      workingDirectory: root,
+      candidate: verified,
+      processControl,
+      client: createLoopbackMcpClient(),
+      configDirectoryName: ".obsidian",
+      timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 2_000 },
+      profileName: INNER_PROFILE.name,
+      profile: INNER_PROFILE,
+      probe: { ...probe(), probeRunning: async () => MATCHING_OBSERVED },
+      provisionVault: provisionTestVault,
+      cleanupVault: cleanupTestVault,
+      record: () => undefined,
+      assertion: () => undefined,
+    });
+    expect(result.verdict, result.failure).toBe("partial");
+    expect(result.failure).toBeNull();
+    expect(result.result?.scope).toBe("two-vault-registry-isolation");
+    expect(result.result?.crossVaultLookupsAbsent).toBe(true);
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts).size).toBe(2);
+    expect(result.cleanup["vault-a"]?.residualPaths).toEqual([]);
+    expect(result.cleanup["vault-b"]?.residualPaths).toEqual([]);
+    for (const path of starts) await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 30_000);
+
   it("checks running versions before executing any acceptance corpus", async () => {
     let corpusCalls = 0;
     const { options } = await arrangeRun("run-live-version-mismatch", {
@@ -1298,6 +1405,27 @@ describe("installed-runtime harness failure projection", () => {
     expect(result.verdict).toBe("invalid");
     expect(result.failure).toMatchObject({ stage: "inventory_before", code: "inventory_failed" });
   });
+
+  it("does not promote a partial installed slice into full gate evidence", async () => {
+    const { options } = await arrangeRun("run-gate-partial-not-full", {
+      runGateIsolationCorpus: async () => ({
+        scope: "two-vault-registry-isolation",
+        result: null,
+        verdict: "partial",
+        cleanup: { "vault-a": null, "vault-b": null },
+        failure: null,
+        candidateBundleSha256: "a".repeat(64),
+        profileName: INNER_PROFILE.name,
+        runtimeMismatches: [],
+        provenance: { vaults: [] },
+      }),
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({ stage: "gate_isolation_corpus", code: "gate_isolation_corpus_failed" });
+    expect(result.evidence.gateIsolationCorpus).toBeNull();
+  });
+
 
   it("records failed evidence when the gate-isolation corpus fails", async () => {
     const { root, options } = await arrangeRun("run-gate-isolation-fails", {
