@@ -134,6 +134,7 @@ export function projectObservedHealth(
   state: BridgeHealthState,
   port: number,
   searchSnapshotReadiness?: () => "ready" | "building" | "unavailable",
+  mutationExecutorReady?: boolean,
 ): HealthResult {
   const effectiveGate = projectEffectiveGate(state);
   const snapshotReadiness = searchSnapshotReadiness?.() ?? state.readiness.searchSnapshot;
@@ -153,6 +154,17 @@ export function projectObservedHealth(
     !stableReasonCodes.includes(state.effectiveGate.code)
   ) {
     stableReasonCodes.push(state.effectiveGate.code);
+  }
+  const recoveredStartupSnapshot =
+    dynamicSnapshotState && snapshotReadiness === "ready" &&
+    state.readiness.searchSnapshot !== "ready" &&
+    state.overall === "degraded" && state.operatorAction === "finish_initialization" &&
+    state.reasonCodes.some(code => initialSnapshotReasonCodes.has(code)) &&
+    stableReasonCodes.length === 0 && effectiveGate === null &&
+    state.recovery.state === "none" && state.write.gate === "open" &&
+    state.write.state === "writable" && state.write.pauseSource === null;
+  if (recoveredStartupSnapshot && mutationExecutorReady === false) {
+    stableReasonCodes.push("mutation_executor_not_ready");
   }
   const reasonCode =
     snapshotReadiness === "building"
@@ -183,12 +195,16 @@ export function projectObservedHealth(
     lifecycle: state.lifecycle,
     effectiveGate,
     overall:
-      snapshotNotReady && state.overall === "healthy" ? "degraded" : state.overall,
+      recoveredStartupSnapshot && mutationExecutorReady === true
+        ? "healthy"
+        : snapshotNotReady && state.overall === "healthy" ? "degraded" : state.overall,
     reasonCodes: snapshotNotReady
       ? [...new Set([...stableReasonCodes, reasonCode])]
       : stableReasonCodes,
     operatorAction:
-      snapshotNotReady &&
+      recoveredStartupSnapshot && mutationExecutorReady !== undefined
+        ? mutationExecutorReady ? "none" : "wait_for_readiness"
+        : snapshotNotReady &&
       (state.operatorAction === "none" ||
         state.operatorAction === "finish_initialization")
         ? "wait_for_readiness"
@@ -380,7 +396,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         z.object({}).strict().parse(request.params.arguments ?? {});
         const health =
           sessionState.incompatibleHealth ??
-          projectObservedHealth(options.health, port, options.searchSnapshotReadiness);
+          projectObservedHealth(options.health, port, options.searchSnapshotReadiness, options.changeSets?.execution !== undefined);
         return {
           content: [{ type: "text" as const, text: serializeCompatibilityText(health) }],
           structuredContent: health,

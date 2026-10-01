@@ -1298,6 +1298,64 @@ describe("Managed Vault Bridge plugin lifecycle", () => {
     await runtime.unload();
   });
 
+  it.each([true, false])("projects recovered startup snapshots over public MCP without inventing executor readiness: %s", async (executorReady) => {
+    let readable = false;
+    const execution = {
+      loadRecoveryFrame: async () => null,
+      persistRecoveryFrame: async () => undefined,
+      pathKind: async () => null,
+      directoryIdentity: async () => null,
+      prepareDirectory: async () => "directory",
+      publishDirectory: async () => undefined,
+      discardPreparedDirectory: async () => undefined,
+      removeDirectory: async () => undefined,
+      publishSearchSnapshot: async () => undefined,
+    };
+    const runtime = new ManagedVaultBridgeRuntime({
+      vault: { name: "Alpha", path: "D:/Vaults/Alpha" },
+      settings: { load: async () => undefined, save: async () => undefined },
+      searchDataSource: {
+        listMarkdownPaths: async () => ["note.md"],
+        readBinary: async () => readable ? new TextEncoder().encode("ready") : null,
+      },
+      changeSetDataSource: {
+        readBinary: async () => null,
+        pathKind: async () => null,
+        isContained: async () => true,
+      },
+      ...(executorReady ? { changeSetExecution: execution } : {}),
+      createBridge: createBridgeInstance,
+      createVaultId: () => "vault-a",
+      selectInitialPort: () => 0,
+    });
+    const client = new Client({ name: "startup-health", version: "1.0.0" });
+    try {
+      await runtime.load();
+      await client.connect(new StreamableHTTPClientTransport(runtime.bridge!.endpoint, {
+        requestInit: { headers: { "X-Expected-Vault-ID": "vault-a" } },
+      }));
+      expect((await client.callTool({ name: "vault_health", arguments: {} })).structuredContent)
+        .toMatchObject({ readiness: { searchSnapshot: "unavailable", cache: "unavailable" }, overall: "degraded" });
+      readable = true;
+      await runtime.refreshSearchSnapshot();
+      expect((await client.callTool({ name: "vault_health", arguments: {} })).structuredContent)
+        .toMatchObject({
+          readiness: { searchSnapshot: "ready", index: "ready", cache: "unavailable" },
+          overall: executorReady ? "healthy" : "degraded",
+          operatorAction: executorReady ? "none" : "wait_for_readiness",
+          reasonCodes: executorReady ? [] : ["mutation_executor_not_ready"],
+        });
+      if (executorReady) {
+        await runtime.pauseWrites();
+        expect((await client.callTool({ name: "vault_health", arguments: {} })).structuredContent)
+          .toMatchObject({ overall: "degraded", effectiveGate: { code: "writes_paused" }, operatorAction: "resume_writes" });
+      }
+    } finally {
+      await client.close().catch(() => undefined);
+      await runtime.unload();
+    }
+  });
+
   it("starts health reporting when the initial Search Snapshot build fails closed", async () => {
     const bridge = fakeBridge(27123);
     let captured: Parameters<ManagedVaultBridgeRuntimeOptions["createBridge"]>[0] | undefined;
