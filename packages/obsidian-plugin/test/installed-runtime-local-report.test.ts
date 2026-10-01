@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
-import { loadInstalledLocalOperatorReport } from "../src/installed-runtime/local-operator-report.js";
+import { loadInstalledLocalOperatorReport, waitForInstalledLocalOperatorReport } from "../src/installed-runtime/local-operator-report.js";
 
 it("rejects a local report whose claimed checksum verification covers an invalid diagnostic bundle", async () => {
   const root = await mkdtemp(join(tmpdir(), "local-operator-report-"));
@@ -28,6 +28,10 @@ it("rejects a local report whose claimed checksum verification covers an invalid
     await expect(loadInstalledLocalOperatorReport({
       descriptor, vaultId: "report-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "standard-diagnostic-copy",
+    })).rejects.toThrow("diagnostic checksum");
+    await expect(waitForInstalledLocalOperatorReport({
+      descriptor, vaultId: "report-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "standard-diagnostic-copy", timeoutMs: 100,
     })).rejects.toThrow("diagnostic checksum");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -62,5 +66,25 @@ it("rejects content diagnostic reports outside the exact private loopback MCP en
         action: "content-inclusive-diagnostic-copy", confirmationId, expectedSelectionSha256: "b".repeat(64),
       })).rejects.toThrow("loopback endpoint");
     }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("times out waiting for a real local operator report instead of dispatching the operator action", async () => {
+  const root = await mkdtemp(join(tmpdir(), "local-operator-wait-"));
+  try {
+    const vaultPath = join(root, "installed-runtime-vault-wait");
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "report-plugin");
+    const reportDirectory = join(root, "reports");
+    await mkdir(pluginDirectory, { recursive: true });
+    await mkdir(reportDirectory);
+    await writeFile(join(pluginDirectory, "main.js"), "candidate");
+    const { descriptor } = await createInstalledRuntimeAcceptanceDescriptor({
+      runId: "wait", vaultPath, pluginId: "report-plugin", reportDirectory,
+      candidateBundleSha256: "a".repeat(64),
+    });
+    await expect(waitForInstalledLocalOperatorReport({
+      descriptor, vaultId: "report-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "human-only", timeoutMs: 20,
+    })).rejects.toThrow("Local Primary Operator report is required");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

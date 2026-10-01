@@ -165,3 +165,24 @@ export async function loadInstalledLocalOperatorReport(options: {
   }
   return { ...report, before, after };
 }
+
+/** Observes the separate local channel; it never invokes a Primary Operator action. */
+export async function waitForInstalledLocalOperatorReport(
+  options: Parameters<typeof loadInstalledLocalOperatorReport>[0] & { readonly timeoutMs: number },
+): Promise<Awaited<ReturnType<typeof loadInstalledLocalOperatorReport>>> {
+  if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
+    throw new Error("Local Primary Operator report timeout must be a positive integer");
+  }
+  const deadline = Date.now() + options.timeoutMs;
+  while (true) {
+    try {
+      return await loadInstalledLocalOperatorReport(options);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`Local Primary Operator report is required for ${options.action}`, { cause: error });
+      }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, Math.min(25, deadline - Date.now())));
+    }
+  }
+}
