@@ -73,6 +73,17 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     expect(JSON.parse(copied)).toMatchObject({ outcome: "copied", generated: true, copied: true,
       checksumVerified: true, bundleChecksum: selectedBundle.checksum.canonicalPayload });
     expect(copied).not.toContain("private selected text");
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "local-baseline-rejected", action: "accept-recovery-baseline", outcome: "rejected",
+      before: bundle, after: bundle,
+    });
+    const control = JSON.parse(await readFile(join(reports, `local-write-control-${createHash("sha256").update("local-baseline-rejected").digest("hex")}.json`), "utf8"));
+    expect(control).toMatchObject({
+      action: "accept-recovery-baseline", outcome: "rejected", invocationId: "local-baseline-rejected",
+      before: { health: { recovery: "none" }, journal: { availability: "unavailable" } },
+      after: { health: { recovery: "none" }, journal: { availability: "unavailable" } },
+    });
     const replacement = join(root, "replacement-reports");
     await mkdir(replacement);
     await rename(reports, `${reports}-original`);

@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from "node:fs";
-import { verifyStandardDiagnosticBundle } from "../diagnostic-bundle.js";
+import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
 import { verifyContentInclusiveDiagnosticBundle, type ContentInclusiveDiagnosticBundle } from "../content-inclusive-diagnostic-bundle.js";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, realpath, link, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -31,6 +31,15 @@ export interface InstalledRuntimeAcceptanceActivation {
     readonly outcome: "copied";
     readonly bundle: ContentInclusiveDiagnosticBundle;
   })): Promise<void>;
+  recordLocalWriteControl(options: {
+    readonly vaultId: string;
+    readonly endpoint: URL;
+    readonly invocationId: string;
+    readonly action: "pause-writes" | "accept-recovery-baseline" | "resume-writes";
+    readonly outcome: "accepted" | "rejected";
+    readonly before: StandardDiagnosticBundle;
+    readonly after: StandardDiagnosticBundle;
+  }): Promise<void>;
   dispose(): void;
 }
 
@@ -269,6 +278,43 @@ export async function activateInstalledRuntimeAcceptanceDriver(
           bundleVersion: request.bundle.bundleVersion, versions: request.bundle.trace.versions,
         } : {}),
         selectionSha256: createHash("sha256").update(request.selection).digest("hex"),
+      })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      try {
+        await requireBoundReportRoot();
+        await link(temporaryPath, reportPath);
+      } finally {
+        await rm(temporaryPath, { force: true });
+      }
+    },
+    async recordLocalWriteControl(request) {
+      if (!verifyStandardDiagnosticBundle(request.before) || !verifyStandardDiagnosticBundle(request.after)) {
+        throw new Error("Local write control requires verified before/after diagnostics");
+      }
+      if (disposed) throw new Error("Installed acceptance activation is disposed");
+      const current = (await loadInstalledRuntimeAcceptanceDescriptor(options)).descriptor;
+      if (current.runId !== loaded.descriptor.runId || current.vaultPath !== loaded.descriptor.vaultPath ||
+          current.pluginId !== loaded.descriptor.pluginId || current.candidateBundleSha256 !== loaded.descriptor.candidateBundleSha256 ||
+          current.installedMainSha256 !== loaded.descriptor.installedMainSha256 ||
+          current.reportDirectory !== loaded.descriptor.reportDirectory || current.capabilityToken !== loaded.descriptor.capabilityToken) {
+        throw new Error("Installed acceptance descriptor identity changed");
+      }
+      const identity = await readPersistedBridgeIdentity(options.vaultPath, options.pluginId, options.configDirectoryName);
+      if (identity === null || identity.vaultId !== request.vaultId ||
+          request.endpoint.toString() !== `http://127.0.0.1:${identity.port}/mcp` || request.invocationId.length === 0) {
+        throw new Error("Local write control report does not match the running Vault identity");
+      }
+      await requireBoundReportRoot();
+      const invocationDigest = createHash("sha256").update(request.invocationId).digest("hex");
+      const reportPath = join(reportRealPath, `local-write-control-${invocationDigest}.json`);
+      const temporaryPath = `${reportPath}.${randomBytes(16).toString("hex")}.next`;
+      await writeFile(temporaryPath, `${JSON.stringify({
+        schemaVersion: 1, runId: loaded.descriptor.runId,
+        candidateBundleSha256: loaded.descriptor.candidateBundleSha256,
+        installedMainSha256: loaded.descriptor.installedMainSha256,
+        capabilityToken: loaded.descriptor.capabilityToken,
+        vaultId: request.vaultId, endpoint: request.endpoint.toString(),
+        invocationId: request.invocationId, action: request.action, outcome: request.outcome,
+        before: request.before, after: request.after,
       })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
       try {
         await requireBoundReportRoot();

@@ -880,20 +880,47 @@ export default class VaultOperationBridgePlugin extends Plugin {
     };
     addPathClassificationCommand("move", "move");
     addPathClassificationCommand("copy", "copy");
+    const observeLocalWriteControl = async (
+      action: "pause-writes" | "accept-recovery-baseline" | "resume-writes",
+      operation: () => Promise<void>,
+    ): Promise<void> => {
+      const acceptance = this.#installedRuntimeAcceptance;
+      if (acceptance === undefined) return operation();
+      const settings = runtime.persistedSettings;
+      const bridge = runtime.bridge;
+      if (settings === undefined || bridge === undefined) return operation();
+      const invocationId = randomUUID();
+      const before = await runtime.createStandardDiagnosticBundle();
+      let outcome: "accepted" | "rejected" = "accepted";
+      let rejected = false;
+      let failure: unknown;
+      try {
+        await operation();
+      } catch (error) {
+        outcome = "rejected";
+        rejected = true;
+        failure = error;
+      }
+      const after = await runtime.createStandardDiagnosticBundle();
+      await acceptance.recordLocalWriteControl({
+        vaultId: settings.vaultId, endpoint: bridge.endpoint, invocationId, action, outcome, before, after,
+      });
+      if (rejected) throw failure;
+    };
     this.addCommand({
       id: "pause-managed-vault-writes",
       name: "Pause Managed Vault writes",
-      callback: () => runtime.pauseWrites(),
+      callback: () => observeLocalWriteControl("pause-writes", () => runtime.pauseWrites()),
     });
     this.addCommand({
       id: "accept-trusted-managed-vault-recovery-baseline",
       name: "Accept trusted Managed Vault recovery baseline",
-      callback: () => runtime.acceptTrustedRecoveryBaseline(),
+      callback: () => observeLocalWriteControl("accept-recovery-baseline", () => runtime.acceptTrustedRecoveryBaseline()),
     });
     this.addCommand({
       id: "resume-managed-vault-writes",
       name: "Resume Managed Vault writes",
-      callback: () => runtime.resumeWrites(),
+      callback: () => observeLocalWriteControl("resume-writes", () => runtime.resumeWrites()),
     });
     const pluginDirectory =
       this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
