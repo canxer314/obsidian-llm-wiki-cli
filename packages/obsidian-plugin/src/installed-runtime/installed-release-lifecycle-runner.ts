@@ -18,8 +18,10 @@ export interface InstalledReleaseLifecycleSliceOptions extends Omit<LifecycleSce
 /** A rejected launch has not transferred its handle to the scenario yet. */
 async function stopRejectedRuntime(options: InstalledReleaseLifecycleSliceOptions, request: ObsidianLaunchRequest, handle: ObsidianProcessHandle): Promise<void> {
   try {
-    const identity = await readPersistedBridgeIdentity(request.vaultPath, options.candidate.identity.pluginId, options.configDirectoryName ?? ".obsidian");
+    let identity = await readPersistedBridgeIdentity(request.vaultPath, options.candidate.identity.pluginId, options.configDirectoryName ?? ".obsidian");
     await handle.stop();
+    // Startup may persist identity while stop waits for the process to exit.
+    identity ??= await readPersistedBridgeIdentity(request.vaultPath, options.candidate.identity.pluginId, options.configDirectoryName ?? ".obsidian");
     if (identity === null) return;
     const deadline = Date.now() + (options.timeouts?.stopMs ?? 30_000);
     while (Date.now() < deadline) {

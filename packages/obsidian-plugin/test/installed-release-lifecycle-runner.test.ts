@@ -161,3 +161,28 @@ for (const runner of [runInstalledReleaseLifecycleSlice, runInstalledReleaseUnin
     expect(JSON.stringify(records)).not.toContain("/private/operator/secret-vault");
   });
 }
+
+
+for (const runner of [runInstalledReleaseLifecycleSlice, runInstalledReleaseUninstallSlice]) {
+  it(`${runner.name} retains roots when identity is persisted during stop and its listener survives`, async () => {
+    const { root, candidate } = await arrange();
+    const server = createServer(socket => socket.end());
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("No test listener");
+    let cleaned = false;
+    try {
+      const result = await runner({ candidate, workingDirectory: root, runId: "late-identity", profile: MVP_PERF_REF_LINUX_1, profileName: MVP_PERF_REF_LINUX_1.name,
+        probe: { probe: async () => { throw new Error("unused"); }, probeRunning: async () => ({ platform: "linux", capabilities: [] }) },
+        processControl: { start: async ({ vaultPath }) => ({ pid: 47, stop: async () => {
+          await writeFile(join(vaultPath, ".obsidian/plugins/slice-bridge/data.json"), JSON.stringify({ vaultId: "11111111-1111-4111-8111-111111111111", port: address.port }));
+        } }) },
+        cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+        timeouts: { stopMs: 50 }, record: () => {}, assertion: () => {},
+      });
+      expect(result.verdict).toBe("failed");
+      expect(cleaned).toBe(false);
+      expect(result.cleanup?.residualPaths).toEqual(["generated_runtime_residue"]);
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+}
