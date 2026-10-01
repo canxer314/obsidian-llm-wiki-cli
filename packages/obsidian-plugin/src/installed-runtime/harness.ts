@@ -553,6 +553,7 @@ export async function runInstalledRuntimeHarness(
   };
 
   let handle: ObsidianProcessHandle | null = null;
+  let startupShutdownUnconfirmed = false;
   let acceptanceDriver: {
     requestSemanticEvidenceScenario(options: {
       readonly scenario: import("./semantic-evidence-corpus.js").SemanticEvidenceSearchSnapshotScenarioName;
@@ -562,13 +563,13 @@ export async function runInstalledRuntimeHarness(
     cleanup(): Promise<void>;
   } | null = null;
   let isolatedSemanticEvidenceSequence = 0;
+  let isolatedRuntimeResidue = false;
   let firstIdentity = null as PersistedBridgeIdentity | null;
 
   class BridgeStillReachableError extends Error {}
 
   const stopObsidian = async (): Promise<void> => {
     const current = handle;
-    handle = null;
     if (current === null) return;
     await current.stop();
     if (firstIdentity !== null) {
@@ -582,6 +583,7 @@ export async function runInstalledRuntimeHarness(
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
+    handle = null;
   };
 
   const startAndObserve = async (
@@ -602,8 +604,24 @@ export async function runInstalledRuntimeHarness(
         profileDirectory: vault.profileDirectory,
       });
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       failFromError(startStage, error);
       return;
+    }
+    if (options.probe.probeRunning !== undefined && profile !== null) {
+      try {
+        state.observed = await options.probe.probeRunning(vault);
+        state.mismatches = preflightRuntimeProfile(profile, state.observed);
+        if (state.mismatches.length > 0) {
+          fail("preflight", "profile_mismatch", "The running runtime does not match the registered profile");
+          return;
+        }
+      } catch (error) {
+        fail("preflight", "profile_probe_failed", sanitize(error instanceof Error ? error.message : String(error)));
+        return;
+      }
     }
     let identity: PersistedBridgeIdentity;
     try {
@@ -703,7 +721,8 @@ export async function runInstalledRuntimeHarness(
       fail("preflight", "profile_probe_failed", sanitize(error instanceof Error ? error.message : String(error)));
     }
     if (state.observed !== null) {
-      state.mismatches = preflightRuntimeProfile(profile, state.observed);
+      state.mismatches = preflightRuntimeProfile(profile, state.observed).filter(mismatch =>
+        options.probe.probeRunning === undefined || !mismatch.field.startsWith("versions."));
       if (state.mismatches.length > 0) {
         fail("preflight", "profile_mismatch", "The probed runtime does not match the registered profile");
       }
@@ -792,6 +811,8 @@ export async function runInstalledRuntimeHarness(
       configDirectoryName,
     });
     let isolatedHandle: ObsidianProcessHandle | null = null;
+    let isolatedStartupShutdownUnconfirmed = false;
+    let isolatedPort: number | undefined;
     let isolatedDriver: Awaited<ReturnType<typeof prepare>> | null = null;
     try {
       await installCandidateBundle(candidate, isolated.vaultPath, configDirectoryName);
@@ -804,6 +825,11 @@ export async function runInstalledRuntimeHarness(
       isolatedHandle = await options.processControl.start({
         vaultPath: isolated.vaultPath,
         profileDirectory: isolated.profileDirectory,
+      }).catch((error: unknown) => {
+        if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+          isolatedStartupShutdownUnconfirmed = true;
+        }
+        throw error;
       });
       let observedIdentity: PersistedBridgeIdentity | null = null;
       await waitForCondition(async () => {
@@ -818,6 +844,7 @@ export async function runInstalledRuntimeHarness(
         throw new BridgeIdentityError("Isolated Semantic Evidence Bridge identity unavailable");
       }
       const identity: PersistedBridgeIdentity = observedIdentity;
+      isolatedPort = identity.port;
       await waitForCondition(() => isLoopbackPortOpen(identity.port), {
         timeoutMs: timeouts.startupMs,
       });
@@ -838,18 +865,32 @@ export async function runInstalledRuntimeHarness(
       });
     } finally {
       let cleanupFailure: unknown;
+      if (isolatedStartupShutdownUnconfirmed) {
+        isolatedRuntimeResidue = true;
+        throw new ObsidianProcessError("Isolated startup shutdown was not confirmed", "obsidian_stop_failed");
+      }
       try {
         await isolatedHandle?.stop();
+        if (isolatedPort !== undefined) {
+          await waitForCondition(async () => !(await isLoopbackPortOpen(isolatedPort!)), {
+            timeoutMs: timeouts.portClosedMs,
+          });
+        }
       } catch (error) {
-        cleanupFailure ??= error;
+        isolatedRuntimeResidue = true;
+        throw error;
       }
       try {
         await isolatedDriver?.cleanup();
       } catch (error) {
         cleanupFailure ??= error;
       }
-      const cleanup = await cleanupVault(isolated);
+      const cleanup = await cleanupVault(isolated).catch((error: unknown) => {
+        isolatedRuntimeResidue = true;
+        throw error;
+      });
       if (cleanup.residualPaths.length > 0) {
+        isolatedRuntimeResidue = true;
         throw new SemanticEvidenceSearchSnapshotCorpusError(
           "Isolated Semantic Evidence runtime left generated content",
         );
@@ -1289,7 +1330,7 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
-  if (acceptanceDriver !== null) {
+  if (acceptanceDriver !== null && handle === null && !startupShutdownUnconfirmed) {
     try {
       await acceptanceDriver.cleanup();
     } catch (error) {
@@ -1313,7 +1354,11 @@ export async function runInstalledRuntimeHarness(
   // Cleanup runs even after failures; residual generated content invalidates
   // the evidence rather than silently passing (spec §12.6). Cleanup never
   // touches roots the run did not itself provision.
-  if (state.vault !== null) {
+  if (state.vault !== null && (handle !== null || startupShutdownUnconfirmed)) {
+    // The process or listener may still own these files. Retain both roots.
+    state.cleanup = { attempted: true, residualPaths: ["/"] };
+    fail("cleanup", "residual_test_content", "Generated runtime shutdown was not confirmed");
+  } else if (state.vault !== null) {
     try {
       state.cleanup = await cleanupVault(state.vault);
     } catch (error) {
@@ -1323,6 +1368,10 @@ export async function runInstalledRuntimeHarness(
     if (state.cleanup.residualPaths.length > 0) {
       fail("cleanup", "residual_test_content", "Generated test content survived cleanup");
     }
+  }
+
+  if (isolatedRuntimeResidue) {
+    state.cleanup = { attempted: true, residualPaths: [...(state.cleanup?.residualPaths ?? []), "isolated-runtime/"] };
   }
 
   // Residual generated content invalidates the run's evidence even when a
@@ -1340,7 +1389,6 @@ export async function runInstalledRuntimeHarness(
 
   const firstHealth = state.observations[0]?.observation.health;
   const changeSetCorpus: ChangeSetCorpusEvidence | null =
-    state.failure === null &&
     state.changeSetAdmission !== null &&
     state.changeSetReplay !== null
       ? composeChangeSetCorpusEvidence({
@@ -1351,7 +1399,7 @@ export async function runInstalledRuntimeHarness(
         })
       : null;
   const gateIsolationCorpus: GateIsolationCorpusEvidence | null =
-    state.failure === null && state.gateIsolation !== null
+    state.gateIsolation !== null
       ? composeGateIsolationCorpusEvidence({
           outcome: state.gateIsolation,
           events: gateIsolationEvents,
@@ -1359,7 +1407,7 @@ export async function runInstalledRuntimeHarness(
         })
       : null;
   const registeredReferenceRewriteCorpus: RegisteredReferenceRewriteCorpusEvidence | null =
-    state.failure === null && state.registeredReferenceRewrite !== null
+    state.registeredReferenceRewrite !== null
       ? composeRegisteredReferenceRewriteCorpusEvidence({
           outcome: state.registeredReferenceRewrite,
           events: registeredReferenceRewriteEvents,
@@ -1375,7 +1423,7 @@ export async function runInstalledRuntimeHarness(
         })
       : null;
   const privacyRecoveryAuthorityCorpus: PrivacyRecoveryAuthorityCorpusEvidence | null =
-    state.failure === null && state.privacyRecoveryAuthority !== null
+    state.privacyRecoveryAuthority !== null
       ? privacyRecoveryAuthorityCorpusEvidenceSchema.parse(
           composePrivacyRecoveryAuthorityCorpusEvidence({
             outcome: state.privacyRecoveryAuthority,
@@ -1385,7 +1433,7 @@ export async function runInstalledRuntimeHarness(
         )
       : null;
   const releaseLifecycleCorpus: ReleaseLifecycleCorpusEvidence | null =
-    state.failure === null && state.releaseLifecycle !== null
+    state.releaseLifecycle !== null
       ? releaseLifecycleCorpusEvidenceSchema.parse(
           composeReleaseLifecycleCorpusEvidence({
             outcome: state.releaseLifecycle,
@@ -1395,7 +1443,7 @@ export async function runInstalledRuntimeHarness(
         )
       : null;
   const crashRestorationRetainedAuthorityCorpus: CrashRestorationRetainedAuthorityCorpusEvidence | null =
-    state.failure === null && state.crashRestorationRetainedAuthority !== null
+    state.crashRestorationRetainedAuthority !== null
       ? crashRestorationRetainedAuthorityCorpusEvidenceSchema.parse(
           composeCrashRestorationRetainedAuthorityCorpusEvidence({
             outcome: state.crashRestorationRetainedAuthority,

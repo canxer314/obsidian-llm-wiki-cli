@@ -184,8 +184,21 @@ export function createLinuxObsidianProcessControl(options: {
           await confirmGeneratedVaultTrust({ ...request, timeoutMs: 120_000 });
         } catch (error) {
           if (child.pid !== undefined) {
-            try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ }
+            try { process.kill(-child.pid, "SIGKILL"); } catch (stopError) {
+              if ((stopError as NodeJS.ErrnoException).code !== "ESRCH") throw stopError;
+            }
             await waitForExit(child, options.stopTimeoutMs ?? 30_000);
+            const deadline = Date.now() + (options.stopTimeoutMs ?? 30_000);
+            while (true) {
+              try { process.kill(-child.pid, 0); } catch (stopError) {
+                if ((stopError as NodeJS.ErrnoException).code === "ESRCH") break;
+                throw stopError;
+              }
+              if (Date.now() >= deadline) {
+                throw new ObsidianProcessError("Obsidian startup cleanup left a live process group", "obsidian_stop_failed");
+              }
+              await delay(10);
+            }
           }
           throw error;
         }

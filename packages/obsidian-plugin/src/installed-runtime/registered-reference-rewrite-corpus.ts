@@ -556,6 +556,7 @@ export async function runRegisteredReferenceRewriteCorpus(options: {
     })();
   }
 
+  try {
   // ---------------------------------------------------------------------------
   // 1. Four grammar move proofs: each move derives a destination-only rewrite of
   //    its referrer. The referrer's final bytes are verified byte-for-byte and
@@ -977,6 +978,10 @@ export async function runRegisteredReferenceRewriteCorpus(options: {
     residualCleanup,
     assertions,
   };
+  } finally {
+    observerStopped = true;
+    await observerRun;
+  }
 }
 
 async function arrangeDigest(

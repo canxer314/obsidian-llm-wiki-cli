@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 
@@ -158,7 +158,13 @@ export async function requestInstalledSemanticEvidenceScenario(options: {
     ...current,
     command,
   });
-  await writeFile(options.descriptorPath, `${JSON.stringify(updated)}\n`, "utf8");
+  const temporaryPath = `${options.descriptorPath}.${randomBytes(16).toString("hex")}.next`;
+  await writeFile(temporaryPath, `${JSON.stringify(updated)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  try {
+    await rename(temporaryPath, options.descriptorPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
 }
 
 const semanticScenarioSchema =
@@ -196,6 +202,7 @@ export const AUTHORITATIVE_INSTALLED_RUNTIME_RUNNER_NAMES = [
   "runRegisteredReferenceRewriteCorpus",
   "runPrivacyRecoveryAuthorityCorpus",
   "runReleaseLifecycleCorpus",
+  "runCrashRestorationRetainedAuthorityCorpus",
   "semanticEvidenceScenarioRunner",
 ] as const;
 
@@ -206,6 +213,7 @@ type HarnessAuthoritativeInstalledRuntimeRunners = Required<
     | "runRegisteredReferenceRewriteCorpus"
     | "runPrivacyRecoveryAuthorityCorpus"
     | "runReleaseLifecycleCorpus"
+    | "runCrashRestorationRetainedAuthorityCorpus"
     | "semanticEvidenceScenarioRunner"
   >
 >;
@@ -379,6 +387,8 @@ export function createAuthoritativeInstalledRuntimeRunners(
       });
       return unavailableRunner("Release-lifecycle local Primary Operator control");
     },
+    runCrashRestorationRetainedAuthorityCorpus: async () =>
+      unavailableRunner("Crash-restoration retained-authority corpus"),
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:
       createInstalledSemanticEvidenceScenarioRunner({

@@ -279,8 +279,11 @@ export default class VaultOperationBridgePlugin extends Plugin {
         semanticContentMatches: (path, bytes) =>
           installedSemanticEvidence?.acceptsMetadataCacheObservation(path) !== false &&
           semanticVersions.matches(path, bytes),
-        resolveLink: (target, sourcePath) =>
-          this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)?.path ?? null,
+        resolveLink: (target, sourcePath) => {
+          // Obsidian resolves decoded linkpaths, not raw destinations with fragments.
+          const { path } = parseLinktext(target);
+          return this.app.metadataCache.getFirstLinkpathDest(decodeURIComponent(path), sourcePath)?.path ?? null;
+        },
         candidatePaths: (target, sourcePath) => {
           const { path } = parseLinktext(target);
           return enumerateCanonicalReferenceTargets(

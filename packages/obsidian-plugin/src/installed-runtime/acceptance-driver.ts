@@ -1,9 +1,10 @@
 import { watch, type FSWatcher } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 
 import {
   installedRuntimeAcceptanceDescriptorSchema,
+  isPathInside,
   loadInstalledRuntimeAcceptanceDescriptor,
   semanticEvidenceScenarioReportPath,
   type InstalledRuntimeAcceptanceDescriptor,
@@ -52,6 +53,10 @@ export async function activateInstalledRuntimeAcceptanceDriver(
   } else if (!reportFacts.isDirectory()) {
     throw new Error("Installed acceptance report root is not a directory");
   }
+  if (!isPathInside(await realpath(dirname(loaded.descriptor.vaultPath)),
+      await realpath(loaded.descriptor.reportDirectory))) {
+    throw new Error("Installed acceptance report root must stay inside the real run workspace");
+  }
   let watcher: FSWatcher | undefined;
   let disposed = false;
   let lastSequence = loaded.descriptor.command.sequence;
@@ -81,6 +86,9 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         throw new Error("Installed acceptance command sequence is not contiguous");
       }
       if (command.action !== "run-semantic-evidence-scenario") return;
+      if (command.capabilityToken !== loaded.descriptor.capabilityToken) {
+        throw new Error("Installed acceptance command capability changed");
+      }
       lastSequence = command.sequence;
       let result: { readonly summary: unknown } | {
         readonly failure: { readonly code: "scenario_execution_failed" };
@@ -124,7 +132,8 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         throw error;
       }
     };
-    watcher = watch(loaded.path, { persistent: false }, () => {
+    watcher = watch(dirname(loaded.path), { persistent: false }, (_event, filename) => {
+      if (filename !== null && filename.toString() !== basename(loaded.path)) return;
       commandTail = commandTail.then(inspectCommand);
       void commandTail.catch(() => undefined);
     });

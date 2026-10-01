@@ -67,3 +67,34 @@ it("refuses to replace a profile registered to another Vault", async () => {
   }).start({ vaultPath: root, profileDirectory })).rejects.toThrow("already registered");
   expect(await readFile(join(profileDirectory, "obsidian.json"), "utf8")).toBe(original);
 });
+
+it("does not report startup failure as cleaned until the whole process group is absent", async () => {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { vi } = await import("vitest");
+  const root = await mkdtemp(join(tmpdir(), "linux-start-cleanup-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const executable = join(root, "host");
+  await writeFile(executable, '#!/bin/sh\nexec sleep 30\n', { mode: 0o700 });
+  // This non-generated Vault deliberately fails GUI supervision after spawn.
+  const realKill = process.kill.bind(process);
+  let killedGroup: number | undefined;
+  let absenceChecks = 0;
+  const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < 0 && signal === "SIGKILL") killedGroup = pid;
+    if (pid < 0 && signal === 0) {
+      absenceChecks += 1;
+      if (absenceChecks === 1) return true;
+    }
+    return realKill(pid, signal);
+  });
+  try {
+    await expect(createLinuxObsidianProcessControl({ executablePath: executable, stopTimeoutMs: 2_000 })
+      .start({ vaultPath: root, profileDirectory: join(root, "profile") }))
+      .rejects.toThrow("generated acceptance Vault");
+    expect(killedGroup).toBeDefined();
+    expect(absenceChecks).toBeGreaterThanOrEqual(2);
+  } finally {
+    kill.mockRestore();
+    if (killedGroup !== undefined) { try { realKill(killedGroup, "SIGKILL"); } catch {} }
+  }
+});

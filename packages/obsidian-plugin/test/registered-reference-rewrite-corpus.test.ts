@@ -758,6 +758,34 @@ describe("registered-reference rewrite corpus over a real loopback Bridge", () =
     }
   }, 120_000);
 
+  it("stops the observer before rejecting a failed move scenario", async () => {
+    const host = await arrangeSession(FIXTURES);
+    const bridge = await createRewriteBridge(host, true);
+    const client = await connectClient(bridge.endpoint, EXPECTED_VAULT_ID);
+    const observerClient = await connectClient(bridge.endpoint, EXPECTED_VAULT_ID);
+    const callTool = callToolOf(client);
+    const observe = callToolOf(observerClient);
+    let observations = 0;
+    let released = false;
+    try {
+      await expect(runRegisteredReferenceRewriteCorpus({
+        session: makeSession(host, async (tool, args) => {
+          if (tool === "vault_change_set_submit") throw new Error("move refused");
+          return callTool(tool, args);
+        }, [], { callTool: async (tool, args) => {
+          observations += 1;
+          if (released) throw new Error("observer survived corpus");
+          return observe(tool, args);
+        } }),
+        record: () => undefined, assertion: () => undefined,
+      })).rejects.toThrow("move refused");
+      const atRejection = observations;
+      released = true;
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(observations).toBe(atRejection);
+    } finally { released = true; await observerClient.close(); await client.close(); }
+  });
+
   it("derives the same deterministic corpus identity across fresh runs", async () => {
     const run = async (): Promise<ReturnType<typeof runRegisteredReferenceRewriteCorpus> extends Promise<infer T> ? T : never> => {
       const host = await arrangeSession(FIXTURES);

@@ -78,6 +78,8 @@ export interface ObservedRuntimeEnvironment {
 
 export interface RuntimeEnvironmentProbe {
   probe(): Promise<ObservedRuntimeEnvironment>;
+  /** Runtime version facts can only be collected after the dedicated process starts. */
+  probeRunning?(request: { readonly vaultPath: string; readonly profileDirectory: string }): Promise<ObservedRuntimeEnvironment>;
 }
 
 export interface RuntimePreflightMismatch {

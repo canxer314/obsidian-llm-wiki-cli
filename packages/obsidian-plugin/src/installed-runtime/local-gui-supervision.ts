@@ -1,12 +1,20 @@
 import { readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
+export interface SupervisedRuntimeVersions {
+  readonly obsidianVersion: string;
+  readonly electronVersion: string;
+  readonly nodeVersion: string;
+}
+
+class GuiSupervisionIdentityError extends Error {}
+
 /** Local GUI supervision restricted to a generated acceptance profile. */
 export async function confirmGeneratedVaultTrust(options: {
   readonly vaultPath: string;
   readonly profileDirectory: string;
   readonly timeoutMs: number;
-}): Promise<void> {
+}): Promise<SupervisedRuntimeVersions> {
   const vaultPath = resolve(options.vaultPath);
   if (!basename(vaultPath).startsWith("installed-runtime-vault-")) {
     throw new Error("GUI trust confirmation requires a generated acceptance Vault");
@@ -36,7 +44,7 @@ export async function confirmGeneratedVaultTrust(options: {
       const debuggerUrl = new URL(target.webSocketDebuggerUrl);
       if (debuggerUrl.protocol !== "ws:" || debuggerUrl.hostname !== "127.0.0.1" ||
           debuggerUrl.port !== String(port)) {
-        throw new Error("GUI renderer debugger escaped the supervised loopback port");
+        throw new GuiSupervisionIdentityError("GUI renderer debugger escaped the supervised loopback port");
       }
       const socket = new WebSocket(debuggerUrl);
       try {
@@ -45,21 +53,43 @@ export async function confirmGeneratedVaultTrust(options: {
           socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
           socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("GUI supervision connection failed")); }, { once: true });
         });
-        const result = await new Promise<{ result?: { result?: { value?: string }; exceptionDetails?: unknown } }>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error("GUI confirmation timed out")), 1_000);
-          socket.addEventListener("message", (event) => {
+        const result = await new Promise<{ result?: { result?: { value?: unknown }; exceptionDetails?: unknown } }>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            socket.removeEventListener("message", onMessage);
+            reject(new Error("GUI confirmation timed out"));
+          }, 1_000);
+          const onMessage = (event: MessageEvent): void => {
+            let response;
+            try { response = JSON.parse(String(event.data)); } catch { return; }
+            if (response?.id !== 1) return;
             clearTimeout(timer);
-            resolve(JSON.parse(String(event.data)));
-          }, { once: true });
+            socket.removeEventListener("message", onMessage);
+            if (response.error !== undefined) {
+              reject(new GuiSupervisionIdentityError("GUI evaluation was rejected"));
+              return;
+            }
+            resolve(response);
+          };
+          socket.addEventListener("message", onMessage);
           socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
-            expression: `(()=>{if(typeof app==='undefined')return 'waiting';if(app.vault.adapter.getBasePath()!==${JSON.stringify(vaultPath)})throw Error('Wrong acceptance Vault');const button=[...document.querySelectorAll('.modal button')].find(b=>b.textContent==='Trust author and enable plugins');if(button){button.click();return 'waiting';}return Object.keys(app.plugins.plugins).length===1&&app.plugins.plugins[${JSON.stringify(pluginId)}]&&app.vault.getMarkdownFiles().every(f=>app.metadataCache.getFileCache(f)!==null)?'loaded':'waiting';})()`,
+            expression: `(()=>{if(typeof app==='undefined'||!app.vault?.adapter)return 'waiting';if(app.vault.adapter.getBasePath()!==${JSON.stringify(vaultPath)})throw Error('Wrong acceptance Vault');const button=[...document.querySelectorAll('.modal button')].find(b=>b.textContent==='Trust author and enable plugins');if(button){button.click();return 'waiting';}if(!app.plugins?.plugins)return 'waiting';return Object.keys(app.plugins.plugins).length===1&&app.plugins.plugins[${JSON.stringify(pluginId)}]&&app.vault.getMarkdownFiles().every(f=>app.metadataCache.getFileCache(f)!==null)?{obsidianVersion:JSON.parse(require('fs').readFileSync(require('path').join(process.resourcesPath,'obsidian.asar','package.json'),'utf8')).version,electronVersion:process.versions.electron,nodeVersion:process.versions.node}:'waiting';})()`,
             returnByValue: true,
           } }));
         });
-        if (result.result?.exceptionDetails !== undefined) throw new Error("GUI Vault identity verification failed");
-        if (result.result?.result?.value === "loaded") return;
+        if (result.result?.exceptionDetails !== undefined) throw new GuiSupervisionIdentityError("GUI Vault identity verification failed");
+        const value = result.result?.result?.value;
+        if (value !== "waiting") {
+          if (typeof value !== "object" || value === null ||
+              !["obsidianVersion", "electronVersion", "nodeVersion"].every(key =>
+                typeof (value as Record<string, unknown>)[key] === "string" &&
+                /^\d+\.\d+\.\d+$/u.test((value as Record<string, string>)[key]!))) {
+            throw new GuiSupervisionIdentityError("GUI runtime versions are unavailable");
+          }
+          return value as SupervisedRuntimeVersions;
+        }
       } finally { socket.close(); }
-    } catch {
+    } catch (error) {
+      if (error instanceof GuiSupervisionIdentityError) throw error;
       // Renderer/profile initialization may not have completed yet.
     }
     await new Promise((resolve) => setTimeout(resolve, 100));

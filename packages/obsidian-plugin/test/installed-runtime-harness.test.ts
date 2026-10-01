@@ -177,7 +177,24 @@ function createFakeObsidianProcessControl(
           listMarkdownPaths: async () => [],
           readBinary: async () => null,
         },
-        createBridge: (options) => createBridgeInstance(options),
+        createBridge: (options) => {
+          // Inner tests allocate the first listener atomically through the OS.
+          // Production persistent-port conflict behavior is tested separately.
+          const firstStart = starts === 1 || knobs.forgetOnSecondStart === true;
+          const bridge = createBridgeInstance({ ...options, port: firstStart ? 0 : options.port });
+          return {
+            ...bridge,
+            get port() { return bridge.port; },
+            get endpoint() { return bridge.endpoint; },
+            async start() {
+              await bridge.start();
+              if (stored !== undefined && firstStart) {
+                stored.port = bridge.port;
+                await writeFile(dataPath, JSON.stringify(stored), "utf8");
+              }
+            },
+          };
+        },
       });
       liveRuntimes.push(runtime);
       await runtime.load();
@@ -723,6 +740,41 @@ function stubGateIsolationOutcome(): GateIsolationOutcome {
 }
 
 describe("installed-runtime harness orchestration", () => {
+  it("checks running versions before executing any acceptance corpus", async () => {
+    let corpusCalls = 0;
+    const { options } = await arrangeRun("run-live-version-mismatch", {
+      probe: {
+        probe: async () => ({ ...MATCHING_OBSERVED, obsidianVersion: undefined,
+          electronVersion: undefined, nodeVersion: undefined }),
+        probeRunning: async () => ({ ...MATCHING_OBSERVED, electronVersion: "wrong-runtime" }),
+      },
+      runPublicWireCorpus: async () => { corpusCalls += 1; throw new Error("must not run"); },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.failure).toMatchObject({ stage: "preflight", code: "profile_mismatch" });
+    expect(result.evidence.profile.observed?.electronVersion).toBe("wrong-runtime");
+    expect(result.evidence.profile.mismatches).toEqual([
+      { field: "versions.electron", expected: "0.0.0-inner", actual: "wrong-runtime" },
+    ]);
+    expect(corpusCalls).toBe(0);
+    expect(result.evidence.cleanup?.residualPaths).toEqual([]);
+  });
+
+  it("refuses missing running versions even when the registration claims a match", async () => {
+    const { options } = await arrangeRun("run-live-version-missing", {
+      probe: {
+        probe: async () => MATCHING_OBSERVED,
+        probeRunning: async () => ({ ...MATCHING_OBSERVED, obsidianVersion: undefined }),
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("invalid");
+    expect(result.evidence.profile.mismatches).toEqual([
+      { field: "versions.obsidian", expected: "0.0.0-inner", actual: null },
+    ]);
+    expect(result.evidence.publicWireCorpus).toBeNull();
+  });
+
   it("fails closed before launch when the private acceptance driver is not wired", async () => {
     const { options } = await arrangeRun("run-missing-acceptance-driver", {
       prepareInstalledRuntimeAcceptanceDriver: undefined,
@@ -978,6 +1030,95 @@ describe("installed-runtime harness failure projection", () => {
     expect(processControl.starts).toBe(4);
   });
 
+  it("invalidates evidence when isolated Vault cleanup throws", async () => {
+    const { options } = await arrangeRun("run-isolated-cleanup-throws", {
+      cleanupVault: async vault => {
+        if (vault.vaultPath.endsWith("-semantic-1")) throw new Error("cleanup refused");
+        return { attempted: true, residualPaths: [] };
+      },
+      isolateSemanticEvidenceScenarios: true,
+      semanticEvidenceScenarioRunner: { run: async () => stubSemanticEvidenceSearchSnapshotOutcome().scenarios[0]! },
+      runSemanticEvidenceSearchSnapshotCorpus: async ({ scenarioRunner }) => {
+        await scenarioRunner.run({ scenario: "create_note/clean_convergence",
+          endpoint: new URL("http://127.0.0.1:1/mcp"), expectedVaultId: "primary", workingDirectory: "." });
+        return stubSemanticEvidenceSearchSnapshotOutcome();
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.failure?.stage).toBe("semantic_evidence_search_snapshot_corpus");
+    expect(result.verdict).toBe("invalid");
+    expect(result.evidence.cleanup?.residualPaths).toContain("isolated-runtime/");
+  });
+
+  it("retains an isolated Vault when startup shutdown cannot be confirmed", async () => {
+    const control = createFakeObsidianProcessControl();
+    const cleaned: string[] = [];
+    const { options } = await arrangeRun("run-isolated-start-cleanup-fails", {
+      processControl: { start: async request => {
+        if (request.vaultPath.endsWith("-semantic-1")) {
+          throw new ObsidianProcessError("startup group survived", "obsidian_stop_failed");
+        }
+        return control.start(request);
+      } },
+      cleanupVault: async vault => { cleaned.push(vault.vaultPath); return { attempted: true, residualPaths: [] }; },
+      isolateSemanticEvidenceScenarios: true,
+      semanticEvidenceScenarioRunner: { run: async () => stubSemanticEvidenceSearchSnapshotOutcome().scenarios[0]! },
+      runSemanticEvidenceSearchSnapshotCorpus: async ({ scenarioRunner }) => {
+        await scenarioRunner.run({ scenario: "create_note/clean_convergence",
+          endpoint: new URL("http://127.0.0.1:1/mcp"), expectedVaultId: "primary", workingDirectory: "." });
+        return stubSemanticEvidenceSearchSnapshotOutcome();
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(cleaned.some(path => path.endsWith("-semantic-1"))).toBe(false);
+    expect(result.verdict).toBe("invalid");
+    expect(result.evidence.cleanup?.residualPaths).toContain("isolated-runtime/");
+  });
+
+  it("retains an isolated scenario Vault when its process cannot stop", async () => {
+    const control = createFakeObsidianProcessControl();
+    const cleaned: string[] = [];
+    const { options } = await arrangeRun("run-isolated-stop-fails", {
+      processControl: { start: async request => {
+        const handle = await control.start(request);
+        return request.vaultPath.endsWith("-semantic-1")
+          ? { ...handle, stop: async () => { throw new Error("isolated stop failed"); } }
+          : handle;
+      } },
+      cleanupVault: async vault => {
+        cleaned.push(vault.vaultPath);
+        return { attempted: true, residualPaths: [] };
+      },
+      isolateSemanticEvidenceScenarios: true,
+      semanticEvidenceScenarioRunner: { run: async () => stubSemanticEvidenceSearchSnapshotOutcome().scenarios[0]! },
+      runSemanticEvidenceSearchSnapshotCorpus: async ({ scenarioRunner }) => {
+        await scenarioRunner.run({ scenario: "create_note/clean_convergence",
+          endpoint: new URL("http://127.0.0.1:1/mcp"), expectedVaultId: "primary", workingDirectory: "." });
+        return stubSemanticEvidenceSearchSnapshotOutcome();
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.failure?.stage).toBe("semantic_evidence_search_snapshot_corpus");
+    expect(cleaned.some(path => path.endsWith("-semantic-1"))).toBe(false);
+    expect(result.verdict).toBe("invalid");
+    expect(result.evidence.cleanup?.residualPaths).not.toEqual([]);
+  });
+
+  it("retains generated roots when startup cleanup cannot confirm process shutdown", async () => {
+    let cleaned = false;
+    const { options } = await arrangeRun("run-start-cleanup-fails", {
+      processControl: createFakeObsidianProcessControl({
+        startError: new ObsidianProcessError("startup process group survived", "obsidian_stop_failed"),
+      }),
+      cleanupVault: async () => { cleaned = true; return { attempted: true, residualPaths: [] }; },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.failure?.code).toBe("obsidian_stop_failed");
+    expect(cleaned).toBe(false);
+    expect(result.verdict).toBe("invalid");
+    expect(result.evidence.cleanup?.residualPaths).not.toEqual([]);
+  });
+
   it("records failed evidence when Obsidian cannot start", async () => {
     const { options } = await arrangeRun("run-start-fails", {
       processControl: createFakeObsidianProcessControl({
@@ -1074,7 +1215,7 @@ describe("installed-runtime harness failure projection", () => {
       timeouts: { startupMs: 5_000, stopMs: 2_000, portClosedMs: 400 },
     });
     const result = await runInstalledRuntimeHarness(options);
-    expect(result.verdict).toBe("failed");
+    expect(result.verdict).toBe("invalid");
     expect(result.failure).toMatchObject({
       stage: "obsidian_stop",
       code: "bridge_still_reachable",
@@ -1082,14 +1223,18 @@ describe("installed-runtime harness failure projection", () => {
   });
 
   it("records failed evidence when the controlled stop itself fails", async () => {
+    let cleanupCalls = 0;
     const { options } = await arrangeRun("run-stop-fails", {
       processControl: createFakeObsidianProcessControl({
         stopError: new ObsidianProcessError("taskkill refused", "obsidian_stop_failed"),
       }),
+      cleanupVault: async () => { cleanupCalls += 1; return { attempted: true, residualPaths: [] }; },
       timeouts: { startupMs: 5_000, stopMs: 500, portClosedMs: 300 },
     });
     const result = await runInstalledRuntimeHarness(options);
-    expect(result.verdict).toBe("failed");
+    expect(result.verdict).toBe("invalid");
+    expect(cleanupCalls).toBe(0);
+    expect(result.evidence.cleanup?.residualPaths).not.toEqual([]);
     expect(result.failure).toMatchObject({
       stage: "obsidian_stop",
       code: "obsidian_stop_failed",
@@ -1220,6 +1365,12 @@ describe("installed-runtime harness failure projection", () => {
     const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
     expect(evidence.verdict).toBe("failed");
     expect(evidence.crashRestorationRetainedAuthorityCorpus).toBeNull();
+    // Restart replay has not run, so this corpus is still incomplete.
+    expect(evidence.changeSetCorpus).toBeNull();
+    expect(evidence.gateIsolationCorpus?.verdict).toBe("passed");
+    expect(evidence.registeredReferenceRewriteCorpus?.verdict).toBe("passed");
+    expect(evidence.privacyRecoveryAuthorityCorpus?.verdict).toBe("passed");
+    expect(evidence.releaseLifecycleCorpus?.verdict).toBe("passed");
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 

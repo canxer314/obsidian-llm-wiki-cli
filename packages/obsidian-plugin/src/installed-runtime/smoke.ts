@@ -25,7 +25,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, rm, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { platform } from "node:os";
 import { join, resolve } from "node:path";
@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 
 import { assembleReleaseBundle } from "../release/assemble-release-bundle.js";
 import { currentSourceTreeTag } from "../release/release-identity.js";
+import { confirmGeneratedVaultTrust } from "./local-gui-supervision.js";
 import { runInstalledRuntimeHarness } from "./harness.js";
 import { createLinuxObsidianProcessControl, createWindowsObsidianProcessControl } from "./obsidian-process.js";
 import {
@@ -101,9 +102,6 @@ async function probeHost(registration: SmokeRegistration): Promise<ObservedRunti
   return {
     platform: platform(),
     ...(hostOsBuild() === undefined ? {} : { osBuild: hostOsBuild() }),
-    obsidianVersion: executablePresent ? registration.obsidianVersion : undefined,
-    electronVersion: executablePresent ? registration.electronVersion : undefined,
-    nodeVersion: executablePresent ? registration.nodeVersion : undefined,
     capabilities,
   };
 }
@@ -123,10 +121,7 @@ async function assembleLocalCandidate(destination: string): Promise<void> {
   if (!(await fileExists(manifest)) || !(await fileExists(mainJs))) {
     return;
   }
-  // The destination is the harness-managed default candidate directory;
-  // packaging requires an absent-or-empty directory, so clear prior output.
-  await rm(destination, { recursive: true, force: true });
-  await rm(`${destination}.attestation.json`, { force: true });
+  // Each run owns a fresh candidate directory; never clear another run's bytes.
   await assembleReleaseBundle({
     tag: currentSourceTreeTag().tag,
     packageRoot,
@@ -144,11 +139,11 @@ async function main(): Promise<number> {
   }
   const workdir = resolve(args.workdir);
   const registration = await readRegistration(resolve(args.registration));
-  const candidate = resolve(args.candidate ?? join(workdir, "candidate-bundle"));
+  const runId = randomRunId();
+  const candidate = resolve(args.candidate ?? join(workdir, `candidate-bundle-${runId}`));
   if (args.candidate === undefined) {
     await assembleLocalCandidate(candidate);
   }
-  const runId = randomRunId();
   const evidencePath = resolve(
     args.evidence ?? join(workdir, "evidence", `installed-runtime-smoke-${runId}.json`),
   );
@@ -164,7 +159,15 @@ async function main(): Promise<number> {
     workingDirectory: workdir,
     evidencePath,
     runId,
-    probe: { probe: () => probeHost(registration) },
+    probe: {
+      probe: () => probeHost(registration),
+      ...(platform() === "linux" ? {
+        probeRunning: async (request: { vaultPath: string; profileDirectory: string }) => ({
+          ...await probeHost(registration),
+          ...await confirmGeneratedVaultTrust({ ...request, timeoutMs: 30_000 }),
+        }),
+      } : {}),
+    },
     processControl: (platform() === "linux"
       ? createLinuxObsidianProcessControl
       : createWindowsObsidianProcessControl)({

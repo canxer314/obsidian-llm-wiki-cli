@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +131,7 @@ describe("installed-runtime authoritative command", () => {
     expect(Object.keys(runners).sort()).toEqual([
       "isolateSemanticEvidenceScenarios",
       "prepareInstalledRuntimeAcceptanceDriver",
+      "runCrashRestorationRetainedAuthorityCorpus",
       "runGateIsolationCorpus",
       "runPrivacyRecoveryAuthorityCorpus",
       "runRegisteredReferenceRewriteCorpus",
@@ -329,6 +330,23 @@ describe("installed-runtime authoritative command", () => {
     ).rejects.toThrow(/installed entry point/u);
   });
 
+  it("rejects a report root symlink that escapes the generated workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "private-report-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "private-report-outside-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }),
+      () => rm(outside, { recursive: true, force: true }));
+    const vaultPath = join(root, "installed-runtime-vault-symlink");
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "llm-wiki");
+    await mkdir(pluginDirectory, { recursive: true });
+    await writeFile(join(pluginDirectory, "main.js"), "candidate");
+    const reportDirectory = join(root, "reports");
+    await createInstalledRuntimeAcceptanceDescriptor({ runId: "symlink", vaultPath,
+      pluginId: "llm-wiki", candidateBundleSha256: "a".repeat(64), reportDirectory });
+    await symlink(outside, reportDirectory, "dir");
+    await expect(activateInstalledRuntimeAcceptanceDriver({ vaultPath, pluginId: "llm-wiki" }))
+      .rejects.toThrow(/report root.*workspace/u);
+  });
+
   it("activates private control only for a matching installed candidate", async () => {
     const workingDirectory = await mkdtemp(join(tmpdir(), "installed-smoke-command-"));
     cleanups.push(() => rm(workingDirectory, { recursive: true, force: true }));
@@ -412,7 +430,17 @@ describe("installed-runtime authoritative command", () => {
       capabilityToken: "b".repeat(64),
       summary,
     });
-    activation?.dispose();
+    try {
+      await requestInstalledSemanticEvidenceScenario({
+        descriptorPath: join(pluginDirectory, "installed-runtime-acceptance.json"),
+        descriptor: activation!.descriptor,
+        scenario: "create_note/quiet_window_reset", expectedVaultId: "vault-123",
+        endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      });
+      await expect.poll(() => commands).toEqual([
+        "create_note/clean_convergence", "create_note/quiet_window_reset",
+      ]);
+    } finally { activation?.dispose(); }
   });
 
   it("reports a failed private scenario without leaking its error content", async () => {
@@ -458,6 +486,31 @@ describe("installed-runtime authoritative command", () => {
     } finally { activation?.dispose(); await created.cleanup(); }
   });
 
+  it("refuses a command whose capability differs from its bound descriptor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "private-command-token-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const vaultPath = join(root, "installed-runtime-vault-token");
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "llm-wiki");
+    await mkdir(pluginDirectory, { recursive: true });
+    await writeFile(join(pluginDirectory, "main.js"), "candidate");
+    const created = await createInstalledRuntimeAcceptanceDescriptor({
+      runId: "token", vaultPath, pluginId: "llm-wiki", candidateBundleSha256: "a".repeat(64),
+      reportDirectory: join(root, "reports"), createCapabilityToken: () => "b".repeat(64),
+    });
+    let executed = false;
+    const activation = await activateInstalledRuntimeAcceptanceDriver({ vaultPath, pluginId: "llm-wiki",
+      executeSemanticEvidenceScenario: async () => { executed = true; return {}; },
+    });
+    try {
+      await writeFile(created.path, JSON.stringify({ ...created.descriptor, command: {
+        sequence: 1, action: "run-semantic-evidence-scenario", capabilityToken: "c".repeat(64),
+        scenario: "create_note/clean_convergence", expectedVaultId: "vault", endpoint: "http://127.0.0.1:32123/mcp",
+      } }));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(executed).toBe(false);
+    } finally { activation?.dispose(); }
+  });
+
   it("publishes a token-bound one-shot scenario command", async () => {
     const workingDirectory = await mkdtemp(join(tmpdir(), "installed-smoke-command-"));
     cleanups.push(() => rm(workingDirectory, { recursive: true, force: true }));
@@ -474,6 +527,8 @@ describe("installed-runtime authoritative command", () => {
       createCapabilityToken: () => "b".repeat(64),
     });
 
+    const previousDescriptor = await open(created.path, "r");
+    cleanups.push(() => previousDescriptor.close());
     await requestInstalledSemanticEvidenceScenario({
       descriptorPath: created.path,
       descriptor: created.descriptor,
@@ -482,6 +537,7 @@ describe("installed-runtime authoritative command", () => {
       endpoint: new URL("http://127.0.0.1:32123/mcp"),
     });
 
+    expect(JSON.parse(await previousDescriptor.readFile("utf8")).command.action).toBe("idle");
     expect(JSON.parse(await readFile(created.path, "utf8"))).toMatchObject({
       command: {
         sequence: 1,
@@ -661,6 +717,9 @@ describe("installed-runtime authoritative command", () => {
   it("does not substitute an in-process corpus when installed control is absent", async () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
 
+    expect(runners.runCrashRestorationRetainedAuthorityCorpus).toBeTypeOf("function");
+    await expect(runners.runCrashRestorationRetainedAuthorityCorpus({} as never))
+      .rejects.toThrow(/installed Obsidian acceptance driver/u);
     await expect(
       runners.runGateIsolationCorpus({} as never),
     ).rejects.toThrow(/installed Obsidian acceptance driver/u);
