@@ -1050,6 +1050,29 @@ describe("installed-runtime harness failure projection", () => {
     expect(result.evidence.cleanup?.residualPaths).toContain("isolated-runtime/");
   });
 
+  it("rejects an isolated runtime version mismatch before requesting its scenario", async () => {
+    let runs = 0;
+    const { options } = await arrangeRun("run-isolated-version-mismatch", {
+      probe: {
+        probe: async () => MATCHING_OBSERVED,
+        probeRunning: async request => request.vaultPath.endsWith("-semantic-1")
+          ? { ...MATCHING_OBSERVED, electronVersion: "wrong-runtime" } : MATCHING_OBSERVED,
+      },
+      isolateSemanticEvidenceScenarios: true,
+      semanticEvidenceScenarioRunner: { run: async () => { runs += 1; return stubSemanticEvidenceSearchSnapshotOutcome().scenarios[0]!; } },
+      runSemanticEvidenceSearchSnapshotCorpus: async ({ scenarioRunner }) => {
+        await scenarioRunner.run({ scenario: "create_note/clean_convergence",
+          endpoint: new URL("http://127.0.0.1:1/mcp"), expectedVaultId: "primary", workingDirectory: "." });
+        return stubSemanticEvidenceSearchSnapshotOutcome();
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.failure?.stage).toBe("semantic_evidence_search_snapshot_corpus");
+    expect(runs).toBe(0);
+    expect(result.evidence.semanticEvidenceSearchSnapshotCorpus).toBeNull();
+    expect(result.evidence.cleanup?.residualPaths).toEqual([]);
+  });
+
   it("retains an isolated Vault when startup shutdown cannot be confirmed", async () => {
     const control = createFakeObsidianProcessControl();
     const cleaned: string[] = [];

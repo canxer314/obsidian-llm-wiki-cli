@@ -831,6 +831,14 @@ export async function runInstalledRuntimeHarness(
         }
         throw error;
       });
+      if (options.probe.probeRunning !== undefined && profile !== null) {
+        const observed = await options.probe.probeRunning(isolated);
+        if (preflightRuntimeProfile(profile, observed).length > 0) {
+          throw new SemanticEvidenceSearchSnapshotCorpusError(
+            "Isolated runtime does not match the registered profile",
+          );
+        }
+      }
       let observedIdentity: PersistedBridgeIdentity | null = null;
       await waitForCondition(async () => {
         observedIdentity = await readPersistedBridgeIdentity(
