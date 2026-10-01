@@ -387,7 +387,11 @@ export function createAuthoritativeInstalledRuntimeRunners(
     },
     runRegisteredReferenceRewriteCorpus:
       runInstalledRegisteredReferenceRewriteCorpus,
-    runPrivacyRecoveryAuthorityCorpus: runInstalledPrivacyRecoveryAuthorityCorpus,
+    runPrivacyRecoveryAuthorityCorpus: request => runInstalledPrivacyRecoveryAuthorityCorpus({
+      ...request,
+      operatorReportTimeoutMs: request.operatorReportTimeoutMs ?? 180_000,
+      recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes",
+    }),
     runReleaseLifecycleCorpus: async (request) => {
       if (request.profile !== undefined && request.profileName !== undefined && request.probe !== undefined) {
         const installed = { ...request, profile: request.profile, profileName: request.profileName,

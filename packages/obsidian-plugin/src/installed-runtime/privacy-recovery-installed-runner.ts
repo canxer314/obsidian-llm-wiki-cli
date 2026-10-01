@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -10,8 +10,12 @@ import { parseChangeSetStatusResult, parseHealthResult } from "@llm-wiki/vault-c
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { HealthObservationError } from "./loopback-client.js";
 import { PUBLIC_WIRE_TOOL_NAMES } from "./public-wire-corpus.js";
+import { waitForInstalledLocalOperatorReport } from "./local-operator-report.js";
+import { requestInstalledSemanticEvidenceScenario } from "./smoke-command.js";
+import { readInstalledCrashJournal } from "./installed-crash-restoration-slice.js";
 import { preflightRuntimeProfile } from "./runtime-profile.js";
-import { loadInstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
+import { loadInstalledRuntimeAcceptanceDescriptor, semanticEvidenceScenarioReportPath } from "./acceptance-driver-protocol.js";
+import { z } from "zod";
 import type { InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 import type { ObservedRuntimeEnvironment, RegisteredRuntimeProfile, RuntimeEnvironmentProbe } from "./runtime-profile.js";
 import {
@@ -34,6 +38,8 @@ export interface InstalledPrivacyBoundaryOptions {
   readonly client: LoopbackMcpClient;
   readonly configDirectoryName: string;
   readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+  readonly operatorReportTimeoutMs: number;
+  readonly recoveryFixture?: "trash_note/restore_evidence_deadline_blocks_writes";
   readonly profileName: string;
   readonly profile: RegisteredRuntimeProfile;
   readonly probe: RuntimeEnvironmentProbe;
@@ -41,6 +47,7 @@ export interface InstalledPrivacyBoundaryOptions {
   readonly cleanupVault: typeof cleanupTestVault;
   readonly prepareInstalledRuntimeAcceptanceDriver: (request: {
     readonly vaultPath: string; readonly pluginId: string; readonly candidateBundleSha256: string; readonly configDirectoryName: string;
+    readonly reportDirectory: string;
   }) => Promise<{ readonly path: string; readonly descriptor: InstalledRuntimeAcceptanceDescriptor; cleanup(): Promise<void> }>;
   readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
   readonly assertion: (name: string) => void;
@@ -61,6 +68,14 @@ export interface InstalledPrivacyAuthorityBoundarySliceResult {
   readonly vaultIdsSha256: Readonly<Record<"vault-a" | "vault-b", string>>;
   readonly rejectedAuthorityAttempts: number;
   readonly observedHealthUnchanged: true;
+  readonly standardDiagnostics: readonly {
+    readonly label: "vault-a" | "vault-b";
+    readonly checksum: string;
+    readonly bundleVersion: "1.0";
+    readonly checksumVerified: true;
+    readonly redactionVerified: true;
+    readonly listenerPort: number;
+  }[];
   readonly provenance: readonly {
     readonly label: "vault-a" | "vault-b";
     readonly vaultIdSha256: string;
@@ -70,6 +85,14 @@ export interface InstalledPrivacyAuthorityBoundarySliceResult {
     readonly afterHealthSha256: string;
     readonly beforeUnknownKeyStatusSha256: string;
     readonly afterUnknownKeyStatusSha256: string;
+  }[];
+  readonly recoveryHandoff: readonly {
+    readonly label: "vault-a" | "vault-b";
+    readonly journalPhase: "FAILED";
+    readonly proofState: "result_unproven";
+    readonly recovery: "blocked";
+    readonly effectiveGate: "recovery_blocked";
+    readonly submissionKeySha256: string;
   }[];
   readonly humanRequired: readonly ["diagnostic-bundles", "recovery-baseline", "resume-writes"];
 }
@@ -146,6 +169,7 @@ async function startVault(options: SliceOptions, label: LiveVault["label"]): Pro
       pluginId: options.candidate.identity.pluginId,
       candidateBundleSha256: options.candidate.identity.bundleSha256,
       configDirectoryName: options.configDirectoryName,
+      reportDirectory: join(dirname(vault.vaultPath), `privacy-local-reports-${options.runId}-${label}`),
     });
     if (acceptance.descriptor.runId !== options.runId || acceptance.descriptor.vaultPath !== vault.vaultPath ||
         acceptance.descriptor.pluginId !== options.candidate.identity.pluginId ||
@@ -290,6 +314,9 @@ async function stopAndClean(options: RunnerOptions, runtimes: readonly LiveVault
 
 /** Proves only the installed Agent authority boundary; local diagnostics and recovery transitions remain human-required. */
 export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: RunnerOptions): Promise<InstalledPrivacyAuthorityBoundarySliceResult> => {
+  if (!Number.isSafeInteger(rawOptions.operatorReportTimeoutMs) || rawOptions.operatorReportTimeoutMs < 1) {
+    throw new Error("Local Primary Operator report timeout must be a positive integer");
+  }
   if (rawOptions.profileName !== rawOptions.profile.name || rawOptions.probe.probeRunning === undefined) {
     throw new Error("Privacy/recovery boundary slice requires a registered profile and running-runtime probe");
   }
@@ -303,6 +330,9 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         port: runtime.identity.port,
         vaultIdSha256: digest(runtime.identity.vaultId),
       });
+    }
+    if (await realpath(runtimes[0]!.descriptor.reportDirectory) === await realpath(runtimes[1]!.descriptor.reportDirectory)) {
+      throw new Error("Each privacy Vault requires an independent report root");
     }
     const authorityNames = [
       "vault_diagnostic_bundle",
@@ -332,6 +362,75 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     }
     options.record("assertion", "agent-authority-attempts-observations-unchanged", { attempts: authorityNames.length * 2, statusObservations: 2 });
     options.assertion("authority:agent-attempts-rejected-without-observed-health-or-status-change");
+    const recoveryHandoff: InstalledPrivacyAuthorityBoundarySliceResult["recoveryHandoff"][number][] = [];
+    const standardDiagnostics: InstalledPrivacyAuthorityBoundarySliceResult["standardDiagnostics"][number][] = [];
+    for (const runtime of runtimes) {
+      if (options.recoveryFixture !== undefined) {
+        await requestInstalledSemanticEvidenceScenario({ descriptorPath: runtime.descriptorPath, descriptor: runtime.descriptor,
+          scenario: options.recoveryFixture, expectedVaultId: runtime.identity.vaultId, endpoint: runtime.endpoint });
+        const reportPath = semanticEvidenceScenarioReportPath(runtime.descriptor.reportDirectory, options.recoveryFixture);
+        await waitForCondition(async () => {
+          const text = await readFile(reportPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          });
+          if (text === null) return false;
+          const completed = z.object({ schemaVersion: z.literal(1), runId: z.string(), vaultId: z.string(), endpoint: z.string(),
+            scenario: z.string(), candidateBundleSha256: z.string(), installedMainSha256: z.string(), capabilityToken: z.string(),
+            summary: z.object({ scenario: z.string(), proofState: z.literal("result_unproven"), statusProofState: z.literal("result_unproven"),
+              journalPhase: z.literal("FAILED"), writesBlocked: z.literal(true), cleanupSucceeded: z.literal(true) }).passthrough(),
+          }).strict().parse(JSON.parse(text));
+          if (completed.runId !== runtime.descriptor.runId || completed.vaultId !== runtime.identity.vaultId ||
+              completed.endpoint !== runtime.endpoint.toString() || completed.scenario !== options.recoveryFixture ||
+              completed.summary.scenario !== options.recoveryFixture || completed.capabilityToken !== runtime.descriptor.capabilityToken ||
+              completed.candidateBundleSha256 !== runtime.descriptor.candidateBundleSha256 || completed.installedMainSha256 !== runtime.descriptor.installedMainSha256) {
+            throw new Error("Blocked fixture completion report identity does not match");
+          }
+          return true;
+        }, { timeoutMs: options.operatorReportTimeoutMs });
+        await waitForCondition(async () => {
+          const health = (await observeHealth(runtime)).state;
+          return health.outcome === "observed" && health.recovery.state === "blocked" && health.effectiveGate?.code === "recovery_blocked";
+        }, { timeoutMs: options.operatorReportTimeoutMs });
+        const frame = await readInstalledCrashJournal(join(runtime.vault.vaultPath, ".llm-wiki", "recovery-journal.bin"));
+        if (frame.phase !== "FAILED" || typeof frame.payload !== "object" || frame.payload === null || Array.isArray(frame.payload) ||
+            frame.payload.vaultId !== runtime.identity.vaultId || typeof frame.payload.input !== "object" ||
+            frame.payload.input === null || Array.isArray(frame.payload.input) || typeof frame.payload.input.submissionKey !== "string") {
+          throw new Error("Recovery handoff requires a real Vault-bound durable FAILED journal");
+        }
+        const submissionKey = frame.payload.input.submissionKey;
+        const result = await runtime.client.callTool({ name: "vault_change_set_status", arguments: { submissionKey } });
+        if (result.isError === true) throw new Error("Recovery fixture status observation failed");
+        const status = parseChangeSetStatusResult(result.structuredContent);
+        if (status.lookup !== "found" || status.changeSet.changeSetId !== frame.payload.changeSetId ||
+            status.changeSet.state !== "result_unproven") {
+          throw new Error("Recovery handoff requires terminal result_unproven status");
+        }
+        recoveryHandoff.push({ label: runtime.label, journalPhase: "FAILED", proofState: "result_unproven",
+          recovery: "blocked", effectiveGate: "recovery_blocked", submissionKeySha256: digest(submissionKey) });
+      }
+      options.record("transport", `${runtime.label}-standard-local-report-required`, { action: "standard-diagnostic-copy" });
+      const report = await waitForInstalledLocalOperatorReport({ descriptor: runtime.descriptor, vaultId: runtime.identity.vaultId,
+        endpoint: runtime.endpoint, configDirectoryName: options.configDirectoryName,
+        action: "standard-diagnostic-copy", timeoutMs: options.operatorReportTimeoutMs });
+      if (report.action !== "standard-diagnostic-copy") throw new Error("Expected the standard local diagnostic report");
+      if (options.recoveryFixture !== undefined && (report.bundle.health.recovery !== "blocked" ||
+          report.bundle.health.effectiveGate !== "recovery_blocked" || report.bundle.journal.availability !== "available" ||
+          !report.bundle.journal.frames.some(frame => frame.state === "valid" && frame.phase === "FAILED"))) {
+        throw new Error("Standard report does not preserve the real blocked recovery fixture");
+      }
+      const serialized = JSON.stringify(report.bundle);
+      for (const marker of [runtime.identity.vaultId, runtime.vault.vaultPath, runtime.vault.profileDirectory, runtime.descriptor.capabilityToken]) {
+        if (serialized.includes(marker) || serialized.includes(JSON.stringify(marker).slice(1, -1))) {
+          throw new Error("Standard local diagnostic contains private runtime identity");
+        }
+      }
+      const facts = { label: runtime.label, checksum: report.bundle.checksum.canonicalPayload,
+        bundleVersion: report.bundle.bundleVersion, checksumVerified: true as const, redactionVerified: true as const,
+        listenerPort: runtime.identity.port };
+      standardDiagnostics.push(facts);
+      options.record("assertion", `${runtime.label}-standard-local-report-observed`, facts);
+    }
     return {
       scope: "two-vault-agent-authority-boundary",
       verdict: "partial",
@@ -343,6 +442,8 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       },
       rejectedAuthorityAttempts: authorityNames.length * runtimes.length,
       observedHealthUnchanged: true,
+      standardDiagnostics,
+      recoveryHandoff,
       provenance: runtimes.map((runtime, index) => ({
         label: runtime.label, vaultIdSha256: digest(runtime.identity.vaultId),
         installedMainSha256: runtime.descriptor.installedMainSha256,

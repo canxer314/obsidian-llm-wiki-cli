@@ -345,6 +345,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly client: LoopbackMcpClient;
     readonly configDirectoryName: string;
     readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly operatorReportTimeoutMs?: number;
     readonly provisionVault: typeof provisionTestVault;
     readonly cleanupVault: typeof cleanupTestVault;
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;

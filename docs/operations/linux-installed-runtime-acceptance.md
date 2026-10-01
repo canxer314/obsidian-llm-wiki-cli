@@ -117,3 +117,15 @@ never dispatches a local action. Only a missing report is retried: an absent
 installed descriptor, changed bundle, malformed report, or failed validation is
 an immediate failure. Missing Primary Operator evidence cannot become a passed
 corpus by waiting or by substituting an Agent invocation.
+
+The built-in privacy adapter uses independent report roots for its two generated
+Vaults and waits up to 180 seconds per local report. It first observes the six-tool
+Agent authority boundary, then runs the existing installed trash/restore evidence
+failure fixture. Before requesting a standard copy, it waits for the identity-bound
+scenario completion and cleanup, checks the durable Vault-bound `FAILED` frame,
+and observes the corresponding public `result_unproven` status and blocked health.
+It never invokes the local copy command. Missing or invalid local evidence fails
+closed, and runtime/listener shutdown must be confirmed before generated-root
+cleanup. The returned standard-copy and blocked-handoff facts remain partial:
+ordered baseline/resume, fresh content confirmations, complete historical identity
+preservation, and cross-Vault recovery isolation are still required.
