@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, open, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -485,6 +485,42 @@ describe("installed-runtime authoritative command", () => {
       await expect.poll(() => commands).toEqual([
         "create_note/clean_convergence", "create_note/quiet_window_reset",
       ]);
+    } finally { activation?.dispose(); }
+  });
+
+  it("refuses a report directory replaced by an escaping symlink after activation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "acceptance-report-swap-"));
+    const outside = await mkdtemp(join(tmpdir(), "acceptance-report-outside-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    cleanups.push(() => rm(outside, { recursive: true, force: true }));
+    const vaultPath = join(root, "installed-runtime-vault-swap");
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "llm-wiki");
+    await mkdir(pluginDirectory, { recursive: true });
+    await writeFile(join(pluginDirectory, "main.js"), "candidate");
+    const reportDirectory = join(root, "reports");
+    const created = await createInstalledRuntimeAcceptanceDescriptor({
+      runId: "swap", vaultPath, pluginId: "llm-wiki",
+      candidateBundleSha256: "a".repeat(64), reportDirectory,
+    });
+    let executed = false;
+    const activation = await activateInstalledRuntimeAcceptanceDriver({
+      vaultPath, pluginId: "llm-wiki",
+      executeSemanticEvidenceScenario: async () => {
+        await rm(reportDirectory, { recursive: true });
+        await symlink(outside, reportDirectory, "dir");
+        executed = true;
+        return {};
+      },
+    });
+    try {
+      await requestInstalledSemanticEvidenceScenario({
+        descriptorPath: created.path, descriptor: created.descriptor,
+        scenario: "create_note/clean_convergence", expectedVaultId: "vault-swap",
+        endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      });
+      await expect.poll(() => executed).toBe(true);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(await readdir(outside)).toEqual([]);
     } finally { activation?.dispose(); }
   });
 

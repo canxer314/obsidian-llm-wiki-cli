@@ -53,10 +53,15 @@ export async function activateInstalledRuntimeAcceptanceDriver(
   } else if (!reportFacts.isDirectory()) {
     throw new Error("Installed acceptance report root is not a directory");
   }
-  if (!isPathInside(await realpath(dirname(loaded.descriptor.vaultPath)),
-      await realpath(loaded.descriptor.reportDirectory))) {
-    throw new Error("Installed acceptance report root must stay inside the real run workspace");
-  }
+  const workspaceRealPath = await realpath(dirname(loaded.descriptor.vaultPath));
+  const reportRealPath = await realpath(loaded.descriptor.reportDirectory);
+  const requireBoundReportRoot = async (): Promise<void> => {
+    if (await realpath(loaded.descriptor.reportDirectory) !== reportRealPath ||
+        !isPathInside(workspaceRealPath, reportRealPath)) {
+      throw new Error("Installed acceptance report root changed or escaped the real run workspace");
+    }
+  };
+  await requireBoundReportRoot();
   let watcher: FSWatcher | undefined;
   let disposed = false;
   let lastSequence = loaded.descriptor.command.sequence;
@@ -90,6 +95,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         throw new Error("Installed acceptance command capability changed");
       }
       lastSequence = command.sequence;
+      await requireBoundReportRoot();
       let result: { readonly summary: unknown } | {
         readonly failure: { readonly code: "scenario_execution_failed" };
       };
@@ -104,6 +110,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         // Error messages may contain Vault content, paths, or credentials.
         result = { failure: { code: "scenario_execution_failed" } };
       }
+      await requireBoundReportRoot();
       const reportPath = semanticEvidenceScenarioReportPath(
         parsed.reportDirectory,
         command.scenario,
