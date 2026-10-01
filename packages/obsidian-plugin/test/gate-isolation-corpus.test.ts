@@ -403,6 +403,14 @@ describe("per-Vault gate-and-isolation corpus over two real loopback Bridges", (
       expect(result.vaultIdsSha256["vault-a"]).not.toBe(result.vaultIdsSha256["vault-b"]);
       expect(result.sharedKeyChangeSetIds["vault-a"]).not.toBe(result.sharedKeyChangeSetIds["vault-b"]);
       expect(result.crossVaultLookupsAbsent).toBe(true);
+      expect(result).toMatchObject({
+        lookups: {
+          "a-key-on-a": { lookup: "found" }, "a-key-on-b": { lookup: "unknown", changeSetId: null },
+          "b-key-on-a": { lookup: "unknown", changeSetId: null }, "b-key-on-b": { lookup: "found" },
+          "shared-key-on-a": { lookup: "found", changeSetId: result.sharedKeyChangeSetIds["vault-a"] },
+          "shared-key-on-b": { lookup: "found", changeSetId: result.sharedKeyChangeSetIds["vault-b"] },
+        },
+      });
       expect(result.assertions).toEqual([
         "distinct-change-set-identities",
         "cross-vault-key-lookup-absent",

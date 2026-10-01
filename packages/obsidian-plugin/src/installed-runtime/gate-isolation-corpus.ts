@@ -78,6 +78,10 @@ export interface InstalledGateIsolationResult {
   readonly vaultIdsSha256: Readonly<{ "vault-a": string; "vault-b": string }>;
   readonly sharedKeyChangeSetIds: Readonly<{ "vault-a": string; "vault-b": string }>;
   readonly crossVaultLookupsAbsent: true;
+  readonly lookups: Readonly<Record<
+    "a-key-on-a" | "a-key-on-b" | "b-key-on-a" | "b-key-on-b" | "shared-key-on-a" | "shared-key-on-b",
+    { readonly lookup: "found" | "unknown"; readonly changeSetId: string | null }
+  >>;
   readonly assertions: readonly string[];
 }
 
@@ -158,6 +162,14 @@ export async function runInstalledGateIsolationSlice(options: {
       "vault-b": b.changeSet.changeSetId,
     },
     crossVaultLookupsAbsent: true,
+    lookups: {
+      "a-key-on-a": { lookup: aOnA.lookup, changeSetId: aOnA.changeSet.changeSetId },
+      "a-key-on-b": { lookup: aOnB.lookup, changeSetId: null },
+      "b-key-on-a": { lookup: bOnA.lookup, changeSetId: null },
+      "b-key-on-b": { lookup: bOnB.lookup, changeSetId: bOnB.changeSet.changeSetId },
+      "shared-key-on-a": { lookup: sharedOnA.lookup, changeSetId: sharedOnA.changeSet.changeSetId },
+      "shared-key-on-b": { lookup: sharedOnB.lookup, changeSetId: sharedOnB.changeSet.changeSetId },
+    },
     assertions: ["distinct-change-set-identities", "cross-vault-key-lookup-absent"],
   };
 }
