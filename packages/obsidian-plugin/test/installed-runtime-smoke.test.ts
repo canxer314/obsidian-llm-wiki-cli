@@ -779,13 +779,16 @@ describe("installed-runtime authoritative command", () => {
       reportDirectory: join(workingDirectory, "installed-runtime-acceptance-run-123"),
     });
 
+    const privateReportRoot = join(workingDirectory, "privacy-vault-a-reports");
     const armed = await runners.prepareInstalledRuntimeAcceptanceDriver({
       vaultPath,
       pluginId: "llm-wiki",
       candidateBundleSha256: "a".repeat(64),
+      reportDirectory: privateReportRoot,
     });
 
     expect(JSON.parse(await readFile(armed.path, "utf8"))).toMatchObject({
+      reportDirectory: privateReportRoot,
       runId: "run-123",
       candidateBundleSha256: "a".repeat(64),
     });

@@ -249,6 +249,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly pluginId: string;
     readonly candidateBundleSha256: string;
     readonly configDirectoryName: string;
+    readonly reportDirectory?: string;
   }) => Promise<{
     requestSemanticEvidenceScenario(options: {
       readonly scenario: import("./semantic-evidence-corpus.js").SemanticEvidenceSearchSnapshotScenarioName;

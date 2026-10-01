@@ -240,6 +240,7 @@ export interface AuthoritativeInstalledRuntimeRunners
     readonly pluginId: string;
     readonly candidateBundleSha256: string;
     readonly configDirectoryName?: string;
+    readonly reportDirectory?: string;
   }): Promise<InstalledRuntimeAcceptanceDriverHandle>;
 }
 
@@ -360,7 +361,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
       const created = await createInstalledRuntimeAcceptanceDescriptor({
         ...request,
         runId: options.runId,
-        reportDirectory: options.reportDirectory,
+        reportDirectory: request.reportDirectory ?? options.reportDirectory,
       });
       activeDescriptor = created.descriptor;
       return {
