@@ -193,6 +193,12 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     expect(() => createAcceptanceMatrixReport(mismatched)).toThrow(/matched profile/u);
   });
 
+  it("rejects aggregation whose verified input digest belongs to another candidate", () => {
+    const foreign = evidence();
+    foreign.inputHashes.candidateBundleSha256 = "b".repeat(64);
+    expect(() => createAcceptanceMatrixReport(foreign)).toThrow(/candidate.*binding/u);
+  });
+
   it("fails closed when a mapped scenario assertion is absent", () => {
     const missingScenarioEvidence = evidence();
     missingScenarioEvidence.publicWireCorpus = {

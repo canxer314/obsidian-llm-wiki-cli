@@ -247,6 +247,9 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence)
       evidence.candidate === null || evidence.bridgeIdentity === null) {
     throw new AcceptanceMatrixError("Acceptance matrix requires matched profile and runtime identity");
   }
+  if (evidence.inputHashes.candidateBundleSha256 !== evidence.candidate.bundleSha256) {
+    throw new AcceptanceMatrixError("Acceptance matrix candidate input digest binding does not match");
+  }
   if (evidence.beforeInventory === null || evidence.afterInventory === null || evidence.cleanup === null) {
     throw new AcceptanceMatrixError("Acceptance matrix requires inventories and cleanup evidence");
   }
