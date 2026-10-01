@@ -46,10 +46,11 @@ as installed-runtime acceptance.
 
 ## Installed partial slices and full acceptance
 
-The built-in crash adapter executes independently supervised create-note slices
-at `after_prepared` and `after_committed`. The former must restore an absent file
-and retain `intent_not_applied`; the latter must preserve exact committed bytes
-and retain `intent_applied`. Both bind the durable Journal, pre-crash status,
+The built-in crash adapter executes independently supervised create-note and
+exact edit-body slices at `after_prepared` and `after_committed`. The create-note
+PREPARED slice must restore an absent file; the edit-body PREPARED slice must
+retain exact original bytes. Both retain `intent_not_applied`. COMMITTED slices
+must preserve exact committed bytes and retain `intent_applied`. All four bind the durable Journal, pre-crash status,
 post-restart status, and replayed complete Change Set record to the same identity.
 Their success does not cover every mutation/fault boundary or retention case, so
 the crash corpus still fails closed rather than promoting these slices.
@@ -125,6 +126,13 @@ modification times. Multiple pending reports for the requested action are ambigu
 and fail closed. Every discovered control report is validated, including consumed
 reports and reports for other actions; neither category bypasses identity or
 checksum checks.
+
+`waitForNextInstalledLocalContentReport` likewise discovers real confirmation IDs
+and requires the expected selection SHA-256. It validates even consumed reports,
+checks copied version facts against the installed contract, and rejects multiple
+pending confirmations rather than guessing their order. It never opens a modal or
+copies a selection. Report-protocol tests do not prove a Primary Operator actually
+cancelled or confirmed a fresh installed modal.
 
 The built-in privacy adapter uses independent report roots for its two generated
 Vaults and waits up to 180 seconds per local report. It first observes the six-tool
