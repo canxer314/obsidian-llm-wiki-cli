@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
@@ -48,21 +48,7 @@ export async function loadInstalledLocalOperatorReport(options: {
   (z.infer<typeof controlReportSchema> & { readonly before: StandardDiagnosticBundle; readonly after: StandardDiagnosticBundle })
 > {
   const binding = options.descriptor;
-  const { descriptor: current } = await loadInstalledRuntimeAcceptanceDescriptor({ vaultPath: binding.vaultPath,
-    pluginId: binding.pluginId, configDirectoryName: options.configDirectoryName });
-  if (current.runId !== binding.runId || current.vaultPath !== binding.vaultPath ||
-      current.pluginId !== binding.pluginId || current.candidateBundleSha256 !== binding.candidateBundleSha256 ||
-      current.installedMainSha256 !== binding.installedMainSha256 ||
-      current.capabilityToken !== binding.capabilityToken || current.reportDirectory !== binding.reportDirectory) {
-    throw new Error("Local operator descriptor identity changed; identity does not match the installed run");
-  }
-  const root = await realpath(binding.reportDirectory);
-  if (root !== resolve(binding.reportDirectory)) {
-    throw new Error("Local operator report root changed from its bound directory");
-  }
-  if (!isPathInside(await realpath(dirname(binding.vaultPath)), root)) {
-    throw new Error("Local operator report root escaped the run workspace");
-  }
+  const root = await validateLocalReportBinding(options);
   const filename = options.action === "standard-diagnostic-copy" ? "local-standard-diagnostic-copy.json" :
     options.action === "content-inclusive-diagnostic-copy" ?
       `local-content-inclusive-diagnostic-copy-${createHash("sha256").update(options.confirmationId).digest("hex")}.json` :
@@ -164,6 +150,72 @@ export async function loadInstalledLocalOperatorReport(options: {
     throw new Error("Local operator resume transition did not prove recovery-safe writable state");
   }
   return { ...report, before, after };
+}
+
+async function validateLocalReportBinding(options: {
+  readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
+  readonly endpoint: URL;
+  readonly configDirectoryName?: string;
+}): Promise<string> {
+  const binding = options.descriptor;
+  const { descriptor: current } = await loadInstalledRuntimeAcceptanceDescriptor({ vaultPath: binding.vaultPath,
+    pluginId: binding.pluginId, configDirectoryName: options.configDirectoryName });
+  if (current.runId !== binding.runId || current.vaultPath !== binding.vaultPath ||
+      current.pluginId !== binding.pluginId || current.candidateBundleSha256 !== binding.candidateBundleSha256 ||
+      current.installedMainSha256 !== binding.installedMainSha256 ||
+      current.capabilityToken !== binding.capabilityToken || current.reportDirectory !== binding.reportDirectory) {
+    throw new Error("Local operator descriptor identity changed; identity does not match the installed run");
+  }
+  if (options.endpoint.protocol !== "http:" || options.endpoint.hostname !== "127.0.0.1" ||
+      options.endpoint.username !== "" || options.endpoint.password !== "" || options.endpoint.port === "" ||
+      options.endpoint.pathname !== "/mcp" || options.endpoint.search !== "" || options.endpoint.hash !== "") {
+    throw new Error("Local operator report does not match the private loopback endpoint");
+  }
+  const root = await realpath(binding.reportDirectory);
+  if (root !== resolve(binding.reportDirectory)) throw new Error("Local operator report root changed from its bound directory");
+  if (!isPathInside(await realpath(dirname(binding.vaultPath)), root)) throw new Error("Local operator report root escaped the run workspace");
+  return root;
+}
+
+/** Discovers local command evidence only; ambiguous pending invocations never imply an order. */
+export async function waitForNextInstalledLocalControlReport(options: {
+  readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
+  readonly vaultId: string;
+  readonly endpoint: URL;
+  readonly configDirectoryName?: string;
+  readonly action: "pause-writes" | "accept-recovery-baseline" | "resume-writes";
+  readonly consumedInvocationIds: readonly string[];
+  readonly timeoutMs: number;
+}): Promise<z.infer<typeof controlReportSchema> & { readonly before: StandardDiagnosticBundle; readonly after: StandardDiagnosticBundle }> {
+  if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
+    throw new Error("Local Primary Operator report timeout must be a positive integer");
+  }
+  const deadline = Date.now() + options.timeoutMs;
+  while (true) {
+    const root = await validateLocalReportBinding(options);
+    const candidates: Awaited<ReturnType<typeof waitForNextInstalledLocalControlReport>>[] = [];
+    for (const filename of (await readdir(root)).filter(name => name.startsWith("local-write-control-") && name.endsWith(".json")).sort()) {
+      const path = join(root, filename);
+      if (await realpath(path) !== path) throw new Error("Local operator report cannot be a symbolic link");
+      const facts = await stat(path);
+      if (!facts.isFile() || (process.platform !== "win32" && (facts.mode & 0o077) !== 0)) {
+        throw new Error("Local operator report is not a private regular file");
+      }
+      const discovered = controlReportSchema.parse(JSON.parse(await readFile(path, "utf8")));
+      if (filename !== `local-write-control-${createHash("sha256").update(discovered.invocationId).digest("hex")}.json`) {
+        throw new Error("Local operator control filename does not match the invocation");
+      }
+      const verified = await loadInstalledLocalOperatorReport({ ...options, action: discovered.action, invocationId: discovered.invocationId });
+      if (verified.action === "standard-diagnostic-copy" || verified.action === "content-inclusive-diagnostic-copy") {
+        throw new Error("Expected local write-control report");
+      }
+      if (verified.action === options.action && !options.consumedInvocationIds.includes(verified.invocationId)) candidates.push(verified);
+    }
+    if (candidates.length > 1) throw new Error("Local operator control report order is ambiguous");
+    if (candidates.length === 1) return candidates[0]!;
+    if (Date.now() >= deadline) throw new Error(`Local Primary Operator report is required for ${options.action}`);
+    await new Promise(resolvePromise => setTimeout(resolvePromise, Math.min(25, deadline - Date.now())));
+  }
 }
 
 /** Observes the separate local channel; it never invokes a Primary Operator action. */
