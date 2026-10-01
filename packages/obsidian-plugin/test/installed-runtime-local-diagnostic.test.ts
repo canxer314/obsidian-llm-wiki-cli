@@ -75,6 +75,11 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     expect(JSON.parse(copied)).toMatchObject({ outcome: "copied", generated: true, copied: true,
       checksumVerified: true, bundleChecksum: selectedBundle.checksum.canonicalPayload });
     expect(copied).not.toContain("private selected text");
+    await expect(activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "foreign-listener-control", action: "resume-writes", outcome: "accepted",
+      before: wrongListenerBundle, after: bundle,
+    })).rejects.toThrow("diagnostic listener");
     await activation!.recordLocalWriteControl({
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       invocationId: "local-baseline-rejected", action: "accept-recovery-baseline", outcome: "rejected",

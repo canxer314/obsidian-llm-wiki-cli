@@ -306,6 +306,10 @@ export async function activateInstalledRuntimeAcceptanceDriver(
           request.endpoint.toString() !== `http://127.0.0.1:${identity.port}/mcp` || request.invocationId.length === 0) {
         throw new Error("Local write control report does not match the running Vault identity");
       }
+      if ([request.before, request.after].some(bundle =>
+          bundle.listenerTimeline.some(entry => entry.port !== identity.port))) {
+        throw new Error("Local write control diagnostic listener does not match the running Vault endpoint");
+      }
       await requireBoundReportRoot();
       const invocationDigest = createHash("sha256").update(request.invocationId).digest("hex");
       const reportPath = join(reportRealPath, `local-write-control-${invocationDigest}.json`);
