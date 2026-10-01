@@ -258,6 +258,7 @@ it("hands off real disk FAILED journals and live blocked recovery without dispat
     expect(result.recoveryHandoff).toEqual([
       expect.objectContaining({ label: "vault-a", journalPhase: "FAILED", proofState: "result_unproven", recovery: "blocked", effectiveGate: "recovery_blocked" }),
     ]);
+    expect(fixture.events).toContain("vault-a-recovery-blocked-gate-row-observed");
     expect(fixture.events.filter(event => event === "real-blocked-fixture-completed")).toHaveLength(1);
     expect(result.verdict).toBe("partial");
     expect(result.humanRequired).toContain("recovery-baseline");

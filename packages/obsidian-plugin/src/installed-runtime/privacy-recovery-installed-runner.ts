@@ -10,6 +10,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { parseChangeSetStatusResult, parseHealthResult } from "@llm-wiki/vault-contracts";
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { HealthObservationError } from "./loopback-client.js";
+import { observeInstalledBlockedGate } from "./installed-blocked-gate-observation.js";
 import { PUBLIC_WIRE_TOOL_NAMES } from "./public-wire-corpus.js";
 import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport } from "./local-operator-report.js";
 import { requestInstalledSemanticEvidenceScenario } from "./smoke-command.js";
@@ -420,6 +421,17 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
             status.changeSet.state !== "result_unproven") {
           throw new Error("Recovery handoff requires terminal result_unproven status");
         }
+        const blockedGate = await observeInstalledBlockedGate({
+          session: { callTool: async (name, arguments_) => {
+            const response = await runtime.client.callTool({ name, arguments: arguments_ });
+            return { isError: response.isError === true, structuredContent: response.structuredContent,
+              ...(Array.isArray(response.content) ? { content: response.content } : {}) };
+          } },
+          vaultIdSha256: createHash("sha256").update(runtime.identity.vaultId).digest("hex"),
+          knownSubmissionKey: submissionKey,
+        });
+        options.record("assertion", `${runtime.label}-recovery-blocked-gate-row-observed`, blockedGate);
+        for (const assertion of blockedGate.assertions) options.assertion(assertion);
         terminalProof = { submissionKey, statusSha256: digest(status.changeSet) };
         recoveryHandoff.push({ label: runtime.label, journalPhase: "FAILED", proofState: "result_unproven",
           recovery: "blocked", effectiveGate: "recovery_blocked", submissionKeySha256: digest(submissionKey) });

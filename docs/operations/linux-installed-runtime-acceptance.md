@@ -140,7 +140,11 @@ Agent authority boundary, then runs the existing installed trash/restore evidenc
 failure fixture only in Vault A, retaining Vault B as an unaffected control. Before requesting a standard copy, it waits for the identity-bound
 scenario completion and cleanup, checks the durable Vault-bound `FAILED` frame,
 and observes the corresponding public `result_unproven` status and blocked health.
-It never invokes the local copy command. Missing or invalid local evidence fails
+It never invokes the local copy command. The blocked fixture also checks all six
+public tools: content tools reject with the recovery gate, historical status remains
+queryable, and a fresh valid Submission Key binds the contract's terminal
+`intent_not_applied` disposition with `recovery_blocked` rather than executing.
+Missing or invalid local evidence fails
 closed, and runtime/listener shutdown must be confirmed before generated-root
 cleanup. The built-in adapter then observes Vault B's rejected baseline, Vault A's accepted
 baseline, and a separate Vault A resume report, in that order. It independently
