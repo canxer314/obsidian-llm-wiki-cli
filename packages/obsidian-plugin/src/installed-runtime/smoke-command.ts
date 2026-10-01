@@ -33,6 +33,7 @@ import type {
 import { runInstalledRegisteredReferenceRewriteCorpus } from "./registered-reference-installed-runner.js";
 import { runInstalledGateIsolationCorpus } from "./gate-installed-runner.js";
 import { runInstalledPrivacyRecoveryAuthorityCorpus } from "./privacy-recovery-installed-runner.js";
+import { runInstalledCrashRestorationSlice } from "./installed-crash-restoration-slice.js";
 import { MVP_PERF_REF_1 } from "./runtime-profile.js";
 
 export {
@@ -393,8 +394,17 @@ export function createAuthoritativeInstalledRuntimeRunners(
       });
       return unavailableRunner("Release-lifecycle local Primary Operator control");
     },
-    runCrashRestorationRetainedAuthorityCorpus: async () =>
-      unavailableRunner("Crash-restoration retained-authority corpus"),
+    runCrashRestorationRetainedAuthorityCorpus: async (request) => {
+      if (request.installed === undefined) {
+        throw new Error("Crash acceptance requires installed candidate, profile, process and descriptor inputs for the installed Obsidian acceptance driver");
+      }
+      const partial = await runInstalledCrashRestorationSlice({
+        ...request.installed,
+        reportDirectory: options.reportDirectory ?? request.installed.reportDirectory,
+      });
+      request.record("assertion", "installed-crash-prepared-partial", partial);
+      throw new Error("Installed PREPARED rollback slice is partial; full crash and retained-authority acceptance are still required");
+    },
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:
       createInstalledSemanticEvidenceScenarioRunner({

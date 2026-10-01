@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
+import { dirname } from "node:path";
 
 import {
   CandidateBundleError,
@@ -372,6 +373,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly assertion: (name: string) => void;
   }) => Promise<ReleaseLifecycleCorpusOutcome>;
   readonly runCrashRestorationRetainedAuthorityCorpus?: (options: {
+    readonly installed?: import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions;
     readonly workingDirectory: string;
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
@@ -1334,10 +1336,29 @@ export async function runInstalledRuntimeHarness(
       if (runner === undefined) {
         throw new CrashRestorationRetainedAuthorityCorpusError("Installed crash runner is required; Node corpus evidence is not authoritative");
       }
+      const candidate = state.candidate;
       state.crashRestorationRetainedAuthority = await runner({
           workingDirectory: options.workingDirectory,
           record: recordCrashRestorationRetainedAuthorityEvent,
           assertion: recordCrashRestorationRetainedAuthorityAssertion,
+          ...(candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined ? {} : {
+            installed: {
+              runId, workingDirectory: options.workingDirectory,
+              reportDirectory: dirname(options.evidencePath),
+              candidate, profile, client, processControl: options.processControl,
+              configDirectoryName, timeouts,
+              probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+              prepareAcceptanceDriver: async request => {
+                const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+                if (!("path" in prepared) || !("descriptor" in prepared)) {
+                  throw new Error("Installed crash descriptor binding is unavailable");
+                }
+                return prepared as Awaited<ReturnType<import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions["prepareAcceptanceDriver"]>>;
+              },
+              record: recordCrashRestorationRetainedAuthorityEvent,
+              assertion: recordCrashRestorationRetainedAuthorityAssertion,
+            },
+          }),
         });
     } catch (error) {
       fail(

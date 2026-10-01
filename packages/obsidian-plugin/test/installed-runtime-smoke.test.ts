@@ -217,6 +217,12 @@ describe("installed-runtime authoritative command", () => {
     ).rejects.toBe(provisionAttempt);
   });
 
+  it("requires concrete installed crash inputs rather than a simulator callback", async () => {
+    await expect(createAuthoritativeInstalledRuntimeRunners().runCrashRestorationRetainedAuthorityCorpus({
+      workingDirectory: "/tmp", record: () => undefined, assertion: () => undefined,
+    })).rejects.toThrow("installed candidate, profile, process and descriptor inputs");
+  });
+
   it("rejects a registered-reference runtime without its own registered profile probe", async () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
     let provisioned = false;
