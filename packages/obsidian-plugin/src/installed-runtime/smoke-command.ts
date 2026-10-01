@@ -391,6 +391,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
       ...request,
       operatorReportTimeoutMs: request.operatorReportTimeoutMs ?? 180_000,
       recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes",
+      recoveryControls: true,
     }),
     runReleaseLifecycleCorpus: async (request) => {
       if (request.profile !== undefined && request.profileName !== undefined && request.probe !== undefined) {

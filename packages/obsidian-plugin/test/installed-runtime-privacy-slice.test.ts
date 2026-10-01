@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { expect, it } from "vitest";
 import { brandVerifiedCandidateBundle, inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
-import { createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
+import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
+import { randomUUID } from "node:crypto";
 import { runInstalledPrivacyRecoveryAuthorityCorpus, type InstalledPrivacyBoundaryOptions } from "../src/installed-runtime/privacy-recovery-installed-runner.js";
 import { provisionTestVault, cleanupTestVault } from "../src/installed-runtime/test-vault.js";
 import { ObsidianProcessError } from "../src/installed-runtime/obsidian-process.js";
@@ -44,7 +45,7 @@ it("rejects a foreign privacy descriptor before starting the generated runtime",
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked") {
+async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" = "missing", blockedSnapshotUnavailable = false) {
   const root = await mkdtemp(join(tmpdir(), "privacy-report-"));
   const candidateDirectory = join(root, "candidate");
   await mkdir(candidateDirectory);
@@ -81,7 +82,10 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
         execution = await createFileSystemChangeSetExecutionAdapter({ journalPath: join(stateDirectory, "recovery-journal.bin"), host, slotCapacity: 16384 });
         executions.set(vaultPath, execution);
       }
-      const bridge = createBridgeInstance({ port: 0, health: { ...health, vault: { id: vaultPath, name: "private-name", path: vaultPath } },
+      const bridge = createBridgeInstance({ port: 0, health: { ...structuredClone(health), vault: { id: vaultPath, name: "private-name", path: vaultPath } },
+        ...(blockedSnapshotUnavailable && vaultPath.includes("vault-a") ? {
+          searchSnapshotReadiness: () => events.includes("real-blocked-fixture-completed") ? "unavailable" as const : "ready" as const,
+        } : {}),
         discoverService: { execute: unused, releaseClient: () => undefined },
         readDataSource: { readBinary: unused, parseFrontmatter: () => null, headings: () => [] },
         changeSets: { store: { load: async () => undefined, save: async () => undefined },
@@ -136,6 +140,33 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
       return { ...created, cleanup: async () => { events.push("clean-descriptor"); } };
     }, record: (_kind: string, name: string) => {
       events.push(name);
+      if (controls === "real" && name.endsWith("local-control-report-required")) {
+        const [vaultPath] = [...descriptors.entries()].find(([path]) => path.includes(name.startsWith("vault-a") ? "vault-a" : "vault-b"))!;
+        const bridge = bridges.get(vaultPath)!;
+        const action = name.includes("resume-writes") ? "resume-writes" : "accept-recovery-baseline";
+        writes.push((async () => {
+          const capture = async () => {
+            const observed = (await createLoopbackMcpClient().observeHealth(bridge.endpoint, vaultPath)).health;
+            if (observed.outcome !== "observed") throw new Error("Missing fixture health");
+            return createStandardDiagnosticBundle({ vaultId: vaultPath, versions: observed.versions,
+              health: { readiness: observed.readiness, recovery: observed.recovery.state, write: observed.write,
+                effectiveGate: observed.effectiveGate?.code ?? null, overall: observed.overall, reasonCodes: observed.reasonCodes, operatorAction: observed.operatorAction },
+              listener: observed.listener, queue: observed.queue, lifecycle: observed.lifecycle,
+              journal: executions.has(vaultPath) ? await executions.get(vaultPath)!.diagnosticJournalFacts() : { availability: "unavailable", frames: [] },
+              changeSets: [], machineEvents: [] });
+          };
+          const before = await capture();
+          let outcome: "accepted" | "rejected" = "accepted";
+          try { if (action === "resume-writes") await bridge.resumeWrites(); else await bridge.acceptTrustedRecoveryBaseline(async () => undefined); }
+          catch { outcome = "rejected"; }
+          expect(outcome).toBe(vaultPath.includes("vault-b") ? "rejected" : "accepted");
+          const after = await capture();
+          const activation = await activateInstalledRuntimeAcceptanceDriver({ vaultPath, pluginId: "privacy-plugin" });
+          try { await activation!.recordLocalWriteControl({ vaultId: vaultPath, endpoint: bridge.endpoint, invocationId: randomUUID(), action, outcome, before, after }); }
+          finally { activation?.dispose(); }
+          events.push(`${name}-published-${outcome}`);
+        })());
+      }
       if (!name.endsWith("standard-local-report-required") || mode === "missing" || mode === "shared") return;
       if (mode === "blocked") expect(events.filter(event => event === "real-blocked-fixture-cleanup-completed").length).toBe(1);
       const [vaultPath, { descriptor }] = [...descriptors.entries()].find(([path]) => path.includes(name.startsWith("vault-a") ? "vault-a" : "vault-b"))!;
@@ -230,6 +261,38 @@ it("hands off real disk FAILED journals and live blocked recovery without dispat
     expect(fixture.events.filter(event => event === "real-blocked-fixture-completed")).toHaveLength(1);
     expect(result.verdict).toBe("partial");
     expect(result.humanRequired).toContain("recovery-baseline");
+  } finally { await fixture.cleanup(); }
+});
+
+it("requires an independently observed Vault B rejected baseline report before consuming Vault A recovery controls", async () => {
+  const fixture = await reportFixture("blocked");
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, recoveryControls: true } as InstalledPrivacyBoundaryOptions)).rejects.toThrow("Local Primary Operator report is required for accept-recovery-baseline");
+    expect(fixture.events).toContain("vault-b-accept-recovery-baseline-local-control-report-required");
+    expect(fixture.events.filter(event => event === "stop")).toHaveLength(2);
+  } finally { await fixture.cleanup(); }
+});
+
+it("consumes rejected B then accepted A baseline reports while preserving terminal public proof", async () => {
+  const fixture = await reportFixture("blocked", "real");
+  try {
+    const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, recoveryControls: true });
+    expect(result.recoveryControlObservations).toEqual([
+      expect.objectContaining({ label: "vault-b", action: "accept-recovery-baseline", outcome: "rejected", liveHealthUnchanged: true }),
+      expect.objectContaining({ label: "vault-a", action: "accept-recovery-baseline", outcome: "accepted", liveWriteState: "paused", journalCleared: true, terminalStatusUnchanged: true }),
+      expect.objectContaining({ label: "vault-a", action: "resume-writes", outcome: "accepted", liveWriteState: "writable", terminalStatusUnchanged: true }),
+    ]);
+    expect(result.verdict).toBe("partial");
+  } finally { await fixture.cleanup(); }
+});
+
+it("observes real blocked recovery handoff even when the post-cleanup Search Snapshot is unavailable", async () => {
+  const fixture = await reportFixture("blocked", "missing", true);
+  try {
+    const result = await runInstalledPrivacyRecoveryAuthorityCorpus(fixture.options);
+    expect(result.recoveryHandoff).toHaveLength(1);
+    expect(result.recoveryHandoff[0]).toMatchObject({ journalPhase: "FAILED", recovery: "blocked", effectiveGate: "recovery_blocked" });
+    expect(fixture.events).toContain("vault-a-standard-local-report-required");
   } finally { await fixture.cleanup(); }
 });
 

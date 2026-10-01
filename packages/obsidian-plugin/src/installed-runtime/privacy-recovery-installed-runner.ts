@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
-import { readFile, realpath } from "node:fs/promises";
+import { open, readFile, realpath } from "node:fs/promises";
+import { openRecoveryJournal } from "../recovery-journal.js";
 import { dirname, join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,7 +11,7 @@ import { parseChangeSetStatusResult, parseHealthResult } from "@llm-wiki/vault-c
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { HealthObservationError } from "./loopback-client.js";
 import { PUBLIC_WIRE_TOOL_NAMES } from "./public-wire-corpus.js";
-import { waitForInstalledLocalOperatorReport } from "./local-operator-report.js";
+import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport } from "./local-operator-report.js";
 import { requestInstalledSemanticEvidenceScenario } from "./smoke-command.js";
 import { readInstalledCrashJournal } from "./installed-crash-restoration-slice.js";
 import { preflightRuntimeProfile } from "./runtime-profile.js";
@@ -40,6 +41,7 @@ export interface InstalledPrivacyBoundaryOptions {
   readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
   readonly operatorReportTimeoutMs: number;
   readonly recoveryFixture?: "trash_note/restore_evidence_deadline_blocks_writes";
+  readonly recoveryControls?: true;
   readonly profileName: string;
   readonly profile: RegisteredRuntimeProfile;
   readonly probe: RuntimeEnvironmentProbe;
@@ -93,6 +95,16 @@ export interface InstalledPrivacyAuthorityBoundarySliceResult {
     readonly recovery: "blocked";
     readonly effectiveGate: "recovery_blocked";
     readonly submissionKeySha256: string;
+  }[];
+  readonly recoveryControlObservations: readonly {
+    readonly label: "vault-a" | "vault-b";
+    readonly action: "accept-recovery-baseline" | "resume-writes";
+    readonly outcome: "accepted" | "rejected";
+    readonly invocationIdSha256: string;
+    readonly liveHealthUnchanged?: true;
+    readonly liveWriteState?: "paused" | "writable";
+    readonly journalCleared?: true;
+    readonly terminalStatusUnchanged?: true;
   }[];
   readonly humanRequired: readonly ["diagnostic-bundles", "recovery-baseline", "resume-writes"];
 }
@@ -264,7 +276,7 @@ async function observeHealth(runtime: LiveVault): Promise<{ digest: string; stat
     throw new Error(`${runtime.label} health observation failed`);
   }
   const health = parseHealthResult(result.structuredContent);
-  if (health.outcome !== "observed" || health.readiness.searchSnapshot !== "ready") throw new Error(`${runtime.label} health is not ready`);
+  if (health.outcome !== "observed") throw new Error(`${runtime.label} health is not observed`);
   return { digest: digest(health), state: health };
 }
 
@@ -362,6 +374,8 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     }
     options.record("assertion", "agent-authority-attempts-observations-unchanged", { attempts: authorityNames.length * 2, statusObservations: 2 });
     options.assertion("authority:agent-attempts-rejected-without-observed-health-or-status-change");
+    let terminalProof: { readonly submissionKey: string; readonly statusSha256: string } | undefined;
+    const recoveryControlObservations: InstalledPrivacyAuthorityBoundarySliceResult["recoveryControlObservations"][number][] = [];
     const recoveryHandoff: InstalledPrivacyAuthorityBoundarySliceResult["recoveryHandoff"][number][] = [];
     const standardDiagnostics: InstalledPrivacyAuthorityBoundarySliceResult["standardDiagnostics"][number][] = [];
     for (const runtime of runtimes) {
@@ -406,6 +420,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
             status.changeSet.state !== "result_unproven") {
           throw new Error("Recovery handoff requires terminal result_unproven status");
         }
+        terminalProof = { submissionKey, statusSha256: digest(status.changeSet) };
         recoveryHandoff.push({ label: runtime.label, journalPhase: "FAILED", proofState: "result_unproven",
           recovery: "blocked", effectiveGate: "recovery_blocked", submissionKeySha256: digest(submissionKey) });
       }
@@ -437,6 +452,56 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       standardDiagnostics.push(facts);
       options.record("assertion", `${runtime.label}-standard-local-report-observed`, facts);
     }
+    if (options.recoveryControls === true) {
+      const affected = runtimes[0]!;
+      const unaffected = runtimes[1]!;
+      if (terminalProof === undefined) throw new Error("Recovery controls require the observed blocked terminal proof");
+      const consumedInvocationIds: string[] = [];
+      const consume = async (runtime: LiveVault, action: "accept-recovery-baseline" | "resume-writes") => {
+        options.record("transport", `${runtime.label}-${action}-local-control-report-required`, { label: runtime.label, action });
+        const report = await waitForNextInstalledLocalControlReport({ descriptor: runtime.descriptor, vaultId: runtime.identity.vaultId,
+          endpoint: runtime.endpoint, configDirectoryName: options.configDirectoryName,
+          action, consumedInvocationIds, timeoutMs: options.operatorReportTimeoutMs });
+        consumedInvocationIds.push(report.invocationId);
+        return report;
+      };
+      const report = await consume(unaffected, "accept-recovery-baseline");
+      if (report.outcome !== "rejected" || (await observeHealth(unaffected)).digest !== before[1]!.digest ||
+          await observeStatus(unaffected) !== statusBefore[1]) throw new Error("Vault B baseline rejection changed live health or status");
+      recoveryControlObservations.push({ label: "vault-b", action: "accept-recovery-baseline", outcome: "rejected",
+        invocationIdSha256: digest(report.invocationId), liveHealthUnchanged: true });
+      const accepted = await consume(affected, "accept-recovery-baseline");
+      const health = (await observeHealth(affected)).state;
+      const handle = await open(join(affected.vault.vaultPath, ".llm-wiki", "recovery-journal.bin"), "r");
+      let journalCleared: boolean;
+      try { journalCleared = (await (await openRecoveryJournal(handle)).recover()) === undefined; }
+      finally { await handle.close(); }
+      const status = await affected.client.callTool({ name: "vault_change_set_status", arguments: { submissionKey: terminalProof.submissionKey } });
+      const observedStatus = parseChangeSetStatusResult(status.structuredContent);
+      if (accepted.outcome !== "accepted" || !journalCleared || health.outcome !== "observed" ||
+          health.recovery.state !== "none" || health.write.state !== "paused" || health.effectiveGate?.code !== "writes_paused" ||
+          status.isError === true || observedStatus.lookup !== "found" || observedStatus.vault.writeState !== "paused" ||
+          observedStatus.vault.writeGate !== health.write.gate || digest(observedStatus.changeSet) !== terminalProof.statusSha256 ||
+          (await observeHealth(unaffected)).digest !== before[1]!.digest || await observeStatus(unaffected) !== statusBefore[1]) {
+        throw new Error("Accepted baseline lacks cleared journal, live paused recovery, or preserved terminal status and Vault B");
+      }
+      recoveryControlObservations.push({ label: "vault-a", action: "accept-recovery-baseline", outcome: "accepted",
+        invocationIdSha256: digest(accepted.invocationId), liveWriteState: "paused", journalCleared: true, terminalStatusUnchanged: true });
+      const resumed = await consume(affected, "resume-writes");
+      const resumedHealth = (await observeHealth(affected)).state;
+      const resumedResult = await affected.client.callTool({ name: "vault_change_set_status", arguments: { submissionKey: terminalProof.submissionKey } });
+      const resumedStatus = parseChangeSetStatusResult(resumedResult.structuredContent);
+      if (resumed.outcome !== "accepted" || resumedHealth.outcome !== "observed" || resumedHealth.recovery.state !== "none" ||
+          resumedHealth.write.state !== "writable" || resumedHealth.write.gate !== "open" || resumedHealth.write.pauseSource !== null ||
+          resumedHealth.effectiveGate !== null || resumedResult.isError === true || resumedStatus.lookup !== "found" ||
+          resumedStatus.vault.writeState !== "writable" || resumedStatus.vault.writeGate !== "open" ||
+          digest(resumedStatus.changeSet) !== terminalProof.statusSha256 ||
+          (await observeHealth(unaffected)).digest !== before[1]!.digest || await observeStatus(unaffected) !== statusBefore[1]) {
+        throw new Error("Resume lacks live writable recovery-safe state or preserved terminal status and Vault B");
+      }
+      recoveryControlObservations.push({ label: "vault-a", action: "resume-writes", outcome: "accepted",
+        invocationIdSha256: digest(resumed.invocationId), liveWriteState: "writable", terminalStatusUnchanged: true });
+    }
     return {
       scope: "two-vault-agent-authority-boundary",
       verdict: "partial",
@@ -450,6 +515,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       observedHealthUnchanged: true,
       standardDiagnostics,
       recoveryHandoff,
+      recoveryControlObservations,
       provenance: runtimes.map((runtime, index) => ({
         label: runtime.label, vaultIdSha256: digest(runtime.identity.vaultId),
         installedMainSha256: runtime.descriptor.installedMainSha256,
