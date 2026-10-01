@@ -11,6 +11,16 @@ export const INSTALLED_RUNTIME_VAULT_DIRECTORY_PREFIX =
   "installed-runtime-vault-";
 
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const crashRestorationCommandSchema = z.object({
+  sequence: z.number().int().positive(),
+  capabilityToken: digestSchema,
+  action: z.literal("run-crash-restoration-scenario"),
+  scenario: z.literal("create_note/after_prepared"),
+  expectedVaultId: z.string().min(1),
+  endpoint: z.string().url(),
+  submissionKey: z.string().min(1),
+  input: z.unknown(),
+}).strict();
 
 export const installedRuntimeAcceptanceCommandSchema = z.discriminatedUnion(
   "action",
@@ -32,6 +42,7 @@ export const installedRuntimeAcceptanceCommandSchema = z.discriminatedUnion(
         endpoint: z.string().url(),
       })
       .strict(),
+    crashRestorationCommandSchema,
   ],
 );
 

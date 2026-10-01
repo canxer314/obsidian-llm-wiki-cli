@@ -66,6 +66,12 @@ import {
   createInstalledSemanticEvidenceScenarioControl,
   createInstalledSemanticEvidenceWire,
 } from "./installed-runtime/installed-semantic-evidence.js";
+import { createNoteCorpusProfile } from "./corpus/create-note-corpus.js";
+import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
+import {
+  parseCrashRestorationCommand,
+  writeCrashRestorationBoundaryReport,
+} from "./installed-runtime/crash-restoration-protocol.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -142,6 +148,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
       | ReturnType<typeof createInstalledSemanticEvidenceScenarioControl>
       | undefined;
     let runtime!: ManagedVaultBridgeRuntime;
+    let armedCrashBoundary: {
+      readonly descriptor: import("./installed-runtime/acceptance-driver-protocol.js").InstalledRuntimeAcceptanceDescriptor;
+      readonly command: import("./installed-runtime/crash-restoration-protocol.js").CrashRestorationCommand;
+    } | undefined;
     let incompatibleState = false;
     const semanticVersions = new ObsidianSemanticVersionTracker();
     const referenced = async (path: string): Promise<boolean> =>
@@ -354,6 +364,17 @@ export default class VaultOperationBridgePlugin extends Plugin {
       },
       changeSetDataSource,
       changeSetExecution,
+      crashInjector: async (point) => {
+        const armed = armedCrashBoundary;
+        if (armed === undefined || point !== "after_prepared") return;
+        const frame = await changeSetExecution?.loadRecoveryFrame();
+        if (frame?.phase !== "PREPARED" || frame.input.submissionKey !== armed.command.submissionKey) {
+          throw new Error("Installed crash injector did not observe the armed PREPARED frame");
+        }
+        await writeCrashRestorationBoundaryReport({ descriptor: armed.descriptor,
+          command: armed.command, journalPhase: frame.phase });
+        await new Promise<void>(() => undefined);
+      },
       incompatibleState,
       onSearchSnapshotRefreshScheduled: (observation) => {
         installedSemanticEvidence?.recordSearchSnapshotRefresh(observation);
@@ -814,6 +835,29 @@ export default class VaultOperationBridgePlugin extends Plugin {
           configDirectoryName: this.app.vault.configDir,
           executeSemanticEvidenceScenario: (request) =>
             installedSemanticEvidence!.execute(request),
+          executeCrashRestorationScenario: async ({ descriptor, command }) => {
+            const parsed = parseCrashRestorationCommand(command);
+            if (parsed === null) throw new Error("Installed crash-restoration command is malformed");
+            if (parsed.expectedVaultId !== runtime.persistedSettings?.vaultId ||
+                parsed.endpoint !== runtime.bridge?.endpoint.toString()) {
+              throw new Error("Installed crash-restoration command targets another runtime");
+            }
+            const profile = createNoteCorpusProfile();
+            if (!parsed.submissionKey.startsWith("submission-")) {
+              throw new Error("Installed crash-restoration fixture key is invalid");
+            }
+            const expectedInput = profile.buildSubmitInput(parsed.submissionKey.slice("submission-".length));
+            if (JSON.stringify(parsed.input) !== JSON.stringify(expectedInput)) {
+              throw new Error("Installed crash-restoration fixture does not match create-note program");
+            }
+            armedCrashBoundary = { descriptor, command: parsed };
+            const before = await changeSetExecution.loadRecoveryFrame();
+            if (before !== null) throw new Error("Crash slice requires a clean Recovery Journal");
+            void installedSemanticEvidenceWire.submit({ endpoint: new URL(parsed.endpoint),
+              expectedVaultId: parsed.expectedVaultId, input: parseChangeSetSubmitInput(parsed.input) })
+              .catch(() => undefined);
+            return { boundary: "after_prepared", journalPhase: "PREPARED" };
+          },
         })) ?? undefined;
     }
     const addPathClassificationCommand = (

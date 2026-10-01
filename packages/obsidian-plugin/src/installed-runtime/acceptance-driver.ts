@@ -2,6 +2,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 
+import { parseCrashRestorationCommand } from "./crash-restoration-protocol.js";
 import {
   installedRuntimeAcceptanceDescriptorSchema,
   isPathInside,
@@ -19,6 +20,10 @@ export interface InstalledRuntimeAcceptanceDriverOptions {
   readonly vaultPath: string;
   readonly pluginId: string;
   readonly configDirectoryName?: string;
+  readonly executeCrashRestorationScenario?: (options: {
+    readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
+    readonly command: import("./crash-restoration-protocol.js").CrashRestorationCommand;
+  }) => Promise<{ readonly boundary: "after_prepared"; readonly journalPhase: "PREPARED" }>;
   readonly executeSemanticEvidenceScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly scenario: string;
@@ -67,7 +72,8 @@ export async function activateInstalledRuntimeAcceptanceDriver(
   let lastSequence = loaded.descriptor.command.sequence;
   let commandTail: Promise<void> = Promise.resolve();
   const executeSemanticEvidenceScenario = options.executeSemanticEvidenceScenario;
-  if (executeSemanticEvidenceScenario !== undefined) {
+  const executeCrashRestorationScenario = options.executeCrashRestorationScenario;
+  if (executeSemanticEvidenceScenario !== undefined || executeCrashRestorationScenario !== undefined) {
     const inspectCommand = async (): Promise<void> => {
       if (disposed) return;
       const parsed = installedRuntimeAcceptanceDescriptorSchema.parse(
@@ -85,17 +91,29 @@ export async function activateInstalledRuntimeAcceptanceDriver(
       ) {
         throw new Error("Installed acceptance descriptor identity changed");
       }
+      await requireBoundReportRoot();
       const command = parsed.command;
       if (command.sequence <= lastSequence) return;
       if (command.sequence !== lastSequence + 1) {
         throw new Error("Installed acceptance command sequence is not contiguous");
       }
-      if (command.action !== "run-semantic-evidence-scenario") return;
       if (command.capabilityToken !== loaded.descriptor.capabilityToken) {
         throw new Error("Installed acceptance command capability changed");
       }
+      const crashCommand = parseCrashRestorationCommand(command);
+      if (crashCommand !== null) {
+        if (executeCrashRestorationScenario === undefined) return;
+        lastSequence = command.sequence;
+        try {
+          await executeCrashRestorationScenario({ descriptor: parsed, command: crashCommand });
+        } catch {
+          // Do not publish a success-shaped marker when the installed execution failed.
+        }
+        return;
+      }
+      if (command.action !== "run-semantic-evidence-scenario") return;
+      if (executeSemanticEvidenceScenario === undefined) return;
       lastSequence = command.sequence;
-      await requireBoundReportRoot();
       let result: { readonly summary: unknown } | {
         readonly failure: { readonly code: "scenario_execution_failed" };
       };
@@ -110,11 +128,11 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         // Error messages may contain Vault content, paths, or credentials.
         result = { failure: { code: "scenario_execution_failed" } };
       }
-      await requireBoundReportRoot();
       const reportPath = semanticEvidenceScenarioReportPath(
         parsed.reportDirectory,
         command.scenario,
       );
+      await requireBoundReportRoot();
       await mkdir(dirname(reportPath), { recursive: true });
       const temporaryPath = `${reportPath}.${command.sequence}.next`;
       await writeFile(
