@@ -159,8 +159,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
     };
     watcher = watch(dirname(loaded.path), { persistent: false }, (_event, filename) => {
       if (filename !== null && filename.toString() !== basename(loaded.path)) return;
-      commandTail = commandTail.then(inspectCommand);
-      void commandTail.catch(() => undefined);
+      commandTail = commandTail.then(inspectCommand).catch(() => undefined);
     });
   }
   return {

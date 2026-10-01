@@ -148,6 +148,9 @@ export async function runInstalledCrashRestorationSlice(
     const installed = acceptanceDriver.descriptor;
     const reportDirectory = resolve(options.reportDirectory);
     if (installed.reportDirectory !== reportDirectory || installed.runId !== options.runId ||
+        installed.vaultPath !== resolve(vault.vaultPath) ||
+        installed.pluginId !== options.candidate.identity.pluginId ||
+        installed.installedMainSha256 !== options.candidate.identity.files.find(file => file.path === "main.js")?.sha256 ||
         installed.candidateBundleSha256 !== options.candidate.identity.bundleSha256) {
       throw new Error("Crash slice acceptance descriptor is not candidate/run bound");
     }

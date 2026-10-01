@@ -1,12 +1,75 @@
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
 import { requestInstalledCrashRestorationScenario } from "../src/installed-runtime/crash-restoration-protocol.js";
-import { mkdtemp, mkdir, readdir, open, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { crashRestorationBoundaryPath, loadCrashBoundaryReport } from "../src/installed-runtime/crash-restoration-protocol.js";
+import { crashRestorationBoundaryPath, loadCrashBoundaryReport, writeCrashRestorationBoundaryReport } from "../src/installed-runtime/crash-restoration-protocol.js";
 import { openRecoveryJournal } from "../src/recovery-journal.js";
-import { readInstalledCrashJournal } from "../src/installed-runtime/installed-crash-restoration-slice.js";
+import { readInstalledCrashJournal, runInstalledCrashRestorationSlice } from "../src/installed-runtime/installed-crash-restoration-slice.js";
+import { brandVerifiedCandidateBundle, inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
+import type { InstalledCrashRestorationSliceOptions } from "../src/installed-runtime/installed-crash-restoration-slice.js";
+
+it("rejects a crash descriptor for a foreign Vault, plugin, or installed entry point before startup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-binding-"));
+  const candidateDirectory = join(root, "candidate");
+  await mkdir(candidateDirectory);
+  await writeFile(join(candidateDirectory, "manifest.json"), JSON.stringify({ id: "crash-plugin", version: "0.1.0", minAppVersion: "1.0.0" }));
+  await writeFile(join(candidateDirectory, "main.js"), "candidate");
+  const candidate = brandVerifiedCandidateBundle({
+    bundleDirectory: candidateDirectory, identity: await inspectCandidateBundle(candidateDirectory),
+    tag: "v0.1.0", repository: "test/crash", workflowRef: "test", attestationSource: "local-candidate",
+  });
+  let starts = 0;
+  try {
+    for (const changed of [
+      { vaultPath: join(root, "foreign-vault") },
+      { pluginId: "foreign-plugin" },
+      { installedMainSha256: "f".repeat(64) },
+    ]) {
+      await expect(runInstalledCrashRestorationSlice({
+        runId: "binding", workingDirectory: root, reportDirectory: join(root, "reports"), candidate,
+        processControl: { start: async () => { starts += 1; throw new Error("Unexpected runtime startup"); } },
+        client: {}, profile: {}, probe: {}, timeouts: { startupMs: 10, stopMs: 10, portClosedMs: 10 },
+        prepareAcceptanceDriver: async (request) => {
+          const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "binding", reportDirectory: join(root, "reports") });
+          return { ...created, descriptor: { ...created.descriptor, ...changed }, cleanup: async () => undefined };
+        },
+        record: () => undefined, assertion: () => undefined,
+      } as InstalledCrashRestorationSliceOptions)).rejects.toThrow("descriptor is not candidate/run bound");
+    }
+    expect(starts).toBe(0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("continues inspecting an authenticated command after rejecting a malformed descriptor update", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-invalid-update-"));
+  const vaultPath = join(root, "installed-runtime-vault-invalid-update");
+  const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "crash-plugin");
+  await mkdir(pluginDirectory, { recursive: true });
+  await writeFile(join(pluginDirectory, "main.js"), "candidate");
+  const created = await createInstalledRuntimeAcceptanceDescriptor({
+    runId: "invalid-update", vaultPath, pluginId: "crash-plugin", reportDirectory: join(root, "reports"),
+    candidateBundleSha256: "a".repeat(64),
+  });
+  let dispatched = 0;
+  const activation = await activateInstalledRuntimeAcceptanceDriver({
+    vaultPath, pluginId: "crash-plugin",
+    executeCrashRestorationScenario: async () => { dispatched += 1; return { boundary: "after_prepared", journalPhase: "PREPARED" }; },
+  });
+  try {
+    await writeFile(created.path, "{not-json");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(dispatched).toBe(0);
+    await writeFile(created.path, JSON.stringify(created.descriptor));
+    await requestInstalledCrashRestorationScenario({
+      descriptorPath: created.path, descriptor: created.descriptor,
+      expectedVaultId: "update-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      input: { submissionKey: "update-key" }, crashPoint: "after_prepared",
+    });
+    await expect.poll(() => dispatched, { timeout: 1000 }).toBe(1);
+  } finally { activation?.dispose(); await rm(root, { recursive: true, force: true }); }
+});
 
 it("does not publish a PREPARED marker merely because a private crash command was dispatched", async () => {
   const root = await mkdtemp(join(tmpdir(), "installed-crash-dispatch-"));
@@ -37,6 +100,32 @@ it("does not publish a PREPARED marker merely because a private crash command wa
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(await readdir(reportDirectory)).toEqual([]);
   } finally { activation?.dispose(); await rm(root, { recursive: true, force: true }); }
+});
+
+it("does not leak a crash capability marker through a report-root symlink outside the generated workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-root-"));
+  const outside = await mkdtemp(join(tmpdir(), "installed-crash-outside-"));
+  const vaultPath = join(root, "installed-runtime-vault-root");
+  const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "crash-plugin");
+  await mkdir(pluginDirectory, { recursive: true });
+  await writeFile(join(pluginDirectory, "main.js"), "candidate");
+  const reportDirectory = join(root, "reports");
+  const created = await createInstalledRuntimeAcceptanceDescriptor({
+    runId: "report-root", vaultPath, pluginId: "crash-plugin", reportDirectory,
+    candidateBundleSha256: "a".repeat(64),
+  });
+  try {
+    await rm(reportDirectory, { recursive: true, force: true });
+    await symlink(outside, reportDirectory, "dir");
+    await expect(writeCrashRestorationBoundaryReport({
+      descriptor: created.descriptor, journalPhase: "PREPARED",
+      command: { sequence: 1, capabilityToken: created.descriptor.capabilityToken,
+        action: "run-crash-restoration-scenario", scenario: "create_note/after_prepared",
+        expectedVaultId: "root-vault", endpoint: "http://127.0.0.1:32123/mcp",
+        submissionKey: "root-key", input: {} },
+    })).rejects.toThrow("report root");
+    expect(await readdir(outside)).toEqual([]);
+  } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });
 
 it("rejects a crash marker bound to a foreign endpoint or submission", async () => {

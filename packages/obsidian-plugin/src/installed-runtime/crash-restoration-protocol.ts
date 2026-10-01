@@ -1,11 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import { z } from "zod";
 
 import {
   installedRuntimeAcceptanceDescriptorSchema,
+  isPathInside,
   type InstalledRuntimeAcceptanceDescriptor,
 } from "./acceptance-driver-protocol.js";
 
@@ -95,7 +96,12 @@ export async function writeCrashRestorationBoundaryReport(options: {
     point: "after_prepared",
     journalPhase: options.journalPhase,
   });
-  const path = crashRestorationBoundaryPath(options.descriptor.reportDirectory);
+  const workspaceRealPath = await realpath(dirname(options.descriptor.vaultPath));
+  const reportRealPath = await realpath(options.descriptor.reportDirectory);
+  if (!isPathInside(workspaceRealPath, reportRealPath)) {
+    throw new Error("Installed crash report root escaped the real run workspace");
+  }
+  const path = crashRestorationBoundaryPath(reportRealPath);
   const temp = `${path}.${randomBytes(16).toString("hex")}.next`;
   await writeFile(temp, `${JSON.stringify(report)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
   try { await rename(temp, path); }
