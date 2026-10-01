@@ -195,6 +195,18 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "rejected-cleared-journal" })).rejects.toThrow("rejected baseline changed journal facts");
+    const historical = createStandardDiagnosticBundle({ ...evidence, changeSets: [{
+      changeSetId: "historical-change", submissionKey: "historical-key", enqueueSeq: 1,
+      state: "intent_not_applied", executionPhase: "terminal",
+    }] });
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "rejected-lost-history", action: "accept-recovery-baseline", outcome: "rejected",
+      before: historical, after: bundle,
+    });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "rejected-lost-history" })).rejects.toThrow("baseline changed historical outcomes");
     await writeFile(join(pluginDirectory, "main.js"), "replaced candidate");
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),

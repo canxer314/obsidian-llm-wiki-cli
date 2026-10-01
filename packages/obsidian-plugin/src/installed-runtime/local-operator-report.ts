@@ -114,6 +114,15 @@ export async function loadInstalledLocalOperatorReport(options: {
   }
   const before = bundles[0]!;
   const after = bundles[1]!;
+  if (report.action === "accept-recovery-baseline") {
+    const historicalOutcomes = (bundle: StandardDiagnosticBundle) => bundle.changeSetOutcomes
+      .filter(entry => entry.executionPhase === "terminal")
+      .map(entry => ({ enqueueSeq: entry.enqueueSeq, state: entry.state, executionPhase: entry.executionPhase }))
+      .sort((left, right) => left.enqueueSeq - right.enqueueSeq);
+    if (JSON.stringify(historicalOutcomes(before)) !== JSON.stringify(historicalOutcomes(after))) {
+      throw new Error("Local operator baseline changed historical outcomes");
+    }
+  }
   if (report.action === "accept-recovery-baseline" && report.outcome === "rejected" &&
       (before.health.recovery !== after.health.recovery ||
        before.health.effectiveGate !== after.health.effectiveGate ||
