@@ -73,3 +73,24 @@ local evidence containing a capability: do not publish the raw report files.
 No local command invocation means no local authority proof. Reports alone do not
 complete the full privacy/recovery corpus or A-01…A-44 aggregation; the installed
 runner must also verify scenario preconditions, history, isolation, and cleanup.
+
+The local report consumer reloads the installed descriptor and verifies the
+installed entry-point digest before reading evidence. It rejects redirected
+report directories, non-private files, foreign run identities, and any endpoint
+other than `http://127.0.0.1:<port>/mcp` without credentials, query, or fragment.
+Standard and write-control bundle checksums are recomputed; a writer's
+`checksumVerified` declaration is not itself proof.
+
+An accepted baseline report must begin with blocked recovery and a unique latest
+valid `FAILED` Journal frame, then show cleared Journal slots, recovery `none`,
+and writes still paused. A rejected baseline must preserve recovery/write and
+Journal facts. Both outcomes must preserve the stable terminal outcome projection
+(enqueue sequence, state, and execution phase); randomized diagnostic aliases are
+not compared across copies. This projection is not a substitute for the runner's
+independent historical Change Set identity/status observations.
+
+`waitForInstalledLocalOperatorReport` observes reports with a bounded timeout. It
+never dispatches a local action. Only a missing report is retried: an absent
+installed descriptor, changed bundle, malformed report, or failed validation is
+an immediate failure. Missing Primary Operator evidence cannot become a passed
+corpus by waiting or by substituting an Agent invocation.
