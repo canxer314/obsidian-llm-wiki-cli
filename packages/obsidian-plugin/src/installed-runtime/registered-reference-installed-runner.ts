@@ -11,6 +11,7 @@ import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { installCandidateBundle } from "./candidate-bundle.js";
 import type { InstalledRuntimeHarnessOptions } from "./harness.js";
 import {
+  ObsidianProcessError,
   readPersistedBridgeIdentity,
   waitForCondition,
   type ObsidianProcessHandle,
@@ -302,6 +303,9 @@ async function startRuntime(
     };
   } catch (error) {
     for (const client of clients.reverse()) await client.close().catch(() => undefined);
+    if (process === undefined && error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+      throw error;
+    }
     if (process !== undefined) {
       await process.stop();
       const identity = await readPersistedBridgeIdentity(

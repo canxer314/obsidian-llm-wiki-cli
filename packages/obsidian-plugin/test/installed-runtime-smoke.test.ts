@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ObsidianProcessError } from "../src/installed-runtime/obsidian-process.js";
 import { assembleReleaseBundle } from "../src/release/assemble-release-bundle.js";
 import { verifyReleaseBundle } from "../src/release/verify-release-bundle.js";
 import { provisionTestVault, cleanupTestVault } from "../src/installed-runtime/test-vault.js";
@@ -216,6 +217,34 @@ describe("installed-runtime authoritative command", () => {
       },
       record: () => undefined,
       assertion: () => undefined,
+    })).rejects.toBe(shutdownError);
+    expect(cleanupCalls).toBe(0);
+  });
+
+  it("preserves reference runtime roots when startup shutdown cannot be confirmed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reference-start-residue-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const packageRoot = join(root, "pkg");
+    await mkdir(join(packageRoot, "dist"), { recursive: true });
+    await writeFile(join(packageRoot, "manifest.json"), JSON.stringify({
+      id: "llm-wiki-vault-bridge", name: "Verifier fixture",
+      version: "0.2.0", minAppVersion: "1.13.4", isDesktopOnly: true,
+    }));
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "0.2.0" }));
+    await writeFile(join(packageRoot, "dist", "main.js"), "// verifier fixture\n");
+    const bundleDirectory = join(root, "bundle");
+    await assembleReleaseBundle({ tag: "v0.2.0", packageRoot, bundleDirectory });
+    const candidate = await verifyReleaseBundle({ bundleDirectory, expectedTag: "v0.2.0" });
+    const shutdownError = new ObsidianProcessError("startup shutdown unconfirmed", "obsidian_stop_failed");
+    let cleanupCalls = 0;
+    await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      runId: "startup-shutdown-proof", workingDirectory: root, candidate,
+      processControl: { start: async () => { throw shutdownError; } },
+      client: {} as never, configDirectoryName: ".obsidian",
+      timeouts: { startupMs: 1, stopMs: 1, portClosedMs: 1 },
+      provisionVault: provisionTestVault,
+      cleanupVault: async vault => { cleanupCalls += 1; return cleanupTestVault(vault); },
+      record: () => undefined, assertion: () => undefined,
     })).rejects.toBe(shutdownError);
     expect(cleanupCalls).toBe(0);
   });
