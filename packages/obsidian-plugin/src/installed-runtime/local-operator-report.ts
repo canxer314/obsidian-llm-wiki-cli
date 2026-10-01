@@ -69,6 +69,12 @@ export async function loadInstalledLocalOperatorReport(options: {
       report.vaultId !== options.vaultId || report.endpoint !== options.endpoint.toString()) {
     throw new Error("Local operator report identity does not match the installed run");
   }
+  if (options.endpoint.protocol !== "http:" || options.endpoint.hostname !== "127.0.0.1" ||
+      options.endpoint.username !== "" || options.endpoint.password !== "" ||
+      options.endpoint.port === "" || options.endpoint.pathname !== "/mcp" ||
+      options.endpoint.search !== "" || options.endpoint.hash !== "") {
+    throw new Error("Local operator report does not match the private loopback endpoint");
+  }
   if (report.action === "content-inclusive-diagnostic-copy") {
     if (options.action !== report.action || report.confirmationId !== options.confirmationId ||
         report.selectionSha256 !== options.expectedSelectionSha256) {
@@ -96,6 +102,12 @@ export async function loadInstalledLocalOperatorReport(options: {
   }
   const before = bundles[0]!;
   const after = bundles[1]!;
+  if (report.action === "accept-recovery-baseline" && report.outcome === "rejected" &&
+      (before.health.recovery !== after.health.recovery ||
+       before.health.effectiveGate !== after.health.effectiveGate ||
+       JSON.stringify(before.health.write) !== JSON.stringify(after.health.write))) {
+    throw new Error("Local operator rejected baseline changed recovery state");
+  }
   if (report.action === "accept-recovery-baseline" && report.outcome === "accepted" &&
       (before.health.recovery !== "blocked" || before.health.effectiveGate !== "recovery_blocked" ||
        before.journal.availability !== "available" ||

@@ -140,6 +140,14 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "resume-writes", invocationId: "unsafe-resume" })).rejects.toThrow("resume transition");
+    await activation!.recordLocalWriteControl({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      invocationId: "mutating-rejected-baseline", action: "accept-recovery-baseline", outcome: "rejected",
+      before: blocked, after: bundle,
+    });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      action: "accept-recovery-baseline", invocationId: "mutating-rejected-baseline" })).rejects.toThrow("rejected baseline changed recovery state");
     const replacement = join(root, "replacement-reports");
     await mkdir(replacement);
     await rename(reports, `${reports}-original`);
