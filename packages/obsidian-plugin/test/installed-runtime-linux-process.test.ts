@@ -98,3 +98,29 @@ it("does not report startup failure as cleaned until the whole process group is 
     if (killedGroup !== undefined) { try { realKill(killedGroup, "SIGKILL"); } catch {} }
   }
 });
+
+it("classifies startup termination errors as unconfirmed shutdown", async () => {
+  const { writeFile } = await import("node:fs/promises");
+  const { vi } = await import("vitest");
+  const root = await mkdtemp(join(tmpdir(), "linux-start-kill-refused-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const executable = join(root, "host");
+  await writeFile(executable, '#!/bin/sh\nexec sleep 30\n', { mode: 0o700 });
+  const realKill = process.kill.bind(process);
+  let group: number | undefined;
+  const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < 0 && signal === "SIGKILL") {
+      group = pid;
+      throw Object.assign(new Error("termination refused"), { code: "EPERM" });
+    }
+    return realKill(pid, signal);
+  });
+  try {
+    await expect(createLinuxObsidianProcessControl({ executablePath: executable, stopTimeoutMs: 2_000 })
+      .start({ vaultPath: root, profileDirectory: join(root, "profile") }))
+      .rejects.toMatchObject({ code: "obsidian_stop_failed" });
+  } finally {
+    kill.mockRestore();
+    if (group !== undefined) { try { realKill(group, "SIGKILL"); } catch {} }
+  }
+});
