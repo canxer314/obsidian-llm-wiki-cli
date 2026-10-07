@@ -1,3 +1,4 @@
+import { syntheticFifoProof } from "./helpers/fifo-proof.js";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5,6 +6,8 @@ import { basename, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as crashCorpus from "../src/installed-runtime/crash-restoration-retained-authority-corpus.js";
+import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
+const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 import {
   createBridgeInstance,
@@ -234,7 +237,7 @@ async function arrangeRun(
     candidateVerification: { expectedTag: CANDIDATE_TAG, expectedPluginId: "candidate-bridge" },
     workingDirectory: root,
     evidencePath: join(root, "evidence", `${runId}.json`),
-    probe: probe(),
+    probe: { ...probe(), probeRunning: async () => MATCHING_OBSERVED },
     processControl: createFakeObsidianProcessControl(),
     prepareInstalledRuntimeAcceptanceDriver: async () => ({
       requestSemanticEvidenceScenario: async () => undefined,
@@ -242,6 +245,10 @@ async function arrangeRun(
     }),
     profiles: PROFILES,
     runId,
+    runPersistentFifoCorpus: async ({ runId, profile, candidate, assertion }) => {
+      assertion("concurrency/persistent-fifo:repreflight-and-restart-proven");
+      return syntheticFifoProof(runId, profile.name, candidate.identity.bundleSha256);
+    },
     runPublicWireCorpus: async ({ fixtureSeed }) => ({
       evidence: {
         fixtureSeed: createHash("sha256").update(fixtureSeed, "utf8").digest("hex"),
@@ -302,12 +309,12 @@ async function arrangeRun(
         verdict: "passed",
       },
     }),
-    runChangeSetCorpus: async ({ seedNotes, record, assertion }) => {
+    runChangeSetCorpus: async ({ seedNotes, record, assertion, inventoryContext, expectedVaultId }) => {
       const seeded =
         seedNotes.find(({ path }) => path === "Notes/Welcome.md")?.content ?? "";
       const digest = createHash("sha256").update(seeded, "utf8").digest("hex");
       const entries = [{ path: "Notes/Welcome.md", sha256: digest, sizeBytes: 0 }];
-      record("assertion", "stubbed-change-set-corpus-began", {
+      record("assertion", "change-set-corpus-began", {
         corpusId: "change-set-submission-proof",
       });
       record("cleanup", "change-set-idle-state", {
@@ -316,6 +323,39 @@ async function arrangeRun(
         currentExecutionId: null,
         writeGate: "open",
       });
+      const inventoryEntries = [
+        { kind: "directory" as const, path: "Notes" }, { kind: "directory" as const, path: "ChangeSetProof" },
+        { kind: "file" as const, path: "Notes/Welcome.md", sha256: digest, sizeBytes: 0 },
+        { kind: "file" as const, path: "ChangeSetProof/AdmissionProof.md", sha256: digest, sizeBytes: 44 },
+        { kind: "file" as const, path: "ChangeSetProof/Editable.md", sha256: digest, sizeBytes: 26 },
+        { kind: "file" as const, path: "ChangeSetProof/Evidence.bin", sha256: digest, sizeBytes: 5 },
+        { kind: "absent" as const, path: "ChangeSetProof/ReadDep.md" },
+        { kind: "absent" as const, path: "ChangeSetProof/copy.bin" },
+        { kind: "absent" as const, path: "ChangeSetProof/AdmissionProof.md/Child.md" },
+      ].map((entry) => Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))) as Array<{kind:"file";path:string;sha256:string;sizeBytes:number}|{kind:"directory"|"absent";path:string}>;
+      const inventoryDigest = createHash("sha256").update(JSON.stringify(inventoryEntries)).digest("hex");
+      const inventory = { scope: "all-public-vault-files-directories-and-affected-absence" as const, entries: inventoryEntries, digest: inventoryDigest };
+      const rejectionNames = ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent", "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination"];
+      const proofs = rejectionNames.map((name, index) => ({ submissionKeySha256: createHash("sha256").update(name).digest("hex"), changeSetId: `rejected-${index}`, state: "intent_not_applied" as const, failureCode: name === "rejection/non-unique-replacement" ? "exact_match_count_mismatch" as const : index < 3 ? "stale_observation" as const : "path_conflict" as const, executed: false }));
+      for (const [index, name] of rejectionNames.entries()) {
+        const proof = proofs[index]!;
+        const changeSet = { changeSetId: proof.changeSetId, state: proof.state, failure: proof.failureCode === "path_conflict" ? { code: proof.failureCode, operationId: "operation", path: "ChangeSetProof/AdmissionProof.md" } : proof.failureCode === "exact_match_count_mismatch" ? { code: proof.failureCode, operationId: "operation", actualOccurrences: 2 } : { code: proof.failureCode } };
+        const vault = { writeGate: "open", writeState: "writable" };
+        record("assertion", `${name}:inventory-before`, inventory);
+        record("tool", "vault_change_set_submit", { submissionKeySha256: proof.submissionKeySha256, result: { outcome: "registered", changeSet, vault } });
+        record("tool", "vault_change_set_status", { submissionKeySha256: proof.submissionKeySha256, result: { lookup: "found", changeSet, vault } });
+        record("tool", "vault_health", {
+          outcome: "observed", vault: { id: expectedVaultId, name: "fixture", path: inventoryContext!.vaultPath },
+          versions: { bridge: "1", plugin: "1", protocol: "1.0", persistentStateSchema: 1, recoveryJournalSchema: 1 },
+          readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" },
+          recovery: { state: "none" }, write: { gate: "open", state: "writable", pauseSource: null },
+          queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
+          lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" },
+          listener: { address: "127.0.0.1", port: 32123 },
+          effectiveGate: null, overall: "healthy", reasonCodes: [], operatorAction: "none",
+        });
+        record("assertion", `${name}:inventory-after`, inventory);
+      }
       const assertions = [
         "submission/valid-create:no-validate-apply-handshake",
         "rejection/stale-direct-target:no-mutation-inventory",
@@ -359,9 +399,13 @@ async function arrangeRun(
             executed: true,
           },
         ],
-        rejectionClasses: [
-          { name: "rejection/stale-direct-target", failureCode: "stale_observation" },
-        ],
+        rejectionClasses: rejectionNames.map((name, index) => ({
+            name, failureCode: proofs[index]!.failureCode, noMutationDigestUnchanged: true,
+            binding: { runId: inventoryContext!.runId, runtimeProfileId: inventoryContext!.runtimeProfileId, candidateBundleSha256: inventoryContext!.candidateBundleSha256, vaultIdSha256: createHash("sha256").update(expectedVaultId).digest("hex") },
+            beforeInventory: inventory, afterInventory: inventory, proof: proofs[index]!, status: proofs[index]!,
+            eventOrder: { before: index * 5 + 3, submit: index * 5 + 4, status: index * 5 + 5, terminal: index * 5 + 6, after: index * 5 + 7 },
+            terminal: { recoveryState: "none", queueLength: 0, currentExecutionId: null, writeGate: "open" },
+          })),
         fifoReport: {
           concurrentSubmissions: 1,
           applied: 1,
@@ -429,6 +473,7 @@ async function arrangeRun(
         "span/bom-crlf-cjk-astral:single-verified-span",
         "reject/stale-closure:no-mutation",
         "span/duplicate-equal-spellings:untouched-bytes-exact",
+        "span/second-equal-spelling-only:untouched-bytes-exact",
         "observer:no-half-written-markdown",
       ]) assertion(name);
       return stubRegisteredReferenceRewriteOutcome();
@@ -668,6 +713,13 @@ function stubRegisteredReferenceRewriteOutcome(): RegisteredReferenceRewriteOutc
     rawBytes: {
       fixtures: [{ scenario: "span/exact", hostModes: ["bom"], locatedReferences: 1, everyReferenceExactlyOneVerifiedSpan: true, everyUntouchedByteExact: true, finalBytesHashReread: true }],
       duplicateEqualSpellingsRewritten: 1,
+      secondEqualSpellingOnly: {
+        scenario: "span/second-equal-spelling-only", fixturePath: "ReferenceProof/Single/Ref.md",
+        fixtureSha256: a26Digest(SINGLE_SPAN_BEFORE), beforeSha256: a26Digest(SINGLE_SPAN_BEFORE), afterSha256: a26Digest(SINGLE_SPAN_AFTER),
+        referencesLocated: 2, selectedOrdinal: 2, selectedSpan: { startByte: 58, endByteExclusive: 72 },
+        beforeSizeBytes: 83, afterSizeBytes: 89, untouchedPrefixSha256: a26Digest(Buffer.from(SINGLE_SPAN_BEFORE).subarray(0, 58)), untouchedSuffixSha256: a26Digest(Buffer.from(SINGLE_SPAN_BEFORE).subarray(72)),
+        untouchedPrefixExact: true, untouchedSuffixExact: true, firstReferenceExact: true, fullBytesExact: true, finalBytesHashReread: true,
+      },
     },
     rejections: [{ scenario: "reject/stale", failureCode: "stale_observation", registered: true, noMutationDigestUnchanged: true }],
     observer: { enabledSecondObserver: true, discoversIssued: 1, privateStagingPathsObserved: 0, halfWrittenMarkdownObserved: 0 },

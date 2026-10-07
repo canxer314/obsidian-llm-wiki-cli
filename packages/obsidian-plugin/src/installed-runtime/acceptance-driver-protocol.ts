@@ -3,6 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import { z } from "zod";
+import { fifoCommandSchema } from "./fifo-observation.js";
 
 export const INSTALLED_RUNTIME_ACCEPTANCE_DESCRIPTOR =
   "installed-runtime-acceptance.json";
@@ -43,6 +44,13 @@ export const installedRuntimeAcceptanceCommandSchema = z.discriminatedUnion(
       })
       .strict(),
     crashRestorationCommandSchema,
+    z.object({
+      sequence: z.number().int().positive(), capabilityToken: digestSchema,
+      action: z.literal("run-reference-single-span-scenario"),
+      scenario: z.literal("span/second-equal-spelling-only"),
+      expectedVaultId: z.string().min(1), endpoint: z.string().url(),
+    }).strict(),
+    fifoCommandSchema,
   ],
 );
 

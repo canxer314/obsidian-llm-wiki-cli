@@ -39,7 +39,7 @@ const ASSERTIONS = {
     "rejection/occupied-destination:path_conflict",
     "submission/replay-identical-key:no-re-execution",
     "submission/conflicting-key-reuse:no-new-change-set",
-    "concurrency/independent-batch:applied-exactly-once",
+    "concurrency/persistent-fifo:repreflight-and-restart-proven",
     "recovery/missing-response:recovered-through-original-key",
     "preview/final-status-replay:immutable-effect-evidence",
   ],
@@ -54,6 +54,7 @@ const ASSERTIONS = {
     "span/bom-crlf-cjk-astral:single-verified-span",
     "reject/stale-closure:no-mutation",
     "span/duplicate-equal-spellings:untouched-bytes-exact",
+    "span/second-equal-spelling-only:untouched-bytes-exact",
     "observer:no-half-written-markdown",
   ],
   semantic: [
@@ -77,15 +78,75 @@ const ASSERTIONS = {
   ],
 } as const;
 
+// Synthetic verifier fixture only; this never claims an installed acceptance run.
+function syntheticFifoProof() {
+  const entries = [1, 2, 3, 4].map(i => ({ submissionKey: String(i).repeat(64), changeSetId: String(i + 4).repeat(64), enqueueSeq: i }));
+  const event = (kind: string, i: number, extra = {}) => ({ kind, ...entries[i], ...extra });
+  return {
+    scope: "persistent-fifo-and-pre-mutation-repreflight", source: "installed-obsidian", runId: "acceptance-run", profile: "MVP-PERF-REF-1",
+    candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, vaultIdSha256: DIGEST, seed: DIGEST, canonicalManifestSha256: DIGEST,
+    beforeInventorySha256: DIGEST, afterInventorySha256: DIGEST, targetAfterSha256: "2".repeat(64), dependencyAfterSha256: "4".repeat(64), derivedAfterSha256: DIGEST,
+    replay: { keysReplayed: 4, identitiesPreserved: 4, recordsUnchanged: 4, noAdditionalExecutionEvents: true },
+    enqueue: entries, staleKeys: [entries[1]!.submissionKey, entries[2]!.submissionKey], cleanupSucceeded: true, verdict: "passed",
+    events: [event("enqueued", 0), event("started", 0, { writeLease: true }), event("preflight", 0, { accepted: true, writeLease: true }), event("first-mutation", 0), event("committed", 0),
+      ...[1, 2, 3].map(i => event("enqueued", i)),
+      { kind: "fixtures-changed", targetBefore: "1".repeat(64), targetAfter: "2".repeat(64), dependencyBefore: "3".repeat(64), dependencyAfter: "4".repeat(64) },
+      { kind: "restart", stopped: true }, event("recovered", 0, { state: "intent_applied" }),
+      ...[1, 2].flatMap(i => [event("started", i, { writeLease: true }), event("preflight", i, { accepted: false, writeLease: true }), event("terminal", i, { state: "intent_not_applied" })]),
+      event("started", 3, { writeLease: true }), event("preflight", 3, { accepted: true, writeLease: true }), event("first-mutation", 3), event("committed", 3), event("terminal", 3, { state: "intent_applied" })],
+  };
+}
+
 function evidence(): InstalledRuntimeEvidence {
   const publicWire = {
     ...corpus(ASSERTIONS.publicWire),
     canonicalManifestSha256: DIGEST,
     tools: ["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_change_set_status"],
   };
+  const rejectionNames = ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent", "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination"];
+  const inventoryEntries = [
+        { kind: "directory" as const, path: "Notes" }, { kind: "directory" as const, path: "ChangeSetProof" },
+        { kind: "file" as const, path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+        { kind: "file" as const, path: "ChangeSetProof/AdmissionProof.md", sha256: DIGEST, sizeBytes: 44 },
+        { kind: "file" as const, path: "ChangeSetProof/Editable.md", sha256: DIGEST, sizeBytes: 26 },
+        { kind: "file" as const, path: "ChangeSetProof/Evidence.bin", sha256: DIGEST, sizeBytes: 5 },
+        { kind: "absent" as const, path: "ChangeSetProof/ReadDep.md" },
+        { kind: "absent" as const, path: "ChangeSetProof/copy.bin" },
+        { kind: "absent" as const, path: "ChangeSetProof/AdmissionProof.md/Child.md" },
+      ].map((entry) => Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))) as Array<{kind:"file";path:string;sha256:string;sizeBytes:number}|{kind:"directory"|"absent";path:string}>;
+      const inventoryDigest = createHash("sha256").update(JSON.stringify(inventoryEntries)).digest("hex");
+      const inventory = { scope: "all-public-vault-files-directories-and-affected-absence" as const, entries: inventoryEntries, digest: inventoryDigest };
+  const inventoryEventDigest = createHash("sha256").update(JSON.stringify({ digest: inventory.digest, entries: inventory.entries, scope: inventory.scope })).digest("hex");
+  const rejectionProof = { submissionKeySha256: DIGEST, changeSetId: "rejected", state: "intent_not_applied" as const, failureCode: "stale_observation" as const, executed: false };
+  const idle = { recoveryState: "none" as const, queueLength: 0 as const, currentExecutionId: null, writeGate: "open" as const };
+  const proofs = rejectionNames.map((name, index) => ({ ...rejectionProof, changeSetId: `rejected-${index}`, submissionKeySha256: createHash("sha256").update(name).digest("hex"), failureCode: name === "rejection/non-unique-replacement" ? "exact_match_count_mismatch" : index < 3 ? "stale_observation" : "path_conflict" }));
+  const canonicalHash = (value: Record<string, unknown>) => createHash("sha256").update(JSON.stringify(Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))))).digest("hex");
+  const seedInventory = { scope: "Notes/", entries: [], digest: DIGEST };
   const changeSet = {
     ...corpus(ASSERTIONS.changeSet),
-    admission: { submissions: [{ executed: true, state: "intent_applied" }] },
+    corpusId: "change-set-submission-proof", seedManifestSha256: DIGEST,
+    beforeInventory: seedInventory, afterInventory: seedInventory,
+    admission: {
+      submissions: [{ submissionKeySha256: DIGEST, changeSetId: "applied", state: "intent_applied", failureCode: null, executed: true }],
+      rejectionClasses: rejectionNames.map((name, index) => ({
+        name, failureCode: proofs[index]!.failureCode, noMutationDigestUnchanged: true,
+        binding: { runId: "acceptance-run", runtimeProfileId: "MVP-PERF-REF-1", candidateBundleSha256: DIGEST, vaultIdSha256: createHash("sha256").update("vault").digest("hex") },
+        beforeInventory: inventory, afterInventory: inventory, proof: proofs[index], status: proofs[index], terminal: idle,
+        eventOrder: { before: index * 5 + 1, submit: index * 5 + 2, status: index * 5 + 3, terminal: index * 5 + 4, after: index * 5 + 5 },
+      })),
+      fifo: { persistentObservation: syntheticFifoProof(), concurrentSubmissions: 1, applied: 1, distinctChangeSetIds: 1, contendedTarget: { submissions: 2, winners: 1, rejected: 1, noPartialMutation: true } },
+      recovery: [{ name: "recovery", recoveredThroughOriginalKey: true, changedContentRejected: true, changedKeyCreatedNoChangeSet: true }],
+      immutableRecords: [{ submissionKeySha256: DIGEST, changeSetId: "applied", state: "intent_applied", requestedEffectIds: ["operation"], derivedEffectIds: [], pathCount: 1 }],
+    },
+    replay: { keysReplayed: 1, identitiesPreserved: 1, recordsUnchanged: 1, conflictingReusesRejected: 1 },
+    residualCleanup: idle,
+    eventLog: rejectionNames.flatMap((name, index) => [
+      { sequence: index * 5 + 1, kind: "assertion", name: `${name}:inventory-before`, detailSha256: inventoryEventDigest },
+      { sequence: index * 5 + 2, kind: "tool", name: "vault_change_set_submit", detailSha256: canonicalHash(proofs[index]!) },
+      { sequence: index * 5 + 3, kind: "tool", name: "vault_change_set_status", detailSha256: canonicalHash(proofs[index]!) },
+      { sequence: index * 5 + 4, kind: "tool", name: "vault_health", detailSha256: canonicalHash({ ...idle, vaultIdSha256: createHash("sha256").update("vault").digest("hex") }) },
+      { sequence: index * 5 + 5, kind: "assertion", name: `${name}:inventory-after`, detailSha256: inventoryEventDigest },
+    ]), verdict: "passed",
   };
   const gate = {
     ...corpus(ASSERTIONS.gate),
@@ -144,6 +205,16 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("maps A-26 to the independent second verified span, not rename-all", () => {
+    expect(createAcceptanceMatrixReport(evidence()).scenarios.find(({ id }) => id === "A-26")?.assertion)
+      .toBe("span/second-equal-spelling-only:untouched-bytes-exact");
+  });
+
+  it("refuses response-only FIFO claims without actual persistent observations", () => {
+    const missing = evidence();
+    delete missing.changeSetCorpus!.admission.fifo.persistentObservation;
+    expect(() => createAcceptanceMatrixReport(missing)).toThrow(/FIFO/u);
+  });
   it("covers every acceptance ID and every child corpus exactly once", () => {
     const report = createAcceptanceMatrixReport(evidence());
     expect(report.scenarios).toHaveLength(44);

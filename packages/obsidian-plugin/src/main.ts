@@ -57,6 +57,7 @@ import {
   isRegisteredSubpathResult,
 } from "./obsidian-search-data-source.js";
 import { RecoveryJournalIncompatibleError } from "./recovery-journal.js";
+import { createInstalledFifoObserver } from "./installed-runtime/installed-fifo-observer.js";
 import {
   activateInstalledRuntimeAcceptanceDriver,
   type InstalledRuntimeAcceptanceActivation,
@@ -66,6 +67,7 @@ import {
   createInstalledSemanticEvidenceScenarioControl,
   createInstalledSemanticEvidenceWire,
 } from "./installed-runtime/installed-semantic-evidence.js";
+import { executeInstalledReferenceSingleSpan } from "./installed-runtime/registered-reference-single-span.js";
 import { replaceExactCorpusProfile } from "./corpus/edit-body-corpus.js";
 import { createNoteCorpusProfile } from "./corpus/create-note-corpus.js";
 import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
@@ -145,6 +147,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const activateAcceptanceDriver = adapter instanceof FileSystemAdapter;
+    const fifoObserver = activateAcceptanceDriver ? await createInstalledFifoObserver({
+      vaultPath: basePath, pluginId: this.manifest.id,
+      configDirectoryName: this.app.vault.configDir,
+    }) : undefined;
     let installedSemanticEvidence:
       | ReturnType<typeof createInstalledSemanticEvidenceScenarioControl>
       | undefined;
@@ -365,6 +371,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       },
       changeSetDataSource,
       changeSetExecution,
+      ...(fifoObserver === undefined ? {} : { acceptanceObserver: fifoObserver }),
       crashInjector: async (point) => {
         const armed = armedCrashBoundary;
         if (armed === undefined || !armed.command.scenario.endsWith(`/${point}`)) return;
@@ -836,6 +843,13 @@ export default class VaultOperationBridgePlugin extends Plugin {
           vaultPath: basePath,
           pluginId: this.manifest.id,
           configDirectoryName: this.app.vault.configDir,
+          executeReferenceSingleSpanScenario: async (request) => {
+            if (request.expectedVaultId !== runtime.persistedSettings?.vaultId || request.endpoint.toString() !== runtime.bridge?.endpoint.toString() || await changeSetExecution.loadRecoveryFrame() !== null) {
+              throw new Error("Installed A-26 requires the bound clean runtime");
+            }
+            return executeInstalledReferenceSingleSpan({ ...request, readBinary: async (path) =>
+              (await adapter.exists(path)) ? new Uint8Array(await adapter.readBinary(path)) : null });
+          },
           executeSemanticEvidenceScenario: (request) =>
             installedSemanticEvidence!.execute(request),
           executeCrashRestorationScenario: async ({ descriptor, command }) => {

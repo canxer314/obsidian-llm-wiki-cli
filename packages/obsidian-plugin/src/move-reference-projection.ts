@@ -157,6 +157,22 @@ function renderedTarget(
   return joinFileAndFragment(nextFileLinkpath, decodedFragment);
 }
 
+/** Internal byte adapter shared by move projection and the armed A-26 corpus. */
+export function spliceVerifiedReference(
+  bytes: Uint8Array,
+  reference: SearchSnapshotReference,
+  target: string,
+): Uint8Array | null {
+  if (!Number.isInteger(reference.startByte) || !Number.isInteger(reference.endByteExclusive) ||
+      reference.startByte < 0 || reference.endByteExclusive > bytes.byteLength ||
+      reference.startByte >= reference.endByteExclusive ||
+      !Buffer.from(bytes.slice(reference.startByte, reference.endByteExclusive)).equals(Buffer.from(reference.original))) return null;
+  try {
+    const rendered = renderRegisteredReference(reference.profile, reference.original, target, "note");
+    return Buffer.concat([bytes.slice(0, reference.startByte), Buffer.from(rendered), bytes.slice(reference.endByteExclusive)]);
+  } catch { return null; }
+}
+
 function projectNote(
   note: SearchSnapshotNote,
   references: readonly SearchSnapshotReference[],
@@ -168,25 +184,14 @@ function projectNote(
   for (const reference of [...references].sort(
     (left, right) => right.startByte - left.startByte,
   )) {
-    if (
-      reference.startByte < 0 ||
-      reference.endByteExclusive > nextStart ||
-      reference.startByte >= reference.endByteExclusive ||
-      !Buffer.from(
-        projected.slice(reference.startByte, reference.endByteExclusive),
-      ).equals(Buffer.from(reference.original))
-    ) return null;
-    let rendered: string;
-    try {
-      const target = renderedTarget(reference, note, operation, candidates);
-      if (target === null) return null;
-      rendered = renderRegisteredReference(reference.profile, reference.original, target, "note");
-    } catch {
-      return null;
-    }
-    const prefix = projected.slice(0, reference.startByte);
-    const suffix = projected.slice(reference.endByteExclusive);
-    projected = Buffer.concat([prefix, Buffer.from(rendered), suffix]);
+    if (reference.endByteExclusive > nextStart) return null;
+    let target: string | null;
+    try { target = renderedTarget(reference, note, operation, candidates); }
+    catch { return null; }
+    if (target === null) return null;
+    const next = spliceVerifiedReference(projected, reference, target);
+    if (next === null) return null;
+    projected = next;
     nextStart = reference.startByte;
   }
   return projected;

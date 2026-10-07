@@ -1,8 +1,9 @@
+import { persistentFifoProofSchema } from "./fifo-observation.js";
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
 
-import type { InstalledRuntimeEvidence } from "./evidence.js";
+import { changeSetCorpusEvidenceSchema, type InstalledRuntimeEvidence } from "./evidence.js";
 
 /**
  * The complete #44 acceptance matrix. Each criterion is bound once to concrete
@@ -108,13 +109,13 @@ const matrixPlan = [
   ["A-17", "change-set-submission", "rejection/occupied-destination:path_conflict"],
   ["A-18", "change-set-submission", "submission/replay-identical-key:no-re-execution"],
   ["A-19", "change-set-submission", "submission/conflicting-key-reuse:no-new-change-set"],
-  ["A-20", "change-set-submission", "concurrency/independent-batch:applied-exactly-once"],
+  ["A-20", "change-set-submission", "concurrency/persistent-fifo:repreflight-and-restart-proven"],
   ["A-21", "crash-restoration-retained-authority", "recovery:durable-prepared-restores-whole-change-set-before-writes"],
   ["A-22", "crash-restoration-retained-authority", "recovery:compare-before-restore-preserves-third-party-bytes-and-blocks-writes"],
   ["A-23", "gate-isolation", "recovery-blocked/atomic-bind-and-history:bound-intent-not-applied"],
   ["A-24", "registered-reference-rewrite", "span/bom-crlf-cjk-astral:single-verified-span"],
   ["A-25", "registered-reference-rewrite", "reject/stale-closure:no-mutation"],
-  ["A-26", "registered-reference-rewrite", "span/duplicate-equal-spellings:untouched-bytes-exact"],
+  ["A-26", "registered-reference-rewrite", "span/second-equal-spelling-only:untouched-bytes-exact"],
   ["A-27", "semantic-evidence-search-snapshot", "scenario:edit_body/stale_version_callback_after_newer_bytes:closed"],
   ["A-28", "semantic-evidence-search-snapshot", "scenario:create_note/clean_convergence:closed"],
   ["A-29", "semantic-evidence-search-snapshot", "scenario:edit_body/missing_observation_deadline:closed"],
@@ -252,6 +253,13 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence)
   }
   if (evidence.beforeInventory === null || evidence.afterInventory === null || evidence.cleanup === null) {
     throw new AcceptanceMatrixError("Acceptance matrix requires inventories and cleanup evidence");
+  }
+  const fifo = persistentFifoProofSchema.safeParse(evidence.changeSetCorpus?.admission.fifo?.persistentObservation);
+  if (!fifo.success || fifo.data.runId !== evidence.runId || fifo.data.profile !== evidence.profile.name ||
+      fifo.data.candidateBundleSha256 !== evidence.candidate.bundleSha256) throw new AcceptanceMatrixError("A-20 requires bound installed persistent FIFO observations and confirmed cleanup");
+  if (evidence.changeSetCorpus !== null) {
+    // A-15 is a raw-byte observation, never a string assertion alone.
+    changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);
   }
   const children = childManifests(evidence);
   const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
