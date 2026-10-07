@@ -17,7 +17,6 @@ import {
 
 import { registeredReferenceRewriteCorpusEvidenceSchema } from "../src/installed-runtime/evidence.js";
 import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
-import { createHash } from "node:crypto";
 const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const DIGEST = "a".repeat(64);
 const REJECTION_NAMES = ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent", "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination"];
