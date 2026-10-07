@@ -1,3 +1,4 @@
+import { persistentFifoProofSchema } from "./fifo-observation.js";
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
@@ -108,7 +109,7 @@ const matrixPlan = [
   ["A-17", "change-set-submission", "rejection/occupied-destination:path_conflict"],
   ["A-18", "change-set-submission", "submission/replay-identical-key:no-re-execution"],
   ["A-19", "change-set-submission", "submission/conflicting-key-reuse:no-new-change-set"],
-  ["A-20", "change-set-submission", "concurrency/independent-batch:applied-exactly-once"],
+  ["A-20", "change-set-submission", "concurrency/persistent-fifo:repreflight-and-restart-proven"],
   ["A-21", "crash-restoration-retained-authority", "recovery:durable-prepared-restores-whole-change-set-before-writes"],
   ["A-22", "crash-restoration-retained-authority", "recovery:compare-before-restore-preserves-third-party-bytes-and-blocks-writes"],
   ["A-23", "gate-isolation", "recovery-blocked/atomic-bind-and-history:bound-intent-not-applied"],
@@ -253,6 +254,9 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence)
   if (evidence.beforeInventory === null || evidence.afterInventory === null || evidence.cleanup === null) {
     throw new AcceptanceMatrixError("Acceptance matrix requires inventories and cleanup evidence");
   }
+  const fifo = persistentFifoProofSchema.safeParse(evidence.changeSetCorpus?.admission.fifo?.persistentObservation);
+  if (!fifo.success || fifo.data.runId !== evidence.runId || fifo.data.profile !== evidence.profile.name ||
+      fifo.data.candidateBundleSha256 !== evidence.candidate.bundleSha256) throw new AcceptanceMatrixError("A-20 requires bound installed persistent FIFO observations and confirmed cleanup");
   const children = childManifests(evidence);
   const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
     const childIndex = children.findIndex((child) => child.corpusId === corpusId);

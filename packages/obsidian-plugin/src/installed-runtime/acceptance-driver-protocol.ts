@@ -3,6 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import { z } from "zod";
+import { fifoCommandSchema } from "./fifo-observation.js";
 
 export const INSTALLED_RUNTIME_ACCEPTANCE_DESCRIPTOR =
   "installed-runtime-acceptance.json";
@@ -43,6 +44,7 @@ export const installedRuntimeAcceptanceCommandSchema = z.discriminatedUnion(
       })
       .strict(),
     crashRestorationCommandSchema,
+    fifoCommandSchema,
   ],
 );
 

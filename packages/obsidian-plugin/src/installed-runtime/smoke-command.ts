@@ -1,3 +1,4 @@
+import { runInstalledPersistentFifoCorpus } from "./fifo-installed-runner.js";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -203,6 +204,7 @@ const installedScenarioReportSchema = z.union([
 export const AUTHORITATIVE_INSTALLED_RUNTIME_RUNNER_NAMES = [
   "prepareInstalledRuntimeAcceptanceDriver",
   "runGateIsolationCorpus",
+  "runPersistentFifoCorpus",
   "runRegisteredReferenceRewriteCorpus",
   "runPrivacyRecoveryAuthorityCorpus",
   "runReleaseLifecycleCorpus",
@@ -214,6 +216,7 @@ type HarnessAuthoritativeInstalledRuntimeRunners = Required<
   Pick<
     InstalledRuntimeHarnessOptions,
     | "runGateIsolationCorpus"
+    | "runPersistentFifoCorpus"
     | "runRegisteredReferenceRewriteCorpus"
     | "runPrivacyRecoveryAuthorityCorpus"
     | "runReleaseLifecycleCorpus"
@@ -379,6 +382,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
         },
       };
     },
+    runPersistentFifoCorpus: runInstalledPersistentFifoCorpus,
     runGateIsolationCorpus: async (request) => {
       if (request.probe === undefined || request.profile === undefined || request.candidate === undefined) {
         return unavailableRunner("Gate-isolation corpus");

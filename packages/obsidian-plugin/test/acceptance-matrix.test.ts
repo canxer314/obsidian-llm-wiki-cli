@@ -39,7 +39,7 @@ const ASSERTIONS = {
     "rejection/occupied-destination:path_conflict",
     "submission/replay-identical-key:no-re-execution",
     "submission/conflicting-key-reuse:no-new-change-set",
-    "concurrency/independent-batch:applied-exactly-once",
+    "concurrency/persistent-fifo:repreflight-and-restart-proven",
     "recovery/missing-response:recovered-through-original-key",
     "preview/final-status-replay:immutable-effect-evidence",
   ],
@@ -77,6 +77,25 @@ const ASSERTIONS = {
   ],
 } as const;
 
+// Synthetic verifier fixture only; this never claims an installed acceptance run.
+function syntheticFifoProof() {
+  const entries = [1, 2, 3, 4].map(i => ({ submissionKey: String(i).repeat(64), changeSetId: String(i + 4).repeat(64), enqueueSeq: i }));
+  const event = (kind: string, i: number, extra = {}) => ({ kind, ...entries[i], ...extra });
+  return {
+    scope: "persistent-fifo-and-pre-mutation-repreflight", source: "installed-obsidian", runId: "acceptance-run", profile: "MVP-PERF-REF-1",
+    candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, vaultIdSha256: DIGEST, seed: DIGEST, canonicalManifestSha256: DIGEST,
+    beforeInventorySha256: DIGEST, afterInventorySha256: DIGEST, targetAfterSha256: DIGEST, dependencyAfterSha256: DIGEST, derivedAfterSha256: DIGEST,
+    replay: { keysReplayed: 4, identitiesPreserved: 4, recordsUnchanged: 4, noAdditionalExecutionEvents: true },
+    enqueue: entries, staleKeys: [entries[1]!.submissionKey, entries[2]!.submissionKey], cleanupSucceeded: true, verdict: "passed",
+    events: [event("enqueued", 0), event("started", 0, { writeLease: true }), event("preflight", 0, { accepted: true, writeLease: true }), event("first-mutation", 0), event("committed", 0),
+      ...[1, 2, 3].map(i => event("enqueued", i)),
+      { kind: "fixtures-changed", targetBefore: "1".repeat(64), targetAfter: "2".repeat(64), dependencyBefore: "3".repeat(64), dependencyAfter: "4".repeat(64) },
+      { kind: "restart", stopped: true }, event("recovered", 0, { state: "intent_applied" }),
+      ...[1, 2].flatMap(i => [event("started", i, { writeLease: true }), event("preflight", i, { accepted: false, writeLease: true }), event("terminal", i, { state: "intent_not_applied" })]),
+      event("started", 3, { writeLease: true }), event("preflight", 3, { accepted: true, writeLease: true }), event("first-mutation", 3), event("committed", 3), event("terminal", 3, { state: "intent_applied" })],
+  };
+}
+
 function evidence(): InstalledRuntimeEvidence {
   const publicWire = {
     ...corpus(ASSERTIONS.publicWire),
@@ -85,7 +104,7 @@ function evidence(): InstalledRuntimeEvidence {
   };
   const changeSet = {
     ...corpus(ASSERTIONS.changeSet),
-    admission: { submissions: [{ executed: true, state: "intent_applied" }] },
+    admission: { submissions: [{ executed: true, state: "intent_applied" }], fifo: { persistentObservation: syntheticFifoProof() } },
   };
   const gate = {
     ...corpus(ASSERTIONS.gate),
@@ -144,6 +163,11 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("refuses response-only FIFO claims without actual persistent observations", () => {
+    const missing = evidence();
+    delete missing.changeSetCorpus!.admission.fifo.persistentObservation;
+    expect(() => createAcceptanceMatrixReport(missing)).toThrow(/FIFO/u);
+  });
   it("covers every acceptance ID and every child corpus exactly once", () => {
     const report = createAcceptanceMatrixReport(evidence());
     expect(report.scenarios).toHaveLength(44);

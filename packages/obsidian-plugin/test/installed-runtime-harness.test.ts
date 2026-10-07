@@ -1,3 +1,4 @@
+import { syntheticFifoProof } from "./helpers/fifo-proof.js";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -234,7 +235,7 @@ async function arrangeRun(
     candidateVerification: { expectedTag: CANDIDATE_TAG, expectedPluginId: "candidate-bridge" },
     workingDirectory: root,
     evidencePath: join(root, "evidence", `${runId}.json`),
-    probe: probe(),
+    probe: { ...probe(), probeRunning: async () => MATCHING_OBSERVED },
     processControl: createFakeObsidianProcessControl(),
     prepareInstalledRuntimeAcceptanceDriver: async () => ({
       requestSemanticEvidenceScenario: async () => undefined,
@@ -242,6 +243,10 @@ async function arrangeRun(
     }),
     profiles: PROFILES,
     runId,
+    runPersistentFifoCorpus: async ({ runId, profile, candidate, assertion }) => {
+      assertion("concurrency/persistent-fifo:repreflight-and-restart-proven");
+      return syntheticFifoProof(runId, profile.name, candidate.identity.bundleSha256);
+    },
     runPublicWireCorpus: async ({ fixtureSeed }) => ({
       evidence: {
         fixtureSeed: createHash("sha256").update(fixtureSeed, "utf8").digest("hex"),

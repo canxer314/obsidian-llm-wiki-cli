@@ -149,6 +149,7 @@ describe("installed-runtime authoritative command", () => {
       "prepareInstalledRuntimeAcceptanceDriver",
       "runCrashRestorationRetainedAuthorityCorpus",
       "runGateIsolationCorpus",
+      "runPersistentFifoCorpus",
       "runPrivacyRecoveryAuthorityCorpus",
       "runRegisteredReferenceRewriteCorpus",
       "runReleaseLifecycleCorpus",
