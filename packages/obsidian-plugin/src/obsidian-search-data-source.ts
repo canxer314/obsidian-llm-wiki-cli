@@ -157,10 +157,17 @@ function classifyReference(reference: CacheReference): {
         : original.startsWith("[")
           ? parseMarkdownReference(original, false)
           : null;
-  if (parsed === null || parsed.destination !== reference.link) {
+  if (parsed === null) {
     throw new Error("Installed cache uses an unregistered reference grammar");
   }
-  return { profile: parsed.profile, target: reference.link };
+  const markdown = parsed.profile === "markdown_inline_link" || parsed.profile === "markdown_embed";
+  if (parsed.destination !== reference.link &&
+      (!markdown || decodeURIComponent(parsed.destination) !== reference.link)) {
+    throw new Error("Installed cache uses an unregistered reference grammar");
+  }
+  // The host may decode Markdown cache links. Keep the raw destination so
+  // resolution and move projection each decode it exactly once.
+  return { profile: parsed.profile, target: parsed.destination };
 }
 
 export interface CanonicalReferenceCandidate {
@@ -273,7 +280,7 @@ function referenceEvidence(
   adapter: ObsidianSearchAdapter,
 ): HostReferenceEvidence {
   const classified = classifyReference(reference);
-  const resolvedPath = verifyResolvedTarget(reference.link, sourcePath, adapter);
+  const resolvedPath = verifyResolvedTarget(classified.target, sourcePath, adapter);
   return {
     ...classified,
     resolvedPath,

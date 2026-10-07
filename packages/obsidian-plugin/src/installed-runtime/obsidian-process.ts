@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { confirmGeneratedVaultTrust } from "./local-gui-supervision.js";
+import { diagnosticProcessEnvironment } from "./installed-diagnostic-privacy.js";
 
 /**
  * Obsidian process-control seam (issue #197): the orchestrator only knows
@@ -13,6 +15,7 @@ import { setTimeout as delay } from "node:timers/promises";
 export interface ObsidianLaunchRequest {
   readonly vaultPath: string;
   readonly profileDirectory: string;
+  readonly diagnosticPrivacyEnvironment?: Record<string, string>;
 }
 
 export interface ObsidianProcessHandle {
@@ -48,6 +51,27 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void
   });
 }
 
+async function registerDedicatedObsidianProfile(request: ObsidianLaunchRequest): Promise<void> {
+  await mkdir(request.profileDirectory, { recursive: true });
+  const registrationPath = join(request.profileDirectory, "obsidian.json");
+  const existing = await readFile(registrationPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (existing !== null) {
+    const registration = JSON.parse(existing) as { vaults?: Record<string, { path?: string }> };
+    const vaults = Object.values(registration.vaults ?? {});
+    if (vaults.length !== 1 || vaults[0]?.path !== request.vaultPath) {
+      throw new ObsidianProcessError("Obsidian profile is already registered to another Vault", "obsidian_start_failed");
+    }
+  } else {
+    await writeFile(registrationPath, JSON.stringify({
+      vaults: { acceptance: { path: request.vaultPath, ts: Date.now(), open: true } },
+      cli: true,
+    }), { flag: "wx" });
+  }
+}
+
 /**
  * Real process control for the registered Windows runtime. The dedicated
  * profile directory is passed through Electron's `--user-data-dir` switch so
@@ -55,6 +79,7 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void
  * the Vault path argument opens exactly the generated test Vault. Stop uses
  * `taskkill /T` on Windows so the whole Electron process tree exits.
  */
+
 export function createWindowsObsidianProcessControl(options: {
   executablePath: string;
   stopTimeoutMs?: number;
@@ -64,15 +89,18 @@ export function createWindowsObsidianProcessControl(options: {
   const stopTimeoutMs = options.stopTimeoutMs ?? 30_000;
   return {
     async start(request) {
+      await registerDedicatedObsidianProfile(request);
       let child: ChildProcess;
       try {
         child = spawnImpl(
           options.executablePath,
           [
+            "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
             `--user-data-dir=${request.profileDirectory}`,
             `obsidian://open?path=${encodeURIComponent(request.vaultPath)}`,
           ],
-          { stdio: "ignore", windowsHide: true },
+          { stdio: "ignore", windowsHide: true, env: diagnosticProcessEnvironment(request) },
         );
       } catch (error) {
         throw new ObsidianProcessError(
@@ -129,6 +157,98 @@ export function createWindowsObsidianProcessControl(options: {
               );
             }
           }
+        },
+      };
+    },
+  };
+}
+
+export function createLinuxObsidianProcessControl(options: {
+  executablePath: string;
+  stopTimeoutMs?: number;
+  launchArguments?: readonly string[];
+}): ObsidianProcessControl {
+  return {
+    async start(request) {
+      const diagnosticEnvironment = diagnosticProcessEnvironment(request);
+      await registerDedicatedObsidianProfile(request);
+      const child = spawn(options.executablePath, [
+        ...(options.launchArguments ?? [
+          "--remote-debugging-port=0",
+          "--remote-debugging-address=127.0.0.1",
+          "--disable-gpu",
+        ]),
+        `--user-data-dir=${request.profileDirectory}`,
+        `obsidian://open?path=${encodeURIComponent(request.vaultPath)}`,
+      ], { detached: true, stdio: "ignore", env: diagnosticEnvironment });
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", resolve);
+        child.once("error", (error) => reject(new ObsidianProcessError(
+          `Obsidian failed to launch: ${error.message}`, "obsidian_start_failed",
+        )));
+      });
+      let stopped = false;
+      if (options.launchArguments === undefined) {
+        try {
+          await confirmGeneratedVaultTrust({ ...request, timeoutMs: 120_000 });
+        } catch (error) {
+          try {
+            if (child.pid !== undefined) {
+              try { process.kill(-child.pid, "SIGKILL"); } catch (stopError) {
+                if ((stopError as NodeJS.ErrnoException).code !== "ESRCH") throw stopError;
+              }
+              await waitForExit(child, options.stopTimeoutMs ?? 30_000);
+              const deadline = Date.now() + (options.stopTimeoutMs ?? 30_000);
+              while (true) {
+                try { process.kill(-child.pid, 0); } catch (stopError) {
+                  if ((stopError as NodeJS.ErrnoException).code === "ESRCH") break;
+                  throw stopError;
+                }
+                if (Date.now() >= deadline) {
+                  throw new ObsidianProcessError("Obsidian startup cleanup left a live process group", "obsidian_stop_failed");
+                }
+                await delay(10);
+              }
+            }
+          } catch {
+            throw new ObsidianProcessError("Obsidian startup shutdown was not confirmed", "obsidian_stop_failed");
+          }
+          throw error;
+        }
+      }
+      return {
+        pid: child.pid,
+        async stop() {
+          if (stopped) return;
+          const pid = child.pid;
+          if (pid === undefined) throw new ObsidianProcessError("Obsidian has no process identity", "obsidian_stop_failed");
+          try { process.kill(-pid, "SIGTERM"); } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          }
+          try {
+            await waitForExit(child, options.stopTimeoutMs ?? 30_000);
+          } catch {
+            try { process.kill(-pid, "SIGKILL"); } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+            }
+            await waitForExit(child, options.stopTimeoutMs ?? 30_000);
+          }
+          // The parent may exit first; terminate any remaining group members.
+          try { process.kill(-pid, "SIGKILL"); } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          }
+          const groupDeadline = Date.now() + (options.stopTimeoutMs ?? 30_000);
+          while (true) {
+            try { process.kill(-pid, 0); } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+              throw error;
+            }
+            if (Date.now() >= groupDeadline) {
+              throw new ObsidianProcessError("Obsidian process group did not exit within the stop deadline", "obsidian_stop_failed");
+            }
+            await delay(10);
+          }
+          stopped = true;
         },
       };
     },

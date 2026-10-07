@@ -1,5 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { defaultContractPackageRoot, loadVersionContractPackage, runContractFixtureWireCorpus, completeContractPackageCorpus, contractDigest, type ContractChildConsumptionContext, type ContractChildSource, type ContractFixtureWireEvidence, type VersionContractPackage } from "./contract-package-corpus.js";
+import { runContractCrossCallScenario, type ContractCrossCallEvidence } from "./contract-cross-call.js";
+import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { connect } from "node:net";
+import { dirname, join, resolve, relative } from "node:path";
+import { consumeManualPauseProof, manualPauseSourceDigest, type ManualPauseConsumptionContext } from "./manual-pause-source.js";
 
 import {
   CandidateBundleError,
@@ -13,9 +18,24 @@ import {
 } from "../release/release-identity.js";
 import { verifyReleaseBundle } from "../release/verify-release-bundle.js";
 import {
+  createAcceptanceMatrixReport,
+  type AcceptanceMatrixReport,
+} from "./acceptance-matrix.js";
+import {
   writeEvidenceFile,
+  parseEvidence,
+  type ChangeSetCorpusEvidence,
+  type GateIsolationCorpusEvidence,
   type InstalledRuntimeEvidence,
   type InstalledRuntimeVerdict,
+  privacyRecoveryAuthorityCorpusEvidenceSchema,
+  type RegisteredReferenceRewriteCorpusEvidence,
+  type PrivacyRecoveryAuthorityCorpusEvidence,
+  type SemanticEvidenceCorpusEvidence,
+  type ReleaseLifecycleCorpusEvidence,
+  crashRestorationRetainedAuthorityCorpusEvidenceSchema,
+  type CrashRestorationRetainedAuthorityCorpusEvidence,
+  releaseLifecycleCorpusEvidenceSchema,
 } from "./evidence.js";
 import {
   createLoopbackMcpClient,
@@ -43,6 +63,52 @@ import {
   type RuntimePreflightMismatch,
 } from "./runtime-profile.js";
 import {
+  PublicWireCorpusError,
+  runPublicWireCorpus,
+  type PublicWireCorpusResult,
+} from "./public-wire-corpus.js";
+import {
+  ChangeSetSubmissionCorpusError,
+  composeChangeSetCorpusEvidence,
+  runChangeSetReplayCorpusAtEndpoint,
+  runChangeSetSubmissionCorpusAtEndpoint,
+  type ChangeSetAdmissionOutcome,
+  type ChangeSetReplayOutcome,
+} from "./change-set-submission-corpus.js";
+import {
+  composeGateIsolationCorpusEvidence,
+  GateIsolationCorpusError,
+  type GateIsolationOutcome,
+} from "./gate-isolation-corpus.js";
+import type { InstalledGateIsolationRun } from "./gate-installed-runner.js";
+import {
+  composeRegisteredReferenceRewriteCorpusEvidence,
+  RegisteredReferenceRewriteCorpusError,
+  type RegisteredReferenceRewriteOutcome,
+} from "./registered-reference-rewrite-corpus.js";
+import {
+  composePrivacyRecoveryAuthorityCorpusEvidence,
+  PrivacyRecoveryAuthorityCorpusError,
+  type PrivacyRecoveryAuthorityCorpusOutcome,
+} from "./privacy-recovery-authority-corpus.js";
+import {
+  composeSemanticEvidenceSearchSnapshotCorpusEvidence,
+  SemanticEvidenceSearchSnapshotCorpusError,
+  runSemanticEvidenceSearchSnapshotCorpusAtEndpoint,
+  type SemanticEvidenceSearchSnapshotOutcome,
+} from "./semantic-evidence-corpus.js";
+import {
+  composeReleaseLifecycleCorpusEvidence,
+  ReleaseLifecycleCorpusError,
+  type ReleaseLifecycleCorpusOutcome,
+} from "./release-lifecycle-corpus.js";
+import type { InstalledPrivacyAuthorityBoundarySliceResult } from "./privacy-recovery-installed-runner.js";
+import {
+  composeCrashRestorationRetainedAuthorityCorpusEvidence,
+  CrashRestorationRetainedAuthorityCorpusError,
+  type CrashRestorationRetainedAuthorityCorpusOutcome,
+} from "./crash-restoration-retained-authority-corpus.js";
+import {
   cleanupTestVault,
   compareInventories,
   provisionTestVault,
@@ -67,6 +133,7 @@ export type HarnessStage =
   | "preflight"
   | "provision"
   | "candidate"
+  | "acceptance_driver"
   | "inventory_before"
   | "obsidian_start"
   | "bridge_readiness"
@@ -74,6 +141,17 @@ export type HarnessStage =
   | "obsidian_stop"
   | "obsidian_restart"
   | "health_restart"
+  | "public_wire_corpus"
+  | "change_set_corpus"
+  | "change_set_replay"
+  | "gate_isolation_corpus"
+  | "registered_reference_rewrite_corpus"
+  | "plugin_event_observer_corpus"
+  | "semantic_evidence_search_snapshot_corpus"
+  | "privacy_recovery_authority_corpus"
+  | "release_lifecycle_corpus"
+  | "crash_restoration_retained_authority_corpus"
+  | "acceptance_matrix"
   | "inventory_after"
   | "cleanup";
 
@@ -89,6 +167,8 @@ export type HarnessFailureCode =
   | "candidate_checksum_manifest_missing"
   | "candidate_manifest_invalid"
   | "candidate_unverified_bundle"
+  | "acceptance_driver_unavailable"
+  | "acceptance_driver_cleanup_failed"
   | "release_tag_malformed"
   | "release_tag_mismatch"
   | "release_plugin_id_mismatch"
@@ -116,6 +196,17 @@ export type HarnessFailureCode =
   | "identity_mismatch"
   | "listener_mismatch"
   | "representation_mismatch"
+  | "public_wire_corpus_failed"
+  | "change_set_corpus_failed"
+  | "change_set_replay_failed"
+  | "gate_isolation_corpus_failed"
+  | "registered_reference_rewrite_corpus_failed"
+  | "plugin_event_observer_corpus_failed"
+  | "semantic_evidence_search_snapshot_corpus_failed"
+  | "privacy_recovery_authority_corpus_failed"
+  | "release_lifecycle_corpus_failed"
+  | "crash_restoration_retained_authority_corpus_failed"
+  | "acceptance_matrix_failed"
   | "cleanup_failed"
   | "residual_test_content";
 
@@ -156,7 +247,161 @@ export interface InstalledRuntimeHarnessOptions {
   readonly evidencePath: string;
   readonly probe: RuntimeEnvironmentProbe;
   readonly processControl: ObsidianProcessControl;
+  /**
+   * Arms private installed-only acceptance control after verified installation
+   * and removes it before final inventory/cleanup. It is never part of MCP.
+   */
+  readonly prepareInstalledRuntimeAcceptanceDriver?: (options: {
+    readonly vaultPath: string;
+    readonly pluginId: string;
+    readonly candidateBundleSha256: string;
+    readonly configDirectoryName: string;
+    readonly reportDirectory?: string;
+  }) => Promise<{
+    requestSemanticEvidenceScenario(options: {
+      readonly scenario: import("./semantic-evidence-corpus.js").SemanticEvidenceSearchSnapshotScenarioName;
+      readonly expectedVaultId: string;
+      readonly endpoint: URL;
+    }): Promise<void>;
+    cleanup(): Promise<void>;
+  }>;
   readonly client?: LoopbackMcpClient;
+  readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
+  readonly contractPackageRoot?: string;
+  readonly runContractPackageWire?: typeof runContractFixtureWireCorpus;
+  readonly runContractCrossCall?: typeof runContractCrossCallScenario;
+  readonly completeContractPackage?: typeof completeContractPackageCorpus;
+  readonly contractContinuationTiming?: "full-real-time" | "binding-only";
+  readonly contractScenarioId?: string;
+  readonly prepareContractInvalidUtf8Fixture?: (options: { readonly vaultPath: string; readonly path: string }) => Promise<() => Promise<void>>;
+  /**
+   * Write-side corpus seams (issue #175). The admission phase runs in the
+   * initial Obsidian window; the replay phase reconnects after the controlled
+   * restart and replays every established Submission Key. Both default to the
+   * real loopback implementations and are injectable for inner tests.
+   */
+  readonly runChangeSetCorpus?: typeof runChangeSetSubmissionCorpusAtEndpoint;
+  readonly runChangeSetReplay?: typeof runChangeSetReplayCorpusAtEndpoint;
+  /**
+   * Gate-and-isolation corpus seam (issue #177): a self-contained two-Managed-Vault
+   * scenario that provisions and starts two dedicated generated test Vaults
+   * through the harness seams and drives the six-tool gate algebra over real
+   * loopback Bridges. It runs between the initial window and the controlled
+   * restart. A missing runner or non-passing corpus outcome fails closed; it
+   * never produces passing evidence by skipping the stage.
+   */
+  readonly runGateIsolationCorpus?: (options: {
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly profileName: string;
+    readonly profile: RegisteredRuntimeProfile;
+    readonly probe: RuntimeEnvironmentProbe;
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<GateIsolationOutcome | InstalledGateIsolationRun>;
+  /**
+   * Registered-reference rewrite corpus seam (issue #178): a self-contained
+   * move-rewrite scenario that proves destination-only registered-reference
+   * rewrites preserve exact bytes over the real transport. It runs between the
+   * initial window and the controlled restart. A missing runner or non-passing
+   * corpus outcome fails closed; required evidence cannot be omitted.
+   */
+  readonly runRegisteredReferenceRewriteCorpus?: (options: {
+    readonly profile?: RegisteredRuntimeProfile;
+    readonly probe?: RuntimeEnvironmentProbe;
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly retainChildSource?: (source: ContractChildSource) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<RegisteredReferenceRewriteOutcome>;
+  /**
+   * Semantic Evidence/Search Snapshot corpus seam (issue #179). It runs over
+   * the live installed Bridge's six-tool loopback transport and invokes the
+   * shared real Change Set/evidence/snapshot corpus. A failed proof is a
+   * release-blocking harness failure; the default is the production corpus and
+   * this seam exists only for harness tests.
+   */
+  readonly runSemanticEvidenceSearchSnapshotCorpus?: (options: {
+    readonly endpoint: URL;
+    readonly expectedVaultId: string;
+    readonly workingDirectory: string;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+    readonly retainChildSource?: (source: ContractChildSource) => void;
+    readonly scenarioRunner: import("./semantic-evidence-corpus.js").InstalledSemanticEvidenceScenarioRunner;
+  }) => Promise<SemanticEvidenceSearchSnapshotOutcome>;
+  readonly semanticEvidenceScenarioRunner?: import("./semantic-evidence-corpus.js").InstalledSemanticEvidenceScenarioRunner;
+  /**
+   * Runs each Semantic Evidence scenario in its own generated Vault/runtime.
+   * This is required for authoritative composition because a result_unproven
+   * scenario intentionally leaves its runtime recovery-blocked; the harness
+   * must never use trusted local recovery authority to continue the program.
+   */
+  readonly isolateSemanticEvidenceScenarios?: boolean;
+  readonly runPrivacyRecoveryAuthorityCorpus?: (options: {
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly operatorReportTimeoutMs?: number;
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+    readonly profileName: string;
+    readonly profile: RegisteredRuntimeProfile;
+    readonly probe: RuntimeEnvironmentProbe;
+    readonly prepareInstalledRuntimeAcceptanceDriver: import("./privacy-recovery-installed-runner.js").InstalledPrivacyBoundaryOptions["prepareInstalledRuntimeAcceptanceDriver"];
+  }) => Promise<PrivacyRecoveryAuthorityCorpusOutcome | InstalledPrivacyAuthorityBoundarySliceResult>;
+  /**
+   * Verified release-lifecycle corpus (issue #181): composes the installed
+   * install/repair, upgrade, uninstall, and purge scenarios. The caller supplies
+   * the self-contained runner so each scenario can use its own verified release
+   * identities and runtime-host seam; its result is release-blocking evidence.
+   */
+  readonly runReleaseLifecycleCorpus?: (options: {
+    readonly profileName?: string;
+    readonly profile?: RegisteredRuntimeProfile;
+    readonly probe?: RuntimeEnvironmentProbe;
+    readonly runId: string;
+    readonly workingDirectory: string;
+    readonly candidate: VerifiedCandidateBundle;
+    readonly processControl: ObsidianProcessControl;
+    readonly client: LoopbackMcpClient;
+    readonly configDirectoryName: string;
+    readonly timeouts: { readonly startupMs: number; readonly stopMs: number; readonly portClosedMs: number };
+    readonly provisionVault: typeof provisionTestVault;
+    readonly cleanupVault: typeof cleanupTestVault;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<ReleaseLifecycleCorpusOutcome>;
+  readonly runManualPauseCorpus?: typeof import("./manual-pause-installed-runner.js").runInstalledManualPauseCorpus;
+  readonly runPersistentFifoCorpus?: typeof import("./fifo-installed-runner.js").runInstalledPersistentFifoCorpus;
+  readonly runCrashRestorationRetainedAuthorityCorpus?: (options: {
+    readonly installed?: import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions;
+    readonly workingDirectory: string;
+    readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly assertion: (name: string) => void;
+  }) => Promise<CrashRestorationRetainedAuthorityCorpusOutcome>;
+  readonly runPluginEventObserverCorpus?: (options: Omit<import("./plugin-event-observer-corpus.js").PluginEventObserverCorpusOptions, "prepareAcceptanceDriver" | "semanticEvidenceScenarioRunner" | "reportDirectory">) => Promise<unknown>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -172,6 +417,8 @@ export interface InstalledRuntimeHarnessResult {
   readonly failure: HarnessFailure | null;
   readonly evidence: InstalledRuntimeEvidence;
   readonly evidencePath: string;
+  /** Private re-consumption closure retains source context, never serialized in public evidence. */
+  readonly readEvidence: () => Promise<InstalledRuntimeEvidence>;
 }
 
 /** Failures that invalidate the run's environment rather than the candidate. */
@@ -187,6 +434,8 @@ const INVALID_VERDICT_CODES: ReadonlySet<HarnessFailureCode> = new Set([
   "candidate_checksum_manifest_missing",
   "candidate_manifest_invalid",
   "candidate_unverified_bundle",
+  "acceptance_driver_unavailable",
+  "acceptance_driver_cleanup_failed",
   "release_tag_malformed",
   "release_tag_mismatch",
   "release_plugin_id_mismatch",
@@ -229,6 +478,16 @@ interface RunState {
   beforeInventory: VaultInventoryEntry[] | null;
   afterInventory: VaultInventoryEntry[] | null;
   observations: PhasedObservation[];
+  publicWireCorpus: PublicWireCorpusResult | null;
+  changeSetAdmission: ChangeSetAdmissionOutcome | null;
+  changeSetReplay: ChangeSetReplayOutcome | null;
+  gateIsolation: GateIsolationOutcome | null;
+  registeredReferenceRewrite: RegisteredReferenceRewriteOutcome | null;
+  semanticEvidenceSearchSnapshot: SemanticEvidenceSearchSnapshotOutcome | null;
+  privacyRecoveryAuthority: PrivacyRecoveryAuthorityCorpusOutcome | null;
+  releaseLifecycle: ReleaseLifecycleCorpusOutcome | null;
+  crashRestorationRetainedAuthority: CrashRestorationRetainedAuthorityCorpusOutcome | null;
+  acceptanceMatrix: AcceptanceMatrixReport | null;
   cleanup: CleanupReport | null;
   failure: HarnessFailure | null;
 }
@@ -239,6 +498,15 @@ export async function runInstalledRuntimeHarness(
   const now = options.now ?? (() => new Date().toISOString());
   const runId = options.runId ?? randomUUID();
   const startedAt = now();
+  let pluginEventObserverCorpus: import("./plugin-event-observer-evidence.js").PluginEventObserverCorpusEvidence | null = null;
+  let observerContext: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext | undefined;
+  let pauseContext: ManualPauseConsumptionContext | undefined;
+  let contractContext: ContractChildConsumptionContext | undefined;
+  const retainedContractChildren: ContractChildConsumptionContext["children"] = [];
+  const retainContractChild = (source: ContractChildSource): void => {
+    if (source.candidateBundleSha256 !== state.candidate?.identity.bundleSha256 || source.installedMainSha256 !== state.candidate.identity.files.find(file => file.path === "main.js")?.sha256 || source.profileName !== options.profileName || !source.sourceRunId.startsWith(runId + "-") || retainedContractChildren.some(child => child.source.sourceRunId === source.sourceRunId)) throw new Error("Version contract independent child source pin mismatch");
+    retainedContractChildren.push({ source: structuredClone(source), sourceSha256: contractDigest(source) });
+  };
   const client = options.client ?? createLoopbackMcpClient();
   const configDirectoryName = options.configDirectoryName ?? ".obsidian";
   const timeouts = {
@@ -257,6 +525,16 @@ export async function runInstalledRuntimeHarness(
     beforeInventory: null,
     afterInventory: null,
     observations: [],
+    publicWireCorpus: null,
+    changeSetAdmission: null,
+    changeSetReplay: null,
+    gateIsolation: null,
+    registeredReferenceRewrite: null,
+    semanticEvidenceSearchSnapshot: null,
+    privacyRecoveryAuthority: null,
+    releaseLifecycle: null,
+    crashRestorationRetainedAuthority: null,
+    acceptanceMatrix: null,
     cleanup: null,
     failure: null,
   };
@@ -292,6 +570,22 @@ export async function runInstalledRuntimeHarness(
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof TestVaultError) {
       fail(stage, error.code, sanitize(error.message));
+    } else if (error instanceof PublicWireCorpusError) {
+      fail(stage, "public_wire_corpus_failed", sanitize(error.message));
+    } else if (error instanceof ChangeSetSubmissionCorpusError) {
+      fail(stage, "change_set_corpus_failed", sanitize(error.message));
+    } else if (error instanceof GateIsolationCorpusError) {
+      fail(stage, "gate_isolation_corpus_failed", sanitize(error.message));
+    } else if (error instanceof RegisteredReferenceRewriteCorpusError) {
+      fail(stage, "registered_reference_rewrite_corpus_failed", sanitize(error.message));
+    } else if (error instanceof PrivacyRecoveryAuthorityCorpusError) {
+      fail(stage, "privacy_recovery_authority_corpus_failed", sanitize(error.message));
+    } else if (error instanceof ReleaseLifecycleCorpusError) {
+      fail(stage, "release_lifecycle_corpus_failed", sanitize(error.message));
+    } else if (error instanceof CrashRestorationRetainedAuthorityCorpusError) {
+      fail(stage, "crash_restoration_retained_authority_corpus_failed", sanitize(error.message));
+    } else if (error instanceof SemanticEvidenceSearchSnapshotCorpusError) {
+      fail(stage, "semantic_evidence_search_snapshot_corpus_failed", sanitize(error.message));
     } else if (error instanceof HealthObservationError) {
       fail(stage, error.code, sanitize(error.message));
     } else if (error instanceof BridgeIdentityError) {
@@ -305,14 +599,28 @@ export async function runInstalledRuntimeHarness(
     }
   };
 
+  let contractAuthority: VersionContractPackage | null = null;
+  let contractWire: ContractFixtureWireEvidence | null = null;
+  const contractCrossCalls: ContractCrossCallEvidence[] = [];
   let handle: ObsidianProcessHandle | null = null;
+  let startupShutdownUnconfirmed = false;
+  let acceptanceDriver: {
+    requestSemanticEvidenceScenario(options: {
+      readonly scenario: import("./semantic-evidence-corpus.js").SemanticEvidenceSearchSnapshotScenarioName;
+      readonly expectedVaultId: string;
+      readonly endpoint: URL;
+    }): Promise<void>;
+    cleanup(): Promise<void>;
+  } | null = null;
+  const contractChildSources: { scenarioId: string; sourceRunId: string; candidateBundleSha256: string; profileName: string; vaultIdSha256: string; seedManifestSha256: string; identityEventSha256: string; cleanupEventSha256: string }[] = [];
+  let isolatedSemanticEvidenceSequence = 0;
+  let isolatedRuntimeResidue = false;
   let firstIdentity = null as PersistedBridgeIdentity | null;
 
   class BridgeStillReachableError extends Error {}
 
   const stopObsidian = async (): Promise<void> => {
     const current = handle;
-    handle = null;
     if (current === null) return;
     await current.stop();
     if (firstIdentity !== null) {
@@ -326,12 +634,17 @@ export async function runInstalledRuntimeHarness(
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
+    handle = null;
   };
 
   const startAndObserve = async (
     startStage: "obsidian_start" | "obsidian_restart",
     healthStage: "health_initial" | "health_restart",
     phase: "initial" | "after_restart",
+    during?: {
+      stage: "public_wire_corpus" | "change_set_replay";
+      run: (identity: PersistedBridgeIdentity) => Promise<void>;
+    },
   ): Promise<void> => {
     const vault = state.vault;
     const candidate = state.candidate;
@@ -342,8 +655,24 @@ export async function runInstalledRuntimeHarness(
         profileDirectory: vault.profileDirectory,
       });
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       failFromError(startStage, error);
       return;
+    }
+    if (options.probe.probeRunning !== undefined && profile !== null) {
+      try {
+        state.observed = await options.probe.probeRunning(vault);
+        state.mismatches = preflightRuntimeProfile(profile, state.observed);
+        if (state.mismatches.length > 0) {
+          fail("preflight", "profile_mismatch", "The running runtime does not match the registered profile");
+          return;
+        }
+      } catch (error) {
+        fail("preflight", "profile_probe_failed", sanitize(error instanceof Error ? error.message : String(error)));
+        return;
+      }
     }
     let identity: PersistedBridgeIdentity;
     try {
@@ -391,11 +720,36 @@ export async function runInstalledRuntimeHarness(
     }
     try {
       const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
-      const observation = await client.observeHealth(endpoint, identity.vaultId);
+      let observation!: BridgeHealthObservation;
+      await waitForCondition(async () => {
+        observation = await client.observeHealth(endpoint, identity.vaultId);
+        return observation.health.readiness.searchSnapshot === "ready";
+      }, { timeoutMs: timeouts.startupMs, intervalMs: 100 });
       state.observations.push({ phase, observation });
     } catch (error) {
       failFromError(healthStage, error);
       return;
+    }
+    // The during hook runs while Obsidian and its loopback Bridge are live —
+    // the only window a real transport corpus can exercise. A corpus failure is
+    // projected to failed evidence; the controlled stop still runs so cleanup
+    // never leaves a live process holding the generated Vault.
+    if (during !== undefined) {
+      try {
+        await during.run(identity);
+      } catch (error) {
+        if (error instanceof ChangeSetSubmissionCorpusError) {
+          fail(
+            during.stage,
+            during.stage === "change_set_replay"
+              ? "change_set_replay_failed"
+              : "change_set_corpus_failed",
+            sanitize(error.message),
+          );
+        } else {
+          failFromError(during.stage, error);
+        }
+      }
     }
     try {
       await stopObsidian();
@@ -418,7 +772,8 @@ export async function runInstalledRuntimeHarness(
       fail("preflight", "profile_probe_failed", sanitize(error instanceof Error ? error.message : String(error)));
     }
     if (state.observed !== null) {
-      state.mismatches = preflightRuntimeProfile(profile, state.observed);
+      state.mismatches = preflightRuntimeProfile(profile, state.observed).filter(mismatch =>
+        options.probe.probeRunning === undefined || !mismatch.field.startsWith("versions."));
       if (state.mismatches.length > 0) {
         fail("preflight", "profile_mismatch", "The probed runtime does not match the registered profile");
       }
@@ -432,6 +787,24 @@ export async function runInstalledRuntimeHarness(
         runId,
         configDirectoryName,
       });
+      // Generated acceptance Vault only. Exclusive writes cannot overwrite an
+      // existing fixture or a Primary Operator note.
+      const contractFiles: readonly [string, string | Uint8Array][] = [
+        ["ContractFixtures/QuotaMetadata.md", `---\nquota: ${"q".repeat(4_718_592)}\n---\n# Quota\n`],
+        ["Projects/Bridge.md", "---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n"],
+        ["Root.md", "# Root\n[[Projects/Bridge]]\n"],
+        ["Target Note.md", "# Target Note\n"],
+      ];
+      for (const [path, bytes] of contractFiles) {
+        const target = join(state.vault.vaultPath, path); await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, bytes, { flag: "wx" });
+      }
+      const fullSeed = [
+        ...state.vault.seedNotes.map(note => ({ path: note.path, bytes: Buffer.from(note.content, "utf8") })),
+        ...contractFiles.map(([path, content]) => ({ path, bytes: typeof content === "string" ? Buffer.from(content, "utf8") : content })),
+      ];
+      const seedManifest = fullSeed.map(({ path, bytes }) => `${createHash("sha256").update(bytes).digest("hex")}  ${path}`).sort().join("\n") + "\n";
+      state.vault = { ...state.vault, seedManifestSha256: createHash("sha256").update(seedManifest).digest("hex") };
     } catch (error) {
       failFromError("provision", error);
     }
@@ -464,6 +837,160 @@ export async function runInstalledRuntimeHarness(
   }
 
   if (state.failure === null) {
+    const prepare = options.prepareInstalledRuntimeAcceptanceDriver;
+    if (prepare === undefined) {
+      fail(
+        "acceptance_driver",
+        "acceptance_driver_unavailable",
+        "Installed acceptance driver is required for authoritative acceptance",
+      );
+    } else {
+      try {
+        acceptanceDriver = await prepare({
+          vaultPath: state.vault!.vaultPath,
+          pluginId: state.candidate!.identity.pluginId,
+          candidateBundleSha256: state.candidate!.identity.bundleSha256,
+          configDirectoryName,
+        });
+      } catch (error) {
+        fail(
+          "acceptance_driver",
+          "acceptance_driver_unavailable",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
+  }
+
+  const runIsolatedSemanticEvidenceScenario = async (
+    request: Parameters<NonNullable<InstalledRuntimeHarnessOptions["semanticEvidenceScenarioRunner"]>["run"]>[0],
+  ): Promise<Awaited<ReturnType<NonNullable<InstalledRuntimeHarnessOptions["semanticEvidenceScenarioRunner"]>["run"]>>> => {
+    const candidate = state.candidate;
+    const prepare = options.prepareInstalledRuntimeAcceptanceDriver;
+    const runner = options.semanticEvidenceScenarioRunner;
+    if (candidate === null || prepare === undefined || runner === undefined) {
+      throw new SemanticEvidenceSearchSnapshotCorpusError(
+        "Isolated installed Semantic Evidence runtime is unavailable",
+      );
+    }
+    isolatedSemanticEvidenceSequence += 1;
+    const isolated = await provisionTestVault({
+      workingDirectory: options.workingDirectory,
+      runId: `${runId}-semantic-${isolatedSemanticEvidenceSequence}`,
+      configDirectoryName,
+    });
+    let isolatedHandle: ObsidianProcessHandle | null = null;
+    let isolatedStartupShutdownUnconfirmed = false;
+    let isolatedPort: number | undefined;
+    let isolatedDriver: Awaited<ReturnType<typeof prepare>> | null = null;
+    let childSource: typeof contractChildSources[number] | null = null;
+    let retainedChildSource: ContractChildSource | undefined;
+    try {
+      await installCandidateBundle(candidate, isolated.vaultPath, configDirectoryName);
+      isolatedDriver = await prepare({
+        vaultPath: isolated.vaultPath,
+        pluginId: candidate.identity.pluginId,
+        candidateBundleSha256: candidate.identity.bundleSha256,
+        configDirectoryName,
+      });
+      isolatedHandle = await options.processControl.start({
+        vaultPath: isolated.vaultPath,
+        profileDirectory: isolated.profileDirectory,
+      }).catch((error: unknown) => {
+        if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+          isolatedStartupShutdownUnconfirmed = true;
+        }
+        throw error;
+      });
+      if (options.probe.probeRunning !== undefined && profile !== null) {
+        const observed = await options.probe.probeRunning(isolated);
+        if (preflightRuntimeProfile(profile, observed).length > 0) {
+          throw new SemanticEvidenceSearchSnapshotCorpusError(
+            "Isolated runtime does not match the registered profile",
+          );
+        }
+      }
+      let observedIdentity: PersistedBridgeIdentity | null = null;
+      await waitForCondition(async () => {
+        observedIdentity = await readPersistedBridgeIdentity(
+          isolated.vaultPath,
+          candidate.identity.pluginId,
+          configDirectoryName,
+        );
+        return observedIdentity !== null;
+      }, { timeoutMs: timeouts.startupMs });
+      if (observedIdentity === null) {
+        throw new BridgeIdentityError("Isolated Semantic Evidence Bridge identity unavailable");
+      }
+      const identity: PersistedBridgeIdentity = observedIdentity;
+      const sourceIdentity = { scenarioId: request.scenario, sourceRunId: `${runId}-semantic-${isolatedSemanticEvidenceSequence}`, candidateBundleSha256: candidate.identity.bundleSha256, profileName: options.profileName, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: isolated.seedManifestSha256 };
+      childSource = { ...sourceIdentity, identityEventSha256: contractDigest(sourceIdentity), cleanupEventSha256: "0".repeat(64) };
+      recordSemanticEvidenceSearchSnapshotEvent("transport", "semantic-source-vault-identity", sourceIdentity);
+      retainedChildSource = { scenarioId: request.scenario, sourceRunId: sourceIdentity.sourceRunId, candidateBundleSha256: candidate.identity.bundleSha256, installedMainSha256: createHash("sha256").update(await readFile(join(isolated.vaultPath, configDirectoryName, "plugins", candidate.identity.pluginId, "main.js"))).digest("hex"), profileName: options.profileName, identity: structuredClone(identity), seedNotes: await Promise.all(isolated.seedNotes.map(async note => ({ path: note.path, content: await readFile(join(isolated.vaultPath, note.path), "utf8") }))), events: [{ kind: "transport", name: "semantic-source-vault-identity", detail: structuredClone(sourceIdentity) }], cleanup: { attempted: false, residualPaths: [] } };
+      isolatedPort = identity.port;
+      await waitForCondition(() => isLoopbackPortOpen(identity.port), {
+        timeoutMs: timeouts.startupMs,
+      });
+      const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
+      await waitForCondition(async () => {
+        const observation = await client.observeHealth(endpoint, identity.vaultId);
+        return observation.health.readiness.searchSnapshot === "ready";
+      }, { timeoutMs: timeouts.startupMs, intervalMs: 100 });
+      await isolatedDriver.requestSemanticEvidenceScenario({
+        scenario: request.scenario,
+        expectedVaultId: identity.vaultId,
+        endpoint,
+      });
+      return await runner.run({
+        ...request,
+        endpoint,
+        expectedVaultId: identity.vaultId,
+      });
+    } finally {
+      let cleanupFailure: unknown;
+      if (isolatedStartupShutdownUnconfirmed) {
+        isolatedRuntimeResidue = true;
+        throw new ObsidianProcessError("Isolated startup shutdown was not confirmed", "obsidian_stop_failed");
+      }
+      try {
+        await isolatedHandle?.stop();
+        if (isolatedPort !== undefined) {
+          await waitForCondition(async () => !(await isLoopbackPortOpen(isolatedPort!)), {
+            timeoutMs: timeouts.portClosedMs,
+          });
+        }
+      } catch (error) {
+        isolatedRuntimeResidue = true;
+        throw error;
+      }
+      try {
+        await isolatedDriver?.cleanup();
+      } catch (error) {
+        cleanupFailure ??= error;
+      }
+      const cleanup = await cleanupVault(isolated).catch((error: unknown) => {
+        isolatedRuntimeResidue = true;
+        throw error;
+      });
+      if (cleanup.residualPaths.length > 0) {
+        isolatedRuntimeResidue = true;
+        throw new SemanticEvidenceSearchSnapshotCorpusError(
+          "Isolated Semantic Evidence runtime left generated content",
+        );
+      }
+      if (cleanupFailure !== undefined) throw cleanupFailure;
+      if (childSource !== null && cleanup.attempted) {
+        const detail = { sourceRunId: childSource.sourceRunId, vaultIdSha256: childSource.vaultIdSha256, cleanupConfirmed: true };
+        recordSemanticEvidenceSearchSnapshotEvent("cleanup", "semantic-source-vault-cleaned", detail);
+        if (retainedChildSource === undefined) throw new Error("Version contract independent child source absent");
+        retainedChildSource.cleanup = structuredClone(cleanup);
+        retainedChildSource.events.push({ kind: "cleanup", name: "semantic-source-vault-cleaned", detail: structuredClone(detail) });
+        retainContractChild(retainedChildSource);
+      }
+    }
+  };
+
+  if (state.failure === null) {
     try {
       state.beforeInventory = await takeInventory(state.vault!.vaultPath);
     } catch (error) {
@@ -471,11 +998,647 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  let persistentFifo: import("./fifo-observation.js").PersistentFifoProof | undefined;
+  let manualPause: import("./manual-pause-observation.js").ManualPauseProof | undefined;
+
+  // Shared event/assertion collectors for both change-set corpus phases so the
+  // closed evidence block spans the initial admission and the post-restart
+  // replay with monotonic event sequences.
+  const changeSetEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const changeSetAssertions: string[] = [];
+  const recordChangeSetEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    changeSetEvents.push({ kind, name, detail });
+  };
+  const recordChangeSetAssertion = (name: string): void => {
+    changeSetAssertions.push(name);
+  };
+
+  // Gate-isolation corpus event/assertion collectors (issue #177), spanning the
+  // stage that runs between the initial window and the controlled restart.
+  const gateIsolationEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const gateIsolationAssertions: string[] = [];
+  const recordGateIsolationEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    gateIsolationEvents.push({ kind, name, detail });
+  };
+  const recordGateIsolationAssertion = (name: string): void => {
+    gateIsolationAssertions.push(name);
+  };
+
+  // Registered-reference rewrite corpus event/assertion collectors (issue #178),
+  // spanning the stage that runs between the initial window and the restart.
+  const registeredReferenceRewriteEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const registeredReferenceRewriteAssertions: string[] = [];
+  const recordRegisteredReferenceRewriteEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    registeredReferenceRewriteEvents.push({ kind, name, detail });
+    if (name === "registered-reference-source-vault-identity") {
+      const value = detail as Record<string, string>;
+      if (value.sourceRunId?.startsWith(`${runId}-reference-`) && value.candidateBundleSha256 === state.candidate?.identity.bundleSha256 && value.profileName === options.profileName) contractChildSources.push({ scenarioId: "registered-reference-byte-verification", sourceRunId: value.sourceRunId, candidateBundleSha256: value.candidateBundleSha256!, profileName: value.profileName!, vaultIdSha256: value.vaultIdSha256!, seedManifestSha256: value.seedManifestSha256!, identityEventSha256: contractDigest(detail), cleanupEventSha256: "0".repeat(64) });
+    }
+    if (name === "registered-reference-source-vault-cleaned") {
+      const value = detail as Record<string, unknown>; const source = contractChildSources.find(source => source.sourceRunId === value.sourceRunId && source.vaultIdSha256 === value.vaultIdSha256);
+      if (source !== undefined && value.cleanupConfirmed === true) source.cleanupEventSha256 = contractDigest(detail);
+    }
+  };
+  const recordRegisteredReferenceRewriteAssertion = (name: string): void => {
+    registeredReferenceRewriteAssertions.push(name);
+  };
+
+  const semanticEvidenceSearchSnapshotEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const semanticEvidenceSearchSnapshotAssertions: string[] = [];
+  const recordSemanticEvidenceSearchSnapshotEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    semanticEvidenceSearchSnapshotEvents.push({ kind, name, detail });
+    if (name === "semantic-source-vault-identity") {
+      const value = detail as Record<string, string>;
+      if (value.sourceRunId?.startsWith(`${runId}-semantic-`) && value.candidateBundleSha256 === state.candidate?.identity.bundleSha256 && value.profileName === options.profileName) contractChildSources.push({ scenarioId: value.scenarioId!, sourceRunId: value.sourceRunId, candidateBundleSha256: value.candidateBundleSha256!, profileName: value.profileName!, vaultIdSha256: value.vaultIdSha256!, seedManifestSha256: value.seedManifestSha256!, identityEventSha256: contractDigest(detail), cleanupEventSha256: "0".repeat(64) });
+    }
+    if (name === "semantic-source-vault-cleaned") {
+      const value = detail as Record<string, unknown>;
+      const source = contractChildSources.find(source => source.sourceRunId === value.sourceRunId && source.vaultIdSha256 === value.vaultIdSha256);
+      if (source !== undefined && value.cleanupConfirmed === true) source.cleanupEventSha256 = contractDigest(detail);
+    }
+  };
+  const recordSemanticEvidenceSearchSnapshotAssertion = (name: string): void => {
+    semanticEvidenceSearchSnapshotAssertions.push(name);
+  };
+
+  const privacyRecoveryAuthorityEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const privacyRecoveryAuthorityAssertions: string[] = [];
+  const recordPrivacyRecoveryAuthorityEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    privacyRecoveryAuthorityEvents.push({ kind, name, detail });
+  };
+  const recordPrivacyRecoveryAuthorityAssertion = (name: string): void => {
+    privacyRecoveryAuthorityAssertions.push(name);
+  };
+
+  const releaseLifecycleEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const releaseLifecycleAssertions: string[] = [];
+  const crashRestorationRetainedAuthorityEvents: Array<{
+    kind: "transport" | "tool" | "assertion" | "cleanup";
+    name: string;
+    detail: unknown;
+  }> = [];
+  const crashRestorationRetainedAuthorityAssertions: string[] = [];
+  const recordCrashRestorationRetainedAuthorityEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    crashRestorationRetainedAuthorityEvents.push({ kind, name, detail });
+  };
+  const recordCrashRestorationRetainedAuthorityAssertion = (name: string): void => {
+    crashRestorationRetainedAuthorityAssertions.push(name);
+  };
+  const recordReleaseLifecycleEvent = (
+    kind: "transport" | "tool" | "assertion" | "cleanup",
+    name: string,
+    detail: unknown,
+  ): void => {
+    releaseLifecycleEvents.push({ kind, name, detail });
+  };
+  const recordReleaseLifecycleAssertion = (name: string): void => {
+    releaseLifecycleAssertions.push(name);
+  };
+
   if (state.failure === null) {
-    await startAndObserve("obsidian_start", "health_initial", "initial");
+    await startAndObserve("obsidian_start", "health_initial", "initial", {
+      stage: "public_wire_corpus",
+      run: async (identity) => {
+        const vault = state.vault;
+        if (vault === null) return;
+        if (state.failure === null) {
+          try {
+            state.publicWireCorpus = await (options.runPublicWireCorpus ?? runPublicWireCorpus)({
+              endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+              expectedVaultId: identity.vaultId,
+              fixtureSeed: vault.seedManifestSha256,
+              seedNotes: vault.seedNotes.map(({ path, content }) => ({ path, content })),
+            });
+          } catch (error) {
+            failFromError("public_wire_corpus", error);
+          }
+        }
+        if (state.failure === null && state.publicWireCorpus !== null) {
+          try {
+            contractAuthority = await loadVersionContractPackage(options.contractPackageRoot ?? defaultContractPackageRoot());
+            const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
+            contractWire = await (options.runContractPackageWire ?? runContractFixtureWireCorpus)({ authority: contractAuthority, endpoint, expectedVaultId: identity.vaultId });
+            if (options.contractScenarioId !== undefined && !contractAuthority.scenarios.some(scenario => scenario.id === options.contractScenarioId)) throw new Error("Unknown standalone contract scenario");
+            for (const scenario of contractAuthority.scenarios.filter(scenario => options.contractScenarioId === undefined || scenario.id === options.contractScenarioId)) {
+              const invalidPath = "ContractFixtures/InvalidUtf8.md";
+              let removeInvalid: (() => Promise<void>) | undefined;
+              if (scenario.id === "invalid-utf8-no-trusted-result") {
+                removeInvalid = await (options.prepareContractInvalidUtf8Fixture ?? (async ({ vaultPath, path }) => {
+                  await writeFile(join(vaultPath, path), Uint8Array.from([0xc3, 0x28]), { flag: "wx" });
+                  return async () => { await rm(join(vaultPath, path)); };
+                }))({ vaultPath: vault.vaultPath, path: invalidPath });
+              }
+              try {
+              contractCrossCalls.push(await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId: scenario.id, endpoint, expectedVaultId: identity.vaultId, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate!.identity.bundleSha256, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: vault.seedManifestSha256 }, quotaMetadataPath: "ContractFixtures/QuotaMetadata.md", seedNotes: vault.seedNotes, invalidUtf8Path: "ContractFixtures/InvalidUtf8.md", readFixtureBytes: async path => {
+                if (!["Projects/Bridge.md", "ContractFixtures/InvalidUtf8.md", "Notes/Transport.md"].includes(path)) throw new Error("Contract fixture byte observation escaped generated scope");
+                return new Uint8Array(await readFile(join(vault.vaultPath, path)));
+              }, continuationTiming: options.contractContinuationTiming, observeProgramState: async () => ({ registryBytes: new Uint8Array(await readFile(join(vault.vaultPath, configDirectoryName, "plugins", state.candidate!.identity.pluginId, "data.json"))), inventory: (await takeInventory(vault.vaultPath)).filter(entry => !entry.path.startsWith(configDirectoryName + "/") && !entry.path.startsWith(".llm-wiki/")) }), restart: async () => {
+                await stopObsidian();
+                handle = await options.processControl.start({ vaultPath: vault.vaultPath, profileDirectory: vault.profileDirectory });
+                if (profile === null || options.probe.probeRunning === undefined) throw new Error("Contract restart requires a registered installed runtime probe");
+                const observed = await options.probe.probeRunning(vault);
+                if (preflightRuntimeProfile(profile, observed).length !== 0) throw new Error("Contract restart profile mismatch");
+                let restartedIdentity: PersistedBridgeIdentity | null = null;
+                await waitForCondition(async () => {
+                  restartedIdentity = await readPersistedBridgeIdentity(vault.vaultPath, state.candidate!.identity.pluginId, configDirectoryName);
+                  return restartedIdentity !== null && await isLoopbackPortOpen(restartedIdentity.port);
+                }, { timeoutMs: timeouts.startupMs });
+                const found = restartedIdentity as PersistedBridgeIdentity | null;
+                if (found === null || found.vaultId !== identity.vaultId || found.port !== identity.port) throw new Error("Contract restart changed Bridge identity");
+                await client.observeHealth(endpoint, found.vaultId);
+                return { endpoint, expectedVaultId: found.vaultId };
+              } }));
+              } finally {
+                if (removeInvalid !== undefined) {
+                  await removeInvalid();
+                  await waitForCondition(async () => {
+                    const observation = await client.observeHealth(endpoint, identity.vaultId);
+                    return observation.health.readiness.searchSnapshot === "ready";
+                  }, { timeoutMs: timeouts.startupMs });
+                }
+              }
+            }
+            if (options.contractScenarioId !== undefined) fail("public_wire_corpus", "public_wire_corpus_failed", "Standalone contract scenario recorded as partial; full acceptance was not run");
+          } catch (error) {
+            fail("public_wire_corpus", "public_wire_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
+          }
+        }
+        if (state.failure === null && state.publicWireCorpus !== null) {
+          try {
+            state.changeSetAdmission = await (options.runChangeSetCorpus ??
+              runChangeSetSubmissionCorpusAtEndpoint)({
+              endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+              expectedVaultId: identity.vaultId,
+              seedNotes: vault.seedNotes.map(({ path, content }) => ({ path, content })),
+              inventoryContext: {
+                vaultPath: vault.vaultPath,
+                runId,
+                runtimeProfileId: options.profileName,
+                candidateBundleSha256: state.candidate!.identity.bundleSha256,
+                configDirectoryName,
+              },
+              record: recordChangeSetEvent,
+              assertion: recordChangeSetAssertion,
+            });
+          } catch (error) {
+            if (error instanceof ChangeSetSubmissionCorpusError) {
+              fail("change_set_corpus", "change_set_corpus_failed", sanitize(error.message));
+            } else {
+              failFromError("change_set_corpus", error);
+            }
+          }
+        }
+        if (
+          state.failure === null &&
+          state.changeSetAdmission !== null
+        ) {
+          if (options.semanticEvidenceScenarioRunner === undefined) {
+            fail(
+              "semantic_evidence_search_snapshot_corpus",
+              "semantic_evidence_search_snapshot_corpus_failed",
+              "Installed Semantic Evidence scenario runner is required for authoritative acceptance",
+            );
+            return;
+          }
+          try {
+            state.semanticEvidenceSearchSnapshot =
+              await (options.runSemanticEvidenceSearchSnapshotCorpus ??
+                runSemanticEvidenceSearchSnapshotCorpusAtEndpoint)({
+                endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+                expectedVaultId: identity.vaultId,
+                workingDirectory: options.workingDirectory,
+                record: recordSemanticEvidenceSearchSnapshotEvent,
+                retainChildSource: retainContractChild,
+                assertion: recordSemanticEvidenceSearchSnapshotAssertion,
+                scenarioRunner: {
+                  run: async (request) => {
+                    if (options.isolateSemanticEvidenceScenarios === true) {
+                      return runIsolatedSemanticEvidenceScenario(request);
+                    }
+                    if (acceptanceDriver === null) {
+                      throw new SemanticEvidenceSearchSnapshotCorpusError(
+                        "Installed acceptance driver is unavailable",
+                      );
+                    }
+                    await acceptanceDriver.requestSemanticEvidenceScenario({
+                      scenario: request.scenario,
+                      expectedVaultId: request.expectedVaultId,
+                      endpoint: request.endpoint,
+                    });
+                    return options.semanticEvidenceScenarioRunner!.run(request);
+                  },
+                },
+              });
+          } catch (error) {
+            fail(
+              "semantic_evidence_search_snapshot_corpus",
+              "semantic_evidence_search_snapshot_corpus_failed",
+              sanitize(error instanceof Error ? error.message : String(error)),
+            );
+          }
+        }
+      },
+    });
+  }
+  // Independently runnable A-30 proof is collected before the broader gate
+  // corpus can intentionally fail as partial. It never promotes that corpus.
+  if (state.failure === null && options.runManualPauseCorpus !== undefined) {
+    try {
+      const candidate = state.candidate;
+      if (candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined) {
+        throw new Error("Installed manual pause requires verified candidate, profile and observation descriptor");
+      }
+      pauseContext = { runId, candidateBundleSha256: candidate.identity.bundleSha256, installedMainSha256: candidate.identity.files.find(file => file.path === "main.js")!.sha256, profile: profile.name };
+      manualPause = await options.runManualPauseCorpus({
+        runId, workingDirectory: options.workingDirectory, reportDirectory: dirname(options.evidencePath),
+        candidate, profile, client, processControl: options.processControl, configDirectoryName, timeouts,
+        probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+        prepareAcceptanceDriver: async request => {
+          const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+          if (!("path" in prepared) || !("descriptor" in prepared)) throw new Error("Installed manual pause descriptor binding unavailable");
+          return prepared as Awaited<ReturnType<import("./fifo-installed-runner.js").InstalledFifoOptions["prepareAcceptanceDriver"]>>;
+        },
+        retainSource: source => {
+          if (pauseContext!.source !== undefined || source.runId !== pauseContext!.runId || source.candidateBundleSha256 !== pauseContext!.candidateBundleSha256 || source.installedMainSha256 !== pauseContext!.installedMainSha256 || source.profile !== pauseContext!.profile) throw new Error("Manual pause independent source pin mismatch");
+          pauseContext!.source = structuredClone(source);
+          pauseContext!.sourceSha256 = manualPauseSourceDigest(source);
+        },
+        record: recordGateIsolationEvent, assertion: recordGateIsolationAssertion,
+      });
+      consumeManualPauseProof(manualPause, pauseContext);
+    } catch (error) { manualPause = undefined; fail("gate_isolation_corpus", "gate_isolation_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
+  }
+  // The gate-isolation corpus (issue #177) runs between the initial window and
+  // the controlled restart: it provisions and starts its own two dedicated
+  // generated test Vaults through the harness seams, so it runs while no other
+  // Obsidian window is live. When the caller does not wire the seam, the stage
+  // is skipped and the closed evidence envelope records no gate-isolation
+  // block (the top-level passing verdict accepts its absence).
+  if (state.failure === null) {
+    const runner = options.runGateIsolationCorpus;
+    if (runner === undefined) {
+      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate-isolation corpus runner is required");
+    } else if (profile === null) {
+      fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Registered profile is required for gate isolation");
+    } else {
+          const vault = state.vault;
+          const candidate = state.candidate;
+          if (vault === null || candidate === null) {
+            fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Gate isolation requires a provisioned candidate");
+          } else {
+            try {
+              const slice = await runner({
+                runId,
+                profileName: options.profileName,
+                workingDirectory: options.workingDirectory,
+                candidate,
+                processControl: options.processControl,
+                client,
+                configDirectoryName,
+                timeouts,
+                profile,
+                probe: options.probe,
+                provisionVault: provisionTestVault,
+                cleanupVault,
+                record: recordGateIsolationEvent,
+                assertion: recordGateIsolationAssertion,
+              });
+              if ("scope" in slice) {
+                recordGateIsolationEvent("assertion", "installed_gate_isolation_partial_evidence", {
+                  scope: slice.scope,
+                  verdict: slice.verdict,
+                  candidateBundleSha256: slice.candidateBundleSha256,
+                  profileName: slice.profileName,
+                  provenance: slice.provenance,
+                });
+                fail("gate_isolation_corpus", "gate_isolation_corpus_failed", "Installed registry-isolation slice is partial evidence, not the full gate corpus");
+              } else {
+                state.gateIsolation = slice;
+              }
+            } catch (error) {
+              fail("gate_isolation_corpus", "gate_isolation_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
+            }
+          }
+        }
+  }
+  // Separate generated correctness runtimes enable the independent plugin; the
+  // registered candidate-only baseline Vault/profile is never modified.
+  if (state.failure === null) {
+    try {
+      if (options.runPluginEventObserverCorpus === undefined || state.candidate === null || profile === null) throw new Error("Real enabled plugin observer corpus runner is required");
+      const { pluginEventObserverCorpusEvidenceSchema } = await import("./plugin-event-observer-evidence.js");
+      const { retainPluginEventObserverSource } = await import("./plugin-event-observer-corpus.js");
+      observerContext = { runId, candidateBundleSha256: state.candidate.identity.bundleSha256,
+        installedMainSha256: state.candidate.identity.files.find(file => file.path === "main.js")!.sha256,
+        profileName: profile.name, candidatePluginId: state.candidate.identity.pluginId, observations: [] };
+      const starts = new Map<string, { pid: number; binding: import("./plugin-event-observer.js").PluginEventObserverBinding }>();
+      const observerProcessControl = { ...options.processControl, start: async (request: Parameters<typeof options.processControl.start>[0]) => {
+        const vaultRelative = relative(resolve(options.workingDirectory), resolve(request.vaultPath));
+        if (vaultRelative.startsWith("..") || vaultRelative !== `installed-runtime-vault-${runId}-observer-success` && vaultRelative !== `installed-runtime-vault-${runId}-observer-rollback` && vaultRelative !== `installed-runtime-vault-${runId}-observer-startup-recovery`) throw new Error("Observer startup is not an isolated generated correctness Vault");
+        const { pluginEventObserverBindingSchema } = await import("./plugin-event-observer.js");
+        const config = JSON.parse(await readFile(join(request.vaultPath, configDirectoryName, "plugins", "llm-wiki-event-observer", "event-observer.json"), "utf8")) as { binding: unknown };
+        const binding = pluginEventObserverBindingSchema.parse(config.binding);
+        if (binding.vaultPath !== request.vaultPath || binding.runId !== runId || binding.candidateBundleSha256 !== observerContext!.candidateBundleSha256 || binding.installedMainSha256 !== observerContext!.installedMainSha256 || binding.profileName !== observerContext!.profileName) throw new Error("Observer startup source pin differs from verified run");
+        const handle = await options.processControl.start(request);
+        if (handle.pid === undefined) throw new Error("Observer supervised PID missing");
+        starts.set(request.vaultPath, { pid: handle.pid, binding });
+        return handle;
+      } };
+      pluginEventObserverCorpus = pluginEventObserverCorpusEvidenceSchema.parse(await options.runPluginEventObserverCorpus({
+        runId, workingDirectory: options.workingDirectory, candidate: state.candidate, processControl: observerProcessControl,
+        client, profile: profile!, probe: options.probe, configDirectoryName, timeouts,
+        retainObservation: async observation => {
+          const reportRelative = relative(resolve(options.workingDirectory), resolve(observation.reportDirectory));
+          if (reportRelative.startsWith("..") || resolve(observation.reportDirectory) === resolve(observation.binding.vaultPath) || relative(resolve(observation.binding.vaultPath), resolve(observation.reportDirectory)).split(/[\\/]/u)[0] !== ".." ||
+              observation.binding.vaultPath !== join(options.workingDirectory, `installed-runtime-vault-${runId}-observer-${observation.scenario}`)) throw new Error("Observer source escaped private correctness runstore");
+          const start = starts.get(observation.binding.vaultPath);
+          if (start === undefined || start.pid !== observation.supervisorPid ||
+              Object.entries(start.binding).some(([key, value]) => key !== "vaultId" && observation.binding[key as keyof typeof start.binding] !== value) ||
+              start.binding.vaultId !== null && start.binding.vaultId !== observation.binding.vaultId || observation.binding.runId !== runId ||
+              observation.binding.candidateBundleSha256 !== observerContext!.candidateBundleSha256 || observation.binding.installedMainSha256 !== observerContext!.installedMainSha256 ||
+              observation.binding.profileName !== profile!.name || observation.candidatePluginId !== observerContext!.candidatePluginId) throw new Error("Observer source not bound to independently supervised run");
+          const { EXACT_FIXTURE, EXACT_ORIGINAL_BYTES, EXACT_COMMITTED_BYTES } = await import("../corpus/edit-fixtures.js");
+          const target = observation.files.find(file => file.path === EXACT_FIXTURE.path);
+          const expectedBytes = observation.scenario === "startup-recovery" && observation.binding.generation === 2 ? EXACT_ORIGINAL_BYTES : EXACT_COMMITTED_BYTES;
+          if (target === undefined || target.before === null || target.after === null || !Buffer.from(target.before).equals(EXACT_ORIGINAL_BYTES) || !Buffer.from(target.after).equals(EXACT_COMMITTED_BYTES) ||
+              observation.requiredVisibleStates?.some(item => item.path !== EXACT_FIXTURE.path || !Buffer.from(item.bytes).equals(expectedBytes) && !(observation.scenario === "rollback" && Buffer.from(item.bytes).equals(EXACT_ORIGINAL_BYTES))) ||
+              !observation.requiredVisibleStates?.some(item => Buffer.from(item.bytes).equals(expectedBytes))) throw new Error("Observer source fixture policy differs from fixed correctness corpus");
+          const retained = await retainPluginEventObserverSource(observation);
+          observerContext!.observations.push(retained);
+        },
+      }));
+    } catch (error) {
+      fail("plugin_event_observer_corpus", "plugin_event_observer_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
+    }
+  }
+  // The registered-reference rewrite corpus (issue #178) runs between the
+  // initial window and the controlled restart, alongside the gate-isolation
+  // corpus: when the caller does not wire the seam, the stage is skipped and the
+  // closed evidence envelope records no registered-reference rewrite block (the
+  // top-level passing verdict accepts its absence). A real-runtime seam must
+  // stand up its own generated Vault through the harness seams and drive the
+  // move-rewrite program over the real loopback Bridge.
+  if (state.failure === null) {
+    const runner = options.runRegisteredReferenceRewriteCorpus;
+    if (runner === undefined) {
+      fail("registered_reference_rewrite_corpus", "registered_reference_rewrite_corpus_failed", "Registered-reference rewrite corpus runner is required for authoritative acceptance");
+    }
+    const vault = state.vault;
+    const candidate = state.candidate;
+    if (state.failure === null && (vault === null || candidate === null)) {
+      fail(
+        "registered_reference_rewrite_corpus",
+        "registered_reference_rewrite_corpus_failed",
+        "Registered-reference rewrite corpus requires a provisioned candidate",
+      );
+    }
+    if (state.failure === null && runner !== undefined && vault !== null && candidate !== null) {
+      try {
+        state.registeredReferenceRewrite = await runner!({
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordRegisteredReferenceRewriteEvent,
+          retainChildSource: retainContractChild,
+          assertion: recordRegisteredReferenceRewriteAssertion,
+          profile: profile!,
+          probe: options.probe,
+        });
+      } catch (error) {
+        fail(
+          "registered_reference_rewrite_corpus",
+          "registered_reference_rewrite_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
   }
   if (state.failure === null) {
-    await startAndObserve("obsidian_restart", "health_restart", "after_restart");
+    const runner = options.runPrivacyRecoveryAuthorityCorpus;
+    if (runner === undefined) {
+      fail("privacy_recovery_authority_corpus", "privacy_recovery_authority_corpus_failed", "Privacy/recovery corpus runner is required for authoritative acceptance");
+    }
+    const vault = state.vault;
+    const candidate = state.candidate;
+    if (state.failure === null && (vault === null || candidate === null)) {
+      fail(
+        "privacy_recovery_authority_corpus",
+        "privacy_recovery_authority_corpus_failed",
+        "Privacy/recovery corpus requires a provisioned candidate",
+      );
+    }
+    if (state.failure === null && runner !== undefined && vault !== null && candidate !== null) {
+      try {
+        const outcome = await runner!({
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordPrivacyRecoveryAuthorityEvent,
+          assertion: recordPrivacyRecoveryAuthorityAssertion,
+          profileName: options.profileName,
+          profile: profile!,
+          probe: options.probe,
+          prepareInstalledRuntimeAcceptanceDriver: async request => {
+            const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+            if (!("path" in prepared) || !("descriptor" in prepared)) {
+              throw new Error("Installed privacy descriptor binding is unavailable");
+            }
+            return prepared as Awaited<ReturnType<import("./privacy-recovery-installed-runner.js").InstalledPrivacyBoundaryOptions["prepareInstalledRuntimeAcceptanceDriver"]>>;
+          },
+        });
+        if ("scope" in outcome) {
+          recordPrivacyRecoveryAuthorityEvent("assertion", "installed-privacy-boundary-partial", outcome);
+          fail("privacy_recovery_authority_corpus", "privacy_recovery_authority_corpus_failed", "Installed Agent authority boundary is partial; local diagnostics and recovery acceptance are still required");
+        } else {
+          state.privacyRecoveryAuthority = outcome;
+        }
+      } catch (error) {
+        fail(
+          "privacy_recovery_authority_corpus",
+          "privacy_recovery_authority_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
+  }
+  if (state.failure === null) {
+    const runner = options.runReleaseLifecycleCorpus;
+    if (runner === undefined) {
+      fail("release_lifecycle_corpus", "release_lifecycle_corpus_failed", "Release-lifecycle corpus runner is required for authoritative acceptance");
+    }
+    const candidate = state.candidate;
+    if (state.failure === null && candidate === null) {
+      fail(
+        "release_lifecycle_corpus",
+        "release_lifecycle_corpus_failed",
+        "Release-lifecycle corpus requires a verified candidate",
+      );
+    }
+    if (state.failure === null && runner !== undefined && candidate !== null) {
+      try {
+        state.releaseLifecycle = await runner!({
+          profileName: options.profileName, profile: profile!, probe: options.probe,
+          runId,
+          workingDirectory: options.workingDirectory,
+          candidate,
+          processControl: options.processControl,
+          client,
+          configDirectoryName,
+          timeouts,
+          provisionVault: provisionTestVault,
+          cleanupVault,
+          record: recordReleaseLifecycleEvent,
+          assertion: recordReleaseLifecycleAssertion,
+        });
+      } catch (error) {
+        fail(
+          "release_lifecycle_corpus",
+          "release_lifecycle_corpus_failed",
+          sanitize(error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
+  }
+  if (state.failure === null) {
+    try {
+      const runner = options.runCrashRestorationRetainedAuthorityCorpus;
+      if (runner === undefined) {
+        throw new CrashRestorationRetainedAuthorityCorpusError("Installed crash runner is required; Node corpus evidence is not authoritative");
+      }
+      const candidate = state.candidate;
+      state.crashRestorationRetainedAuthority = await runner({
+          workingDirectory: options.workingDirectory,
+          record: recordCrashRestorationRetainedAuthorityEvent,
+          assertion: recordCrashRestorationRetainedAuthorityAssertion,
+          ...(candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined ? {} : {
+            installed: {
+              runId, workingDirectory: options.workingDirectory,
+              reportDirectory: dirname(options.evidencePath),
+              candidate, profile, client, processControl: options.processControl,
+              configDirectoryName, timeouts,
+              probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+              prepareAcceptanceDriver: async request => {
+                const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+                if (!("path" in prepared) || !("descriptor" in prepared)) {
+                  throw new Error("Installed crash descriptor binding is unavailable");
+                }
+                return prepared as Awaited<ReturnType<import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions["prepareAcceptanceDriver"]>>;
+              },
+              record: recordCrashRestorationRetainedAuthorityEvent,
+              assertion: recordCrashRestorationRetainedAuthorityAssertion,
+            },
+          }),
+        });
+    } catch (error) {
+      fail(
+        "crash_restoration_retained_authority_corpus",
+        "crash_restoration_retained_authority_corpus_failed",
+        sanitize(error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+  if (state.failure === null && options.runPersistentFifoCorpus !== undefined) {
+    try {
+      const candidate = state.candidate;
+      if (candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined) {
+        throw new Error("Installed persistent FIFO requires verified candidate, profile and private observation descriptor");
+      }
+      persistentFifo = await options.runPersistentFifoCorpus({
+        runId, workingDirectory: options.workingDirectory, reportDirectory: dirname(options.evidencePath),
+        candidate, profile, client, processControl: options.processControl, configDirectoryName, timeouts,
+        probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+        prepareAcceptanceDriver: async request => {
+          const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+          if (!("path" in prepared) || !("descriptor" in prepared)) throw new Error("Installed FIFO descriptor binding unavailable");
+          return prepared as Awaited<ReturnType<import("./fifo-installed-runner.js").InstalledFifoOptions["prepareAcceptanceDriver"]>>;
+        },
+        record: recordChangeSetEvent, assertion: recordChangeSetAssertion,
+      });
+    } catch (error) { fail("change_set_corpus", "change_set_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
+  }
+  if (state.failure === null) {
+    await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
+      stage: "change_set_replay",
+      run: async (identity) => {
+        if (state.changeSetAdmission === null) return;
+        try {
+          state.changeSetReplay = await (options.runChangeSetReplay ??
+            runChangeSetReplayCorpusAtEndpoint)({
+            endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
+            expectedVaultId: identity.vaultId,
+            establishedKeys: state.changeSetAdmission.replayKeys,
+            record: recordChangeSetEvent,
+            assertion: recordChangeSetAssertion,
+          });
+        } catch (error) {
+          if (error instanceof ChangeSetSubmissionCorpusError) {
+            fail("change_set_replay", "change_set_replay_failed", sanitize(error.message));
+          } else {
+            failFromError("change_set_replay", error);
+          }
+        }
+      },
+    });
   }
 
   // Best-effort stop before cleanup so a failed run never leaves a live
@@ -486,6 +1649,19 @@ export async function runInstalledRuntimeHarness(
     } catch {
       // The primary failure is already recorded; cleanup still proceeds.
     }
+  }
+
+  if (acceptanceDriver !== null && handle === null && !startupShutdownUnconfirmed) {
+    try {
+      await acceptanceDriver.cleanup();
+    } catch (error) {
+      fail(
+        "acceptance_driver",
+        "acceptance_driver_cleanup_failed",
+        sanitize(error instanceof Error ? error.message : String(error)),
+      );
+    }
+    acceptanceDriver = null;
   }
 
   if (state.vault !== null) {
@@ -499,7 +1675,11 @@ export async function runInstalledRuntimeHarness(
   // Cleanup runs even after failures; residual generated content invalidates
   // the evidence rather than silently passing (spec §12.6). Cleanup never
   // touches roots the run did not itself provision.
-  if (state.vault !== null) {
+  if (state.vault !== null && (handle !== null || startupShutdownUnconfirmed)) {
+    // The process or listener may still own these files. Retain both roots.
+    state.cleanup = { attempted: true, residualPaths: ["/"] };
+    fail("cleanup", "residual_test_content", "Generated runtime shutdown was not confirmed");
+  } else if (state.vault !== null) {
     try {
       state.cleanup = await cleanupVault(state.vault);
     } catch (error) {
@@ -509,6 +1689,10 @@ export async function runInstalledRuntimeHarness(
     if (state.cleanup.residualPaths.length > 0) {
       fail("cleanup", "residual_test_content", "Generated test content survived cleanup");
     }
+  }
+
+  if (isolatedRuntimeResidue) {
+    state.cleanup = { attempted: true, residualPaths: [...(state.cleanup?.residualPaths ?? []), "isolated-runtime/"] };
   }
 
   // Residual generated content invalidates the run's evidence even when a
@@ -525,6 +1709,73 @@ export async function runInstalledRuntimeHarness(
         : "failed";
 
   const firstHealth = state.observations[0]?.observation.health;
+  const changeSetCorpus: ChangeSetCorpusEvidence | null =
+    state.changeSetAdmission !== null &&
+    state.changeSetReplay !== null
+      ? composeChangeSetCorpusEvidence({
+          admission: state.changeSetAdmission,
+          replay: state.changeSetReplay,
+          events: changeSetEvents,
+          assertions: changeSetAssertions,
+        })
+      : null;
+  if (changeSetCorpus !== null && persistentFifo !== undefined) changeSetCorpus.admission.fifo.persistentObservation = persistentFifo;
+  const gateIsolationCorpus: GateIsolationCorpusEvidence | null =
+    state.gateIsolation !== null
+      ? composeGateIsolationCorpusEvidence({
+          outcome: state.gateIsolation,
+          events: gateIsolationEvents,
+          assertions: gateIsolationAssertions,
+        })
+      : null;
+  if (gateIsolationCorpus !== null && manualPause !== undefined) gateIsolationCorpus.manualPause.installedObservation = manualPause;
+  const registeredReferenceRewriteCorpus: RegisteredReferenceRewriteCorpusEvidence | null =
+    state.registeredReferenceRewrite !== null
+      ? composeRegisteredReferenceRewriteCorpusEvidence({
+          outcome: state.registeredReferenceRewrite,
+          events: registeredReferenceRewriteEvents,
+          assertions: registeredReferenceRewriteAssertions,
+        })
+      : null;
+  const semanticEvidenceSearchSnapshotCorpus: SemanticEvidenceCorpusEvidence | null =
+    state.semanticEvidenceSearchSnapshot !== null
+      ? composeSemanticEvidenceSearchSnapshotCorpusEvidence({
+          outcome: state.semanticEvidenceSearchSnapshot,
+          events: semanticEvidenceSearchSnapshotEvents,
+          assertions: semanticEvidenceSearchSnapshotAssertions,
+        })
+      : null;
+  if (state.candidate !== null) contractContext = { runId, candidateBundleSha256: state.candidate.identity.bundleSha256, installedMainSha256: state.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: options.profileName, children: retainedContractChildren, reports: [["registered-reference-byte-verification", registeredReferenceRewriteCorpus], ["successor-search-snapshot-graph-evidence", semanticEvidenceSearchSnapshotCorpus]].filter(([, report]) => report !== null).map(([scenarioId, report]) => ({ scenarioId: scenarioId as string, report: structuredClone(report), reportSha256: contractDigest(report) })) };
+  const privacyRecoveryAuthorityCorpus: PrivacyRecoveryAuthorityCorpusEvidence | null =
+    state.privacyRecoveryAuthority !== null
+      ? privacyRecoveryAuthorityCorpusEvidenceSchema.parse(
+          composePrivacyRecoveryAuthorityCorpusEvidence({
+            outcome: state.privacyRecoveryAuthority,
+            events: privacyRecoveryAuthorityEvents,
+            assertions: privacyRecoveryAuthorityAssertions,
+          }),
+        )
+      : null;
+  const releaseLifecycleCorpus: ReleaseLifecycleCorpusEvidence | null =
+    state.releaseLifecycle !== null
+      ? releaseLifecycleCorpusEvidenceSchema.parse(
+          composeReleaseLifecycleCorpusEvidence({
+            outcome: state.releaseLifecycle,
+            events: releaseLifecycleEvents,
+            assertions: releaseLifecycleAssertions,
+          }),
+        )
+      : null;
+  const crashRestorationRetainedAuthorityCorpus: CrashRestorationRetainedAuthorityCorpusEvidence | null =
+    state.crashRestorationRetainedAuthority !== null
+      ? crashRestorationRetainedAuthorityCorpusEvidenceSchema.parse(
+          composeCrashRestorationRetainedAuthorityCorpusEvidence({
+            outcome: state.crashRestorationRetainedAuthority,
+            events: crashRestorationRetainedAuthorityEvents,
+            assertions: crashRestorationRetainedAuthorityAssertions,
+          }),
+        )
+      : null;
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId,
@@ -604,6 +1855,19 @@ export async function runInstalledRuntimeHarness(
             };
           })(),
     observations: state.observations.map((observation) => toObservationEvidence(observation)),
+    contractSourceVaults: contractChildSources.map(source => ({ ...source })),
+    contractPackageCorpus: null,
+    publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
+    changeSetCorpus,
+    gateIsolationCorpus,
+    manualPauseObservation: manualPause ?? null,
+    registeredReferenceRewriteCorpus,
+    semanticEvidenceSearchSnapshotCorpus,
+    privacyRecoveryAuthorityCorpus,
+    releaseLifecycleCorpus,
+    crashRestorationRetainedAuthorityCorpus,
+    pluginEventObserverCorpus,
+    acceptanceMatrix: null,
     verdict,
     failure:
       state.failure === null
@@ -617,14 +1881,50 @@ export async function runInstalledRuntimeHarness(
         : { attempted: true, residualPaths: [...state.cleanup.residualPaths] },
   };
 
+  if (evidence.verdict === "passed") {
+    try {
+      if (contractAuthority === null || contractWire === null || state.vault === null || state.candidate === null || firstIdentity === null || state.beforeInventory === null || state.afterInventory === null || state.cleanup === null) throw new Error("Version contract package execution evidence is absent");
+      const binding = { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 };
+      for (const [scenarioId, report] of [["registered-reference-byte-verification", registeredReferenceRewriteCorpus], ["successor-search-snapshot-graph-evidence", semanticEvidenceSearchSnapshotCorpus]] as const) {
+        if (report === null) continue;
+        const index = contractCrossCalls.findIndex(proof => proof.scenarioId === scenarioId);
+        const proof = await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId, endpoint: new URL(`http://127.0.0.1:${firstIdentity.port}/mcp`), expectedVaultId: firstIdentity.vaultId, binding, predecessorProof: index >= 0 ? contractCrossCalls[index] : undefined, dependency: { binding, sourceVaults: contractChildSources.filter(source => scenarioId === "registered-reference-byte-verification" ? source.scenarioId === scenarioId : source.scenarioId !== "registered-reference-byte-verification"), reportSha256: contractDigest(report), report } });
+        if (index >= 0) contractCrossCalls[index] = proof; else contractCrossCalls.push(proof);
+      }
+      evidence.contractPackageCorpus = (options.completeContractPackage ?? completeContractPackageCorpus)({ authority: contractAuthority, wire: contractWire, crossCalls: contractCrossCalls, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, beforeInventorySha256: contractDigest(state.beforeInventory), afterInventorySha256: contractDigest(state.afterInventory), cleanup: state.cleanup });
+      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence, observerContext, pauseContext, contractContext);
+      (evidence as InstalledRuntimeEvidence & { acceptanceMatrix: AcceptanceMatrixReport }).acceptanceMatrix =
+        state.acceptanceMatrix;
+    } catch (error) {
+      fail(
+        "acceptance_matrix",
+        "acceptance_matrix_failed",
+        sanitize(error instanceof Error ? error.message : String(error)),
+      );
+      const failure = state.failure;
+      if (failure === null) throw new Error("Acceptance matrix failure was not recorded");
+      evidence.verdict = "failed";
+      evidence.failure = {
+        stage: failure.stage,
+        code: failure.code,
+        ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+      };
+    }
+  }
+
+  const partialAuthority = contractAuthority as VersionContractPackage | null;
+  if (partialAuthority !== null && state.candidate !== null && state.vault !== null && firstIdentity !== null) evidence.contractPackageExecution = { authoritySha256: partialAuthority.manifestSha256, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, wire: contractWire, crossCalls: contractCrossCalls.map(proof => ({ ...proof, observations: [...proof.observations] })), complete: evidence.contractPackageCorpus !== null && evidence.contractPackageCorpus !== undefined, cleanup: state.cleanup === null ? null : { attempted: state.cleanup.attempted, residualPaths: [...state.cleanup.residualPaths] } };
   const privateMarkers = [
+    "---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n",
+    "q".repeat(4_718_592),
     ...(state.vault?.seedNotes.map((note) => note.content) ?? []),
     state.vault?.vaultPath ?? "",
     state.vault?.profileDirectory ?? "",
     options.workingDirectory,
   ];
-  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers);
-  return { verdict, failure: state.failure, evidence, evidencePath: options.evidencePath };
+  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers, observerContext, pauseContext, contractContext);
+  return { verdict: evidence.verdict, failure: state.failure, evidence, evidencePath: options.evidencePath,
+    readEvidence: async () => parseEvidence(await readFile(options.evidencePath, "utf8"), observerContext, pauseContext, contractContext) };
 }
 
 // The phase and its observation are recorded together so the evidence

@@ -86,7 +86,8 @@ export interface ManagedVaultBridgeRuntimeOptions {
       dataSource: ChangeSetPreflightDataSource;
       execution?: ChangeSetExecutionAdapter;
       vaultId?: string;
-      crashInjector?: (point: string) => void | Promise<void>;
+      crashInjector?: (point: string, context?: import("./change-set.js").ChangeSetCrashContext) => void | Promise<void>;
+      acceptanceObserver?: import("./change-set.js").ChangeSetServiceOptions["acceptanceObserver"];
     };
     incompatibleState?: boolean;
   }): BridgeInstance;
@@ -98,7 +99,39 @@ export interface ManagedVaultBridgeRuntimeOptions {
   createVaultId?: () => string;
   selectInitialPort?: () => number;
   successBarrierTimeoutMs?: number;
-  crashInjector?: (point: string) => void | Promise<void>;
+  onSearchSnapshotRefreshScheduled?(observation: {
+    readonly reset: boolean;
+  }): void;
+  onSuccessBarrierRound?(observation: {
+    readonly targets: readonly {
+      readonly path: string;
+      readonly expectedContentVersion: string;
+      readonly observedContentVersion: string | undefined;
+      readonly matched: boolean;
+    }[];
+    readonly move?: {
+      readonly absentPath: { readonly path: string; readonly absent: boolean };
+      readonly presentPath: {
+        readonly path: string;
+        readonly expectedContentVersion: string;
+        readonly observedContentVersion: string | undefined;
+        readonly matched: boolean;
+      };
+      readonly closure: readonly {
+        readonly path: string;
+        readonly expectedContentVersion: string;
+        readonly observedContentVersion: string | undefined;
+        readonly expectedResolvedPath: string;
+        readonly observedReferenceCount: number;
+        readonly expectedReferenceCount: number;
+        readonly matched: boolean;
+      }[];
+      readonly matched: boolean;
+    };
+    readonly matched: boolean;
+  }): void;
+  crashInjector?: (point: string, context?: import("./change-set.js").ChangeSetCrashContext) => void | Promise<void>;
+  acceptanceObserver?: import("./change-set.js").ChangeSetServiceOptions["acceptanceObserver"];
 }
 
 function emptyChangeSetState(): ChangeSetRegistryState {
@@ -234,6 +267,19 @@ export class ManagedVaultBridgeRuntime {
     return this.#settings;
   }
 
+  get currentSearchSnapshotVersion(): number | null {
+    return this.#snapshots?.current()?.version ?? null;
+  }
+
+  get currentSearchSnapshotObservation(): {
+    readonly version: number;
+    readonly immutable: true;
+  } | null {
+    const snapshot = this.#snapshots?.current();
+    if (snapshot === undefined || !Object.isFrozen(snapshot)) return null;
+    return { version: snapshot.version, immutable: true };
+  }
+
   get pendingPathChange(): PathChangeEvidence | undefined {
     return this.#pendingPathChange;
   }
@@ -258,40 +304,74 @@ export class ManagedVaultBridgeRuntime {
       const notes = new Map(
         snapshots.current()?.notes.map((note) => [note.path, note]) ?? [],
       );
-      const targetsMatch = targets.every(({ path, contentVersion, requireSemanticMatch }) => {
-        const note = notes.get(path);
-        if (note?.contentVersion !== contentVersion) return false;
-        // A semantic observation for a different version is stale/late and fails.
-        // For a changed note, absence of any observation is not yet proof.
-        if (requireSemanticMatch === true) {
-          return note.semanticContentVersion === contentVersion;
-        }
-        if (
-          note.semanticContentVersion !== undefined &&
-          note.semanticContentVersion !== contentVersion
-        ) return false;
-        return true;
+      const targetObservations = targets.map(
+        ({ path, contentVersion, requireSemanticMatch }) => {
+          const note = notes.get(path);
+          return {
+            path,
+            expectedContentVersion: contentVersion,
+            observedContentVersion: note?.semanticContentVersion,
+            matched:
+              note?.contentVersion === contentVersion &&
+              (requireSemanticMatch === true
+                ? note.semanticContentVersion === contentVersion
+                : note.semanticContentVersion === undefined ||
+                  note.semanticContentVersion === contentVersion),
+          };
+        },
+      );
+      const targetsMatch = targetObservations.every(({ matched }) => matched);
+      const moveObservation = moveBarrier === undefined
+        ? undefined
+        : (() => {
+            const present = notes.get(moveBarrier.presentPath);
+            const presentMatches =
+              present?.contentVersion === moveBarrier.presentVersion;
+            const closure = moveBarrier.closure.map((expected) => {
+              const note = notes.get(expected.path);
+              const observedReferenceCount =
+                note?.resolvedLinks[expected.resolvedPath] ?? 0;
+              const matched =
+                note?.contentVersion === expected.contentVersion &&
+                observedReferenceCount === expected.referenceCount &&
+                !Object.keys(note?.resolvedLinks ?? {}).some(
+                  (path) =>
+                    (path === moveBarrier.presentPath ||
+                      path === moveBarrier.absentPath) &&
+                    path !== expected.resolvedPath,
+                );
+              return {
+                path: expected.path,
+                expectedContentVersion: expected.contentVersion,
+                observedContentVersion: note?.contentVersion,
+                expectedResolvedPath: expected.resolvedPath,
+                observedReferenceCount,
+                expectedReferenceCount: expected.referenceCount,
+                matched,
+              };
+            });
+            const absent = !notes.has(moveBarrier.absentPath);
+            return {
+              absentPath: { path: moveBarrier.absentPath, absent },
+              presentPath: {
+                path: moveBarrier.presentPath,
+                expectedContentVersion: moveBarrier.presentVersion,
+                observedContentVersion: present?.contentVersion,
+                matched: presentMatches,
+              },
+              closure,
+              matched:
+                absent && presentMatches && closure.every(({ matched }) => matched),
+            };
+          })();
+      const roundMatches = targetsMatch && (moveObservation?.matched ?? true);
+      this.#options.onSuccessBarrierRound?.({
+        targets: targetObservations,
+        ...(moveObservation === undefined ? {} : { move: moveObservation }),
+        matched: roundMatches,
       });
-      if (!targetsMatch) return false;
-      if (moveBarrier === undefined) return true;
-      // A note move additionally requires the rename to be visible and every
-      // closure note to resolve its references to the moved note (issue #38).
-      if (
-        notes.has(moveBarrier.absentPath) ||
-        notes.get(moveBarrier.presentPath)?.contentVersion !== moveBarrier.presentVersion
-      ) return false;
-      return moveBarrier.closure.every((expected) => {
-        const note = notes.get(expected.path);
-        return (
-          note?.contentVersion === expected.contentVersion &&
-          note.resolvedLinks[expected.resolvedPath] === expected.referenceCount &&
-          !Object.keys(note.resolvedLinks).some(
-            (path) =>
-              (path === moveBarrier.presentPath || path === moveBarrier.absentPath) &&
-              path !== expected.resolvedPath,
-          )
-        );
-      });
+      if (!roundMatches) return false;
+      return true;
     };
     const deadline = Date.now() + (this.#options.successBarrierTimeoutMs ?? 5_000);
     refresh.schedule();
@@ -329,7 +409,10 @@ export class ManagedVaultBridgeRuntime {
   }
 
   scheduleSearchSnapshotRefresh(): void {
-    this.#snapshotRefresh?.schedule();
+    const observation = this.#snapshotRefresh?.schedule();
+    if (observation !== undefined) {
+      this.#options.onSearchSnapshotRefreshScheduled?.(observation);
+    }
     for (const signal of this.#snapshotSignals.splice(0)) signal();
   }
 
@@ -456,6 +539,14 @@ export class ManagedVaultBridgeRuntime {
       },
     };
     const persistedWriteMode = restricted ? undefined : settings.changeSets?.writeMode;
+    // `baseline_accepted` is deliberately durable before clearing the Journal.
+    // Keep its health projection recovery-blocked until ChangeSetService confirms
+    // that the Journal is gone during startup; otherwise a failed clear could
+    // advertise a manual pause while the service still blocks recovery.
+    const recoveryPending =
+      !restricted &&
+      settings.changeSets?.recovery !== undefined &&
+      settings.changeSets.recovery.state !== "none";
     const writeUnavailable = this.#options.changeSetDataSource === undefined;
     const persistedPaused = persistedWriteMode !== undefined;
     const persistedLifecycle = restricted ? undefined : settings.changeSets?.lifecycle;
@@ -474,14 +565,14 @@ export class ManagedVaultBridgeRuntime {
         cache: "unavailable",
         index: snapshots?.readiness === "ready" ? "ready" : "unavailable",
       },
-      recovery: { state: "none" },
+      recovery: recoveryPending ? { state: "blocked" } : { state: "none" },
       write:
-        writeUnavailable || persistedPaused
+        recoveryPending || writeUnavailable || persistedPaused
           ? {
-              gate: writeUnavailable || maintenanceFailed ? "blocked" : "open",
+              gate: recoveryPending || writeUnavailable || maintenanceFailed ? "blocked" : "open",
               state: "paused",
               pauseSource:
-                writeUnavailable || maintenancePaused || maintenancePending
+                recoveryPending || writeUnavailable || maintenancePaused || maintenancePending
                   ? "maintenance"
                   : "manual",
             }
@@ -494,11 +585,13 @@ export class ManagedVaultBridgeRuntime {
         recovery: "not_run",
       },
       effectiveGate:
-        writeUnavailable || persistedPaused
-          ? { code: maintenancePending ? "upgrade_in_progress" : "writes_paused" }
-          : null,
+        recoveryPending
+          ? { code: "recovery_blocked" }
+          : writeUnavailable || persistedPaused
+            ? { code: maintenancePending ? "upgrade_in_progress" : "writes_paused" }
+            : null,
       overall:
-        writeUnavailable || maintenancePending
+        recoveryPending || writeUnavailable || maintenancePending
           ? "blocked"
           : persistedPaused
             ? "degraded"
@@ -507,31 +600,35 @@ export class ManagedVaultBridgeRuntime {
               ? "healthy"
               : "degraded",
       reasonCodes:
-        maintenanceFailed
-          ? ["upgrade_failed"]
-          : snapshots?.readiness !== "ready"
-            ? ["content_tools_not_ready"]
-            : writeUnavailable
-              ? ["writes_paused"]
-              : maintenancePending
-                ? ["upgrade_in_progress"]
-                : persistedPaused
-                  ? ["writes_paused"]
-                  : this.#options.changeSetExecution === undefined
-                    ? ["mutation_executor_not_ready"]
-                    : [],
+        recoveryPending
+          ? ["recovery_blocked"]
+          : maintenanceFailed
+            ? ["upgrade_failed"]
+            : snapshots?.readiness !== "ready"
+              ? ["content_tools_not_ready"]
+              : writeUnavailable
+                ? ["writes_paused"]
+                : maintenancePending
+                  ? ["upgrade_in_progress"]
+                  : persistedPaused
+                    ? ["writes_paused"]
+                    : this.#options.changeSetExecution === undefined
+                      ? ["mutation_executor_not_ready"]
+                      : [],
       operatorAction:
-        maintenanceFailed
-          ? "finish_upgrade"
-          : snapshots?.readiness !== "ready"
-            ? "finish_initialization"
-            : writeUnavailable || persistedPaused
-              ? maintenancePending
-                ? "finish_upgrade"
-                : "resume_writes"
-              : this.#options.changeSetExecution === undefined
-                ? "wait_for_readiness"
-                : "none",
+        recoveryPending
+          ? "review_recovery"
+          : maintenanceFailed
+            ? "finish_upgrade"
+            : snapshots?.readiness !== "ready"
+              ? "finish_initialization"
+              : writeUnavailable || persistedPaused
+                ? maintenancePending
+                  ? "finish_upgrade"
+                  : "resume_writes"
+                : this.#options.changeSetExecution === undefined
+                  ? "wait_for_readiness"
+                  : "none",
     };
     this.#health = health;
     const bridge = this.#options.createBridge({
@@ -555,6 +652,7 @@ export class ManagedVaultBridgeRuntime {
                     ),
               execution: this.#options.changeSetExecution,
               vaultId: settings.vaultId,
+              ...(this.#options.acceptanceObserver === undefined ? {} : { acceptanceObserver: this.#options.acceptanceObserver }),
               ...(this.#options.crashInjector === undefined
                 ? {}
                 : { crashInjector: this.#options.crashInjector }),
@@ -605,6 +703,12 @@ export class ManagedVaultBridgeRuntime {
       },
       recheckHealth: () => this.refreshSearchSnapshot(),
     });
+  }
+
+  async acceptTrustedRecoveryBaseline(): Promise<void> {
+    const bridge = this.#bridge;
+    if (bridge === undefined) throw new Error("Managed Vault Bridge is not loaded");
+    await bridge.acceptTrustedRecoveryBaseline(() => this.refreshSearchSnapshot());
   }
 
   async resumeWrites(): Promise<void> {
@@ -660,6 +764,7 @@ export class ManagedVaultBridgeRuntime {
       this.#snapshots === undefined
         ? undefined
         : () => this.#snapshots?.readiness ?? "unavailable",
+      execution !== undefined,
     );
     if (projected.outcome !== "observed") {
       throw new Error("Diagnostic evidence is unavailable from this runtime");
@@ -698,8 +803,8 @@ export class ManagedVaultBridgeRuntime {
    * through the local interactive Primary Operator entry point; no Agent
    * Session route can reach it.
    */
-  async createStandardDiagnosticBundle(): Promise<StandardDiagnosticBundle> {
-    return createStandardDiagnosticBundle(await this.#collectDiagnosticEvidence());
+  async createStandardDiagnosticBundle(correlationSalt?: Uint8Array): Promise<StandardDiagnosticBundle> {
+    return createStandardDiagnosticBundle(await this.#collectDiagnosticEvidence(), correlationSalt);
   }
 
   /**

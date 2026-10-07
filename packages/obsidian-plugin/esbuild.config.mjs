@@ -22,6 +22,7 @@ await esbuild.build({
   target: "node24",
   sourcemap: true,
   outfile: "dist/installed-runtime-smoke.mjs",
+  banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
 });
 
 // The release-bundle assemble/verify entries (issue #196) ship as

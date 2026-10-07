@@ -10,7 +10,10 @@
  * Usage (from packages/obsidian-plugin):
  *   npm run smoke:installed-runtime -- \
  *     --registration <registration.json> --workdir <dir> [--candidate <dir>] \
- *     [--profile MVP-PERF-REF-1] [--evidence <path>]
+ *     [--profile MVP-PERF-REF-1] [--evidence <path>] \
+ *     [--contract-scenario <manifest-id>] [--contract-timing full-real-time|binding-only] \
+ *     --previous-release <dir> --previous-release-tag <vX.Y.Z> \
+ *     [--previous-release-attestation <file>]
  *
  * The registration JSON is created once per registered machine and pins the
  * observed installation facts the probe verifies against the registry:
@@ -23,7 +26,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, rm, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { platform } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,50 +34,17 @@ import { fileURLToPath } from "node:url";
 
 import { assembleReleaseBundle } from "../release/assemble-release-bundle.js";
 import { currentSourceTreeTag } from "../release/release-identity.js";
+import { createSupervisedInstalledRuntimeProbe } from "./local-gui-supervision.js";
 import { runInstalledRuntimeHarness } from "./harness.js";
-import { createWindowsObsidianProcessControl } from "./obsidian-process.js";
+import { createLinuxObsidianProcessControl, createWindowsObsidianProcessControl } from "./obsidian-process.js";
 import {
   hostOsBuild,
-  MVP_PERF_REF_1,
   type ObservedRuntimeEnvironment,
 } from "./runtime-profile.js";
-
-interface SmokeArguments {
-  candidate?: string;
-  registration?: string;
-  workdir?: string;
-  evidence?: string;
-  profile: string;
-}
-
-function parseArguments(argv: readonly string[]): SmokeArguments {
-  const parsed: SmokeArguments = { profile: MVP_PERF_REF_1.name };
-  for (let index = 0; index < argv.length; index += 1) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    switch (flag) {
-      case "--candidate":
-        parsed.candidate = value;
-        break;
-      case "--registration":
-        parsed.registration = value;
-        break;
-      case "--workdir":
-        parsed.workdir = value;
-        break;
-      case "--evidence":
-        parsed.evidence = value;
-        break;
-      case "--profile":
-        parsed.profile = value ?? MVP_PERF_REF_1.name;
-        break;
-      default:
-        throw new Error(`Unknown argument: ${flag ?? ""}`);
-    }
-    if (flag !== undefined && flag.startsWith("--")) index += 1;
-  }
-  return parsed;
-}
+import {
+  createAuthoritativeInstalledRuntimeRunners,
+  parseInstalledRuntimeSmokeArguments,
+} from "./smoke-command.js";
 
 interface SmokeRegistration {
   obsidianExecutable: string;
@@ -126,14 +96,13 @@ async function probeHost(registration: SmokeRegistration): Promise<ObservedRunti
   if (await provesLoopbackHttp()) capabilities.push("loopback_http");
   if (platform() === "win32") {
     capabilities.push("ntfs_fixtures", "process_control");
+  } else if (platform() === "linux") {
+    capabilities.push("posix_fixtures", "process_control");
   }
   if (executablePresent) capabilities.push("obsidian_gui");
   return {
     platform: platform(),
     ...(hostOsBuild() === undefined ? {} : { osBuild: hostOsBuild() }),
-    obsidianVersion: executablePresent ? registration.obsidianVersion : undefined,
-    electronVersion: executablePresent ? registration.electronVersion : undefined,
-    nodeVersion: executablePresent ? registration.nodeVersion : undefined,
     capabilities,
   };
 }
@@ -153,10 +122,7 @@ async function assembleLocalCandidate(destination: string): Promise<void> {
   if (!(await fileExists(manifest)) || !(await fileExists(mainJs))) {
     return;
   }
-  // The destination is the harness-managed default candidate directory;
-  // packaging requires an absent-or-empty directory, so clear prior output.
-  await rm(destination, { recursive: true, force: true });
-  await rm(`${destination}.attestation.json`, { force: true });
+  // Each run owns a fresh candidate directory; never clear another run's bytes.
   await assembleReleaseBundle({
     tag: currentSourceTreeTag().tag,
     packageRoot,
@@ -165,31 +131,50 @@ async function assembleLocalCandidate(destination: string): Promise<void> {
 }
 
 async function main(): Promise<number> {
-  const args = parseArguments(process.argv.slice(2));
+  const args = parseInstalledRuntimeSmokeArguments(process.argv.slice(2));
   if (args.registration === undefined || args.workdir === undefined) {
     process.stderr.write(
-      "Usage: run-installed-runtime-smoke --registration <file> --workdir <dir> [--candidate <dir>] [--profile <name>] [--evidence <path>]\n",
+      "Usage: run-installed-runtime-smoke --registration <file> --workdir <dir> [--candidate <dir>] [--profile <name>] [--evidence <path>] [--contract-scenario <manifest-id>] [--contract-timing full-real-time|binding-only] --previous-release <dir> --previous-release-tag <vX.Y.Z> [--previous-release-attestation <file>]\n",
     );
     return 2;
   }
   const workdir = resolve(args.workdir);
   const registration = await readRegistration(resolve(args.registration));
-  const candidate = resolve(args.candidate ?? join(workdir, "candidate-bundle"));
+  const runId = randomRunId();
+  const candidate = resolve(args.candidate ?? join(workdir, `candidate-bundle-${runId}`));
   if (args.candidate === undefined) {
     await assembleLocalCandidate(candidate);
   }
   const evidencePath = resolve(
-    args.evidence ?? join(workdir, "evidence", `installed-runtime-smoke-${randomRunId()}.json`),
+    args.evidence ?? join(workdir, "evidence", `installed-runtime-smoke-${runId}.json`),
   );
+  const authoritativeRunners = createAuthoritativeInstalledRuntimeRunners({
+    runId,
+    reportDirectory: join(workdir, `installed-runtime-acceptance-${runId}`),
+    releaseArguments: args,
+    obsidianVersion: registration.obsidianVersion,
+    lifecycleOperatorObservation: async request => {
+      // Local terminal only: paths and the command never enter public evidence.
+      process.stderr.write(request.action === "enable-plugin"
+        ? `Primary Operator: enable ${request.pluginId} in the generated Vault ${request.vaultPath}; acceptance is waiting for the actual enabled inventory.\n`
+        : `Primary Operator: from ${request.vaultPath}, use only CLAUDE_CONFIG_DIR=${request.configDirectory} for this isolated local registration. Execute ${request.registrationCommand}; acceptance independently reads local config and runs claude mcp get. Do not modify your daily client.\n`);
+    },
+  });
   const result = await runInstalledRuntimeHarness({
     profileName: args.profile,
+    contractScenarioId: args.contractScenario,
+    contractContinuationTiming: args.contractTiming,
     candidateBundleDirectory: candidate,
     workingDirectory: workdir,
     evidencePath,
-    probe: { probe: () => probeHost(registration) },
-    processControl: createWindowsObsidianProcessControl({
+    runId,
+    probe: createSupervisedInstalledRuntimeProbe(() => probeHost(registration)),
+    processControl: (platform() === "linux"
+      ? createLinuxObsidianProcessControl
+      : createWindowsObsidianProcessControl)({
       executablePath: registration.obsidianExecutable,
     }),
+    ...authoritativeRunners,
   });
   process.stdout.write(
     `installed-runtime smoke verdict: ${result.verdict}\nevidence: ${result.evidencePath}\n`,

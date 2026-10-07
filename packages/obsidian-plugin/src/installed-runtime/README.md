@@ -27,10 +27,16 @@ these seams instead of building parallel harnesses.
 5. **Restart** — repeats the observation across a controlled Obsidian stop
    (verified: the loopback listener is gone) and restart, requiring the
    persisted Vault ID and port to remain stable.
-6. **Cleanup + evidence** — snapshots before/after inventories (paths, sizes,
-   SHA-256 only), removes the generated roots, reports residual paths, and
-   atomically writes one closed evidence record. Existing evidence files are
-   never overwritten.
+6. **Private acceptance driver** — before Obsidian starts, arms a descriptor
+   bound to the run ID, generated Vault, plugin ID, candidate/installed bundle
+   digests, report root, and a random capability token. The installed plugin
+   watches this one-shot command channel separately from `/mcp`, executes the
+   requested private acceptance scenario inside Obsidian, and atomically writes
+   a bound digest-only report. It adds no MCP route or seventh public tool.
+7. **Cleanup + evidence** — snapshots before/after inventories (paths, sizes,
+   SHA-256 only), removes the private descriptor and generated roots, reports
+   residual paths, and atomically writes one closed evidence record. Existing
+   evidence files are never overwritten.
 
 ## Verdicts — never a skipped green
 
@@ -56,6 +62,77 @@ never recorded), verdict, failure stage/code, and the residual-cleanup
 report. Serialization scans for registered private markers (seeded note
 bodies, absolute Vault/profile roots) and refuses to write on any leak;
 unknown fields reject fail closed.
+
+The public-wire corpus evidence (issue #174) extends the same envelope with a
+deterministic read-side corpus identity (`corpusId`, seed-inventory and
+scenario-program digests), wire-observed before/after inventories from
+deterministic discovery, and a retained-byte cleanup report proving every
+continuation chain the corpus issued was consumed to completion and rejected
+on replay. A passing run requires the observed inventory digest to be
+unchanged and every issued chain consumed and single-use proven.
+
+The change-set submission corpus (issue #175) proves the write side of the
+same six-tool contract through the same real loopback transport and the real
+file-system Change Set engine. It registers a closed
+`change-set-submission-proof` corpus identity, then exercises one deterministic
+ordered scenario program over `vault_change_set_submit` /
+`vault_change_set_status` (plus `vault_discover`/`vault_health` for inventory
+and idle-state evidence): a valid submit performs validation, complete
+preflight, registration, queueing, and execution-or-recovery advancement with
+no validate/apply handshake; every lease-time preflight rejection class
+returns only its stable evidence and mutates nothing; concurrent submissions
+prove exactly-once admission and single-writer contended-target exclusion;
+lost/truncated/schema-invalid/representation-mismatched submit responses are
+recovered only through the original Submission Key; and preview, final result,
+status, and replay preserve immutable effect IDs, causation, ordering, and
+typed path evidence. The harness runs the admission phase in the initial
+Obsidian window and replays every established Submission Key over a fresh
+connection after the controlled stop/restart boundary, so the durable identity
+evidence is proven across a real process restart. Only digest-only per-key
+proof records, digests of the wire-observed seed inventories, and the idle
+recovery/queue/write-gate report reach the evidence envelope.
+
+The gate-and-isolation corpus (issue #177) proves the per-Managed-Vault gate
+algebra of the same six-tool contract through two real loopback Bridges — two
+dedicated generated test Vaults that progress independently. It registers a
+closed `per-vault-gate-isolation-proof` corpus identity and runs one
+deterministic ordered scenario program over two concurrent Vault sessions plus
+a protocol-incompatible client: the same Submission Key and identical request
+register independent Change Sets in each Vault and a key bound in one Vault is
+never visible to the other; simultaneous gate conditions project exactly one
+effective gate in the fixed precedence order (`recovery_blocked` >
+`recovery_in_progress` > `writes_paused`/`upgrade_in_progress`, with
+session-level `incompatible_protocol` layered on top) and every public tool
+uses the contract-prescribed result branch, Submission Key consequence, and
+MCP `isError` value; a `recovery_blocked` submission atomically binds and
+records the historical `intent_not_applied` disposition, replays it after
+recovery, and requires a fresh Submission Key for renewed intent while other
+gate rows leave blocked unbound submissions unbound; manual pause drains the
+in-flight Change Set to a trustworthy end, retains queued FIFO order, rejects
+new unbound submissions, and keeps health/discovery/reads/status/continue
+available while writes remain gated; gate, pause, queue, and recovery
+transitions in one Managed Vault leave the other Vault's health, queue, and
+results independent; and the protocol-incompatible client gets
+`incompatible_protocol` operational blocks on the content tools and on
+submission/status without inspecting the Change Set registry and without
+binding a new Submission Key. Only digest-only per-Vault seed inventories, the
+wire-observed gate-history digest, per-key proof digests, and a residual-cleanup
+report reach the evidence envelope. Authoritative composition requires this
+runner and fails closed while its installed adapter is unavailable; it never
+omits the evidence block or treats absence as a passing skip.
+
+The privacy-and-recovery-authority corpus (issue #180) extends that same envelope
+with a closed `privacy-recovery-authority-proof` identity. It retains no raw Vault
+IDs, Submission Keys, note bodies, Frontmatter values, attachment bytes, absolute
+or Vault-relative paths, credentials, usernames, environment values, requests, or
+before images: standard local diagnostic bundles are verified for opaque aliases
+and checksums before only proof counts/digests are emitted. Each Agent Session is
+proven to see exactly the existing six MCP tools and a closed `vault_health` result;
+content-inclusive diagnostics and trusted recovery baseline acceptance remain
+explicit local Primary Operator actions. The corpus records rejected remote authority
+attempts without state mutation, Recovery Journal preconditions, explicit local
+resume after acceptance, two-Vault isolation, residual cleanup, and a passing
+release-blocking verdict.
 
 ## Scenario seams
 
@@ -84,6 +161,18 @@ byte-exact state preservation → the identity-mismatch projection → cleanup
 with no residue. #44 composes this scenario into larger corpora; the harness
 corpus above is unchanged.
 
+The release-lifecycle corpus (issue #181) composes the existing real-runtime
+install/repair, upgrade, uninstall, and purge scenarios into one verified
+release-blocking program. Its closed evidence records only release identities
+and digests of before/after bundle and operational-state inventories, then
+proves verified preflight and staged per-Managed-Vault atomic replacement,
+same-version state preservation, drained fail-closed migration and maintenance
+pause until explicit Primary Operator resume, all lifecycle-state projections,
+guarded uninstall, backup-backed interactive purge, recovery refusal, and
+residual cleanup. The authoritative smoke command must resolve and verify the
+previous release and wire this runner itself; absence or unavailable lifecycle
+evidence makes the run `invalid`.
+
 ## Purge scenario (issue #201)
 
 `purge-scenario.ts` exposes `runManagedVaultPurgeScenario(options)` on the
@@ -107,7 +196,10 @@ On a registered Windows machine matching `MVP-PERF-REF-1`:
 cd packages/obsidian-plugin
 npm run smoke:installed-runtime -- \
   --registration registration.json --workdir <scratch-dir> \
-  [--candidate <bundle-dir>] [--evidence <path>]
+  [--candidate <bundle-dir>] [--evidence <path>] \
+  --previous-release <verified-older-bundle-dir> \
+  --previous-release-tag <immutable-vX.Y.Z> \
+  [--previous-release-attestation <claims-path>]
 ```
 
 The registration file pins the observed installation facts:
@@ -121,7 +213,20 @@ The registration file pins the observed installation facts:
 }
 ```
 
+The previous release is supplied as an existing bundle plus an immutable tag.
+It goes through `verifyReleaseBundle()` with checksum, identity, attestation, and
+runtime checks, and its version must be strictly lower than the candidate.
+The command never rebuilds or relabels candidate bytes as a previous release.
+Attestation defaults to `<bundle-dir>.attestation.json`; the optional flag selects
+an existing claims file. Valid release inputs do not bypass the still-unavailable
+installed lifecycle Operator adapter.
+
 Without `--candidate`, the smoke run assembles the locally built plugin
-(`manifest.json` + `dist/main.js`) as the candidate. The process exits zero
-only when the evidence verdict is `passed`; every other outcome writes
-failed/invalid evidence and exits non-zero.
+(`manifest.json` + `dist/main.js`) as the candidate. The command never loads a
+caller-supplied runner module. Its registered-reference runner and private
+Semantic Evidence driver are built in; gate/isolation, privacy/recovery, and
+release-lifecycle adapters currently fail closed until their installed
+composition is available. The process exits zero only when the complete
+A-01…A-44 evidence matrix is `passed`; missing private-driver binding, scenario
+reports, installed executors, or lifecycle inputs write failed/invalid evidence
+and exit non-zero.

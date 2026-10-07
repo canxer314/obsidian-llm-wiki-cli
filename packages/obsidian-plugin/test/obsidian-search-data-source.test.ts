@@ -291,6 +291,29 @@ describe("installed Obsidian reference profiles", () => {
     });
   });
 
+  it("retains the raw Markdown destination when Obsidian caches its decoded link", async () => {
+    const original = "[guide](Inline%20Moved.md 'title')";
+    const dataSource = createObsidianSearchDataSource({
+      markdownFiles: () => [{ path: "Source.md" }],
+      readBinary: async () => new TextEncoder().encode(original),
+      fileCache: () => ({ links: [{ link: "Inline Moved.md", original,
+        position: position(0, original.length) }] }),
+      resolveLink: target => target === "Inline%20Moved.md" ? "Inline Moved.md" : null,
+      candidatePaths: () => ["Inline Moved.md"],
+      validSubpath: () => true,
+      resolvedLinks: () => ({ "Source.md": { "Inline Moved.md": 1 } }),
+      unresolvedLinks: () => ({}),
+      parseFrontmatter: () => null,
+      allTags: () => [],
+    });
+    const snapshots = new SearchSnapshotManager(dataSource);
+    await snapshots.rebuild();
+    expect(snapshots.current()?.notes[0]?.references).toMatchObject([{
+      profile: "markdown_inline_link", target: "Inline%20Moved.md",
+      resolvedPath: "Inline Moved.md", original,
+    }]);
+  });
+
   it("fails closed when installed cache evidence claims an unregistered grammar", async () => {
     const original = "Wiki Note";
     const dataSource = createObsidianSearchDataSource({

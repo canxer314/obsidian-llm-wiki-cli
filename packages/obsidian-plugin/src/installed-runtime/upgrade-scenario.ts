@@ -22,6 +22,7 @@ import {
   type LoopbackMcpClient,
 } from "./loopback-client.js";
 import {
+  ObsidianProcessError,
   readPersistedBridgeIdentity,
   waitForCondition,
   type ObsidianProcessControl,
@@ -190,6 +191,7 @@ export async function runManagedVaultUpgradeScenario(
   const recorder = stageRecorder();
   let vault: { vaultPath: string; profileDirectory: string } | null = null;
   let handle: ObsidianProcessHandle | null = null;
+  let startupShutdownUnconfirmed = false;
   let identity: PersistedBridgeIdentity | null = null;
   let upgrade: ManagedVaultUpgradeResult | null = null;
   let cleanup: CleanupReport | null = null;
@@ -260,6 +262,9 @@ export async function runManagedVaultUpgradeScenario(
       identity = startedIdentity;
       recorder.pass("obsidian_start");
     } catch (error) {
+      if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+        startupShutdownUnconfirmed = true;
+      }
       throw recorder.fail(
         "obsidian_start",
         error instanceof Error ? error.message : String(error),
@@ -307,10 +312,18 @@ export async function runManagedVaultUpgradeScenario(
         runtime,
         reloadRuntime: async () => {
           await handle!.stop();
-          handle = await options.processControl.start({
-            vaultPath: vault!.vaultPath,
-            profileDirectory: vault!.profileDirectory,
-          });
+          handle = null;
+          try {
+            handle = await options.processControl.start({
+              vaultPath: vault!.vaultPath,
+              profileDirectory: vault!.profileDirectory,
+            });
+          } catch (error) {
+            if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") {
+              startupShutdownUnconfirmed = true;
+            }
+            throw error;
+          }
           const reloaded = options.runtimeHost.currentRuntime();
           if (reloaded === null) {
             throw new Error("The reloaded Obsidian did not load the plugin runtime");
@@ -441,11 +454,16 @@ export async function runManagedVaultUpgradeScenario(
   if (handle !== null) {
     try {
       await handle.stop();
+      handle = null;
     } catch {
-      // The primary failure is already recorded; cleanup still proceeds.
+      // Never delete a generated root still owned by a live process.
     }
   }
-  if (vault !== null) {
+  if (vault !== null && (handle !== null || startupShutdownUnconfirmed)) {
+    cleanup = { attempted: true, residualPaths: ["/"] };
+    recorder.fail("cleanup", "Generated runtime shutdown was not confirmed");
+    failure ??= { stage: "cleanup", detail: "Generated runtime shutdown was not confirmed" };
+  } else if (vault !== null) {
     try {
       cleanup = await cleanupVault(vault);
       if (cleanup.residualPaths.length > 0) {

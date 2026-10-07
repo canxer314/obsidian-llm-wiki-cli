@@ -123,6 +123,9 @@ export interface BridgeInstance {
   stop(): Promise<void>;
   pauseWrites(): Promise<void>;
   runMaintenance(operation: BridgeMaintenanceOperation): Promise<void>;
+  acceptTrustedRecoveryBaseline(
+    recheckTrustedBaseline: () => void | Promise<void>,
+  ): Promise<void>;
   resumeWrites(): Promise<void>;
   registrationCommand(serverName?: string): string;
 }
@@ -131,6 +134,7 @@ export function projectObservedHealth(
   state: BridgeHealthState,
   port: number,
   searchSnapshotReadiness?: () => "ready" | "building" | "unavailable",
+  mutationExecutorReady?: boolean,
 ): HealthResult {
   const effectiveGate = projectEffectiveGate(state);
   const snapshotReadiness = searchSnapshotReadiness?.() ?? state.readiness.searchSnapshot;
@@ -150,6 +154,17 @@ export function projectObservedHealth(
     !stableReasonCodes.includes(state.effectiveGate.code)
   ) {
     stableReasonCodes.push(state.effectiveGate.code);
+  }
+  const recoveredStartupSnapshot =
+    dynamicSnapshotState && snapshotReadiness === "ready" &&
+    state.readiness.searchSnapshot !== "ready" &&
+    state.overall === "degraded" && state.operatorAction === "finish_initialization" &&
+    state.reasonCodes.some(code => initialSnapshotReasonCodes.has(code)) &&
+    stableReasonCodes.length === 0 && effectiveGate === null &&
+    state.recovery.state === "none" && state.write.gate === "open" &&
+    state.write.state === "writable" && state.write.pauseSource === null;
+  if (recoveredStartupSnapshot && mutationExecutorReady === false) {
+    stableReasonCodes.push("mutation_executor_not_ready");
   }
   const reasonCode =
     snapshotReadiness === "building"
@@ -180,12 +195,16 @@ export function projectObservedHealth(
     lifecycle: state.lifecycle,
     effectiveGate,
     overall:
-      snapshotNotReady && state.overall === "healthy" ? "degraded" : state.overall,
+      recoveredStartupSnapshot && mutationExecutorReady === true
+        ? "healthy"
+        : snapshotNotReady && state.overall === "healthy" ? "degraded" : state.overall,
     reasonCodes: snapshotNotReady
       ? [...new Set([...stableReasonCodes, reasonCode])]
       : stableReasonCodes,
     operatorAction:
-      snapshotNotReady &&
+      recoveredStartupSnapshot && mutationExecutorReady !== undefined
+        ? mutationExecutorReady ? "none" : "wait_for_readiness"
+        : snapshotNotReady &&
       (state.operatorAction === "none" ||
         state.operatorAction === "finish_initialization")
         ? "wait_for_readiness"
@@ -377,7 +396,7 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
         z.object({}).strict().parse(request.params.arguments ?? {});
         const health =
           sessionState.incompatibleHealth ??
-          projectObservedHealth(options.health, port, options.searchSnapshotReadiness);
+          projectObservedHealth(options.health, port, options.searchSnapshotReadiness, options.changeSets?.execution !== undefined);
         return {
           content: [{ type: "text" as const, text: serializeCompatibilityText(health) }],
           structuredContent: health,
@@ -745,6 +764,29 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
           vaultId: options.changeSets.vaultId ?? options.health.vault.id,
           runtimeState,
         });
+        if (
+          !changeSetService.recoveryBlocked &&
+          options.health.recovery.state === "blocked" &&
+          options.changeSets.execution !== undefined
+        ) {
+          options.health.recovery = { state: "none" };
+          options.health.write = {
+            gate: "open",
+            state: "paused",
+            pauseSource: "manual",
+          };
+          options.health.effectiveGate = { code: "writes_paused" };
+          options.health.overall = "degraded";
+          options.health.reasonCodes = [
+            ...new Set(
+              options.health.reasonCodes
+                .filter((code) => code !== "recovery_blocked")
+                .concat("writes_paused"),
+            ),
+          ];
+          options.health.operatorAction = "resume_writes";
+          options.health.lifecycle.recovery = "succeeded";
+        }
       }
       const server = createServer((request, response) => {
         void handleRequest(request, response).catch(() => {
@@ -898,6 +940,32 @@ export function createBridgeInstance(options: BridgeInstanceOptions): BridgeInst
           },
         },
       );
+    },
+    async acceptTrustedRecoveryBaseline(recheckTrustedBaseline) {
+      const service = changeSetService;
+      if (service === undefined) throw new Error("Change Set service is unavailable");
+      await service.acceptTrustedRecoveryBaseline(recheckTrustedBaseline);
+      const maintenanceFailed =
+        options.health.lifecycle.upgrade === "failed" ||
+        options.health.lifecycle.migration === "failed";
+      options.health.recovery = { state: "none" };
+      options.health.write = {
+        gate: maintenanceFailed ? "blocked" : "open",
+        state: "paused",
+        pauseSource: maintenanceFailed ? "maintenance" : "manual",
+      };
+      options.health.effectiveGate = {
+        code: maintenanceFailed ? "upgrade_in_progress" : "writes_paused",
+      };
+      options.health.overall = maintenanceFailed ? "blocked" : "degraded";
+      options.health.reasonCodes = [
+        ...new Set([
+          ...options.health.reasonCodes.filter((code) => code !== "recovery_blocked"),
+          maintenanceFailed ? "upgrade_failed" : "writes_paused",
+        ]),
+      ];
+      options.health.lifecycle.recovery = "succeeded";
+      options.health.operatorAction = maintenanceFailed ? "finish_upgrade" : "resume_writes";
     },
     async resumeWrites() {
       const service = changeSetService;
