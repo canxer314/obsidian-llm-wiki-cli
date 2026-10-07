@@ -178,20 +178,23 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "stale-failed-baseline" })).rejects.toThrow("baseline transition");
-    const currentFailed = createStandardDiagnosticBundle({ ...evidence, health: blocked.health,
+    const failedEntry = { changeSetId: "failed-change", submissionKey: "failed-key", enqueueSeq: 1,
+      state: "result_unproven", executionPhase: "terminal" };
+    const currentFailed = createStandardDiagnosticBundle({ ...evidence, health: blocked.health, changeSets: [failedEntry],
       journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
         { slot: 0, state: "valid", checksum: "valid", sequence: 1, phase: "PREPARED", frameSchemaVersion: 1, changeSetId: "failed-change" },
         { slot: 1, state: "valid", checksum: "valid", sequence: 2, phase: "FAILED", frameSchemaVersion: 1, changeSetId: "failed-change" },
       ] } });
+    const acceptedPaused = createStandardDiagnosticBundle({ ...evidence, health: paused.health, journal: paused.journal, changeSets: [failedEntry] });
     await activation!.recordLocalWriteControl({
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       invocationId: "valid-baseline", action: "accept-recovery-baseline", outcome: "accepted",
-      before: currentFailed, after: paused,
+      before: currentFailed, after: acceptedPaused,
     });
     expect(await loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "valid-baseline" })).toMatchObject({ outcome: "accepted" });
-    const clearedBlocked = createStandardDiagnosticBundle({ ...evidence, health: blocked.health,
+    const clearedBlocked = createStandardDiagnosticBundle({ ...evidence, health: blocked.health, changeSets: [failedEntry],
       journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
         { slot: 0, state: "empty", checksum: "not_present" },
         { slot: 1, state: "empty", checksum: "not_present" },

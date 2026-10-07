@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { verifyContentInclusiveDiagnosticBundle, type ContentInclusiveDiagnosticBundle } from "../content-inclusive-diagnostic-bundle.js";
 import { diagnosticCanonicalJson, diagnosticSha256 } from "./installed-diagnostic-privacy.js";
-import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
+import { createStandardDiagnosticBundle, canonicalizeDiagnosticPayload, verifyStandardDiagnosticBundle, type StandardDiagnosticBundle, type StandardDiagnosticEvidence } from "../diagnostic-bundle.js";
 import { isPathInside, loadInstalledRuntimeAcceptanceDescriptor, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 import { BRIDGE_VERSION, PLUGIN_VERSION, PROTOCOL_VERSION } from "../version.js";
 import { PERSISTENT_STATE_SCHEMA_VERSION } from "../managed-vault-runtime.js";
@@ -37,6 +37,7 @@ const controlReportSchema = standardReportSchema.omit({ action: true, checksumVe
   action: z.enum(["pause-writes", "accept-recovery-baseline", "resume-writes"]),
   invocationId: z.string().min(1), outcome: z.enum(["accepted", "rejected"]),
   before: z.unknown(), after: z.unknown(),
+  diagnosticCorrelationSalts: z.object({ before: z.string().regex(/^[a-f0-9]{64}$/u), after: z.string().regex(/^[a-f0-9]{64}$/u) }).strict().optional(),
 }).strict();
 
 export async function loadInstalledLocalOperatorReport(options: {
@@ -150,6 +151,24 @@ export async function loadInstalledLocalOperatorReport(options: {
       throw new Error("Local operator rejected baseline changed journal facts");
     }
   }
+  if (report.action === "accept-recovery-baseline" && report.outcome === "accepted") {
+    if ([before, after].some(bundle => bundle.queueTimeline.some(queue => queue.currentExecutionAlias !== null) ||
+        bundle.changeSetOutcomes.some(entry => entry.executionPhase === "executing" || entry.state === "in_progress" && entry.executionPhase !== "queued"))) {
+      throw new Error("Local operator baseline cannot prove absence of in-flight execution");
+    }
+    if (before.journal.availability !== "available" || before.journal.frames.length !== 2 || before.journal.frames.some(frame => frame.state === "invalid")) {
+      throw new Error("Local operator baseline transition cannot accept a missing or corrupt Journal");
+    }
+    const unproven = before.changeSetOutcomes.filter(entry => entry.state === "result_unproven");
+    type ValidFrame = Extract<StandardDiagnosticBundle["journal"]["frames"][number], { state: "valid" }>;
+    const frames: ValidFrame[] = [...before.journal.frames].filter((frame): frame is ValidFrame => frame.state === "valid");
+    const latest = frames.reduce<typeof frames[number] | undefined>((result, frame) =>
+      result === undefined || frame.sequence > result.sequence ? frame : result, undefined);
+    if (unproven.length !== 1 || unproven[0]!.executionPhase !== "terminal" ||
+        latest === undefined || latest.phase !== "FAILED" || latest.changeSetAlias !== unproven[0]!.changeSetAlias) {
+      throw new Error("Local operator baseline transition requires a unique associated terminal result_unproven and FAILED Journal");
+    }
+  }
   if (report.action === "accept-recovery-baseline" && report.outcome === "accepted" &&
       (before.health.recovery !== "blocked" || before.health.effectiveGate !== "recovery_blocked" ||
        before.journal.availability !== "available" ||
@@ -165,6 +184,19 @@ export async function loadInstalledLocalOperatorReport(options: {
        after.queueTimeline.some(queue => queue.currentExecutionAlias !== null))) {
     throw new Error("Local operator pause transition did not prove a drained manual pause");
   }
+  if (report.action === "resume-writes" && report.outcome === "rejected" &&
+      (JSON.stringify(before.health) !== JSON.stringify(after.health))) {
+    throw new Error("Local operator rejected resume changed live recovery or write state");
+  }
+  if (report.action === "resume-writes" && report.outcome === "rejected") {
+    const journal = (bundle: StandardDiagnosticBundle) => ({ ...bundle.journal, frames: bundle.journal.frames.map(frame =>
+      frame.state === "valid" ? { slot: frame.slot, state: frame.state, checksum: frame.checksum, sequence: frame.sequence,
+        phase: frame.phase, frameSchemaVersion: frame.frameSchemaVersion } : frame) });
+    if (JSON.stringify(journal(before)) !== JSON.stringify(journal(after))) throw new Error("Local operator rejected resume changed journal facts");
+    const terminal = (bundle: StandardDiagnosticBundle) => bundle.changeSetOutcomes.map(entry => ({ enqueueSeq: entry.enqueueSeq,
+      state: entry.state, executionPhase: entry.executionPhase })).sort((a, b) => a.enqueueSeq - b.enqueueSeq);
+    if (JSON.stringify(terminal(before)) !== JSON.stringify(terminal(after))) throw new Error("Local operator rejected resume changed historical outcomes");
+  }
   if (report.action === "resume-writes" && report.outcome === "accepted" &&
       (before.health.recovery !== "none" || before.health.effectiveGate === "upgrade_in_progress" ||
        after.health.recovery !== "none" || after.health.write.state !== "writable" ||
@@ -173,6 +205,24 @@ export async function loadInstalledLocalOperatorReport(options: {
     throw new Error("Local operator resume transition did not prove recovery-safe writable state");
   }
   return { ...report, before, after };
+}
+
+/** Correlation salts are not authority: only independently sampled wire/disk sources supply expected identities/state. */
+export function verifyInstalledLocalControlSources(report: {
+  readonly before: StandardDiagnosticBundle; readonly after: StandardDiagnosticBundle;
+  readonly diagnosticCorrelationSalts?: { readonly before: string; readonly after: string };
+}, actual: { readonly before: StandardDiagnosticEvidence; readonly after: StandardDiagnosticEvidence }): void {
+  if (report.diagnosticCorrelationSalts === undefined) throw new Error("Local control diagnostic source correlation is missing");
+  for (const phase of ["before", "after"] as const) {
+    const salt = report.diagnosticCorrelationSalts[phase];
+    if (!/^[a-f0-9]{64}$/u.test(salt)) throw new Error("Local control diagnostic source correlation is invalid");
+    const expected = createStandardDiagnosticBundle(actual[phase], Buffer.from(salt, "hex"));
+    const { checksum: _reportedChecksum, ...reportedPayload } = report[phase];
+    const { checksum: _expectedChecksum, ...expectedPayload } = expected;
+    if (!verifyStandardDiagnosticBundle(report[phase]) || canonicalizeDiagnosticPayload(reportedPayload) !== canonicalizeDiagnosticPayload(expectedPayload)) {
+      throw new Error(`Local control ${phase} diagnostic does not match independently observed sources`);
+    }
+  }
 }
 
 async function validateLocalReportBinding(options: {
@@ -209,12 +259,15 @@ export async function waitForNextInstalledLocalControlReport(options: {
   readonly action: "pause-writes" | "accept-recovery-baseline" | "resume-writes";
   readonly consumedInvocationIds: readonly string[];
   readonly timeoutMs: number;
+  /** Read-only live invariants are checked even while a Primary Operator report is absent. */
+  readonly observeWhileWaiting?: () => Promise<void>;
 }): Promise<z.infer<typeof controlReportSchema> & { readonly before: StandardDiagnosticBundle; readonly after: StandardDiagnosticBundle }> {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
     throw new Error("Local Primary Operator report timeout must be a positive integer");
   }
   const deadline = Date.now() + options.timeoutMs;
   while (true) {
+    await options.observeWhileWaiting?.();
     const root = await validateLocalReportBinding(options);
     const candidates: Awaited<ReturnType<typeof waitForNextInstalledLocalControlReport>>[] = [];
     for (const filename of (await readdir(root)).filter(name => name.startsWith("local-write-control-") && name.endsWith(".json")).sort()) {

@@ -614,7 +614,7 @@ const ALIAS_LABELS: Record<"vault" | "change-set", string> = {
 
 /**
  * Per-bundle opaque aliases. The salt is generated fresh for every bundle and
- * never emitted, so equal identifiers correlate only within one bundle and no
+ * never included in diagnostic content, so equal identifiers correlate only within one bundle and no
  * cross-bundle correlation is introduced. Submission Keys are digested
  * irreversibly with the same salt.
  */
@@ -684,11 +684,12 @@ function redactJournal(
 /**
  * Produces one fixed, closed standard diagnostic bundle. The evidence input is
  * validated against a strict closed grammar, so unknown or content-bearing
- * source fields fail before any bundle is emitted.
+ * source fields fail before any bundle is emitted. Optional correlation material
+ * is retained only in private generated-run reports to verify the unchanged opaque format.
  */
-export function createStandardDiagnosticBundle(evidence: unknown): StandardDiagnosticBundle {
+export function createStandardDiagnosticBundle(evidence: unknown, correlationSalt: Uint8Array = randomBytes(32)): StandardDiagnosticBundle {
   const parsed = parseEvidence(evidence);
-  const aliases = new CorrelationAliases(randomBytes(32));
+  const aliases = new CorrelationAliases(correlationSalt);
   const content: StandardDiagnosticBundleContent = {
     schemaVersion: STANDARD_DIAGNOSTIC_BUNDLE_SCHEMA_VERSION,
     bundleVersion: STANDARD_DIAGNOSTIC_BUNDLE_VERSION,

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -961,7 +961,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
       const bridge = runtime.bridge;
       if (settings === undefined || bridge === undefined) return operation();
       const invocationId = randomUUID();
-      const before = await runtime.createStandardDiagnosticBundle();
+      // Kept only in the private generated acceptance report, never in copied diagnostics.
+      const beforeSalt = randomBytes(32);
+      const afterSalt = randomBytes(32);
+      const before = await runtime.createStandardDiagnosticBundle(beforeSalt);
       let outcome: "accepted" | "rejected" = "accepted";
       let rejected = false;
       let failure: unknown;
@@ -972,9 +975,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
         rejected = true;
         failure = error;
       }
-      const after = await runtime.createStandardDiagnosticBundle();
+      const after = await runtime.createStandardDiagnosticBundle(afterSalt);
       await acceptance.recordLocalWriteControl({
         vaultId: settings.vaultId, endpoint: bridge.endpoint, invocationId, action, outcome, before, after,
+        diagnosticCorrelationSalts: { before: beforeSalt.toString("hex"), after: afterSalt.toString("hex") },
       });
       if (rejected) throw failure;
     };
