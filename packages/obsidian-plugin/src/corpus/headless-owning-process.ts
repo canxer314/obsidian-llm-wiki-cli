@@ -501,7 +501,13 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
     if (testObserver && installedArm !== undefined) {
       if (point.startsWith("after_file_mutation:")) {
         const files = crashProfile(crashScenarioParts(installedArm.command.scenario).kind).files.filter(file => file.originalBytes !== null && file.committedBytes !== null);
-        emitTestCallback("modify", files[Number(point.split(":")[1])]!.path);
+        const path = files[Number(point.split(":")[1])]!.path;
+        if (process.env.CORPUS_INSTALLED_MOVE_OBSERVER_FAULT === "halfwrite-event") {
+          const absolute = join(root, path); const complete = await readFile(absolute);
+          await writeFile(absolute, complete.subarray(0, 9)); emitTestCallback("modify", path);
+          await writeFile(absolute, complete);
+        }
+        emitTestCallback("modify", path);
       }
       if (point.startsWith("recovery_after_file_published:")) emitTestCallback("modify", point.slice("recovery_after_file_published:".length));
     }
@@ -586,7 +592,15 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
           await rename(temporaryPath, recoveryStatePath);
         },
       },
-      createBridge: createBridgeInstance,
+      createBridge: options => createBridgeInstance({ ...options,
+        ...(testObserver && process.env.CORPUS_INSTALLED_MOVE_OBSERVER_FAULT === "replay-second-rewrite" ? { authenticator: { authenticate: async request => {
+          if (request.method === "POST" && request.url === "/mcp" && (await crashExecution!.loadRecoveryFrame())?.phase === "COMMITTED") {
+            const path = "Corpus/Move/Derived-A.md";
+            await writeFile(join(root, path), await readFile(join(root, path))); emitTestCallback("modify", path);
+          }
+          return true;
+        } } } : {}),
+      }),
       searchDataSource,
       changeSetDataSource,
       changeSetExecution,

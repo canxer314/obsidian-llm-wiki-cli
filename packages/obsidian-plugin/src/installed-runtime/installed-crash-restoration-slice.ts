@@ -12,7 +12,7 @@ import { ObsidianProcessError, waitForCondition, readPersistedBridgeIdentity, ty
 import { type VerifiedCandidateBundle, installCandidateBundle } from "./candidate-bundle.js";
 import { provisionTestVault, cleanupTestVault } from "./test-vault.js";
 import { HealthObservationError, type LoopbackMcpClient } from "./loopback-client.js";
-import { crashBoundaryPhase, crashPrivateResidue, crashDigest, crashInventory, crashProfile, loadCrashBoundaryReport, requestInstalledCrashRestorationScenario, verifyCrashInventory, verifyCrashPublicProof, type CrashInventoryEntry, type InstalledCrashKind, type InstalledCrashPoint } from "./crash-restoration-protocol.js";
+import { crashBoundaryPhase, inspectCrashPrivateFootprint, crashPrivateResidue, crashDigest, crashInventory, crashProfile, loadCrashBoundaryReport, requestInstalledCrashRestorationScenario, verifyCrashInventory, verifyCrashPublicProof, type CrashInventoryEntry, type InstalledCrashKind, type InstalledCrashPoint } from "./crash-restoration-protocol.js";
 import type { InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 import { installPluginEventObserver, OBSERVER_CONFIG_FILE } from "./plugin-event-observer-plugin.js";
 import { verifyPluginEventObserverWindow } from "./plugin-event-observer.js";
@@ -61,7 +61,8 @@ export interface InstalledCrashRestorationSliceRecord {
   readonly boundary: readonly CrashInventoryEntry[];
   readonly after: readonly CrashInventoryEntry[];
   readonly attachmentPaths?: readonly { readonly path: string; readonly before: CrashAttachmentPathState; readonly boundary: CrashAttachmentPathState; readonly after: CrashAttachmentPathState }[];
-  readonly privateFootprint?: { readonly before: { readonly stagingFiles: 0; readonly trashFiles: 0 }; readonly boundary: { readonly stagingFiles: 0; readonly trashFiles: 0 }; readonly after: { readonly stagingFiles: 0; readonly trashFiles: 0 } };
+  readonly moveClosure?: readonly { readonly path: string; readonly beforeVersion: string | null; readonly boundaryVersion: string | null; readonly afterVersion: string | null }[];
+  readonly privateFootprint?: { readonly before: { readonly stagingFiles: 0; readonly trashFiles: 0 }; readonly boundary: { readonly stagingFiles: number; readonly trashFiles: number }; readonly after: { readonly stagingFiles: 0; readonly trashFiles: 0 } };
   readonly markerSha256: string;
   readonly durableFrameSha256: string | null;
   readonly terminalProofSha256: string;
@@ -175,6 +176,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     const observer = observerContext === undefined ? undefined : await installPluginEventObserver({ vaultPath: vault.vaultPath, configDirectoryName, reportDirectory: options.reportDirectory, candidatePluginId: options.candidate.identity.pluginId,
       binding: { runId: options.runId, vaultPath: vault.vaultPath, vaultId: null, candidateBundleSha256: installed.candidateBundleSha256, installedMainSha256: installed.installedMainSha256, profileName: options.profile.name, generation: 1 } });
     let observerBinding = observer?.binding;
+    const observerPins: { generation: number; supervisorPid: number; binding: import("./plugin-event-observer.js").PluginEventObserverBinding }[] = [];
     let observerSequence = 0;
     let observerFrom: InstalledCrashPoint = "after_prepared";
     let observerTo: InstalledCrashPoint = "after_prepared";
@@ -193,10 +195,19 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
     sealObserver = async () => {
       if (observerBinding === undefined || observerContext === undefined || processHandle?.pid === undefined) return;
+      const pin = observerPins.find(pin => pin.generation === running!.generation);
+      if (pin === undefined || pin.supervisorPid !== processHandle.pid || Object.entries(pin.binding).some(([key, value]) => key !== "vaultId" && observerBinding![key as keyof typeof observerBinding] !== value)) throw new Error("Installed move observer source differs from pre-start pin");
       const from = profile.expectedBoundary({ point: observerFrom === "after_semantic_evidence" || observerFrom === "before_committed" ? "after_snapshot" : observerFrom, phase: "apply" });
       const to = profile.expectedBoundary({ point: observerTo === "after_semantic_evidence" || observerTo === "before_committed" ? "after_snapshot" : observerTo, phase: "apply" });
       const changed = profile.files.filter(file => from.files.find(entry => entry.path === file.path)!.state !== to.files.find(entry => entry.path === file.path)!.state && to.files.find(entry => entry.path === file.path)!.state !== "absent");
       const requiredVisibleStates = changed.map(file => ({ path: file.path, bytes: to.files.find(entry => entry.path === file.path)!.state === "committed" ? file.committedBytes! : file.originalBytes! }));
+      await waitForCondition(async () => {
+        const events = await observerEvents();
+        return requiredVisibleStates.every(required => events.some(event => {
+          const payload = event.payload as typeof event.payload & { path?: string; rawBytesBase64?: string };
+          return payload.path === required.path && ["changed", "resolved"].includes(payload.kind) && payload.rawBytesBase64 === Buffer.from(required.bytes).toString("base64");
+        }));
+      }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
       await observerCommand("end"); await observerMarker("window-end");
       let events: Awaited<ReturnType<typeof observerEvents>> = [];
       await waitForCondition(async () => { try { events = await observerEvents(true); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
@@ -220,6 +231,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       running = { generation: generations.length + 1, pid: processHandle.pid ?? null, runtime: observed };
       if (observer !== undefined) {
         if (processHandle.pid === undefined) throw new Error("Installed move observer requires supervised process identity");
+        observerPins.push({ generation: running.generation, supervisorPid: processHandle.pid, binding: structuredClone(observerBinding!) });
         await observerMarker("candidate-start");
         if (generations.length > 0) await observerMarker("window-begin");
       }
@@ -255,7 +267,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       }, { timeoutMs: options.boundaryTimeoutMs ?? MAX_SLICE_MS, intervalMs: POLL_MS });
       const frame = await readInstalledCrashJournalOrNull(journalPath);
       const inventory = await crashInventory(vault.vaultPath, configDirectoryName);
-      const privateFootprint = mutationKind === "copy_attachment" || mutationKind === "move_attachment" ? await crashPrivateResidue(vault.vaultPath) : undefined;
+      const privateFootprint = mutationKind === "move_note" ? await inspectCrashPrivateFootprint(vault.vaultPath) : mutationKind === "copy_attachment" || mutationKind === "move_attachment" ? await crashPrivateResidue(vault.vaultPath) : undefined;
       const phase = crashBoundaryPhase(point);
       const original = point === "before_prepared" || point === "after_prepared" || point.startsWith("after_mutation:") || point.startsWith("after_rollback") || point === "before_rolled_back" || point === "after_rolled_back";
       verifyCrashInventory(before, inventory, mutationKind, original ? "original" : "committed", point);
@@ -337,7 +349,11 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       return { kind: "attachment", sizeBytes: entry.bytes, sha256: entry.sha256 };
     };
     const attachmentPaths = profile.files.filter(file => file.kind === "attachment").map(file => ({ path: file.path, before: attachmentState(before, file.path), boundary: attachmentState(boundary.inventory, file.path), after: attachmentState(after, file.path) }));
-    proof = { source: "installed-obsidian", mutationKind, runId: options.runId, vaultId: identity.vaultId, candidateBundleSha256: installed.candidateBundleSha256, installedMainSha256: installed.installedMainSha256, runtimeProfile: options.profile.name, seed, manifestSha256: crashDigest({ seedManifest: vault.seedManifestSha256, input, before }), crashPoint, processStoppedBeforeRestart: true, processGenerations: generations, preparedJournalPhase: boundary.frame?.phase as "PREPARED" | "COMMITTED" | "ROLLED_BACK" | undefined ?? null, journalPhase: terminalPhase, proofState: terminalState, before, boundary: boundary.inventory, after, ...(attachmentPaths.length === 0 ? {} : { attachmentPaths, privateFootprint: { before: privateBefore, boundary: boundary.privateFootprint!, after: privateAfter } }), markerSha256: crashDigest(boundary.marker), durableFrameSha256: boundary.frame === null ? null : crashDigest(boundary.frame.payload), terminalProofSha256: terminalDigest, eventOrder, ...(observer === undefined ? {} : { observer: { purpose: "isolated-correctness-not-performance" as const, windows: observerWindows, sourceReports: observerSources } }), wholeStateVerified: true, sentinelAppliedAfterRestore: true, originalFileAbsentAfterRecovery: !after.some(entry => entry.path === profile.primaryPath), ...(!committed && mutationKind !== "create_note" ? { originalFileBytesPreservedAfterRecovery: true as const } : {}), ...(committed ? { committedFileBytesPreservedAfterRecovery: true as const } : {}), healthRecoveryState: "none" };
+    const moveClosure = mutationKind === "move_note" ? profile.files.map(file => {
+      const version = (entries: readonly CrashInventoryEntry[]) => { const entry = entries.find(entry => entry.path === file.path); return entry === undefined ? null : `sha256:${entry.sha256}`; };
+      return { path: file.path, beforeVersion: version(before), boundaryVersion: version(boundary.inventory), afterVersion: version(after) };
+    }) : undefined;
+    proof = { source: "installed-obsidian", mutationKind, runId: options.runId, vaultId: identity.vaultId, candidateBundleSha256: installed.candidateBundleSha256, installedMainSha256: installed.installedMainSha256, runtimeProfile: options.profile.name, seed, manifestSha256: crashDigest({ seedManifest: vault.seedManifestSha256, input, before }), crashPoint, processStoppedBeforeRestart: true, processGenerations: generations, preparedJournalPhase: boundary.frame?.phase as "PREPARED" | "COMMITTED" | "ROLLED_BACK" | undefined ?? null, journalPhase: terminalPhase, proofState: terminalState, before, boundary: boundary.inventory, after, ...(attachmentPaths.length === 0 ? {} : { attachmentPaths }), ...(boundary.privateFootprint === undefined ? {} : { privateFootprint: { before: privateBefore, boundary: boundary.privateFootprint, after: privateAfter } }), markerSha256: crashDigest(boundary.marker), durableFrameSha256: boundary.frame === null ? null : crashDigest(boundary.frame.payload), terminalProofSha256: terminalDigest, eventOrder, ...(moveClosure === undefined ? {} : { moveClosure }), ...(observer === undefined ? {} : { observer: { purpose: "isolated-correctness-not-performance" as const, windows: observerWindows, sourceReports: observerSources } }), wholeStateVerified: true, sentinelAppliedAfterRestore: true, originalFileAbsentAfterRecovery: !after.some(entry => entry.path === profile.primaryPath), ...(!committed && mutationKind !== "create_note" ? { originalFileBytesPreservedAfterRecovery: true as const } : {}), ...(committed ? { committedFileBytesPreservedAfterRecovery: true as const } : {}), healthRecoveryState: "none" };
     options.assertion(`crash-${label}:whole-state-proof-status-replay-before-new-write`);
   } catch (error) {
     if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") shutdownUnconfirmed = true;

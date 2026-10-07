@@ -342,7 +342,7 @@ export async function loadCrashBoundaryReport(options: {
   return report;
 }
 
-export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingFiles: 0; trashFiles: 0 }> {
+export async function inspectCrashPrivateFootprint(vaultPath: string): Promise<{ stagingFiles: number; trashFiles: number }> {
   const count = async (path: string): Promise<number> => {
     const facts = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
     if (facts === null) return 0;
@@ -352,7 +352,11 @@ export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingF
     for (const name of await readdir(path)) total += await count(join(path, name));
     return total;
   };
-  if (await count(join(vaultPath, ".llm-wiki", "staging")) !== 0 || await count(join(vaultPath, ".llm-wiki", "trash")) !== 0) throw new Error("Installed crash terminal private residue remained");
+  return { stagingFiles: await count(join(vaultPath, ".llm-wiki", "staging")), trashFiles: await count(join(vaultPath, ".llm-wiki", "trash")) };
+}
+export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingFiles: 0; trashFiles: 0 }> {
+  const footprint = await inspectCrashPrivateFootprint(vaultPath);
+  if (footprint.stagingFiles !== 0 || footprint.trashFiles !== 0) throw new Error("Installed crash terminal private residue remained");
   return { stagingFiles: 0, trashFiles: 0 };
 }
 

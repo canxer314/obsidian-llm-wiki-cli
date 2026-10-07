@@ -671,7 +671,7 @@ it("rejects a private crash command against a dirty durable journal without armi
 
 
 // Test adapter only: a real Node process + production Bridge, never Obsidian evidence.
-async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint) {
+async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint, observerFault?: "halfwrite-event" | "replay-second-rewrite") {
   const { spawn } = await import("node:child_process");
   const { readFile } = await import("node:fs/promises");
   const { createServer } = await import("node:net");
@@ -697,7 +697,7 @@ async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/i
     probe: { probeRunning: async () => ({ platform: "linux", osBuild: "test", obsidianVersion: "NOT-INSTALLED", electronVersion: "NOT-INSTALLED", nodeVersion: process.versions.node, capabilities: [] }) },
     processControl: { start: async (request: { vaultPath: string }) => {
       const control = join(root, `control-${++generation}`);
-      const child = spawn(process.execPath, [bundle], { env: { ...process.env, CORPUS_ROOT: request.vaultPath, CORPUS_VAULT_ID: "node-wire-vault", CORPUS_PORT: String(port), CORPUS_CONTROL_DIR: control, CORPUS_INSTALLED_CRASH_TEST: "1" }, stdio: ["ignore", "ignore", "pipe"] });
+      const child = spawn(process.execPath, [bundle], { env: { ...process.env, CORPUS_ROOT: request.vaultPath, CORPUS_VAULT_ID: "node-wire-vault", CORPUS_PORT: String(port), CORPUS_CONTROL_DIR: control, CORPUS_INSTALLED_CRASH_TEST: "1", ...(observerFault === undefined ? {} : { CORPUS_INSTALLED_MOVE_OBSERVER_FAULT: observerFault }) }, stdio: ["ignore", "ignore", "pipe"] });
       processes.push(child);
       let stderr = ""; child.stderr?.on("data", chunk => { stderr += String(chunk); });
       const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
@@ -1008,7 +1008,7 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     } },
     client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "writable" } } }) },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 5_000 },
-    prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = (["copy_attachment", "move_attachment", "edit_multi_frontmatter", "edit_multi_markdown", "edit_frontmatter", "edit_body_whole", "edit_body"] as const).find(kind => request.vaultPath.includes(`-crash-${kind}-`)) ?? "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
+    prepareAcceptanceDriver: async (request: any) => { if (request.vaultPath.includes("-crash-move_note-")) throw new Error("Historical orchestration fixture lacks enabled observer source"); terminal = false; publishedSequence = 0; mutationKind = (["copy_attachment", "move_attachment", "edit_multi_frontmatter", "edit_multi_markdown", "edit_frontmatter", "edit_body_whole", "edit_body"] as const).find(kind => request.vaultPath.includes(`-crash-${kind}-`)) ?? "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
   } as InstalledCrashRestorationSliceOptions;
   const timer = setInterval(() => {
     if (stopped || terminal || descriptorPath === "") return;
@@ -1293,7 +1293,9 @@ it("closes full status and retained replay for both requested files rather than 
 
 it("orchestrates all independently bound apply/rollback points including whole-body and repeated recovery crashes", async () => {
   const { installedCrashScenarios, crashScenarioParts } = await import("../src/installed-runtime/crash-restoration-protocol.js");
-  for (const scenario of installedCrashScenarios) {
+  for (const scenario of installedCrashScenarios.filter(scenario => !scenario.startsWith("move_note/"))) {
+    // Move's independently sealed observer is exercised by the real Node wire
+    // matrix below, not fabricated by this historical orchestration-only fixture.
     const root = await mkdtemp(join(tmpdir(), "installed-crash-complete-orchestration-"));
     const { kind, point } = crashScenarioParts(scenario);
     const fixture = await arrangeCrashOrchestration(root, "bound-change-set", point, kind);
@@ -1328,7 +1330,7 @@ it("orchestrates COMMITTED process stop, restart and retained replay without pro
 });
 
 
-it("keeps all wired create/exact/whole installed crash boundaries partial at the authoritative corpus run boundary", async () => {
+it("refuses to promote historical orchestration fixtures once the move enabled-observer source is required", async () => {
   const root = await mkdtemp(join(tmpdir(), "installed-crash-partial-orchestration-"));
   const fixture = await arrangeCrashOrchestration(root, "bound-change-set");
   const { createAuthoritativeInstalledRuntimeRunners } = await import("../src/installed-runtime/smoke-command.js");
@@ -1338,7 +1340,7 @@ it("keeps all wired create/exact/whole installed crash boundaries partial at the
       installed: fixture.options, workingDirectory: root,
       record: (_kind, name, detail) => { if (name.startsWith("installed-crash-")) records.push(detail); },
       assertion: () => undefined,
-    })).rejects.toThrow("partial");
+    })).rejects.toThrow("Historical orchestration fixture lacks enabled observer source");
     expect(records).toHaveLength(131);
     expect(records).toEqual(expect.arrayContaining([
       expect.objectContaining({ scope: "single-after-prepared-installed-rollback-slice" }),
@@ -1371,6 +1373,15 @@ it("orchestrates edit_body COMMITTED with exact intended bytes and full retained
   } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
 });
 
+
+it.each(["halfwrite-event", "replay-second-rewrite"] as const)("rejects %s from the live owning process observer even with identical terminal inventory", async fault => {
+  const root = await mkdtemp(join(tmpdir(), "move-480-event-fault-"));
+  const fixture = await arrangeNodeCrashWire(root, "move_note", fault === "halfwrite-event" ? "after_file_mutation:0" : "after_committed", fault);
+  const context: import("../src/installed-runtime/installed-crash-restoration-slice.js").InstalledMoveObserverContext = { runId: fixture.options.runId, candidateBundleSha256: fixture.options.candidate.identity.bundleSha256, installedMainSha256: fixture.options.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: fixture.options.profile.name, observations: [] };
+  try {
+    await expect(runInstalledCrashRestorationSlice({ ...fixture.options, moveObserverContext: context })).rejects.toThrow(fault === "halfwrite-event" ? /complete before\/after/ : /duplicate closure rewrite/);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
 
 it("closes every reachable move apply/rollback boundary through real termination, literal closure bytes and retained observer source (Node adapter, not GUI)", async () => {
   const { readFile } = await import("node:fs/promises");
@@ -1419,8 +1430,15 @@ it("closes every reachable move apply/rollback boundary through real termination
       expect(record.processGenerations).toHaveLength(rollback ? 3 : 2);
       expect(record.observer?.windows).toHaveLength(rollback ? 3 : 2);
       expect(record.cleanupSucceeded).toBe(true);
+      expect(record.moveClosure).toHaveLength(4);
+      expect(record.privateFootprint?.after).toEqual({ stagingFiles: 0, trashFiles: 0 });
       expect(() => verifyInstalledMoveObserverSource(record, context)).not.toThrow();
       expect(() => verifyInstalledMoveObserverSource(record, { ...context, observations: [] })).toThrow(/source context/);
+      expect(() => verifyInstalledMoveObserverSource({ ...record, cleanupSucceeded: false } as never, context)).toThrow(/source context/);
+      const tampered = structuredClone(context);
+      const rawEvents = tampered.observations[0]!.verification.events as { mac: string }[];
+      rawEvents[0]!.mac = "0".repeat(64);
+      expect(() => verifyInstalledMoveObserverSource(record, tampered)).toThrow(/authentication/);
       expect(() => verifyInstalledMoveObserverSource({ ...record, observer: { ...record.observer!, windows: record.observer!.windows.map((window, index) => index === 0 ? { ...window, transcriptSha256: "0".repeat(64) } : window) } }, context)).toThrow(/authenticated retained source/);
       expect(fixture.eventLogs[rollback ? 1 : 0]).toContain(`"point":"${point}"`);
       expect(fixture.eventLogs.at(-1)!.split('"point":"before_prepared"').length - 1).toBe(point === "before_prepared" ? 2 : 1);

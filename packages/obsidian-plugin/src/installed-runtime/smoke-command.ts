@@ -440,7 +440,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
         });
         request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
       }
-      throw new Error("Installed create/exact/whole/frontmatter/multi complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
+      throw new Error("Installed Markdown/Frontmatter/attachment/move closure crash boundaries are partial; other operation families and retained-authority acceptance are still required");
     },
     runPluginEventObserverCorpus: async request => {
       if (options.runId === undefined || options.reportDirectory === undefined) return unavailableRunner("Enabled plugin observer corpus");
