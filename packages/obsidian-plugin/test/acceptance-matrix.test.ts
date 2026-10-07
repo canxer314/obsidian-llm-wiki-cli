@@ -1,3 +1,5 @@
+import { unitContractReport, bindUnitContractSiblings, unitContractContext } from "./helpers/contract-report.js";
+import { CONTRACT_PACKAGE_ASSERTION, contractDigest } from "../src/installed-runtime/contract-package-corpus.js";
 import { createHash } from "node:crypto";
 import { syntheticManualPauseProof, syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
 import { describe, expect, it } from "vitest";
@@ -10,9 +12,10 @@ import {
 
 import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
 let pauseFixture: ReturnType<typeof syntheticManualPauseSource>;
+let contractContext: ReturnType<typeof unitContractContext>;
 function createAcceptanceMatrixReport(report: InstalledRuntimeEvidence) {
   const context = observerSourceFixture({ runId: "acceptance-run", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
-  return composeMatrix(report, context, pauseFixture.context);
+  return composeMatrix(report, context, pauseFixture.context, contractContext);
 }
 const DIGEST = "a".repeat(64);
 
@@ -172,7 +175,7 @@ function evidence(): InstalledRuntimeEvidence {
     ...corpus(ASSERTIONS.privacy),
     authority: { baselineAcceptanceLocalOnly: true },
   };
-  return {
+  const result: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId: "acceptance-run",
     startedAt: "2026-09-29T00:00:00.000Z",
@@ -198,6 +201,7 @@ function evidence(): InstalledRuntimeEvidence {
       { phase: "initial", overall: "healthy", readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recoveryState: "none", write: { gate: "open", state: "writable", pauseSource: null }, effectiveGate: null, reasonCodes: [], operatorAction: "none", healthSha256: DIGEST, vaultPathSha256: DIGEST },
       { phase: "after_restart", overall: "healthy", readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recoveryState: "none", write: { gate: "open", state: "writable", pauseSource: null }, effectiveGate: null, reasonCodes: [], operatorAction: "none", healthSha256: DIGEST, vaultPathSha256: DIGEST },
     ],
+    contractPackageCorpus: unitContractReport({ runId: "acceptance-run", profileName: "MVP-PERF-REF-1", candidateBundleSha256: DIGEST, vaultIdSha256: contractDigest("vault"), seedManifestSha256: DIGEST }),
     publicWireCorpus: publicWire as NonNullable<InstalledRuntimeEvidence["publicWireCorpus"]>,
     changeSetCorpus: changeSet as NonNullable<InstalledRuntimeEvidence["changeSetCorpus"]>,
     gateIsolationCorpus: gate as NonNullable<InstalledRuntimeEvidence["gateIsolationCorpus"]>,
@@ -212,9 +216,191 @@ function evidence(): InstalledRuntimeEvidence {
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
   };
+  bindUnitContractSiblings(result);
+  contractContext = unitContractContext(result.contractPackageCorpus!, DIGEST);
+  return result;
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it.each(["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"])("independently rejects coordinated foreign child Vault substitution for %s", id => {
+    const report = evidence();
+    expect(createAcceptanceMatrixReport(report).scenarios.find(row => row.id === "A-39")?.verdict).toBe("passed");
+    const row = report.contractPackageCorpus!.crossCalls.find(row => row.id === id)!;
+    const dependency = row.proof.dependency!;
+    const child = dependency.sourceVaults[0]!;
+    const previous = structuredClone(child);
+    // Preserve the parent and the independently retained observer/pause contexts.
+    child.sourceRunId = report.runId + "-foreign-child-not-executed";
+    child.vaultIdSha256 = "e".repeat(64);
+    child.seedManifestSha256 = "f".repeat(64);
+    const { identityEventSha256: _identity, cleanupEventSha256: _cleanup, ...identity } = child;
+    child.identityEventSha256 = contractDigest(identity);
+    child.cleanupEventSha256 = contractDigest({ sourceRunId: child.sourceRunId, vaultIdSha256: child.vaultIdSha256, cleanupConfirmed: true });
+    const retainedSummary = report.contractSourceVaults!.find(source => contractDigest(source) === contractDigest(previous))!;
+    Object.assign(retainedSummary, child);
+    const sibling = id === "registered-reference-byte-verification" ? report.registeredReferenceRewriteCorpus! : report.semanticEvidenceSearchSnapshotCorpus!;
+    for (const event of sibling.eventLog) {
+      if (event.detailSha256 === previous.identityEventSha256) event.detailSha256 = child.identityEventSha256;
+      if (event.detailSha256 === previous.cleanupEventSha256) event.detailSha256 = child.cleanupEventSha256;
+    }
+    dependency.report = structuredClone(sibling);
+    dependency.reportSha256 = contractDigest(sibling);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/independent.*(child|source)|source.*pin/i);
+  });
+  it("does not treat six handwritten tool calls as the A-39 version contract proof", () => {
+    const missing = evidence(); missing.contractPackageCorpus = null;
+    expect(() => createAcceptanceMatrixReport(missing)).toThrow(/version-contract-package.*absent/i);
+  });
+  it("rejects a foreign source Vault behind a matching parent report", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    row.proof.dependency!.sourceVaults[0]!.sourceRunId = "foreign-run-child";
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/source Vault.*parent run/i);
+  });
+  it("rejects source Vault digests detached from their recorded identity", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    row.proof.dependency!.sourceVaults[0]!.identityEventSha256 = "b".repeat(64);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/identity.*digest|provenance/i);
+  });
+  it("rejects a semantic source Vault substituted behind the same sibling report", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    const vault = row.proof.dependency!.sourceVaults[0]!;
+    vault.seedManifestSha256 = "b".repeat(64);
+    const { identityEventSha256: _identity, cleanupEventSha256: _cleanup, ...details } = vault;
+    vault.identityEventSha256 = contractDigest(details);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/source Vault.*(record|provenance)/i);
+  });
+  it("rejects replay observation strings without durable registry and raw inventory proof", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    row.proof.programProof = null; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/durable.*(proof|registry)/i);
+  });
+  it("rejects a durable replay entry borrowed from a different canonical request", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    for (const state of [row.proof.programProof!.beforeRepeat, row.proof.programProof!.afterRepeat]) state.entries[0]!.fingerprint = "sha256:" + "b".repeat(64);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/durable.*request|fingerprint/i);
+  });
+  it("rejects an empty public inventory claiming replay executed once", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    row.proof.programProof!.beforeRepeat.inventory = []; row.proof.programProof!.afterRepeat.inventory = [];
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/public.*inventory|first.*effect/i);
+  });
+  it("rejects replay record digests detached from actual status wire output", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    row.proof.programProof!.responseRecordSha256 = "b".repeat(64);
+    for (const state of [row.proof.programProof!.beforeRepeat, row.proof.programProof!.afterRepeat]) state.entries[0]!.recordSha256 = "b".repeat(64);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/wire.*record|record.*wire/i);
+  });
+  it("rejects quota lifecycle reports without rejected-issuance capacity evidence", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "continuation-quota-and-lifecycle-cleanup")!;
+    row.observations = row.observations.filter(entry => entry.name !== "rejected-issuance-has-no-retained-authority"); row.proof.observations = row.observations; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/cross.call behavior.*quota/i);
+  });
+  it("rejects graph transition declarations without their actual discover request and output", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    row.proof.graphTransitions = []; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/graph.*(wire|transition).*proof/i);
+  });
+  it("rejects raw continuation authority inside persisted graph output", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    const output = row.proof.graphTransitions![0]!.after;
+    if (output.outcome !== "results") throw new Error("fixture must be results");
+    const oldHash = contractDigest(output);
+    output.complete = false; output.continuation = "private-token-must-not-be-persisted";
+    for (const entry of row.observations) if (entry.name === "vault_discover" && entry.responseSha256 === oldHash) entry.responseSha256 = contractDigest(output);
+    const old = row.observations.find(entry => entry.facts.transition === "unresolved-link")!;
+    old.facts.afterGraphSha256 = contractDigest(output);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/continuation authority/i);
+  });
+  it("rejects Semantic successor summaries missing one actual graph transition", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    row.observations = row.observations.filter(entry => entry.facts.transition !== "rename"); row.proof.observations = row.observations;
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/(?:successor|graph).*transition/i);
+  });
+  it("does not replace successor graph cross-call behavior with native snapshot summary", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    row.observations = row.observations.filter(entry => entry.name !== "successor-graph-frozen-predecessor"); row.proof.observations = row.observations;
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/frozen.*predecessor/i);
+  });
+  it("rejects a contract source borrowed from a different sibling corpus", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    (row.proof.dependency!.report as { scenarioManifestSha256: string }).scenarioManifestSha256 = "b".repeat(64);
+    row.proof.dependency!.reportSha256 = contractDigest(row.proof.dependency!.report);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/source.*sibling/i);
+  });
+  it("rejects raw continuation authority in publicly persisted dependency reports", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "continuation-operational-gate-precedence")!;
+    const calls = (row.proof.dependency!.report as { calls: { arguments: unknown; compatibilityText: string; structuredContent: unknown }[] }).calls;
+    for (const call of calls) { call.arguments = { continuation: "private-token-must-not-be-published" }; call.compatibilityText = JSON.stringify(call.structuredContent); }
+    row.proof.dependency!.reportSha256 = contractDigest(row.proof.dependency!.report);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow();
+  });
+  it("rejects dependent sources reduced to assertion strings even after rehashing", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    row.proof.dependency!.report = { assertions: ["span/bom-crlf-cjk-astral:single-verified-span"], verdict: "passed" };
+    row.proof.dependency!.reportSha256 = contractDigest(row.proof.dependency!.report);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow();
+  });
+  it("rejects a changed package authority digest even when coverage is complete", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.authoritySha256 = "b".repeat(64);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/authority.*digest/i);
+  });
+  it("rejects a static cross-call assertion presented as behavior proof", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.crossCalls[0]!.observations = [{ sequence: 1, name: "fixture-loaded", requestSha256: DIGEST, responseSha256: DIGEST, facts: { fixtureLoaded: true } }];
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/cross-call.*(behavior|digest)/i);
+  });
+  it("rejects an executed fixture request digest not derived from the version authority", () => {
+    const forged = evidence();
+    const input = forged.contractPackageCorpus!.wire.inputs.find(row => row.id.startsWith("fixtures/"))!;
+    input.requestSha256 = "b".repeat(64);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/fixture.*request.*(digest|authority)/i);
+  });
+  it("rejects unknown-field rejection evidence detached from its rejected wire request", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.wire.unknownFieldRejections[0]!.requestSha256 = "b".repeat(64);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/unknown.field.*(request|evidence)/i);
+  });
+  it("requires consumed and malformed continuation rejection in addition to client binding", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "single-use-client-bound-sliding-continuation")!;
+    row.observations = row.observations.filter(entry => entry.name !== "consumed-token-replay-rejected" && entry.name !== "malformed-token-rejected");
+    row.proof.observations = row.observations; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/cross.call behavior.*continuation/i);
+  });
+  it("rejects contract fixture pointers detached from their executed request", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.fixtures[0]!.evidencePointer = "wire/inputs/999";
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/fixture.*pointer/i);
+  });
   it("rejects coordinated pause transcript and local-report hash substitution with observer context preserved", () => {
     const report = evidence();
     const proof = report.gateIsolationCorpus!.manualPause.installedObservation!;
@@ -339,8 +525,8 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     const report = createAcceptanceMatrixReport(evidence());
     expect(report.scenarios).toHaveLength(44);
     expect(new Set(report.scenarios.map((scenario) => scenario.id))).toHaveLength(44);
-    expect(report.childManifests).toHaveLength(9);
-    expect(new Set(report.childManifests.map((child) => child.corpusId))).toHaveLength(9);
+    expect(report.childManifests).toHaveLength(10);
+    expect(new Set(report.childManifests.map((child) => child.corpusId))).toHaveLength(10);
     expect(validateAcceptanceMatrixReport(report)).toEqual(report);
   });
 

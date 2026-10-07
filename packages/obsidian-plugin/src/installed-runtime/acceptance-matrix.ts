@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import { changeSetCorpusEvidenceSchema, type InstalledRuntimeEvidence } from "./evidence.js";
+import { contractPackageCorpusEvidenceSchema, CONTRACT_PACKAGE_ASSERTION, consumeContractChildSources, type ContractChildConsumptionContext } from "./contract-package-corpus.js";
 import { pluginEventObserverCorpusEvidenceSchema, PLUGIN_EVENT_OBSERVER_ASSERTION } from "./plugin-event-observer-evidence.js";
 import { verifyPluginEventObserverWindow } from "./plugin-event-observer.js";
 
@@ -23,6 +24,7 @@ export const ACCEPTANCE_IDS = Array.from(
 
 export const ACCEPTANCE_CORPUS_IDS = [
   "public-wire",
+  "version-contract-package",
   "change-set-submission",
   "gate-isolation",
   "registered-reference-rewrite",
@@ -133,7 +135,7 @@ const matrixPlan = [
   ["A-36", "gate-isolation", "incompatible/registry-never-inspected:no-key-bound"],
   ["A-37", "plugin-event-observer", PLUGIN_EVENT_OBSERVER_ASSERTION],
   ["A-38", "semantic-evidence-search-snapshot", "scenario:trash_note/delayed_probes_converge:closed"],
-  ["A-39", "public-wire", "six-tool-invocation"],
+  ["A-39", "version-contract-package", "contract:complete-authority-fixtures-wire-and-cross-call-evidence"],
   ["A-40", "gate-isolation", "gates/recovery-blocked-precedence:single-effective-gate"],
   ["A-41", "change-set-submission", "submission/valid-create:no-validate-apply-handshake"],
   ["A-42", "public-wire", "content-version:canonical-markdown-sha256-and-attachment-distinction"],
@@ -174,11 +176,14 @@ function requireCorpus<T>(value: T | null | undefined, name: string): T {
 }
 
 function childManifests(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext): AcceptanceMatrixChildManifest[] {
+  const contract = contractPackageCorpusEvidenceSchema.parse(requireCorpus(evidence.contractPackageCorpus, "version-contract-package corpus"));
+  if (contract.binding.runId !== evidence.runId || contract.binding.profileName !== evidence.profile.name || contract.binding.candidateBundleSha256 !== evidence.candidate?.bundleSha256 || contract.binding.seedManifestSha256 !== evidence.inputHashes.vaultSeedManifestSha256 || contract.binding.vaultIdSha256 !== sha256(evidence.bridgeIdentity?.vaultId)) throw new AcceptanceMatrixError("Version contract package proof binding does not match this installed run");
   const publicWire = requireCorpus(evidence.publicWireCorpus, "public-wire corpus");
   const changeSet = requireCorpus(evidence.changeSetCorpus, "change-set corpus");
   const gate = requireCorpus(evidence.gateIsolationCorpus, "gate-isolation corpus");
   const rewrite = requireCorpus(evidence.registeredReferenceRewriteCorpus, "registered-reference rewrite corpus");
   const semantic = requireCorpus(evidence.semanticEvidenceSearchSnapshotCorpus, "Semantic Evidence/Search Snapshot corpus");
+  if (contract.beforeInventorySha256 !== sha256(evidence.beforeInventory) || contract.afterInventorySha256 !== sha256(evidence.afterInventory)) throw new AcceptanceMatrixError("Version contract inventory binding does not match this installed run");
   const privacy = requireCorpus(evidence.privacyRecoveryAuthorityCorpus, "privacy/recovery authority corpus");
   const lifecycle = requireCorpus(evidence.releaseLifecycleCorpus, "release-lifecycle corpus");
   const crash = requireCorpus(evidence.crashRestorationRetainedAuthorityCorpus, "crash-restoration corpus");
@@ -205,6 +210,7 @@ function childManifests(evidence: InstalledRuntimeEvidence, observerContext?: im
     if (runtime.platform !== evidence.profile.registered.os.platform || runtime.osBuild !== evidence.profile.registered.os.build || runtime.obsidianVersion !== evidence.profile.registered.versions.obsidian || runtime.electronVersion !== evidence.profile.registered.versions.electron || runtime.nodeVersion !== evidence.profile.registered.versions.node || evidence.profile.registered.capabilities.some(capability => !runtime.capabilities.includes(capability)) || scenario.installedMainSha256 !== evidence.candidate?.files.find(file => file.path === "main.js")?.sha256 || scenario.windows.some(window => !window.enabledPlugins.includes(evidence.candidate!.pluginId))) throw new AcceptanceMatrixError("Plugin observer runtime/candidate/plugin inventory mismatch");
   }
   const all = [
+    corpusManifest("version-contract-package", contract, contract.authoritySha256, contract.assertions),
     corpusManifest("plugin-event-observer", observer, observer.scenarioManifestSha256, observer.assertions),
     corpusManifest("public-wire", publicWire, publicWire.canonicalManifestSha256, publicWire.assertions),
     corpusManifest("change-set-submission", changeSet, changeSet.scenarioManifestSha256, changeSet.assertions),
@@ -264,7 +270,7 @@ function canonicalReport(report: Omit<AcceptanceMatrixReport, "canonicalManifest
   };
 }
 
-export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: ManualPauseConsumptionContext): AcceptanceMatrixReport {
+export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: ManualPauseConsumptionContext, contractContext?: ContractChildConsumptionContext): AcceptanceMatrixReport {
   if (evidence.verdict !== "passed" || evidence.failure !== null) throw new AcceptanceMatrixError("Acceptance matrix requires a passing installed-runtime run");
   if (evidence.profile.mismatches.length !== 0 || evidence.profile.observed === null ||
       evidence.profile.observed.obsidianVersion !== evidence.profile.registered.versions.obsidian ||
@@ -295,6 +301,7 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence,
     changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);
   }
   const children = childManifests(evidence, observerContext);
+  consumeContractChildSources(evidence.contractPackageCorpus!, contractContext, evidence);
   const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
     const childIndex = children.findIndex((child) => child.corpusId === corpusId);
     const child = children[childIndex];

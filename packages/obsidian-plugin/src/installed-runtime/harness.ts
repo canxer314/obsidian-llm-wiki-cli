@@ -1,8 +1,10 @@
-import { consumeManualPauseProof, manualPauseSourceDigest, type ManualPauseConsumptionContext } from "./manual-pause-source.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { defaultContractPackageRoot, loadVersionContractPackage, runContractFixtureWireCorpus, completeContractPackageCorpus, contractDigest, type ContractChildConsumptionContext, type ContractChildSource, type ContractFixtureWireEvidence, type VersionContractPackage } from "./contract-package-corpus.js";
+import { runContractCrossCallScenario, type ContractCrossCallEvidence } from "./contract-cross-call.js";
+import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { connect } from "node:net";
 import { dirname, join, resolve, relative } from "node:path";
-import { readFile } from "node:fs/promises";
+import { consumeManualPauseProof, manualPauseSourceDigest, type ManualPauseConsumptionContext } from "./manual-pause-source.js";
 
 import {
   CandidateBundleError,
@@ -265,6 +267,13 @@ export interface InstalledRuntimeHarnessOptions {
   }>;
   readonly client?: LoopbackMcpClient;
   readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
+  readonly contractPackageRoot?: string;
+  readonly runContractPackageWire?: typeof runContractFixtureWireCorpus;
+  readonly runContractCrossCall?: typeof runContractCrossCallScenario;
+  readonly completeContractPackage?: typeof completeContractPackageCorpus;
+  readonly contractContinuationTiming?: "full-real-time" | "binding-only";
+  readonly contractScenarioId?: string;
+  readonly prepareContractInvalidUtf8Fixture?: (options: { readonly vaultPath: string; readonly path: string }) => Promise<() => Promise<void>>;
   /**
    * Write-side corpus seams (issue #175). The admission phase runs in the
    * initial Obsidian window; the replay phase reconnects after the controlled
@@ -317,6 +326,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly provisionVault: typeof provisionTestVault;
     readonly cleanupVault: typeof cleanupTestVault;
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
+    readonly retainChildSource?: (source: ContractChildSource) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<RegisteredReferenceRewriteOutcome>;
   /**
@@ -332,6 +342,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly workingDirectory: string;
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
+    readonly retainChildSource?: (source: ContractChildSource) => void;
     readonly scenarioRunner: import("./semantic-evidence-corpus.js").InstalledSemanticEvidenceScenarioRunner;
   }) => Promise<SemanticEvidenceSearchSnapshotOutcome>;
   readonly semanticEvidenceScenarioRunner?: import("./semantic-evidence-corpus.js").InstalledSemanticEvidenceScenarioRunner;
@@ -490,6 +501,12 @@ export async function runInstalledRuntimeHarness(
   let pluginEventObserverCorpus: import("./plugin-event-observer-evidence.js").PluginEventObserverCorpusEvidence | null = null;
   let observerContext: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext | undefined;
   let pauseContext: ManualPauseConsumptionContext | undefined;
+  let contractContext: ContractChildConsumptionContext | undefined;
+  const retainedContractChildren: ContractChildConsumptionContext["children"] = [];
+  const retainContractChild = (source: ContractChildSource): void => {
+    if (source.candidateBundleSha256 !== state.candidate?.identity.bundleSha256 || source.installedMainSha256 !== state.candidate.identity.files.find(file => file.path === "main.js")?.sha256 || source.profileName !== options.profileName || !source.sourceRunId.startsWith(runId + "-") || retainedContractChildren.some(child => child.source.sourceRunId === source.sourceRunId)) throw new Error("Version contract independent child source pin mismatch");
+    retainedContractChildren.push({ source: structuredClone(source), sourceSha256: contractDigest(source) });
+  };
   const client = options.client ?? createLoopbackMcpClient();
   const configDirectoryName = options.configDirectoryName ?? ".obsidian";
   const timeouts = {
@@ -582,6 +599,9 @@ export async function runInstalledRuntimeHarness(
     }
   };
 
+  let contractAuthority: VersionContractPackage | null = null;
+  let contractWire: ContractFixtureWireEvidence | null = null;
+  const contractCrossCalls: ContractCrossCallEvidence[] = [];
   let handle: ObsidianProcessHandle | null = null;
   let startupShutdownUnconfirmed = false;
   let acceptanceDriver: {
@@ -592,6 +612,7 @@ export async function runInstalledRuntimeHarness(
     }): Promise<void>;
     cleanup(): Promise<void>;
   } | null = null;
+  const contractChildSources: { scenarioId: string; sourceRunId: string; candidateBundleSha256: string; profileName: string; vaultIdSha256: string; seedManifestSha256: string; identityEventSha256: string; cleanupEventSha256: string }[] = [];
   let isolatedSemanticEvidenceSequence = 0;
   let isolatedRuntimeResidue = false;
   let firstIdentity = null as PersistedBridgeIdentity | null;
@@ -766,6 +787,24 @@ export async function runInstalledRuntimeHarness(
         runId,
         configDirectoryName,
       });
+      // Generated acceptance Vault only. Exclusive writes cannot overwrite an
+      // existing fixture or a Primary Operator note.
+      const contractFiles: readonly [string, string | Uint8Array][] = [
+        ["ContractFixtures/QuotaMetadata.md", `---\nquota: ${"q".repeat(4_718_592)}\n---\n# Quota\n`],
+        ["Projects/Bridge.md", "---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n"],
+        ["Root.md", "# Root\n[[Projects/Bridge]]\n"],
+        ["Target Note.md", "# Target Note\n"],
+      ];
+      for (const [path, bytes] of contractFiles) {
+        const target = join(state.vault.vaultPath, path); await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, bytes, { flag: "wx" });
+      }
+      const fullSeed = [
+        ...state.vault.seedNotes.map(note => ({ path: note.path, bytes: Buffer.from(note.content, "utf8") })),
+        ...contractFiles.map(([path, content]) => ({ path, bytes: typeof content === "string" ? Buffer.from(content, "utf8") : content })),
+      ];
+      const seedManifest = fullSeed.map(({ path, bytes }) => `${createHash("sha256").update(bytes).digest("hex")}  ${path}`).sort().join("\n") + "\n";
+      state.vault = { ...state.vault, seedManifestSha256: createHash("sha256").update(seedManifest).digest("hex") };
     } catch (error) {
       failFromError("provision", error);
     }
@@ -844,6 +883,8 @@ export async function runInstalledRuntimeHarness(
     let isolatedStartupShutdownUnconfirmed = false;
     let isolatedPort: number | undefined;
     let isolatedDriver: Awaited<ReturnType<typeof prepare>> | null = null;
+    let childSource: typeof contractChildSources[number] | null = null;
+    let retainedChildSource: ContractChildSource | undefined;
     try {
       await installCandidateBundle(candidate, isolated.vaultPath, configDirectoryName);
       isolatedDriver = await prepare({
@@ -882,6 +923,10 @@ export async function runInstalledRuntimeHarness(
         throw new BridgeIdentityError("Isolated Semantic Evidence Bridge identity unavailable");
       }
       const identity: PersistedBridgeIdentity = observedIdentity;
+      const sourceIdentity = { scenarioId: request.scenario, sourceRunId: `${runId}-semantic-${isolatedSemanticEvidenceSequence}`, candidateBundleSha256: candidate.identity.bundleSha256, profileName: options.profileName, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: isolated.seedManifestSha256 };
+      childSource = { ...sourceIdentity, identityEventSha256: contractDigest(sourceIdentity), cleanupEventSha256: "0".repeat(64) };
+      recordSemanticEvidenceSearchSnapshotEvent("transport", "semantic-source-vault-identity", sourceIdentity);
+      retainedChildSource = { scenarioId: request.scenario, sourceRunId: sourceIdentity.sourceRunId, candidateBundleSha256: candidate.identity.bundleSha256, installedMainSha256: createHash("sha256").update(await readFile(join(isolated.vaultPath, configDirectoryName, "plugins", candidate.identity.pluginId, "main.js"))).digest("hex"), profileName: options.profileName, identity: structuredClone(identity), seedNotes: await Promise.all(isolated.seedNotes.map(async note => ({ path: note.path, content: await readFile(join(isolated.vaultPath, note.path), "utf8") }))), events: [{ kind: "transport", name: "semantic-source-vault-identity", detail: structuredClone(sourceIdentity) }], cleanup: { attempted: false, residualPaths: [] } };
       isolatedPort = identity.port;
       await waitForCondition(() => isLoopbackPortOpen(identity.port), {
         timeoutMs: timeouts.startupMs,
@@ -934,6 +979,14 @@ export async function runInstalledRuntimeHarness(
         );
       }
       if (cleanupFailure !== undefined) throw cleanupFailure;
+      if (childSource !== null && cleanup.attempted) {
+        const detail = { sourceRunId: childSource.sourceRunId, vaultIdSha256: childSource.vaultIdSha256, cleanupConfirmed: true };
+        recordSemanticEvidenceSearchSnapshotEvent("cleanup", "semantic-source-vault-cleaned", detail);
+        if (retainedChildSource === undefined) throw new Error("Version contract independent child source absent");
+        retainedChildSource.cleanup = structuredClone(cleanup);
+        retainedChildSource.events.push({ kind: "cleanup", name: "semantic-source-vault-cleaned", detail: structuredClone(detail) });
+        retainContractChild(retainedChildSource);
+      }
     }
   };
 
@@ -1001,6 +1054,14 @@ export async function runInstalledRuntimeHarness(
     detail: unknown,
   ): void => {
     registeredReferenceRewriteEvents.push({ kind, name, detail });
+    if (name === "registered-reference-source-vault-identity") {
+      const value = detail as Record<string, string>;
+      if (value.sourceRunId?.startsWith(`${runId}-reference-`) && value.candidateBundleSha256 === state.candidate?.identity.bundleSha256 && value.profileName === options.profileName) contractChildSources.push({ scenarioId: "registered-reference-byte-verification", sourceRunId: value.sourceRunId, candidateBundleSha256: value.candidateBundleSha256!, profileName: value.profileName!, vaultIdSha256: value.vaultIdSha256!, seedManifestSha256: value.seedManifestSha256!, identityEventSha256: contractDigest(detail), cleanupEventSha256: "0".repeat(64) });
+    }
+    if (name === "registered-reference-source-vault-cleaned") {
+      const value = detail as Record<string, unknown>; const source = contractChildSources.find(source => source.sourceRunId === value.sourceRunId && source.vaultIdSha256 === value.vaultIdSha256);
+      if (source !== undefined && value.cleanupConfirmed === true) source.cleanupEventSha256 = contractDigest(detail);
+    }
   };
   const recordRegisteredReferenceRewriteAssertion = (name: string): void => {
     registeredReferenceRewriteAssertions.push(name);
@@ -1018,6 +1079,15 @@ export async function runInstalledRuntimeHarness(
     detail: unknown,
   ): void => {
     semanticEvidenceSearchSnapshotEvents.push({ kind, name, detail });
+    if (name === "semantic-source-vault-identity") {
+      const value = detail as Record<string, string>;
+      if (value.sourceRunId?.startsWith(`${runId}-semantic-`) && value.candidateBundleSha256 === state.candidate?.identity.bundleSha256 && value.profileName === options.profileName) contractChildSources.push({ scenarioId: value.scenarioId!, sourceRunId: value.sourceRunId, candidateBundleSha256: value.candidateBundleSha256!, profileName: value.profileName!, vaultIdSha256: value.vaultIdSha256!, seedManifestSha256: value.seedManifestSha256!, identityEventSha256: contractDigest(detail), cleanupEventSha256: "0".repeat(64) });
+    }
+    if (name === "semantic-source-vault-cleaned") {
+      const value = detail as Record<string, unknown>;
+      const source = contractChildSources.find(source => source.sourceRunId === value.sourceRunId && source.vaultIdSha256 === value.vaultIdSha256);
+      if (source !== undefined && value.cleanupConfirmed === true) source.cleanupEventSha256 = contractDigest(detail);
+    }
   };
   const recordSemanticEvidenceSearchSnapshotAssertion = (name: string): void => {
     semanticEvidenceSearchSnapshotAssertions.push(name);
@@ -1093,6 +1163,56 @@ export async function runInstalledRuntimeHarness(
         }
         if (state.failure === null && state.publicWireCorpus !== null) {
           try {
+            contractAuthority = await loadVersionContractPackage(options.contractPackageRoot ?? defaultContractPackageRoot());
+            const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
+            contractWire = await (options.runContractPackageWire ?? runContractFixtureWireCorpus)({ authority: contractAuthority, endpoint, expectedVaultId: identity.vaultId });
+            if (options.contractScenarioId !== undefined && !contractAuthority.scenarios.some(scenario => scenario.id === options.contractScenarioId)) throw new Error("Unknown standalone contract scenario");
+            for (const scenario of contractAuthority.scenarios.filter(scenario => options.contractScenarioId === undefined || scenario.id === options.contractScenarioId)) {
+              const invalidPath = "ContractFixtures/InvalidUtf8.md";
+              let removeInvalid: (() => Promise<void>) | undefined;
+              if (scenario.id === "invalid-utf8-no-trusted-result") {
+                removeInvalid = await (options.prepareContractInvalidUtf8Fixture ?? (async ({ vaultPath, path }) => {
+                  await writeFile(join(vaultPath, path), Uint8Array.from([0xc3, 0x28]), { flag: "wx" });
+                  return async () => { await rm(join(vaultPath, path)); };
+                }))({ vaultPath: vault.vaultPath, path: invalidPath });
+              }
+              try {
+              contractCrossCalls.push(await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId: scenario.id, endpoint, expectedVaultId: identity.vaultId, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate!.identity.bundleSha256, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: vault.seedManifestSha256 }, quotaMetadataPath: "ContractFixtures/QuotaMetadata.md", seedNotes: vault.seedNotes, invalidUtf8Path: "ContractFixtures/InvalidUtf8.md", readFixtureBytes: async path => {
+                if (!["Projects/Bridge.md", "ContractFixtures/InvalidUtf8.md", "Notes/Transport.md"].includes(path)) throw new Error("Contract fixture byte observation escaped generated scope");
+                return new Uint8Array(await readFile(join(vault.vaultPath, path)));
+              }, continuationTiming: options.contractContinuationTiming, observeProgramState: async () => ({ registryBytes: new Uint8Array(await readFile(join(vault.vaultPath, configDirectoryName, "plugins", state.candidate!.identity.pluginId, "data.json"))), inventory: (await takeInventory(vault.vaultPath)).filter(entry => !entry.path.startsWith(configDirectoryName + "/") && !entry.path.startsWith(".llm-wiki/")) }), restart: async () => {
+                await stopObsidian();
+                handle = await options.processControl.start({ vaultPath: vault.vaultPath, profileDirectory: vault.profileDirectory });
+                if (profile === null || options.probe.probeRunning === undefined) throw new Error("Contract restart requires a registered installed runtime probe");
+                const observed = await options.probe.probeRunning(vault);
+                if (preflightRuntimeProfile(profile, observed).length !== 0) throw new Error("Contract restart profile mismatch");
+                let restartedIdentity: PersistedBridgeIdentity | null = null;
+                await waitForCondition(async () => {
+                  restartedIdentity = await readPersistedBridgeIdentity(vault.vaultPath, state.candidate!.identity.pluginId, configDirectoryName);
+                  return restartedIdentity !== null && await isLoopbackPortOpen(restartedIdentity.port);
+                }, { timeoutMs: timeouts.startupMs });
+                const found = restartedIdentity as PersistedBridgeIdentity | null;
+                if (found === null || found.vaultId !== identity.vaultId || found.port !== identity.port) throw new Error("Contract restart changed Bridge identity");
+                await client.observeHealth(endpoint, found.vaultId);
+                return { endpoint, expectedVaultId: found.vaultId };
+              } }));
+              } finally {
+                if (removeInvalid !== undefined) {
+                  await removeInvalid();
+                  await waitForCondition(async () => {
+                    const observation = await client.observeHealth(endpoint, identity.vaultId);
+                    return observation.health.readiness.searchSnapshot === "ready";
+                  }, { timeoutMs: timeouts.startupMs });
+                }
+              }
+            }
+            if (options.contractScenarioId !== undefined) fail("public_wire_corpus", "public_wire_corpus_failed", "Standalone contract scenario recorded as partial; full acceptance was not run");
+          } catch (error) {
+            fail("public_wire_corpus", "public_wire_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
+          }
+        }
+        if (state.failure === null && state.publicWireCorpus !== null) {
+          try {
             state.changeSetAdmission = await (options.runChangeSetCorpus ??
               runChangeSetSubmissionCorpusAtEndpoint)({
               endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
@@ -1136,6 +1256,7 @@ export async function runInstalledRuntimeHarness(
                 expectedVaultId: identity.vaultId,
                 workingDirectory: options.workingDirectory,
                 record: recordSemanticEvidenceSearchSnapshotEvent,
+                retainChildSource: retainContractChild,
                 assertion: recordSemanticEvidenceSearchSnapshotAssertion,
                 scenarioRunner: {
                   run: async (request) => {
@@ -1332,6 +1453,7 @@ export async function runInstalledRuntimeHarness(
           provisionVault: provisionTestVault,
           cleanupVault,
           record: recordRegisteredReferenceRewriteEvent,
+          retainChildSource: retainContractChild,
           assertion: recordRegisteredReferenceRewriteAssertion,
           profile: profile!,
           probe: options.probe,
@@ -1623,6 +1745,7 @@ export async function runInstalledRuntimeHarness(
           assertions: semanticEvidenceSearchSnapshotAssertions,
         })
       : null;
+  if (state.candidate !== null) contractContext = { runId, candidateBundleSha256: state.candidate.identity.bundleSha256, installedMainSha256: state.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: options.profileName, children: retainedContractChildren, reports: [["registered-reference-byte-verification", registeredReferenceRewriteCorpus], ["successor-search-snapshot-graph-evidence", semanticEvidenceSearchSnapshotCorpus]].filter(([, report]) => report !== null).map(([scenarioId, report]) => ({ scenarioId: scenarioId as string, report: structuredClone(report), reportSha256: contractDigest(report) })) };
   const privacyRecoveryAuthorityCorpus: PrivacyRecoveryAuthorityCorpusEvidence | null =
     state.privacyRecoveryAuthority !== null
       ? privacyRecoveryAuthorityCorpusEvidenceSchema.parse(
@@ -1732,6 +1855,8 @@ export async function runInstalledRuntimeHarness(
             };
           })(),
     observations: state.observations.map((observation) => toObservationEvidence(observation)),
+    contractSourceVaults: contractChildSources.map(source => ({ ...source })),
+    contractPackageCorpus: null,
     publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
     changeSetCorpus,
     gateIsolationCorpus,
@@ -1758,7 +1883,16 @@ export async function runInstalledRuntimeHarness(
 
   if (evidence.verdict === "passed") {
     try {
-      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence, observerContext, pauseContext);
+      if (contractAuthority === null || contractWire === null || state.vault === null || state.candidate === null || firstIdentity === null || state.beforeInventory === null || state.afterInventory === null || state.cleanup === null) throw new Error("Version contract package execution evidence is absent");
+      const binding = { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 };
+      for (const [scenarioId, report] of [["registered-reference-byte-verification", registeredReferenceRewriteCorpus], ["successor-search-snapshot-graph-evidence", semanticEvidenceSearchSnapshotCorpus]] as const) {
+        if (report === null) continue;
+        const index = contractCrossCalls.findIndex(proof => proof.scenarioId === scenarioId);
+        const proof = await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId, endpoint: new URL(`http://127.0.0.1:${firstIdentity.port}/mcp`), expectedVaultId: firstIdentity.vaultId, binding, predecessorProof: index >= 0 ? contractCrossCalls[index] : undefined, dependency: { binding, sourceVaults: contractChildSources.filter(source => scenarioId === "registered-reference-byte-verification" ? source.scenarioId === scenarioId : source.scenarioId !== "registered-reference-byte-verification"), reportSha256: contractDigest(report), report } });
+        if (index >= 0) contractCrossCalls[index] = proof; else contractCrossCalls.push(proof);
+      }
+      evidence.contractPackageCorpus = (options.completeContractPackage ?? completeContractPackageCorpus)({ authority: contractAuthority, wire: contractWire, crossCalls: contractCrossCalls, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, beforeInventorySha256: contractDigest(state.beforeInventory), afterInventorySha256: contractDigest(state.afterInventory), cleanup: state.cleanup });
+      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence, observerContext, pauseContext, contractContext);
       (evidence as InstalledRuntimeEvidence & { acceptanceMatrix: AcceptanceMatrixReport }).acceptanceMatrix =
         state.acceptanceMatrix;
     } catch (error) {
@@ -1778,15 +1912,19 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  const partialAuthority = contractAuthority as VersionContractPackage | null;
+  if (partialAuthority !== null && state.candidate !== null && state.vault !== null && firstIdentity !== null) evidence.contractPackageExecution = { authoritySha256: partialAuthority.manifestSha256, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, wire: contractWire, crossCalls: contractCrossCalls.map(proof => ({ ...proof, observations: [...proof.observations] })), complete: evidence.contractPackageCorpus !== null && evidence.contractPackageCorpus !== undefined, cleanup: state.cleanup === null ? null : { attempted: state.cleanup.attempted, residualPaths: [...state.cleanup.residualPaths] } };
   const privateMarkers = [
+    "---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n",
+    "q".repeat(4_718_592),
     ...(state.vault?.seedNotes.map((note) => note.content) ?? []),
     state.vault?.vaultPath ?? "",
     state.vault?.profileDirectory ?? "",
     options.workingDirectory,
   ];
-  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers, observerContext, pauseContext);
+  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers, observerContext, pauseContext, contractContext);
   return { verdict: evidence.verdict, failure: state.failure, evidence, evidencePath: options.evidencePath,
-    readEvidence: async () => parseEvidence(await readFile(options.evidencePath, "utf8"), observerContext, pauseContext) };
+    readEvidence: async () => parseEvidence(await readFile(options.evidencePath, "utf8"), observerContext, pauseContext, contractContext) };
 }
 
 // The phase and its observation are recorded together so the evidence
