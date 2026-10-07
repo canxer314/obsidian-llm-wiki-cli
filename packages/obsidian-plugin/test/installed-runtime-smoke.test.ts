@@ -250,6 +250,7 @@ describe("installed-runtime authoritative command", () => {
     const provisionAttempt = new Error("privacy provision attempted");
     await expect(runners.runPrivacyRecoveryAuthorityCorpus({
       profileName: "test", profile: { name: "test" }, probe: { probeRunning: async () => { throw new Error("Must not probe"); } },
+      retainDiagnosticObservation: async () => undefined,
       provisionVault: async () => { throw provisionAttempt; }, candidate: {},
     } as never)).rejects.toBe(provisionAttempt);
   });

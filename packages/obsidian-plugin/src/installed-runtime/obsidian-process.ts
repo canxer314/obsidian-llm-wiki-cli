@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { confirmGeneratedVaultTrust } from "./local-gui-supervision.js";
+import { diagnosticProcessEnvironment } from "./installed-diagnostic-privacy.js";
 
 /**
  * Obsidian process-control seam (issue #197): the orchestrator only knows
@@ -14,6 +15,7 @@ import { confirmGeneratedVaultTrust } from "./local-gui-supervision.js";
 export interface ObsidianLaunchRequest {
   readonly vaultPath: string;
   readonly profileDirectory: string;
+  readonly diagnosticPrivacyEnvironment?: Record<string, string>;
 }
 
 export interface ObsidianProcessHandle {
@@ -98,7 +100,7 @@ export function createWindowsObsidianProcessControl(options: {
             `--user-data-dir=${request.profileDirectory}`,
             `obsidian://open?path=${encodeURIComponent(request.vaultPath)}`,
           ],
-          { stdio: "ignore", windowsHide: true },
+          { stdio: "ignore", windowsHide: true, env: diagnosticProcessEnvironment(request) },
         );
       } catch (error) {
         throw new ObsidianProcessError(
@@ -168,6 +170,7 @@ export function createLinuxObsidianProcessControl(options: {
 }): ObsidianProcessControl {
   return {
     async start(request) {
+      const diagnosticEnvironment = diagnosticProcessEnvironment(request);
       await registerDedicatedObsidianProfile(request);
       const child = spawn(options.executablePath, [
         ...(options.launchArguments ?? [
@@ -177,7 +180,7 @@ export function createLinuxObsidianProcessControl(options: {
         ]),
         `--user-data-dir=${request.profileDirectory}`,
         `obsidian://open?path=${encodeURIComponent(request.vaultPath)}`,
-      ], { detached: true, stdio: "ignore" });
+      ], { detached: true, stdio: "ignore", env: diagnosticEnvironment });
       await new Promise<void>((resolve, reject) => {
         child.once("spawn", resolve);
         child.once("error", (error) => reject(new ObsidianProcessError(

@@ -228,6 +228,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     const replay = await submit(input, !committed);
     if (replay.outcome !== "registered" || JSON.stringify(replay.changeSet) !== JSON.stringify(recovered.changeSet)) throw new Error("Recovered Bridge did not replay the retained terminal record");
     verifyCrashInventory(before, await crashInventory(vault.vaultPath, configDirectoryName), mutationKind, committed ? "committed" : "original");
+    if (JSON.stringify(await readInstalledCrashJournal(journalPath)) !== JSON.stringify(recoveredFrame)) throw new Error("Installed crash replay changed the durable terminal frame");
     eventOrder.push("complete-public-proof-status-and-identical-replay-observed");
     const sentinelPath = "Notes/CrashSentinel.md";
     const sentinel = await submit({ submissionKey: `sentinel-${seed}`, operations: [{ operationId: "post-restore-sentinel", kind: "create_note", path: sentinelPath, content: "# Restore completed\n", ifExists: "reject" }] });

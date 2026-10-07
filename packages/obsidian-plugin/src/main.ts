@@ -905,19 +905,19 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 }
               }
             } else if (kind !== "create_note") {
-              const fixture = profile.files[0]!;
-              const bytes = await readFile(join(basePath, ...fixture.path.split("/")));
-              if (!bytes.equals(fixture.originalBytes!)) throw new Error("Installed edit-body seed bytes changed");
-              const file = this.app.vault.getFileByPath(fixture.path);
-              if (file === null) throw new Error("Installed edit-body seed is not visible to Obsidian");
-              // A cold-cache startup may have indexed the pre-seeded note before
-              // this plugin subscribed. Re-publish identical bytes through the
-              // real Vault API; only its metadata callback may satisfy matches.
-              await this.app.vault.modifyBinary(file, Uint8Array.from(bytes).buffer);
-              const deadline = Date.now() + 5_000;
-              while (!semanticVersions.matches(fixture.path, fixture.originalBytes!)) {
-                if (Date.now() >= deadline) throw new Error("Installed edit-body seed metadata is unavailable");
-                await new Promise(resolve => setTimeout(resolve, 10));
+              for (const fixture of profile.files) {
+                const bytes = await readFile(join(basePath, ...fixture.path.split("/")));
+                if (!bytes.equals(fixture.originalBytes!)) throw new Error("Installed crash seed bytes changed");
+                const file = this.app.vault.getFileByPath(fixture.path);
+                if (file === null) throw new Error("Installed crash seed is not visible to Obsidian");
+                // Cold-cache notes may predate the subscription. Only real
+                // metadata callbacks for each exact preimage may satisfy it.
+                await this.app.vault.modifyBinary(file, Uint8Array.from(bytes).buffer);
+                const deadline = Date.now() + 5_000;
+                while (!semanticVersions.matches(fixture.path, fixture.originalBytes!)) {
+                  if (Date.now() >= deadline) throw new Error("Installed crash seed metadata is unavailable");
+                  await new Promise(resolve => setTimeout(resolve, 10));
+                }
               }
               runtime.scheduleSearchSnapshotRefresh();
               await runtime.refreshSearchSnapshot();
@@ -1087,7 +1087,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
               if (outcome.outcome === "cancelled") {
                 await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "cancelled" });
               } else if (outcome.outcome === "copied" && generatedBundle !== undefined) {
-                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "copied", bundle: generatedBundle });
+                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "copied", bundle: generatedBundle, copiedTextSha256: outcome.copiedTextSha256 });
               }
             }
             if (outcome.outcome === "copied") {

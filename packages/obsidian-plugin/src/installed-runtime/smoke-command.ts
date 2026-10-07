@@ -398,9 +398,9 @@ export function createAuthoritativeInstalledRuntimeRunners(
       ...request,
       operatorReportTimeoutMs: request.operatorReportTimeoutMs ?? 180_000,
       recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes",
+      diagnosticPrivacy: true,
       recoveryControls: true,
-      // Exact Notes/Welcome.md seed selection; no Vault content enters reports.
-      contentConfirmation: { expectedSelectionSha256: "8c683128e39b84e2261c09b4417d294ad8e0278cfd8203c3a618007c5cf74697" },
+      // A33 uses the exact deterministic generated selection; no raw selection enters public proof.
     }),
     runReleaseLifecycleCorpus: async (request) => {
       if (request.profile !== undefined && request.profileName !== undefined && request.probe !== undefined) {
@@ -427,7 +427,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
         const partial = await runInstalledCrashRestorationSlice({ ...request.installed, crashPoint, mutationKind, reportDirectory: options.reportDirectory ?? request.installed.reportDirectory });
         request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
       }
-      throw new Error("Installed create/exact/whole complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
+      throw new Error("Installed create/exact/whole/frontmatter/multi complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
     },
     runPluginEventObserverCorpus: async request => {
       if (options.runId === undefined || options.reportDirectory === undefined) return unavailableRunner("Enabled plugin observer corpus");
