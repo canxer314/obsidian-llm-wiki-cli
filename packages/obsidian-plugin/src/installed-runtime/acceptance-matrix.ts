@@ -1,3 +1,4 @@
+import { consumeManualPauseProof, type ManualPauseConsumptionContext } from "./manual-pause-source.js";
 import { manualPauseProofSchema } from "./manual-pause-observation.js";
 import { persistentFifoProofSchema } from "./fifo-observation.js";
 import { createHash } from "node:crypto";
@@ -263,7 +264,7 @@ function canonicalReport(report: Omit<AcceptanceMatrixReport, "canonicalManifest
   };
 }
 
-export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext): AcceptanceMatrixReport {
+export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: ManualPauseConsumptionContext): AcceptanceMatrixReport {
   if (evidence.verdict !== "passed" || evidence.failure !== null) throw new AcceptanceMatrixError("Acceptance matrix requires a passing installed-runtime run");
   if (evidence.profile.mismatches.length !== 0 || evidence.profile.observed === null ||
       evidence.profile.observed.obsidianVersion !== evidence.profile.registered.versions.obsidian ||
@@ -287,6 +288,8 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence,
   const pause = manualPauseProofSchema.safeParse(evidence.gateIsolationCorpus?.manualPause?.installedObservation);
   if (!pause.success || pause.data.runId !== evidence.runId || pause.data.profile !== evidence.profile.name ||
       pause.data.candidateBundleSha256 !== evidence.candidate.bundleSha256) throw new AcceptanceMatrixError("A-30 requires bound installed manual pause observations and independent local actions");
+  if (pauseContext?.installedMainSha256 !== evidence.candidate.files.find(file => file.path === "main.js")?.sha256) throw new AcceptanceMatrixError("A-30 manual pause independent source candidate pin absent or mismatched");
+  consumeManualPauseProof(pause.data, pauseContext);
   if (evidence.changeSetCorpus !== null) {
     // A-15 is a raw-byte observation, never a string assertion alone.
     changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);
