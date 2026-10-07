@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { syntheticManualPauseProof } from "./helpers/manual-pause-proof.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -150,6 +151,7 @@ function evidence(): InstalledRuntimeEvidence {
   };
   const gate = {
     ...corpus(ASSERTIONS.gate),
+    manualPause: { installedObservation: syntheticManualPauseProof("acceptance-run", "MVP-PERF-REF-1", DIGEST) },
     residualCleanup: {
       "vault-a": { writeGate: "open" },
       "vault-b": { writeGate: "open" },
@@ -205,6 +207,11 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("refuses boolean-only manual pause claims without bound installed drain and local actions", () => {
+    const missing = evidence();
+    delete missing.gateIsolationCorpus!.manualPause.installedObservation;
+    expect(() => createAcceptanceMatrixReport(missing)).toThrow(/A-30.*pause/u);
+  });
   it("maps A-26 to the independent second verified span, not rename-all", () => {
     expect(createAcceptanceMatrixReport(evidence()).scenarios.find(({ id }) => id === "A-26")?.assertion)
       .toBe("span/second-equal-spelling-only:untouched-bytes-exact");

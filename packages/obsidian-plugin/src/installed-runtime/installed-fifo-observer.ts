@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, open, readFile, realpath } from "node:fs/promises";
+import { appendFile, open, readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { fifoCommandSchema, fifoEventSchema, type FifoEvent } from "./fifo-observation.js";
@@ -63,9 +63,33 @@ export async function createInstalledFifoObserver(options: { vaultPath: string; 
     const identity = await readPersistedBridgeIdentity(options.vaultPath, options.pluginId, options.configDirectoryName);
     if (identity === null || identity.vaultId !== command.expectedVaultId || endpoint.toString() !== `http://127.0.0.1:${identity.port}/mcp`) throw new Error("FIFO observer belongs to a different Managed Vault");
     await appendFifoEvent(descriptor, event);
-    // Hold the real write lease after its durable COMMITTED frame. No local
-    // pause/resume authority is invoked; the supervisor terminates this process.
-    if (event.kind === "committed" && event.submissionKey === command.keys[0]) await new Promise<void>(() => {});
+    // Only releases the fixed generated fixture's write lease. The Primary
+    // Operator's pause and independent resume are never called by this observer.
+    if (event.kind === "committed" && event.submissionKey === command.keys[0]) {
+      if (command.holdUntil === undefined) await new Promise<void>(() => {});
+      else {
+        const path = join(reportRoot, "persistent-fifo-release.json");
+        while (true) {
+          let raw: string;
+          try { raw = await readFile(path, "utf8"); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            await new Promise(resolve => setTimeout(resolve, 25));
+            continue;
+          }
+          const facts = await stat(path);
+          if (await realpath(path) !== path || !facts.isFile() || (process.platform !== "win32" && (facts.mode & 0o077) !== 0)) throw new Error("FIFO fixture release must be a private regular file");
+          const release = z.object({ schemaVersion: z.literal(1), runId: z.string(), candidateBundleSha256: digest,
+            installedMainSha256: digest, capabilityToken: digest, vaultId: z.string(), endpoint: z.string(),
+            headChangeSetId: z.string(), pausingObserved: z.literal(true) }).strict().parse(JSON.parse(raw));
+          if (release.runId !== descriptor.runId || release.candidateBundleSha256 !== descriptor.candidateBundleSha256 ||
+              release.installedMainSha256 !== descriptor.installedMainSha256 || release.capabilityToken !== descriptor.capabilityToken ||
+              release.vaultId !== command.expectedVaultId || release.endpoint !== command.endpoint || release.headChangeSetId !== event.changeSetId ||
+              JSON.stringify((await loadInstalledRuntimeAcceptanceDescriptor(options)).descriptor) !== JSON.stringify(descriptor)) throw new Error("FIFO fixture release binding mismatch");
+          return;
+        }
+      }
+    }
   };
 }
 

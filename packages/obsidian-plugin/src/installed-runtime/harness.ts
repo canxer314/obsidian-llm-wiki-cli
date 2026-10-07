@@ -377,6 +377,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<ReleaseLifecycleCorpusOutcome>;
+  readonly runManualPauseCorpus?: typeof import("./manual-pause-installed-runner.js").runInstalledManualPauseCorpus;
   readonly runPersistentFifoCorpus?: typeof import("./fifo-installed-runner.js").runInstalledPersistentFifoCorpus;
   readonly runCrashRestorationRetainedAuthorityCorpus?: (options: {
     readonly installed?: import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions;
@@ -934,6 +935,7 @@ export async function runInstalledRuntimeHarness(
   }
 
   let persistentFifo: import("./fifo-observation.js").PersistentFifoProof | undefined;
+  let manualPause: import("./manual-pause-observation.js").ManualPauseProof | undefined;
 
   // Shared event/assertion collectors for both change-set corpus phases so the
   // closed evidence block spans the initial admission and the post-restart
@@ -1153,6 +1155,27 @@ export async function runInstalledRuntimeHarness(
         }
       },
     });
+  }
+  // Independently runnable A-30 proof is collected before the broader gate
+  // corpus can intentionally fail as partial. It never promotes that corpus.
+  if (state.failure === null && options.runManualPauseCorpus !== undefined) {
+    try {
+      const candidate = state.candidate;
+      if (candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined) {
+        throw new Error("Installed manual pause requires verified candidate, profile and observation descriptor");
+      }
+      manualPause = await options.runManualPauseCorpus({
+        runId, workingDirectory: options.workingDirectory, reportDirectory: dirname(options.evidencePath),
+        candidate, profile, client, processControl: options.processControl, configDirectoryName, timeouts,
+        probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+        prepareAcceptanceDriver: async request => {
+          const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+          if (!("path" in prepared) || !("descriptor" in prepared)) throw new Error("Installed manual pause descriptor binding unavailable");
+          return prepared as Awaited<ReturnType<import("./fifo-installed-runner.js").InstalledFifoOptions["prepareAcceptanceDriver"]>>;
+        },
+        record: recordGateIsolationEvent, assertion: recordGateIsolationAssertion,
+      });
+    } catch (error) { fail("gate_isolation_corpus", "gate_isolation_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
   }
   // The gate-isolation corpus (issue #177) runs between the initial window and
   // the controlled restart: it provisions and starts its own two dedicated
@@ -1515,6 +1538,7 @@ export async function runInstalledRuntimeHarness(
           assertions: gateIsolationAssertions,
         })
       : null;
+  if (gateIsolationCorpus !== null && manualPause !== undefined) gateIsolationCorpus.manualPause.installedObservation = manualPause;
   const registeredReferenceRewriteCorpus: RegisteredReferenceRewriteCorpusEvidence | null =
     state.registeredReferenceRewrite !== null
       ? composeRegisteredReferenceRewriteCorpusEvidence({
@@ -1643,6 +1667,7 @@ export async function runInstalledRuntimeHarness(
     publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
     changeSetCorpus,
     gateIsolationCorpus,
+    manualPauseObservation: manualPause ?? null,
     registeredReferenceRewriteCorpus,
     semanticEvidenceSearchSnapshotCorpus,
     privacyRecoveryAuthorityCorpus,

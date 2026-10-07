@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { manualPauseProofSchema } from "./manual-pause-observation.js";
 import { persistentFifoProofSchema } from "./fifo-observation.js";
 import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -550,6 +551,7 @@ export const gateIsolationCorpusEvidenceSchema = z
       .strict(),
     manualPause: z
       .object({
+        installedObservation: manualPauseProofSchema.optional(),
         drainedInFlightToTrustworthyEnd: z.literal(true),
         fifoRetained: z.literal(true),
         newUnboundRejected: z.number().int().positive(),
@@ -1210,6 +1212,7 @@ export const installedRuntimeEvidenceSchema = z
     publicWireCorpus: publicWireCorpusEvidenceSchema.nullable(),
     changeSetCorpus: changeSetCorpusEvidenceSchema.nullable(),
     gateIsolationCorpus: gateIsolationCorpusEvidenceSchema.nullable(),
+    manualPauseObservation: manualPauseProofSchema.nullable().optional(),
     registeredReferenceRewriteCorpus:
       registeredReferenceRewriteCorpusEvidenceSchema.nullable(),
     semanticEvidenceSearchSnapshotCorpus:
@@ -1232,6 +1235,10 @@ export const installedRuntimeEvidenceSchema = z
   })
   .strict()
   .superRefine((evidence, context) => {
+    for (const pause of [evidence.manualPauseObservation, evidence.gateIsolationCorpus?.manualPause.installedObservation]) {
+      if (pause && (pause.runId !== evidence.runId || pause.profile !== evidence.profile.name || pause.candidateBundleSha256 !== evidence.candidate?.bundleSha256 ||
+          pause.installedMainSha256 !== evidence.candidate?.files.find(file => file.path === "main.js")?.sha256)) context.addIssue({ code: "custom", message: "Manual pause proof must bind this verified candidate, run and registered profile" });
+    }
     for (const rejection of evidence.changeSetCorpus?.admission.rejectionClasses ?? []) {
       if (rejection.binding.runId !== evidence.runId ||
           rejection.binding.runtimeProfileId !== evidence.profile.name ||

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
+import { syntheticManualPauseProof } from "./helpers/manual-pause-proof.js";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,6 +186,7 @@ function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsol
       otherGatesLeftUnbound: 2,
     },
     manualPause: {
+      installedObservation: { ...syntheticManualPauseProof("run-evidence", "MVP-PERF-REF-1", DIGEST), installedMainSha256: DIGEST },
       drainedInFlightToTrustworthyEnd: true,
       fifoRetained: true,
       newUnboundRejected: 1,
@@ -1104,6 +1106,7 @@ describe("installed-runtime evidence record", () => {
       ...acceptedEvidence(),
       candidate: null,
       bridgeIdentity: null,
+      gateIsolationCorpus: null,
       changeSetCorpus: null,
       inputHashes: { candidateBundleSha256: null, vaultSeedManifestSha256: null },
       beforeInventory: null,

@@ -1,4 +1,5 @@
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
+import { syntheticManualPauseProof } from "./helpers/manual-pause-proof.js";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -245,6 +246,8 @@ async function arrangeRun(
     }),
     profiles: PROFILES,
     runId,
+    runManualPauseCorpus: async ({ runId, profile, candidate }) => ({ ...syntheticManualPauseProof(runId, profile.name, candidate.identity.bundleSha256),
+      installedMainSha256: candidate.identity.files.find(file => file.path === "main.js")!.sha256 }),
     runPersistentFifoCorpus: async ({ runId, profile, candidate, assertion }) => {
       assertion("concurrency/persistent-fifo:repreflight-and-restart-proven");
       return syntheticFifoProof(runId, profile.name, candidate.identity.bundleSha256);

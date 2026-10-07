@@ -1,3 +1,4 @@
+import { manualPauseProofSchema } from "./manual-pause-observation.js";
 import { persistentFifoProofSchema } from "./fifo-observation.js";
 import { createHash } from "node:crypto";
 
@@ -257,6 +258,9 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence)
   const fifo = persistentFifoProofSchema.safeParse(evidence.changeSetCorpus?.admission.fifo?.persistentObservation);
   if (!fifo.success || fifo.data.runId !== evidence.runId || fifo.data.profile !== evidence.profile.name ||
       fifo.data.candidateBundleSha256 !== evidence.candidate.bundleSha256) throw new AcceptanceMatrixError("A-20 requires bound installed persistent FIFO observations and confirmed cleanup");
+  const pause = manualPauseProofSchema.safeParse(evidence.gateIsolationCorpus?.manualPause?.installedObservation);
+  if (!pause.success || pause.data.runId !== evidence.runId || pause.data.profile !== evidence.profile.name ||
+      pause.data.candidateBundleSha256 !== evidence.candidate.bundleSha256) throw new AcceptanceMatrixError("A-30 requires bound installed manual pause observations and independent local actions");
   if (evidence.changeSetCorpus !== null) {
     // A-15 is a raw-byte observation, never a string assertion alone.
     changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);

@@ -1,3 +1,4 @@
+import { runInstalledManualPauseCorpus } from "./manual-pause-installed-runner.js";
 import { runInstalledPersistentFifoCorpus } from "./fifo-installed-runner.js";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -204,6 +205,7 @@ const installedScenarioReportSchema = z.union([
 export const AUTHORITATIVE_INSTALLED_RUNTIME_RUNNER_NAMES = [
   "prepareInstalledRuntimeAcceptanceDriver",
   "runGateIsolationCorpus",
+  "runManualPauseCorpus",
   "runPersistentFifoCorpus",
   "runRegisteredReferenceRewriteCorpus",
   "runPrivacyRecoveryAuthorityCorpus",
@@ -216,6 +218,7 @@ type HarnessAuthoritativeInstalledRuntimeRunners = Required<
   Pick<
     InstalledRuntimeHarnessOptions,
     | "runGateIsolationCorpus"
+    | "runManualPauseCorpus"
     | "runPersistentFifoCorpus"
     | "runRegisteredReferenceRewriteCorpus"
     | "runPrivacyRecoveryAuthorityCorpus"
@@ -382,6 +385,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
         },
       };
     },
+    runManualPauseCorpus: runInstalledManualPauseCorpus,
     runPersistentFifoCorpus: runInstalledPersistentFifoCorpus,
     runGateIsolationCorpus: async (request) => {
       if (request.probe === undefined || request.profile === undefined || request.candidate === undefined) {
