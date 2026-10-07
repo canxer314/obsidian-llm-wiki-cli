@@ -697,8 +697,10 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     runId: "orchestration", crashPoint, mutationKind, configDirectoryName, workingDirectory: root, reportDirectory: join(root, "reports"), candidate, profile,
     probe: { probeRunning: async () => ({ platform: "linux", osBuild: "test", obsidianVersion: "test", electronVersion: "test", nodeVersion: "test", capabilities: [] }) },
     processControl: { start: async (request: any) => {
-      vaultPath = request.vaultPath; stopped = false;
+      vaultPath = request.vaultPath;
       const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
+      terminal = descriptor.command.action !== "idle" && descriptor.command.recovery === undefined;
+      stopped = false;
       await writeFile(join(vaultPath, configDirectoryName, "plugins", "crash-plugin", "data.json"), JSON.stringify({ vaultId: "orchestration-vault", port }));
       if (descriptor.command.recovery !== undefined) { publishedSequence = descriptor.command.sequence; await publishBoundary(descriptor); if (fault === "early_listener") await new Promise<void>(resolve => server.listen(port, "127.0.0.1", resolve)); }
       else {
