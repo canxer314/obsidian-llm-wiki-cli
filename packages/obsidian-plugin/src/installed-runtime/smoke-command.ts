@@ -424,7 +424,16 @@ export function createAuthoritativeInstalledRuntimeRunners(
       }
       for (const scenario of installedCrashScenarios) {
         const { kind: mutationKind, point: crashPoint } = crashScenarioParts(scenario);
-        const partial = await runInstalledCrashRestorationSlice({ ...request.installed, crashPoint, mutationKind, reportDirectory: options.reportDirectory ?? request.installed.reportDirectory });
+        const reportDirectory = mutationKind === "move_note" ? join(options.reportDirectory ?? request.installed.reportDirectory, `move-${crashPoint.replace(/[^A-Za-z0-9-]/gu, "-")}`) : options.reportDirectory ?? request.installed.reportDirectory;
+        const moveObserverContext = mutationKind !== "move_note" ? undefined : {
+          runId: request.installed.runId, candidateBundleSha256: request.installed.candidate.identity.bundleSha256,
+          installedMainSha256: request.installed.candidate.identity.files.find(file => file.path === "main.js")!.sha256,
+          profileName: request.installed.profile.name, observations: [],
+        };
+        const partial = await runInstalledCrashRestorationSlice({ ...request.installed, crashPoint, mutationKind, reportDirectory,
+          ...(moveObserverContext === undefined ? {} : { moveObserverContext }),
+          prepareAcceptanceDriver: input => request.installed!.prepareAcceptanceDriver({ ...input, reportDirectory }),
+        });
         request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
       }
       throw new Error("Installed create/exact/whole/frontmatter/multi complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
