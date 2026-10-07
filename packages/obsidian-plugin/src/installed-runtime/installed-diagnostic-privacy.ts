@@ -132,14 +132,23 @@ export interface InstalledDiagnosticTrustedObservation {
 export interface InstalledDiagnosticTrustedContext {
   /** The run composition obtains this independently from the actual runner, never from the proof under validation. */
   readonly observation: InstalledDiagnosticTrustedObservation;
-  /** Pinned by the external run composition when the runner delivers its source transcript. */
+  /** Transcript digest for consistency only; it cannot replace the separately retained source pin. */
   readonly expectedObservationSha256: string;
 }
 
-/** Public composition boundary requires the independently retained actual runner observation. */
-export function validateInstalledDiagnosticPrivacyProof(value: unknown, binding: { readonly runId: string; readonly candidateBundleSha256: string; readonly profileName: string; readonly installedMainSha256: string }, trusted?: InstalledDiagnosticTrustedContext): z.infer<typeof proofSchema> {
+export interface InstalledDiagnosticSourcePin {
+  /** Retained by the run composition from the runner callback, separately from transported evidence. */
+  readonly binding: InstalledDiagnosticTrustedObservation["binding"];
+  readonly observationSha256: string;
+}
+
+/** The caller is the trust boundary: never obtain expectedPin from the evidence being validated. */
+export function validateInstalledDiagnosticPrivacyProof(value: unknown, binding: InstalledDiagnosticTrustedObservation["binding"], trusted?: InstalledDiagnosticTrustedContext, expectedPin?: InstalledDiagnosticSourcePin): z.infer<typeof proofSchema> {
   if (trusted === undefined) throw new Error("Installed diagnostic proof requires an independent trusted observation");
-  if (!/^[a-f0-9]{64}$/u.test(trusted.expectedObservationSha256) || diagnosticSha256(diagnosticCanonicalJson(trusted.observation)) !== trusted.expectedObservationSha256 ||
+  if (expectedPin === undefined) throw new Error("Installed diagnostic proof requires an independently retained source pin");
+  if (!/^[a-f0-9]{64}$/u.test(expectedPin.observationSha256) || trusted.expectedObservationSha256 !== expectedPin.observationSha256 ||
+      diagnosticSha256(diagnosticCanonicalJson(trusted.observation)) !== expectedPin.observationSha256 ||
+      diagnosticCanonicalJson(expectedPin.binding) !== diagnosticCanonicalJson(binding) ||
       diagnosticCanonicalJson(trusted.observation.binding) !== diagnosticCanonicalJson(binding)) throw new Error("Installed diagnostic trusted observation source binding does not match");
   const proof = proofSchema.parse(value);
   const profile = lookupRegisteredRuntimeProfile(binding.profileName);

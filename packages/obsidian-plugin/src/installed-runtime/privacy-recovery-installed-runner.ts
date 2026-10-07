@@ -30,7 +30,7 @@ import {
 import { cleanupTestVault, provisionTestVault, snapshotInventory, type ProvisionedTestVault } from "./test-vault.js";
 import { diagnosticSha256, diagnosticCanonicalJson, prepareInstalledDiagnosticPrivacyFixture, observeInstalledDiagnosticPrivacySources,
   verifyInstalledDiagnosticPrivacyBundle, validateInstalledDiagnosticPrivacyProof, INSTALLED_DIAGNOSTIC_PRIVACY_COVERAGE, DIAGNOSTIC_PRIVATE_MARKER_CATEGORIES,
-  type InstalledDiagnosticPrivacyFixture, type InstalledDiagnosticTrustedObservation, type InstalledDiagnosticTrustedContext } from "./installed-diagnostic-privacy.js";
+  type InstalledDiagnosticPrivacyFixture, type InstalledDiagnosticTrustedObservation, type InstalledDiagnosticTrustedContext, type InstalledDiagnosticSourcePin } from "./installed-diagnostic-privacy.js";
 import type { VerifiedCandidateBundle } from "./candidate-bundle.js";
 import type { LoopbackMcpClient } from "./loopback-client.js";
 import type { ObsidianProcessControl } from "./obsidian-process.js";
@@ -49,8 +49,8 @@ export interface InstalledPrivacyBoundaryOptions {
   readonly contentConfirmation?: { readonly expectedSelectionSha256: string };
   /** Strict A33 observation; never invokes a local command or confirmation. */
   readonly diagnosticPrivacy?: true;
-  /** Host run composition retains this source separately; it must never be sourced from a submitted public proof. */
-  readonly retainDiagnosticObservation?: (context: InstalledDiagnosticTrustedContext) => Promise<void>;
+  /** Host composition retains the pin/binding separately from transported observations and public proof. */
+  readonly retainDiagnosticObservation?: (context: InstalledDiagnosticTrustedContext, sourcePin: InstalledDiagnosticSourcePin) => Promise<void>;
   readonly profileName: string;
   readonly profile: RegisteredRuntimeProfile;
   readonly probe: RuntimeEnvironmentProbe;
@@ -428,6 +428,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     }
     const diagnosticVaults: InstalledDiagnosticPrivacyProof["vaults"][number][] = [];
     const diagnosticConfirmations: InstalledDiagnosticPrivacyProof["confirmations"][number][] = [];
+    const observedConfirmations: InstalledDiagnosticTrustedObservation["confirmations"][number][] = [];
     let journalPayload: unknown;
     const observedVaults: InstalledDiagnosticTrustedObservation["vaults"][number][] = [];
     const inventorySources = await Promise.all(runtimes.map(runtime => observeInventories(runtime, options.configDirectoryName)));
@@ -607,8 +608,11 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         if (report.outcome !== outcome) throw new Error("Local content confirmations must observe cancellation before a distinct copy");
         if (options.diagnosticPrivacy === true) {
           if (outcome === "copied" && report.copiedTextSha256 === undefined) throw new Error("Installed diagnostic actual copied checksum is missing");
-          diagnosticConfirmations.push({ outcome, confirmationIdSha256: diagnosticSha256(report.confirmationId), selectionSha256: report.selectionSha256,
-            ...(outcome === "copied" ? { copiedTextSha256: report.copiedTextSha256!, bundleChecksum: report.bundleChecksum! } : {}) });
+          // Fix source facts from the verified loader result, not by cloning the public proof later.
+          const observed = { outcome: report.outcome, confirmationIdSha256: diagnosticSha256(report.confirmationId), selectionSha256: report.selectionSha256,
+            ...(report.outcome === "copied" ? { copiedTextSha256: report.copiedTextSha256!, bundleChecksum: report.bundleChecksum! } : {}) };
+          observedConfirmations.push(structuredClone(observed));
+          diagnosticConfirmations.push(structuredClone(observed));
         }
         consumedConfirmationIds.push(report.confirmationId);
         if ((await observeHealth(unaffected)).digest !== before[1]!.digest || await observeStatus(unaffected) !== statusBefore[1]) {
@@ -683,15 +687,16 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       const sourceBinding = { runId: options.runId, candidateBundleSha256: options.candidate.identity.bundleSha256,
         profileName: options.profileName, installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 };
       const observation: InstalledDiagnosticTrustedObservation = { binding: sourceBinding, vaults: observedVaults,
-        confirmations: structuredClone(diagnosticConfirmations), events: structuredClone(proofEvents), removedRoots };
-      const trustedContext: InstalledDiagnosticTrustedContext = { observation, expectedObservationSha256: diagnosticSha256(diagnosticCanonicalJson(observation)) };
+        confirmations: observedConfirmations, events: structuredClone(proofEvents), removedRoots };
+      const sourcePin: InstalledDiagnosticSourcePin = { binding: structuredClone(sourceBinding), observationSha256: diagnosticSha256(diagnosticCanonicalJson(observation)) };
+      const trustedContext: InstalledDiagnosticTrustedContext = { observation, expectedObservationSha256: sourcePin.observationSha256 };
       diagnosticProof = { schemaVersion: 1, scope: "installed-diagnostic-privacy-A33", verdict: "passed",
         runId: options.runId, candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profileName,
         coverage: [...INSTALLED_DIAGNOSTIC_PRIVACY_COVERAGE],
         vaults: diagnosticVaults, confirmations: diagnosticConfirmations, wireRejections: (authorityNames.length + 2) * 2,
         secondVaultUnchanged: true, eventLog: proofEvents, cleanup: { verified: true, vaultCount: 2, residualCount: 0 } };
-      validateInstalledDiagnosticPrivacyProof(diagnosticProof, sourceBinding, trustedContext);
-      await options.retainDiagnosticObservation?.(trustedContext);
+      validateInstalledDiagnosticPrivacyProof(diagnosticProof, sourceBinding, trustedContext, sourcePin);
+      await options.retainDiagnosticObservation?.(trustedContext, sourcePin);
       options.assertion("diagnostics:installed-A33-complete");
     }
     return {
@@ -728,10 +733,15 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
 export async function runInstalledDiagnosticPrivacyAcceptance(options: InstalledPrivacyBoundaryOptions): Promise<InstalledDiagnosticPrivacyProof> {
   if (options.retainDiagnosticObservation === undefined) throw new Error("Installed diagnostic composable proof requires external source retention");
   let trusted: InstalledDiagnosticTrustedContext | undefined;
+  let expectedPin: InstalledDiagnosticSourcePin | undefined;
   const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...options, diagnosticPrivacy: true, recoveryControls: undefined,
-    retainDiagnosticObservation: async context => { trusted = context; await options.retainDiagnosticObservation?.(context); } });
+    retainDiagnosticObservation: async (context, sourcePin) => {
+      trusted = structuredClone(context);
+      expectedPin = structuredClone(sourcePin);
+      await options.retainDiagnosticObservation?.(context, sourcePin);
+    } });
   if (result.diagnosticProof === undefined) throw new Error("Installed A33 diagnostic proof is missing");
   validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, { runId: options.runId,
-    candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profileName, installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 }, trusted);
+    candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profileName, installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 }, trusted, expectedPin);
   return result.diagnosticProof;
 }

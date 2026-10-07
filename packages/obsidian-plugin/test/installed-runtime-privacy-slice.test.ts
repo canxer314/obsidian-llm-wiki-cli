@@ -301,7 +301,14 @@ it("composes a redacted A33 proof only after all live report observations and cl
   const fixture = await reportFixture("blocked", "missing", false, "real", true);
   try {
     let trusted: import("../src/installed-runtime/installed-diagnostic-privacy.js").InstalledDiagnosticTrustedContext | undefined;
-    const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true, retainDiagnosticObservation: async context => { trusted = context; } });
+    let expectedPin: import("../src/installed-runtime/installed-diagnostic-privacy.js").InstalledDiagnosticSourcePin | undefined;
+    const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true,
+      retainDiagnosticObservation: async (context, sourcePin) => {
+        expect(fixture.events.filter(event => event === "stop")).toHaveLength(2);
+        expect(context.observation.removedRoots).toHaveLength(6);
+        trusted = structuredClone(context);
+        expectedPin = structuredClone(sourcePin);
+      } });
     expect(result.verdict).toBe("partial");
     expect(result.diagnosticProof).toMatchObject({ scope: "installed-diagnostic-privacy-A33", verdict: "passed", wireRejections: 16,
       cleanup: { verified: true, vaultCount: 2, residualCount: 0 } });
@@ -309,7 +316,25 @@ it("composes a redacted A33 proof only after all live report observations and cl
     // A public proof cannot promote itself to trusted evidence; context is retained from the actual runner separately.
     expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding)).toThrow("trusted observation");
     const restoredContext = JSON.parse(JSON.stringify(trusted!));
-    expect(validateInstalledDiagnosticPrivacyProof(JSON.parse(JSON.stringify(result.diagnosticProof)), binding, restoredContext)).toEqual(result.diagnosticProof);
+    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, restoredContext)).toThrow("source pin");
+    expect(validateInstalledDiagnosticPrivacyProof(JSON.parse(JSON.stringify(result.diagnosticProof)), binding, restoredContext, expectedPin)).toEqual(result.diagnosticProof);
+    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, restoredContext, { ...expectedPin!, observationSha256: "0".repeat(64) })).toThrow("source binding");
+    for (const field of ["runId", "candidateBundleSha256", "installedMainSha256", "profileName"] as const) {
+      const foreignPin = structuredClone(expectedPin!);
+      (foreignPin.binding as any)[field] = field.endsWith("Sha256") ? "0".repeat(64) : "foreign";
+      expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, restoredContext, foreignPin)).toThrow("source binding");
+    }
+    // Even a coherent replacement transcript and self-selected digest cannot change the separately retained root.
+    const fabricatedSource = structuredClone(restoredContext);
+    fabricatedSource.observation.confirmations[1].copiedTextSha256 = "6".repeat(64);
+    const fabricatedProof = structuredClone(result.diagnosticProof!);
+    (fabricatedProof.confirmations[1] as any).copiedTextSha256 = "6".repeat(64);
+    for (const event of fabricatedProof.eventLog) {
+      if (event.name === "vault-a-copied-local-content-report-observed") (event as any).detailSha256 = createHash("sha256").update(diagnosticCanonicalJson(fabricatedProof.confirmations[1])).digest("hex");
+    }
+    fabricatedSource.observation.events = structuredClone(fabricatedProof.eventLog);
+    fabricatedSource.expectedObservationSha256 = createHash("sha256").update(diagnosticCanonicalJson(fabricatedSource.observation)).digest("hex");
+    expect(() => validateInstalledDiagnosticPrivacyProof(fabricatedProof, binding, fabricatedSource, expectedPin)).toThrow("source binding");
     expect(JSON.stringify(restoredContext)).not.toContain("privacy_body_");
     expect(JSON.stringify(restoredContext)).not.toContain(fixture.root);
     for (const mutation of ["marker-count", "marker-manifest", "copied-bytes", "fixture-manifest", "cleanup"] as const) {
@@ -323,15 +348,15 @@ it("composes a redacted A33 proof only after all live report observations and cl
         if (event.name.endsWith("standard-local-report-observed")) (event as any).detailSha256 = createHash("sha256").update(diagnosticCanonicalJson(forged.vaults[event.name.startsWith("vault-a") ? 0 : 1])).digest("hex");
         if (event.name.endsWith("local-content-report-observed")) (event as any).detailSha256 = createHash("sha256").update(diagnosticCanonicalJson(forged.confirmations[event.name.includes("cancelled") ? 0 : 1])).digest("hex");
       }
-      expect(() => validateInstalledDiagnosticPrivacyProof(forged, binding, restoredContext)).toThrow();
+      expect(() => validateInstalledDiagnosticPrivacyProof(forged, binding, restoredContext, expectedPin)).toThrow();
     }
     const wrongSource = structuredClone(restoredContext);
     wrongSource.observation.binding.runId = "foreign-run";
-    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, wrongSource)).toThrow("source binding");
+    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, wrongSource, expectedPin)).toThrow("source binding");
     const missingCleanup = structuredClone(restoredContext);
     missingCleanup.observation.removedRoots = [];
-    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, missingCleanup)).toThrow("source binding");
-    expect(validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, trusted)).toEqual(result.diagnosticProof);
+    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, missingCleanup, expectedPin)).toThrow("source binding");
+    expect(validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, trusted, expectedPin)).toEqual(result.diagnosticProof);
     for (const invalid of [
       { ...result.diagnosticProof, runId: "foreign" },
       { ...result.diagnosticProof, vaults: result.diagnosticProof!.vaults.map(vault => ({ ...vault, installedMainSha256: "0".repeat(64) })) },
@@ -343,7 +368,7 @@ it("composes a redacted A33 proof only after all live report observations and cl
       { ...result.diagnosticProof, confirmations: result.diagnosticProof!.confirmations.map(confirmation => confirmation.outcome === "copied" ? { ...confirmation, copiedTextSha256: "0".repeat(64) } : confirmation) },
       { ...result.diagnosticProof, eventLog: result.diagnosticProof!.eventLog.filter(event => event.name.endsWith("generated-vault")).map((event, index) => ({ ...event, sequence: index + 1 })) },
       { ...result.diagnosticProof, confirmations: [result.diagnosticProof!.confirmations[0], { ...result.diagnosticProof!.confirmations[1], selectionSha256: "0".repeat(64) }] },
-    ]) expect(() => validateInstalledDiagnosticPrivacyProof(invalid, binding, trusted)).toThrow();
+    ]) expect(() => validateInstalledDiagnosticPrivacyProof(invalid, binding, trusted, expectedPin)).toThrow();
     expect(result.diagnosticProof!.vaults).toHaveLength(2);
     expect(result.diagnosticProof!.vaults[0]!.markerCategories).toHaveLength(12);
     expect(result.diagnosticProof!.confirmations.map(item => item.outcome)).toEqual(["cancelled", "copied"]);
