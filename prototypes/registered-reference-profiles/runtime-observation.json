@@ -1,0 +1,506 @@
+{
+  "probeVersion": 1,
+  "runtime": {
+    "obsidianVersion": "1.13.4 (installer 1.12.4)",
+    "appVersion": null,
+    "vaultName": "ThinkFlywheelVault",
+    "platform": "Win32",
+    "automaticLinkUpdatePreference": true
+  },
+  "fixture": {
+    "rootPath": "_wayfinder-reference-profile-prototype",
+    "sourcePath": "_wayfinder-reference-profile-prototype/source.md",
+    "targetPath": "_wayfinder-reference-profile-prototype/targets/唯一 目标.md",
+    "attachmentPath": "_wayfinder-reference-profile-prototype/attachments/图 像 #1.png",
+    "source": "---\nrelated: \"[[targets/唯一 目标|属性别名]]\"\nrelated_heading: \"[[targets/唯一 目标#章节]]\"\nrelated_list:\n  - \"[[targets/唯一 目标]]\"\n  - \"[[attachments/图 像 #1.png]]\"\n  - \"[[attachments/图 像 %231.png]]\"\nmarkdown_related: \"[属性文本](targets/唯一%20目标.md#章节)\"\nattachment: \"[[attachments/图 像 #1.png]]\"\nattachment_encoded: \"[[attachments/图 像 %231.png]]\"\n---\n\n[[targets/唯一 目标#章节|维基别名]]\n![[attachments/图 像 #1.png|320]]\n![[attachments/图 像 %231.png|321]]\n[行内](targets/唯一%20目标.md#章节 \"行内标题\")\n![图片](<attachments/图 像 #1.png> \"图片标题\")\n![编码图片](attachments/图%20像%20%231.png \"编码标题\")\n[参考链接][唯一-id]\n\n[唯一-id]: <targets/唯一 目标.md#章节> \"参考标题\"\n",
+    "target": "# 章节\n\n第一处。\n\n# 重复\n\n第一处重复。\n\n# 重复\n\n第二处重复。\n\n稳定块。 ^stable-block\n"
+  },
+  "beforeMove": {
+    "sourceRaw": "---\nrelated: \"[[targets/唯一 目标|属性别名]]\"\nrelated_heading: \"[[targets/唯一 目标#章节]]\"\nrelated_list:\n  - \"[[targets/唯一 目标]]\"\n  - \"[[attachments/图 像 #1.png]]\"\n  - \"[[attachments/图 像 %231.png]]\"\nmarkdown_related: \"[属性文本](targets/唯一%20目标.md#章节)\"\nattachment: \"[[attachments/图 像 #1.png]]\"\nattachment_encoded: \"[[attachments/图 像 %231.png]]\"\n---\n\n[[targets/唯一 目标#章节|维基别名]]\n![[attachments/图 像 #1.png|320]]\n![[attachments/图 像 %231.png|321]]\n[行内](targets/唯一%20目标.md#章节 \"行内标题\")\n![图片](<attachments/图 像 #1.png> \"图片标题\")\n![编码图片](attachments/图%20像%20%231.png \"编码标题\")\n[参考链接][唯一-id]\n\n[唯一-id]: <targets/唯一 目标.md#章节> \"参考标题\"\n",
+    "sourceCache": {
+      "links": [
+        {
+          "link": "targets/唯一 目标#章节",
+          "original": "[[targets/唯一 目标#章节|维基别名]]",
+          "displayText": "维基别名",
+          "position": {
+            "start": {
+              "line": 12,
+              "col": 0,
+              "offset": 331
+            },
+            "end": {
+              "line": 12,
+              "col": 25,
+              "offset": 356
+            }
+          }
+        },
+        {
+          "link": "targets/唯一 目标.md#章节",
+          "original": "[行内](targets/唯一%20目标.md#章节 \"行内标题\")",
+          "displayText": "行内",
+          "position": {
+            "start": {
+              "line": 15,
+              "col": 0,
+              "offset": 423
+            },
+            "end": {
+              "line": 15,
+              "col": 34,
+              "offset": 457
+            }
+          }
+        }
+      ],
+      "embeds": [
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "![[attachments/图 像 #1.png|320]]",
+          "displayText": "320",
+          "position": {
+            "start": {
+              "line": 13,
+              "col": 0,
+              "offset": 357
+            },
+            "end": {
+              "line": 13,
+              "col": 31,
+              "offset": 388
+            }
+          }
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "![[attachments/图 像 %231.png|321]]",
+          "displayText": "321",
+          "position": {
+            "start": {
+              "line": 14,
+              "col": 0,
+              "offset": 389
+            },
+            "end": {
+              "line": 14,
+              "col": 33,
+              "offset": 422
+            }
+          }
+        },
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "![图片](<attachments/图 像 #1.png> \"图片标题\")",
+          "displayText": "图片",
+          "position": {
+            "start": {
+              "line": 16,
+              "col": 0,
+              "offset": 458
+            },
+            "end": {
+              "line": 16,
+              "col": 38,
+              "offset": 496
+            }
+          }
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "![编码图片](attachments/图%20像%20%231.png \"编码标题\")",
+          "displayText": "编码图片",
+          "position": {
+            "start": {
+              "line": 17,
+              "col": 0,
+              "offset": 497
+            },
+            "end": {
+              "line": 17,
+              "col": 44,
+              "offset": 541
+            }
+          }
+        }
+      ],
+      "frontmatterLinks": [
+        {
+          "link": "targets/唯一 目标",
+          "original": "[[targets/唯一 目标|属性别名]]",
+          "displayText": "属性别名",
+          "position": null
+        },
+        {
+          "link": "targets/唯一 目标#章节",
+          "original": "[[targets/唯一 目标#章节]]",
+          "displayText": "targets/唯一 目标 > 章节",
+          "position": null
+        },
+        {
+          "link": "targets/唯一 目标",
+          "original": "[[targets/唯一 目标]]",
+          "displayText": "targets/唯一 目标",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "[[attachments/图 像 #1.png]]",
+          "displayText": "attachments/图 像  > 1.png",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "[[attachments/图 像 %231.png]]",
+          "displayText": "attachments/图 像 %231.png",
+          "position": null
+        },
+        {
+          "link": "targets/唯一 目标.md#章节",
+          "original": "[属性文本](targets/唯一%20目标.md#章节)",
+          "displayText": "属性文本",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "[[attachments/图 像 #1.png]]",
+          "displayText": "attachments/图 像  > 1.png",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "[[attachments/图 像 %231.png]]",
+          "displayText": "attachments/图 像 %231.png",
+          "position": null
+        }
+      ],
+      "referenceLinks": [
+        {
+          "link": "targets/唯一 目标.md#章节",
+          "position": {
+            "start": {
+              "line": 20,
+              "col": 0,
+              "offset": 557
+            },
+            "end": {
+              "line": 20,
+              "col": 37,
+              "offset": 594
+            }
+          }
+        }
+      ],
+      "headings": [],
+      "blocks": {}
+    },
+    "targetCache": {
+      "links": [],
+      "embeds": [],
+      "frontmatterLinks": [],
+      "referenceLinks": [],
+      "headings": [
+        {
+          "heading": "章节",
+          "level": 1,
+          "position": {
+            "start": {
+              "line": 0,
+              "col": 0,
+              "offset": 0
+            },
+            "end": {
+              "line": 0,
+              "col": 4,
+              "offset": 4
+            }
+          }
+        },
+        {
+          "heading": "重复",
+          "level": 1,
+          "position": {
+            "start": {
+              "line": 4,
+              "col": 0,
+              "offset": 12
+            },
+            "end": {
+              "line": 4,
+              "col": 4,
+              "offset": 16
+            }
+          }
+        },
+        {
+          "heading": "重复",
+          "level": 1,
+          "position": {
+            "start": {
+              "line": 8,
+              "col": 0,
+              "offset": 26
+            },
+            "end": {
+              "line": 8,
+              "col": 4,
+              "offset": 30
+            }
+          }
+        }
+      ],
+      "blocks": {
+        "stable-block": {
+          "id": "stable-block",
+          "position": {
+            "start": {
+              "line": 12,
+              "col": 0,
+              "offset": 40
+            },
+            "end": {
+              "line": 12,
+              "col": 18,
+              "offset": 58
+            }
+          }
+        }
+      }
+    },
+    "resolvedLinks": {
+      "_wayfinder-reference-profile-prototype/targets/唯一 目标.md": 6
+    },
+    "unresolvedLinks": {
+      "attachments/图 像 ": 4,
+      "attachments/图 像 %231.png": 4
+    },
+    "resolutions": {
+      "targets/唯一 目标": "_wayfinder-reference-profile-prototype/targets/唯一 目标.md",
+      "targets/唯一 目标.md": "_wayfinder-reference-profile-prototype/targets/唯一 目标.md",
+      "唯一 目标": "_wayfinder-reference-profile-prototype/targets/唯一 目标.md",
+      "同名": "_wayfinder-reference-profile-prototype/duplicates-a/同名.md",
+      "attachments/图 像 #1.png": "_wayfinder-reference-profile-prototype/attachments/图 像 #1.png",
+      "attachments/图 像 %231.png": null,
+      "attachments/图%20像%20%231.png": null,
+      "attachments/图 像 ": null,
+      "图 像 #1.png": "_wayfinder-reference-profile-prototype/attachments/图 像 #1.png"
+    }
+  },
+  "afterMove": {
+    "sourceRaw": "---\nrelated: \"[[targets/唯一 目标|属性别名]]\"\nrelated_heading: \"[[targets/唯一 目标#章节]]\"\nrelated_list:\n  - \"[[targets/唯一 目标]]\"\n  - \"[[attachments/图 像 #1.png]]\"\n  - \"[[attachments/图 像 %231.png]]\"\nmarkdown_related: \"[属性文本](targets/唯一%20目标.md#章节)\"\nattachment: \"[[attachments/图 像 #1.png]]\"\nattachment_encoded: \"[[attachments/图 像 %231.png]]\"\n---\n\n[[targets/唯一 目标#章节|维基别名]]\n![[attachments/图 像 #1.png|320]]\n![[attachments/图 像 %231.png|321]]\n[行内](targets/唯一%20目标.md#章节 \"行内标题\")\n![图片](<attachments/图 像 #1.png> \"图片标题\")\n![编码图片](attachments/图%20像%20%231.png \"编码标题\")\n[参考链接][唯一-id]\n\n[唯一-id]: <targets/唯一 目标.md#章节> \"参考标题\"\n",
+    "sourceCache": {
+      "links": [
+        {
+          "link": "targets/唯一 目标#章节",
+          "original": "[[targets/唯一 目标#章节|维基别名]]",
+          "displayText": "维基别名",
+          "position": {
+            "start": {
+              "line": 12,
+              "col": 0,
+              "offset": 331
+            },
+            "end": {
+              "line": 12,
+              "col": 25,
+              "offset": 356
+            }
+          }
+        },
+        {
+          "link": "targets/唯一 目标.md#章节",
+          "original": "[行内](targets/唯一%20目标.md#章节 \"行内标题\")",
+          "displayText": "行内",
+          "position": {
+            "start": {
+              "line": 15,
+              "col": 0,
+              "offset": 423
+            },
+            "end": {
+              "line": 15,
+              "col": 34,
+              "offset": 457
+            }
+          }
+        }
+      ],
+      "embeds": [
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "![[attachments/图 像 #1.png|320]]",
+          "displayText": "320",
+          "position": {
+            "start": {
+              "line": 13,
+              "col": 0,
+              "offset": 357
+            },
+            "end": {
+              "line": 13,
+              "col": 31,
+              "offset": 388
+            }
+          }
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "![[attachments/图 像 %231.png|321]]",
+          "displayText": "321",
+          "position": {
+            "start": {
+              "line": 14,
+              "col": 0,
+              "offset": 389
+            },
+            "end": {
+              "line": 14,
+              "col": 33,
+              "offset": 422
+            }
+          }
+        },
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "![图片](<attachments/图 像 #1.png> \"图片标题\")",
+          "displayText": "图片",
+          "position": {
+            "start": {
+              "line": 16,
+              "col": 0,
+              "offset": 458
+            },
+            "end": {
+              "line": 16,
+              "col": 38,
+              "offset": 496
+            }
+          }
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "![编码图片](attachments/图%20像%20%231.png \"编码标题\")",
+          "displayText": "编码图片",
+          "position": {
+            "start": {
+              "line": 17,
+              "col": 0,
+              "offset": 497
+            },
+            "end": {
+              "line": 17,
+              "col": 44,
+              "offset": 541
+            }
+          }
+        }
+      ],
+      "frontmatterLinks": [
+        {
+          "link": "targets/唯一 目标",
+          "original": "[[targets/唯一 目标|属性别名]]",
+          "displayText": "属性别名",
+          "position": null
+        },
+        {
+          "link": "targets/唯一 目标#章节",
+          "original": "[[targets/唯一 目标#章节]]",
+          "displayText": "targets/唯一 目标 > 章节",
+          "position": null
+        },
+        {
+          "link": "targets/唯一 目标",
+          "original": "[[targets/唯一 目标]]",
+          "displayText": "targets/唯一 目标",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "[[attachments/图 像 #1.png]]",
+          "displayText": "attachments/图 像  > 1.png",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "[[attachments/图 像 %231.png]]",
+          "displayText": "attachments/图 像 %231.png",
+          "position": null
+        },
+        {
+          "link": "targets/唯一 目标.md#章节",
+          "original": "[属性文本](targets/唯一%20目标.md#章节)",
+          "displayText": "属性文本",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 #1.png",
+          "original": "[[attachments/图 像 #1.png]]",
+          "displayText": "attachments/图 像  > 1.png",
+          "position": null
+        },
+        {
+          "link": "attachments/图 像 %231.png",
+          "original": "[[attachments/图 像 %231.png]]",
+          "displayText": "attachments/图 像 %231.png",
+          "position": null
+        }
+      ],
+      "referenceLinks": [
+        {
+          "link": "targets/唯一 目标.md#章节",
+          "position": {
+            "start": {
+              "line": 20,
+              "col": 0,
+              "offset": 557
+            },
+            "end": {
+              "line": 20,
+              "col": 37,
+              "offset": 594
+            }
+          }
+        }
+      ],
+      "headings": [],
+      "blocks": {}
+    },
+    "resolvedLinks": {},
+    "unresolvedLinks": {
+      "targets/唯一 目标": 6,
+      "attachments/图 像 ": 4,
+      "attachments/图 像 %231.png": 4
+    },
+    "oldResolutions": {
+      "targets/唯一 目标": null,
+      "targets/唯一 目标.md": null,
+      "唯一 目标": "_wayfinder-reference-profile-prototype/moved/唯一 目标.md",
+      "同名": "_wayfinder-reference-profile-prototype/duplicates-a/同名.md",
+      "attachments/图 像 #1.png": null,
+      "attachments/图 像 %231.png": null,
+      "attachments/图%20像%20%231.png": null,
+      "attachments/图 像 ": null,
+      "图 像 #1.png": "_wayfinder-reference-profile-prototype/moved/图 像 #1.png"
+    },
+    "newResolutions": {
+      "moved/唯一 目标": "_wayfinder-reference-profile-prototype/moved/唯一 目标.md",
+      "moved/唯一 目标.md": "_wayfinder-reference-profile-prototype/moved/唯一 目标.md",
+      "moved/图 像 #1.png": "_wayfinder-reference-profile-prototype/moved/图 像 #1.png"
+    }
+  },
+  "inferences": {
+    "fixtureCorpusSha256": "227e79460e47346946a4efa1daf969c4e8b88695a62ff55c1c97b16b524a67ee",
+    "sourceChangedByVaultRename": false,
+    "cacheCategoriesPresent": {
+      "links": 2,
+      "embeds": 4,
+      "frontmatterLinks": 8,
+      "referenceLinks": 1
+    },
+    "duplicateBasenameHostWinner": "_wayfinder-reference-profile-prototype/duplicates-a/同名.md",
+    "duplicateHeadingCount": 2,
+    "blockIds": [
+      "stable-block"
+    ]
+  }
+}
