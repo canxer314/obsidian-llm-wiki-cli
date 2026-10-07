@@ -12,18 +12,22 @@ export const INSTALLED_RUNTIME_VAULT_DIRECTORY_PREFIX =
   "installed-runtime-vault-";
 
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-export const installedCrashKinds = ["create_note", "edit_body", "edit_body_whole"] as const;
+export const installedCrashKinds = ["create_note", "edit_body", "edit_body_whole", "edit_frontmatter", "edit_multi_markdown", "edit_multi_frontmatter"] as const;
 export type InstalledCrashKind = typeof installedCrashKinds[number];
 export const installedCrashPoints = [
   "before_prepared", "after_prepared", "after_mutation:0", "after_mutation:1",
-  "after_file_mutation:0", "after_raw_verification", "during_success_barrier",
+  "after_file_mutation:0", "after_file_mutation:1", "after_raw_verification", "during_success_barrier",
   "after_snapshot", "before_committed", "after_committed", "before_rollback",
   "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2",
   "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back",
 ] as const;
 export type InstalledCrashPoint = typeof installedCrashPoints[number];
 export const installedCrashScenarios = installedCrashKinds.flatMap(kind => installedCrashPoints
-  .filter(point => kind === "create_note" || !["after_mutation:0", "after_mutation:1", "after_rollback_mutation:1", "after_rollback_mutation:2"].includes(point))
+  .filter(point => {
+    if (point === "after_file_mutation:1") return kind === "edit_multi_markdown" || kind === "edit_multi_frontmatter";
+    if (point === "after_rollback_mutation:1") return kind === "create_note" || kind === "edit_multi_markdown" || kind === "edit_multi_frontmatter";
+    return kind === "create_note" || !["after_mutation:0", "after_mutation:1", "after_rollback_mutation:2"].includes(point);
+  })
   .map(point => `${kind}/${point}` as const));
 export const installedCrashScenarioSchema = z.enum([installedCrashScenarios[0]!, ...installedCrashScenarios.slice(1)]);
 export const crashRestorationCommandSchema = z.object({
