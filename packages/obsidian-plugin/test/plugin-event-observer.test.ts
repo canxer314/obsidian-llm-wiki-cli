@@ -105,6 +105,16 @@ describe("enabled plugin event/indexing report boundary", () => {
     events[3]!.mac = createHmac("sha256", binding.capabilityToken).update(JSON.stringify(events[3]!.payload)).digest("hex");
     expect(() => verify(events)).toThrow(/failed during/);
   });
+  it("counts byte-bearing callbacks without claiming parent-directory callbacks as content observations", () => {
+    const events = transcript(after);
+    events.splice(3, 0, { ...events[3]!, payload: { ...events[3]!.payload, path: "Notes", presence: "directory", rawBytesBase64: undefined } });
+    for (const [index, event] of events.entries()) {
+      event.payload.sequence = index + 1;
+      event.payload.at = 1000 + index * 10;
+      event.mac = createHmac("sha256", binding.capabilityToken).update(JSON.stringify(event.payload)).digest("hex");
+    }
+    expect(verify(events)).toMatchObject({ eventCount: 2, indexingCount: 1 });
+  });
   it("accepts only complete allowed bytes through the whole registered callback window", () => {
     expect(verify(transcript(before))).toMatchObject({ eventCount: 2, verdict: "passed", observerId: "llm-wiki-event-observer" });
   });

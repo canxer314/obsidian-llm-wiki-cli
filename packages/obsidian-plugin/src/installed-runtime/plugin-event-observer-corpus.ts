@@ -12,18 +12,48 @@ import { provisionTestVault, cleanupTestVault, snapshotInventory, compareInvento
 import { readPersistedBridgeIdentity, waitForCondition, type ObsidianProcessControl, type ObsidianProcessHandle } from "./obsidian-process.js";
 import { preflightRuntimeProfile, type RegisteredRuntimeProfile, type RuntimeEnvironmentProbe } from "./runtime-profile.js";
 import { type LoopbackMcpClient } from "./loopback-client.js";
-import { installPluginEventObserver, OBSERVER_CONFIG_FILE } from "./plugin-event-observer-plugin.js";
+import { installPluginEventObserver, OBSERVER_CONFIG_FILE, EVENT_OBSERVER_PLUGIN_SOURCE } from "./plugin-event-observer-plugin.js";
 import { verifyPluginEventObserverWindow, type PluginEventObserverBinding } from "./plugin-event-observer.js";
 import { requestInstalledCrashRestorationScenario, loadCrashBoundaryReport } from "./crash-restoration-protocol.js";
 import { readInstalledCrashJournal } from "./installed-crash-restoration-slice.js";
 import { requestInstalledSemanticEvidenceScenario, type InstalledRuntimeAcceptanceDriverHandle } from "./smoke-command.js";
 import type { InstalledSemanticEvidenceScenarioRunner } from "./semantic-evidence-corpus.js";
-import { pluginEventObserverCorpusEvidenceSchema } from "./plugin-event-observer-evidence.js";
+import { pluginEventObserverCorpusEvidenceSchema, observerProjectionSha256, type PluginEventObserverCorpusEvidence } from "./plugin-event-observer-evidence.js";
 import { requireObserverInSupervisedProcessTree } from "./plugin-event-observer-process.js";
 
 export const PLUGIN_EVENT_OBSERVER_SCENARIOS = ["success", "rollback", "startup-recovery"] as const;
 export type PluginEventObserverScenario = typeof PLUGIN_EVENT_OBSERVER_SCENARIOS[number];
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+/** Consume the private sealed source, not another copy of the public summary. */
+export async function readPluginEventObserverSourceReport(options: Omit<Parameters<typeof verifyPluginEventObserverWindow>[0], "events" | "expectedPid"> & {
+  scenario: PluginEventObserverScenario; reportDirectory: string; configDirectoryName: string; supervisorPid: number;
+  window: ReturnType<typeof verifyPluginEventObserverWindow> & { supervisorPid: number; supervisedProcessTreeVerified: true };
+}): Promise<PluginEventObserverCorpusEvidence["sourceReports"][number]> {
+  const { binding } = options;
+  const pluginsDirectory = join(binding.vaultPath, options.configDirectoryName, "plugins");
+  const observerMain = await readFile(join(pluginsDirectory, "llm-wiki-event-observer", "main.js"));
+  const candidateMain = await readFile(join(pluginsDirectory, options.candidatePluginId, "main.js"));
+  const identity = await readPersistedBridgeIdentity(binding.vaultPath, options.candidatePluginId, options.configDirectoryName);
+  const enabledPlugins: unknown = JSON.parse(await readFile(join(binding.vaultPath, options.configDirectoryName, "community-plugins.json"), "utf8"));
+  if (hash(observerMain) !== hash(EVENT_OBSERVER_PLUGIN_SOURCE) || hash(observerMain) !== binding.observerMainSha256 ||
+      hash(candidateMain) !== binding.installedMainSha256 || identity === null || identity.vaultId !== binding.vaultId ||
+      !Array.isArray(enabledPlugins) || JSON.stringify(enabledPlugins.slice().sort()) !== JSON.stringify(["llm-wiki-event-observer", options.candidatePluginId].sort())) {
+    throw new Error("Observer independent source installed identity changed");
+  }
+  const transcript = await readFile(join(options.reportDirectory, `observer-generation-${binding.generation}.sealed.jsonl`), "utf8");
+  const events = transcript.trim().split("\n").map(line => JSON.parse(line) as { payload: { pid: number } });
+  const rendererPid = events[0]?.payload.pid;
+  if (rendererPid === undefined) throw new Error("Observer independent source renderer is absent");
+  const sourceWindow = verifyPluginEventObserverWindow({ ...options, events, expectedPid: rendererPid });
+  await requireObserverInSupervisedProcessTree(rendererPid, options.supervisorPid);
+  if (JSON.stringify(options.window) !== JSON.stringify({ ...sourceWindow, supervisorPid: options.supervisorPid, supervisedProcessTreeVerified: true })) {
+    throw new Error("Observer summary differs from independent authenticated source");
+  }
+  return { scenario: options.scenario, runId: binding.runId, vaultIdSha256: hash(identity.vaultId), vaultPathSha256: hash(binding.vaultPath),
+    candidateBundleSha256: binding.candidateBundleSha256, installedMainSha256: hash(candidateMain), profileName: binding.profileName,
+    generation: binding.generation, observerMainSha256: hash(observerMain), rendererPid, supervisorPid: options.supervisorPid,
+    transcriptSha256: sourceWindow.transcriptSha256, projectionSha256: observerProjectionSha256(sourceWindow) };
+}
 export interface PluginEventObserverCorpusOptions {
   runId: string; workingDirectory: string; reportDirectory: string; candidate: VerifiedCandidateBundle;
   processControl: ObsidianProcessControl; client: LoopbackMcpClient; profile: RegisteredRuntimeProfile;
@@ -50,6 +80,7 @@ export async function runPluginEventObserverScenario(options: PluginEventObserve
   let result: unknown;
   let failure: unknown;
   const windows: (ReturnType<typeof verifyPluginEventObserverWindow> & { supervisorPid: number; supervisedProcessTreeVerified: true })[] = [];
+  const sourceReports: PluginEventObserverCorpusEvidence["sourceReports"] = [];
   try {
     // Fixture generation occurs only before any enabled plugin starts.
     const target = join(vault.vaultPath, ...EXACT_FIXTURE.path.split("/"));
@@ -128,12 +159,15 @@ export async function runPluginEventObserverScenario(options: PluginEventObserve
       const sealedEvents = await loadEvents(true);
       const rendererPid = sealedEvents[0]?.payload.pid;
       if (rendererPid === undefined) throw new Error("Observer renderer process identity missing");
-      const window = verifyPluginEventObserverWindow({ binding, events: sealedEvents, candidatePluginId: options.candidate.identity.pluginId,
-        expectedPid: rendererPid, files, maxSilenceMs: 2_000, requiredVisibleStates: requiredBytes.map(bytes => ({ path: EXACT_FIXTURE.path, bytes })),
-        ...(options.scenario === "rollback" ? { requiredTransition: { path: EXACT_FIXTURE.path, states: [EXACT_COMMITTED_BYTES, EXACT_ORIGINAL_BYTES] } } : {}),
-      });
-      await requireObserverInSupervisedProcessTree(rendererPid, handle!.pid!);
-      windows.push({ ...window, supervisorPid: handle!.pid!, supervisedProcessTreeVerified: true });
+      const verification = { binding, candidatePluginId: options.candidate.identity.pluginId, files, maxSilenceMs: 2_000,
+        requiredVisibleStates: requiredBytes.map(bytes => ({ path: EXACT_FIXTURE.path, bytes })),
+        ...(options.scenario === "rollback" ? { requiredTransition: { path: EXACT_FIXTURE.path, states: [EXACT_COMMITTED_BYTES, EXACT_ORIGINAL_BYTES] } } : {}) };
+      const window = { ...verifyPluginEventObserverWindow({ ...verification, events: sealedEvents, expectedPid: rendererPid }),
+        supervisorPid: handle!.pid!, supervisedProcessTreeVerified: true as const };
+      const source = await readPluginEventObserverSourceReport({ ...verification, scenario: options.scenario, reportDirectory, configDirectoryName,
+        supervisorPid: handle!.pid!, window });
+      sourceReports.push(source);
+      windows.push(window);
     };
     const seed = `${runId}-edit`;
     const input = replaceExactCorpusProfile().buildSubmitInput(seed);
@@ -213,13 +247,18 @@ export async function runPluginEventObserverScenario(options: PluginEventObserve
     if (failure !== undefined) throw failure;
   }
   if (result === undefined) throw new Error("Observer scenario produced no evidence");
-  return { ...result as Record<string, unknown>, cleanup: { attempted: true, residualPaths: [] }, verdict: "passed" as const };
+  return { ...result as Record<string, unknown>, sourceReports, cleanup: { attempted: true, residualPaths: [] }, verdict: "passed" as const };
 }
 
 export async function runPluginEventObserverCorpus(options: PluginEventObserverCorpusOptions) {
   const scenarios = [];
-  for (const scenario of PLUGIN_EVENT_OBSERVER_SCENARIOS) scenarios.push(await runPluginEventObserverScenario({ ...options, scenario }));
-  return pluginEventObserverCorpusEvidenceSchema.parse({ scenarios, candidateBundleSha256: options.candidate.identity.bundleSha256, runId: options.runId, profileName: options.profile.name,
+  const sourceReports: PluginEventObserverCorpusEvidence["sourceReports"] = [];
+  for (const scenario of PLUGIN_EVENT_OBSERVER_SCENARIOS) {
+    const { sourceReports: sources, ...result } = await runPluginEventObserverScenario({ ...options, scenario });
+    sourceReports.push(...sources);
+    scenarios.push(result);
+  }
+  return pluginEventObserverCorpusEvidenceSchema.parse({ scenarios, sourceReports, candidateBundleSha256: options.candidate.identity.bundleSha256, runId: options.runId, profileName: options.profile.name,
     purpose: "isolated-correctness-not-performance", scenarioManifestSha256: hash(JSON.stringify(PLUGIN_EVENT_OBSERVER_SCENARIOS)),
     assertions: ["observer:real-enabled-plugin-complete-before-after-success-rollback-startup-recovery"], verdict: "passed" as const });
 }

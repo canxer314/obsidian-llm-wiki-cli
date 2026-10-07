@@ -76,8 +76,8 @@ export function verifyPluginEventObserverWindow(options: {
       } else if (p.presence === "directory" && [...files.keys()].some(path => path.startsWith(`${p.path}/`))) {
         // Folder callbacks carry no file bytes; known fixture parents are the only allowed directories.
       } else throw new Error("Observer event has an unallowed absence or incomplete bytes");
-      if (p.kind !== "snapshot") eventCount++;
-      if (p.kind === "changed" || p.kind === "resolved") indexingCount++;
+      if (p.presence !== "directory" && p.kind !== "snapshot") eventCount++;
+      if (p.presence !== "directory" && (p.kind === "changed" || p.kind === "resolved")) indexingCount++;
       if (p.oldPath !== undefined && !files.has(p.oldPath)) throw new Error("Observer saw undeclared rename source");
     }
   }

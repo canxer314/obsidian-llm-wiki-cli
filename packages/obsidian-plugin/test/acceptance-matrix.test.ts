@@ -207,6 +207,34 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("rejects A37 heartbeat-only summaries despite positive declared coverage counters", () => {
+    const report = evidence();
+    for (const scenario of report.pluginEventObserverCorpus!.scenarios) for (const window of scenario.windows) {
+      window.observations = [{ sequence: 4, kind: "heartbeat" as never, pathSha256: DIGEST, bytesSha256: DIGEST, sizeBytes: 100 }];
+    }
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("rejects A37 a single resolved callback with no bytes despite claimed coverage", () => {
+    const report = evidence();
+    for (const scenario of report.pluginEventObserverCorpus!.scenarios) for (const window of scenario.windows) {
+      window.observations = [{ sequence: 4, kind: "resolved", pathSha256: DIGEST, bytesSha256: null, sizeBytes: 0 }];
+    }
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("rejects A37 complete-looking callbacks whose raw bytes are not the fixed before/after fixture", () => {
+    const report = evidence();
+    for (const scenario of report.pluginEventObserverCorpus!.scenarios) for (const window of scenario.windows) {
+      for (const observation of window.observations) { observation.bytesSha256 = null; observation.sizeBytes = 0; }
+    }
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("rejects A37 substituted observer source hash or renderer PID despite valid coverage", () => {
+    for (const field of ["observerMainSha256", "pid"] as const) {
+      const report = evidence(); const window = report.pluginEventObserverCorpus!.scenarios[0]!.windows[0]!;
+      if (field === "pid") window.pid = 99999; else window.observerMainSha256 = "f".repeat(64);
+      expect(() => createAcceptanceMatrixReport(report)).toThrow();
+    }
+  });
   it("refuses A37 from the old second-client assertion without real plugin windows", () => {
     const report = evidence(); report.pluginEventObserverCorpus = null;
     expect(() => createAcceptanceMatrixReport(report)).toThrow(/real enabled plugin/);
