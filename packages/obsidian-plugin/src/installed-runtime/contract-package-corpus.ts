@@ -78,6 +78,45 @@ function exactCoverage(actual: readonly string[], expected: readonly string[], l
 const executedWire = new WeakMap<object, { endpoint: string; expectedVaultId: string; snapshotSha256: string }>();
 export const contractCorpusBindingSchema = z.object({ runId: z.string().min(1), profileName: z.string().min(1), candidateBundleSha256: digest, vaultIdSha256: digest, seedManifestSha256: digest }).strict();
 export const contractObservationSchema = z.object({ sequence: z.number().int().positive(), name: z.string().min(1), requestSha256: digest, responseSha256: digest, facts: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])) }).strict();
+export interface ContractChildSource {
+  scenarioId: string; sourceRunId: string; candidateBundleSha256: string; installedMainSha256: string; profileName: string;
+  identity: { vaultId: string; port: number };
+  seedNotes: { path: string; content: string }[];
+  events: { kind: "transport" | "cleanup"; name: string; detail: unknown }[];
+  cleanup: { attempted: boolean; residualPaths: readonly string[] };
+}
+/** Runner-owned private snapshots, retained before public projection and Vault removal. */
+export interface ContractChildConsumptionContext {
+  runId: string; candidateBundleSha256: string; installedMainSha256: string; profileName: string;
+  children: { source: ContractChildSource; sourceSha256: string }[];
+  reports: { scenarioId: string; report: unknown; reportSha256: string }[];
+}
+export function contractSeedDigest(seedNotes: readonly { path: string; content: string }[]): string {
+  const manifest = seedNotes.map(note => `${createHash("sha256").update(note.content).digest("hex")}  ${note.path}`).sort().join("\n") + "\n";
+  return createHash("sha256").update(manifest).digest("hex");
+}
+export function consumeContractChildSources(report: ContractPackageCorpusEvidence, context: ContractChildConsumptionContext | undefined, installedMainSha256: string | undefined): void {
+  if (context === undefined || context.runId !== report.binding.runId || context.candidateBundleSha256 !== report.binding.candidateBundleSha256 || context.profileName !== report.binding.profileName || context.installedMainSha256 !== installedMainSha256) throw new ContractPackageCorpusError("Version contract independent child source context absent or mismatched");
+  for (const id of ["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"]) {
+    const dependency = report.crossCalls.find(row => row.id === id)!.proof.dependency!;
+    const retainedReports = context.reports.filter(item => item.scenarioId === id);
+    if (retainedReports.length !== 1 || contractDigest(retainedReports[0]!.report) !== retainedReports[0]!.reportSha256 || retainedReports[0]!.reportSha256 !== dependency.reportSha256) throw new ContractPackageCorpusError("Version contract independent child source report pin mismatch");
+    const children = context.children.filter(item => id === "registered-reference-byte-verification" ? item.source.scenarioId === id : item.source.scenarioId !== "registered-reference-byte-verification");
+    if (children.length === 0 || children.length !== dependency.sourceVaults.length) throw new ContractPackageCorpusError("Version contract independent child source coverage mismatch");
+    const projected = children.map(({ source, sourceSha256 }) => {
+      if (contractDigest(source) !== sourceSha256 || source.candidateBundleSha256 !== context.candidateBundleSha256 || source.installedMainSha256 !== context.installedMainSha256 || source.profileName !== context.profileName || !source.sourceRunId.startsWith(context.runId + "-") || !source.cleanup.attempted || source.cleanup.residualPaths.length !== 0) throw new ContractPackageCorpusError("Version contract independent child source pin mismatch");
+      const identity = { scenarioId: source.scenarioId, sourceRunId: source.sourceRunId, candidateBundleSha256: source.candidateBundleSha256, profileName: source.profileName, vaultIdSha256: contractDigest(source.identity.vaultId), seedManifestSha256: contractSeedDigest(source.seedNotes) };
+      const cleanup = { sourceRunId: source.sourceRunId, vaultIdSha256: identity.vaultIdSha256, cleanupConfirmed: true };
+      const prefix = id === "registered-reference-byte-verification" ? "registered-reference" : "semantic";
+      const expected = [{ kind: "transport", name: `${prefix}-source-vault-identity`, detail: identity }, { kind: "cleanup", name: `${prefix}-source-vault-cleaned`, detail: cleanup }];
+      if (contractDigest(source.events) !== contractDigest(expected)) throw new ContractPackageCorpusError("Version contract independent child source events mismatch");
+      const events = (retainedReports[0]!.report as { eventLog: { kind: string; name: string; detailSha256: string }[] }).eventLog;
+      for (const event of expected) if (!events.some(row => row.kind === event.kind && row.name === event.name && row.detailSha256 === contractDigest(event.detail))) throw new ContractPackageCorpusError("Version contract independent child source report events detached");
+      return { ...identity, identityEventSha256: contractDigest(identity), cleanupEventSha256: contractDigest(cleanup) };
+    });
+    exactCoverage(dependency.sourceVaults.map(contractDigest), projected.map(contractDigest), "independent child source identities and seeds");
+  }
+}
 export const contractSourceVaultSchema = z.object({ scenarioId: z.string().min(1), sourceRunId: z.string().min(1), candidateBundleSha256: digest, profileName: z.string().min(1), vaultIdSha256: digest, seedManifestSha256: digest, identityEventSha256: digest, cleanupEventSha256: digest }).strict();
 export const contractProgramStateSchema = z.object({ registrySha256: digest, nextEnqueueSeq: z.number().int().nonnegative(), entries: z.array(z.object({ submissionKeySha256: digest, fingerprint: z.string().min(1), changeSetIdSha256: digest, enqueueSeq: z.number().int().nonnegative(), recordSha256: digest, state: z.string().min(1), phase: z.string().nullable() }).strict()), inventory: z.array(z.object({ path: z.string().min(1), sha256: digest, sizeBytes: z.number().int().nonnegative() }).strict()) }).strict();
 export const contractProgramProofSchema = z.object({ submissionKeySha256: digest, requestSha256: digest, responseRecordSha256: digest, beforeSubmission: contractProgramStateSchema, beforeRepeat: contractProgramStateSchema, afterRepeat: contractProgramStateSchema }).strict();

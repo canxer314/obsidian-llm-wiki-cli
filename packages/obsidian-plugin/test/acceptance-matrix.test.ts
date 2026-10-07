@@ -1,4 +1,4 @@
-import { unitContractReport, bindUnitContractSiblings } from "./helpers/contract-report.js";
+import { unitContractReport, bindUnitContractSiblings, unitContractContext } from "./helpers/contract-report.js";
 import { CONTRACT_PACKAGE_ASSERTION, contractDigest } from "../src/installed-runtime/contract-package-corpus.js";
 import { createHash } from "node:crypto";
 import { syntheticManualPauseProof, syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
@@ -12,9 +12,10 @@ import {
 
 import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
 let pauseFixture: ReturnType<typeof syntheticManualPauseSource>;
+let contractContext: ReturnType<typeof unitContractContext>;
 function createAcceptanceMatrixReport(report: InstalledRuntimeEvidence) {
   const context = observerSourceFixture({ runId: "acceptance-run", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
-  return composeMatrix(report, context, pauseFixture.context);
+  return composeMatrix(report, context, pauseFixture.context, contractContext);
 }
 const DIGEST = "a".repeat(64);
 
@@ -216,10 +217,37 @@ function evidence(): InstalledRuntimeEvidence {
     cleanup: { attempted: true, residualPaths: [] },
   };
   bindUnitContractSiblings(result);
+  contractContext = unitContractContext(result.contractPackageCorpus!, DIGEST);
   return result;
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it.each(["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"])("independently rejects coordinated foreign child Vault substitution for %s", id => {
+    const report = evidence();
+    expect(createAcceptanceMatrixReport(report).scenarios.find(row => row.id === "A-39")?.verdict).toBe("passed");
+    const row = report.contractPackageCorpus!.crossCalls.find(row => row.id === id)!;
+    const dependency = row.proof.dependency!;
+    const child = dependency.sourceVaults[0]!;
+    const previous = structuredClone(child);
+    // Preserve the parent and the independently retained observer/pause contexts.
+    child.sourceRunId = report.runId + "-foreign-child-not-executed";
+    child.vaultIdSha256 = "e".repeat(64);
+    child.seedManifestSha256 = "f".repeat(64);
+    const { identityEventSha256: _identity, cleanupEventSha256: _cleanup, ...identity } = child;
+    child.identityEventSha256 = contractDigest(identity);
+    child.cleanupEventSha256 = contractDigest({ sourceRunId: child.sourceRunId, vaultIdSha256: child.vaultIdSha256, cleanupConfirmed: true });
+    const retainedSummary = report.contractSourceVaults!.find(source => contractDigest(source) === contractDigest(previous))!;
+    Object.assign(retainedSummary, child);
+    const sibling = id === "registered-reference-byte-verification" ? report.registeredReferenceRewriteCorpus! : report.semanticEvidenceSearchSnapshotCorpus!;
+    for (const event of sibling.eventLog) {
+      if (event.detailSha256 === previous.identityEventSha256) event.detailSha256 = child.identityEventSha256;
+      if (event.detailSha256 === previous.cleanupEventSha256) event.detailSha256 = child.cleanupEventSha256;
+    }
+    dependency.report = structuredClone(sibling);
+    dependency.reportSha256 = contractDigest(sibling);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/independent.*(child|source)|source.*pin/i);
+  });
   it("does not treat six handwritten tool calls as the A-39 version contract proof", () => {
     const missing = evidence(); missing.contractPackageCorpus = null;
     expect(() => createAcceptanceMatrixReport(missing)).toThrow(/version-contract-package.*absent/i);

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import { changeSetCorpusEvidenceSchema, type InstalledRuntimeEvidence } from "./evidence.js";
-import { contractPackageCorpusEvidenceSchema, CONTRACT_PACKAGE_ASSERTION } from "./contract-package-corpus.js";
+import { contractPackageCorpusEvidenceSchema, CONTRACT_PACKAGE_ASSERTION, consumeContractChildSources, type ContractChildConsumptionContext } from "./contract-package-corpus.js";
 import { pluginEventObserverCorpusEvidenceSchema, PLUGIN_EVENT_OBSERVER_ASSERTION } from "./plugin-event-observer-evidence.js";
 import { verifyPluginEventObserverWindow } from "./plugin-event-observer.js";
 
@@ -282,7 +282,7 @@ function canonicalReport(report: Omit<AcceptanceMatrixReport, "canonicalManifest
   };
 }
 
-export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: ManualPauseConsumptionContext): AcceptanceMatrixReport {
+export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: ManualPauseConsumptionContext, contractContext?: ContractChildConsumptionContext): AcceptanceMatrixReport {
   if (evidence.verdict !== "passed" || evidence.failure !== null) throw new AcceptanceMatrixError("Acceptance matrix requires a passing installed-runtime run");
   if (evidence.profile.mismatches.length !== 0 || evidence.profile.observed === null ||
       evidence.profile.observed.obsidianVersion !== evidence.profile.registered.versions.obsidian ||
@@ -313,6 +313,7 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence,
     changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);
   }
   const children = childManifests(evidence, observerContext);
+  consumeContractChildSources(evidence.contractPackageCorpus!, contractContext, evidence.candidate.files.find(file => file.path === "main.js")?.sha256);
   const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
     const childIndex = children.findIndex((child) => child.corpusId === corpusId);
     const child = children[childIndex];

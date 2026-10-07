@@ -1,4 +1,4 @@
-import { unitContractReport, contractDigest, bindUnitContractSiblings } from "./helpers/contract-report.js";
+import { unitContractReport, contractDigest, bindUnitContractSiblings, unitContractContext } from "./helpers/contract-report.js";
 import { createHash } from "node:crypto";
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
 import { syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
@@ -21,10 +21,11 @@ import {
 import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
 const independentObserverContext = () => observerSourceFixture({ runId: "run-evidence", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "candidate-bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
 let pauseFixture: ReturnType<typeof syntheticManualPauseSource>;
-const createInstalledRuntimeAcceptanceMatrix = (report: InstalledRuntimeEvidence) => composeMatrix(report, independentObserverContext(), pauseFixture.context);
-const serializeEvidence = (report: InstalledRuntimeEvidence, markers: readonly string[] = []) => serializePublicEvidence(report, markers, independentObserverContext(), pauseFixture.context);
-const parseEvidence = (text: string) => parsePublicEvidence(text, independentObserverContext(), pauseFixture.context);
-const writeEvidenceFile = (path: string, report: InstalledRuntimeEvidence, markers: readonly string[] = []) => writePublicEvidence(path, report, markers, independentObserverContext(), pauseFixture.context);
+let contractContext: ReturnType<typeof unitContractContext>;
+const createInstalledRuntimeAcceptanceMatrix = (report: InstalledRuntimeEvidence) => composeMatrix(report, independentObserverContext(), pauseFixture.context, contractContext);
+const serializeEvidence = (report: InstalledRuntimeEvidence, markers: readonly string[] = []) => serializePublicEvidence(report, markers, independentObserverContext(), pauseFixture.context, contractContext);
+const parseEvidence = (text: string) => parsePublicEvidence(text, independentObserverContext(), pauseFixture.context, contractContext);
+const writeEvidenceFile = (path: string, report: InstalledRuntimeEvidence, markers: readonly string[] = []) => writePublicEvidence(path, report, markers, independentObserverContext(), pauseFixture.context, contractContext);
 import { registeredReferenceRewriteCorpusEvidenceSchema } from "../src/installed-runtime/evidence.js";
 import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
 const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -762,6 +763,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
     cleanup: { attempted: true, residualPaths: [] },
   };
   bindUnitContractSiblings(evidence);
+  contractContext = unitContractContext(evidence.contractPackageCorpus!, DIGEST);
   return evidence;
 }
 
@@ -1122,6 +1124,7 @@ describe("installed-runtime evidence record", () => {
     const failed: InstalledRuntimeEvidence = {
       ...acceptedEvidence(),
       candidate: null,
+      contractPackageCorpus: null,
       bridgeIdentity: null,
       gateIsolationCorpus: null,
       changeSetCorpus: null,
@@ -1168,6 +1171,7 @@ describe("installed-runtime evidence record", () => {
       },
     };
     const windowsContext = pauseFixture.context;
+    const windowsContractContext = contractContext;
     expect(() => serializeEvidence(windowsLeak, ["C:\\Obsidian\\ThinkFlywheelVault"])).toThrow(
       EvidencePrivacyError,
     );
@@ -1183,7 +1187,7 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(noteBodyLeak, ["# Installed Runtime Harness"])).toThrow(
       EvidencePrivacyError,
     );
-    expect(() => serializePublicEvidence(windowsLeak, ["C:/Obsidian/Other"], independentObserverContext(), windowsContext)).not.toThrow();
+    expect(() => serializePublicEvidence(windowsLeak, ["C:/Obsidian/Other"], independentObserverContext(), windowsContext, windowsContractContext)).not.toThrow();
   });
 
   it("requires private pause context for serialization and re-consumption and rejects substituted public hashes", () => {
@@ -1213,22 +1217,56 @@ describe("installed-runtime evidence record", () => {
   it("independently rechecks the retained pause pin before matrix, serialize, parse and write", async () => {
     const report = acceptedEvidence();
     const observerContext = independentObserverContext();
-    const retained = structuredClone(pauseFixture.context);
-    const text = serializePublicEvidence(report, [], observerContext, retained);
-    expect(parsePublicEvidence(text, observerContext, retained)).toEqual(report);
+    const retained = structuredClone(pauseFixture.context, contractContext);
+    const text = serializePublicEvidence(report, [], observerContext, retained, contractContext);
+    expect(parsePublicEvidence(text, observerContext, retained, contractContext)).toEqual(report);
     const changed = structuredClone(retained);
     changed.source!.wire[0]!.arguments = { injected: true };
     expect(changed.sourceSha256).toBe(retained.sourceSha256);
-    expect(() => composeMatrix(report, observerContext, changed)).toThrow(/pin/u);
-    expect(() => serializePublicEvidence(report, [], observerContext, changed)).toThrow(/pin/u);
-    expect(() => parsePublicEvidence(text, observerContext, changed)).toThrow(/pin/u);
+    expect(() => composeMatrix(report, observerContext, changed, contractContext)).toThrow(/pin/u);
+    expect(() => serializePublicEvidence(report, [], observerContext, changed, contractContext)).toThrow(/pin/u);
+    expect(() => parsePublicEvidence(text, observerContext, changed, contractContext)).toThrow(/pin/u);
     const directory = await mkdtemp(join(tmpdir(), "pause-pin-write-"));
     const path = join(directory, "proof.json");
     try {
-      await expect(writePublicEvidence(path, report, [], observerContext, changed)).rejects.toThrow(/pin/u);
+      await expect(writePublicEvidence(path, report, [], observerContext, changed, contractContext)).rejects.toThrow(/pin/u);
       await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
-      await writePublicEvidence(path, report, [], observerContext, retained);
-      expect(parsePublicEvidence(await readFile(path, "utf8"), observerContext, retained)).toEqual(report);
+      await writePublicEvidence(path, report, [], observerContext, retained, contractContext);
+      expect(parsePublicEvidence(await readFile(path, "utf8"), observerContext, retained, contractContext)).toEqual(report);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+  it("does not bypass independent child source validation when a retained contract report is on a failed run", () => {
+    const report = acceptedEvidence();
+    report.verdict = "failed";
+    report.failure = { stage: "acceptance_matrix", code: "acceptance_matrix_failed" };
+    report.acceptanceMatrix = null;
+    expect(() => serializePublicEvidence(report, [], independentObserverContext(), pauseFixture.context)).toThrow(/independent child source context/i);
+  });
+  it("rechecks independent contract child pins across matrix, serialization, parsing and writing", async () => {
+    const report = acceptedEvidence();
+    const observer = independentObserverContext();
+    const pause = pauseFixture.context;
+    const retained = structuredClone(contractContext);
+    const text = serializePublicEvidence(report, [], observer, pause, retained);
+    expect(() => composeMatrix(report, observer, pause)).toThrow(/independent child source context/i);
+    expect(() => serializePublicEvidence(report, [], observer, pause)).toThrow(/independent child source context/i);
+    expect(() => parsePublicEvidence(text, observer, pause)).toThrow(/independent child source context/i);
+    const changed = structuredClone(retained);
+    changed.children[0]!.source.seedNotes[0]!.content = "substituted private child seed";
+    expect(changed.children[0]!.sourceSha256).toBe(retained.children[0]!.sourceSha256);
+    expect(() => composeMatrix(report, observer, pause, changed)).toThrow(/child source pin/i);
+    expect(() => serializePublicEvidence(report, [], observer, pause, changed)).toThrow(/child source pin/i);
+    expect(() => parsePublicEvidence(text, observer, pause, changed)).toThrow(/child source pin/i);
+    expect(text).not.toContain("unit-child-vault");
+    expect(text).not.toContain("unit-child-seed");
+    expect(text).not.toContain("sourceSha256");
+    const directory = await mkdtemp(join(tmpdir(), "contract-child-pin-"));
+    const path = join(directory, "evidence.json");
+    try {
+      await expect(writePublicEvidence(path, report, [], observer, pause, changed)).rejects.toThrow(/child source pin/i);
+      await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+      await writePublicEvidence(path, report, [], observer, pause, retained);
+      expect(parsePublicEvidence(await readFile(path, "utf8"), observer, pause, retained)).toEqual(report);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
   it("writes atomically, reads back through the schema, and never overwrites", async () => {

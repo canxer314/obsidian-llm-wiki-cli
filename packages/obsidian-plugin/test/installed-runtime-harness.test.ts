@@ -1,3 +1,4 @@
+import { contractSeedDigest, type ContractChildSource } from "../src/installed-runtime/contract-package-corpus.js";
 import { inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
 import { unitContractReport, unitContractSourceVault, contractDigest } from "./helpers/contract-report.js";
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
@@ -243,7 +244,11 @@ async function arrangeRun(
   const candidate = join(root, "candidate");
   await writeCandidateBundle(candidate);
   const candidateIdentity = await inspectCandidateBundle(candidate);
-  const unitSourceIdentity = (scenarioId: string, sourceRunId: string) => ({ scenarioId, sourceRunId, candidateBundleSha256: candidateIdentity.bundleSha256, profileName: INNER_PROFILE.name, vaultIdSha256: "a".repeat(64), seedManifestSha256: "a".repeat(64) });
+  const unitSeed = [{ path: "Notes/Unit.md", content: "unit-child-seed\n" }];
+  const unitSourceIdentity = (scenarioId: string, sourceRunId: string) => ({ scenarioId, sourceRunId, candidateBundleSha256: candidateIdentity.bundleSha256, profileName: INNER_PROFILE.name, vaultIdSha256: contractDigest("unit-child-vault"), seedManifestSha256: contractSeedDigest(unitSeed) });
+  const retainUnitChild = (retain: ((source: ContractChildSource) => void) | undefined, identity: ReturnType<typeof unitSourceIdentity>, prefix: string) => {
+    retain?.({ scenarioId: identity.scenarioId, sourceRunId: identity.sourceRunId, candidateBundleSha256: candidateIdentity.bundleSha256, installedMainSha256: candidateIdentity.files.find(file => file.path === "main.js")!.sha256, profileName: INNER_PROFILE.name, identity: { vaultId: "unit-child-vault", port: 27123 }, seedNotes: unitSeed, events: [{ kind: "transport", name: `${prefix}-source-vault-identity`, detail: identity }, { kind: "cleanup", name: `${prefix}-source-vault-cleaned`, detail: { sourceRunId: identity.sourceRunId, vaultIdSha256: identity.vaultIdSha256, cleanupConfirmed: true } }], cleanup: { attempted: true, residualPaths: [] } });
+  };
   const options: InstalledRuntimeHarnessOptions = {
     profileName: INNER_PROFILE.name,
     candidateBundleDirectory: candidate,
@@ -274,7 +279,6 @@ async function arrangeRun(
         row.proof.dependency = proof.dependency;
         if (proof.scenarioId === "registered-reference-byte-verification") {
           const source = proof.dependency.report as { eventLog: { sequence: number; kind: string; name: string; detailSha256: string }[] };
-          for (const vault of proof.dependency.sourceVaults) source.eventLog.push({ sequence: source.eventLog.length + 1, kind: "transport", name: "registered-reference-source-vault-identity", detailSha256: vault.identityEventSha256 }, { sequence: source.eventLog.length + 2, kind: "cleanup", name: "registered-reference-source-vault-cleaned", detailSha256: vault.cleanupEventSha256 });
           proof.dependency.reportSha256 = contractDigest(source);
         }
         row.evidenceSha256 = contractDigest(row.proof);
@@ -542,10 +546,11 @@ async function arrangeRun(
       }
       return fixture.proof;
     },
-    runRegisteredReferenceRewriteCorpus: async ({ record, assertion }) => {
+    runRegisteredReferenceRewriteCorpus: async ({ record, assertion, retainChildSource }) => {
       const sourceIdentity = unitSourceIdentity("registered-reference-byte-verification", `${runId}-reference-unit-child`);
       record("transport", "registered-reference-source-vault-identity", sourceIdentity);
       record("cleanup", "registered-reference-source-vault-cleaned", { sourceRunId: sourceIdentity.sourceRunId, vaultIdSha256: sourceIdentity.vaultIdSha256, cleanupConfirmed: true });
+      retainUnitChild(retainChildSource, sourceIdentity, "registered-reference");
       record("assertion", "stubbed-registered-reference-rewrite", {});
       record("cleanup", "stubbed-registered-reference-rewrite-cleanup", {});
       for (const name of [
@@ -585,10 +590,11 @@ async function arrangeRun(
       run: async () => stubSemanticEvidenceSearchSnapshotOutcome().scenarios[0]!,
     },
     isolateSemanticEvidenceScenarios: false,
-    runSemanticEvidenceSearchSnapshotCorpus: async ({ record, assertion }) => {
+    runSemanticEvidenceSearchSnapshotCorpus: async ({ record, assertion, retainChildSource }) => {
       const sourceIdentity = unitSourceIdentity("create_note/clean", `${runId}-semantic-unit-child`);
       record("transport", "semantic-source-vault-identity", sourceIdentity);
       record("cleanup", "semantic-source-vault-cleaned", { sourceRunId: sourceIdentity.sourceRunId, vaultIdSha256: sourceIdentity.vaultIdSha256, cleanupConfirmed: true });
+      retainUnitChild(retainChildSource, sourceIdentity, "semantic");
       record("transport", "stubbed-semantic-evidence-connected", {});
       record("assertion", "stubbed-semantic-evidence", {});
       record("cleanup", "stubbed-semantic-evidence-cleanup", {});
@@ -1195,6 +1201,12 @@ describe("installed-runtime harness orchestration", () => {
     expect(result.evidence.observations[0]?.readiness.searchSnapshot).toBe("ready");
   });
 
+  it("fails closed when a child runner publishes source summaries but does not retain its independent source", async () => {
+    const { options } = await arrangeRun("run-child-context-missing");
+    const reference = options.runRegisteredReferenceRewriteCorpus!;
+    await expect(runInstalledRuntimeHarness({ ...options, runRegisteredReferenceRewriteCorpus: request => reference({ ...request, retainChildSource: undefined }) })).rejects.toThrow(/independent child source coverage/i);
+    await expect(readFile(options.evidencePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
   it("keeps the Bridge identity stable across the controlled restart", async () => {
     const { options } = await arrangeRun("run-stable");
     const result = await runInstalledRuntimeHarness(options);
@@ -1412,6 +1424,7 @@ describe("installed-runtime harness failure projection", () => {
         await expect(stat(join(request.vaultPath, "ContractFixtures/InvalidUtf8.md"))).rejects.toMatchObject({ code: "ENOENT" });
         return control.start(request);
       } },
+      completeContractPackage: () => { throw new Error("Unit scenario intentionally lacks the complete contract corpus"); },
       runContractCrossCall: async ({ authority, scenarioId }) => {
         if (scenarioId === "invalid-utf8-no-trusted-result") {
           expect([...await readFile(join(vaultPath, "ContractFixtures/InvalidUtf8.md"))]).toEqual([195, 40]);

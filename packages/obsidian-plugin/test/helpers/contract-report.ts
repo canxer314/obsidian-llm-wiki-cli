@@ -2,10 +2,10 @@ import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../../src/installed-runti
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CONTRACT_PACKAGE_ASSERTION, contractDigest, versionContractAuthorityDigest, defaultContractPackageRoot, type ContractPackageCorpusEvidence, type ContractToolName } from "../../src/installed-runtime/contract-package-corpus.js";
+import { CONTRACT_PACKAGE_ASSERTION, contractDigest, contractSeedDigest, versionContractAuthorityDigest, defaultContractPackageRoot, type ContractChildConsumptionContext, type ContractPackageCorpusEvidence, type ContractToolName } from "../../src/installed-runtime/contract-package-corpus.js";
 
 export function unitContractSourceVault(binding: ContractPackageCorpusEvidence["binding"], scenarioId: string) {
-  const identity = { scenarioId, sourceRunId: binding.runId + "-unit-child", candidateBundleSha256: binding.candidateBundleSha256, profileName: binding.profileName, vaultIdSha256: "a".repeat(64), seedManifestSha256: "a".repeat(64) };
+  const identity = { scenarioId, sourceRunId: binding.runId + "-unit-child", candidateBundleSha256: binding.candidateBundleSha256, profileName: binding.profileName, vaultIdSha256: contractDigest("unit-child-vault"), seedManifestSha256: contractSeedDigest([{ path: "Notes/Unit.md", content: "unit-child-seed\n" }]) };
   return { ...identity, identityEventSha256: contractDigest(identity), cleanupEventSha256: contractDigest({ sourceRunId: identity.sourceRunId, vaultIdSha256: identity.vaultIdSha256, cleanupConfirmed: true }) };
 }
 
@@ -123,5 +123,20 @@ export function bindUnitContractSiblings(evidence: { contractSourceVaults?: Retu
   evidence.contractSourceVaults = structuredClone(report.crossCalls.filter(row => ["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"].includes(row.id)).flatMap(row => row.proof.dependency!.sourceVaults));
   report.beforeInventorySha256 = contractDigest(evidence.beforeInventory);
   report.afterInventorySha256 = contractDigest(evidence.afterInventory);
+}
+/** Independent synthetic private source; never installed acceptance evidence. */
+export function unitContractContext(report: ContractPackageCorpusEvidence, installedMainSha256: string): ContractChildConsumptionContext {
+  const context: ContractChildConsumptionContext = { runId: report.binding.runId, candidateBundleSha256: report.binding.candidateBundleSha256, profileName: report.binding.profileName, installedMainSha256, children: [], reports: [] };
+  for (const id of ["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"]) {
+    const dependency = report.crossCalls.find(row => row.id === id)!.proof.dependency!;
+    for (const child of dependency.sourceVaults) {
+      const { identityEventSha256: _identity, cleanupEventSha256: _cleanup, ...identity } = child;
+      const prefix = id === "registered-reference-byte-verification" ? "registered-reference" : "semantic";
+      const source = { scenarioId: child.scenarioId, sourceRunId: child.sourceRunId, candidateBundleSha256: context.candidateBundleSha256, installedMainSha256, profileName: context.profileName, identity: { vaultId: "unit-child-vault", port: 27123 }, seedNotes: [{ path: "Notes/Unit.md", content: "unit-child-seed\n" }], events: [{ kind: "transport" as const, name: `${prefix}-source-vault-identity`, detail: identity }, { kind: "cleanup" as const, name: `${prefix}-source-vault-cleaned`, detail: { sourceRunId: child.sourceRunId, vaultIdSha256: identity.vaultIdSha256, cleanupConfirmed: true } }], cleanup: { attempted: true, residualPaths: [] } };
+      context.children.push({ source, sourceSha256: contractDigest(source) });
+    }
+    context.reports.push({ scenarioId: id, report: structuredClone(dependency.report), reportSha256: dependency.reportSha256 });
+  }
+  return context;
 }
 export { contractDigest };

@@ -6,7 +6,7 @@ import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { z } from "zod";
-import { contractPackageCorpusEvidenceSchema, contractCorpusBindingSchema, contractCrossCallProofSchema, contractSourceVaultSchema } from "./contract-package-corpus.js";
+import { consumeContractChildSources, contractPackageCorpusEvidenceSchema, contractCorpusBindingSchema, contractCrossCallProofSchema, contractSourceVaultSchema } from "./contract-package-corpus.js";
 import { pluginEventObserverCorpusEvidenceSchema } from "./plugin-event-observer-evidence.js";
 import { referenceSingleSpanProofSchema } from "./registered-reference-single-span.js";
 
@@ -1193,7 +1193,7 @@ export const crashRestorationRetainedAuthorityCorpusEvidenceSchema = z
     }
   });
 
-function evidenceSchemaWithContext(observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext) { return z
+function evidenceSchemaWithContext(observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext, contractContext?: import("./contract-package-corpus.js").ContractChildConsumptionContext) { return z
   .object({
     schemaVersion: z.literal(1),
     runId: z.string().min(1),
@@ -1242,6 +1242,7 @@ function evidenceSchemaWithContext(observerContext?: import("./plugin-event-obse
   })
   .strict()
   .superRefine((evidence, context) => {
+    if (evidence.contractPackageCorpus) try { consumeContractChildSources(evidence.contractPackageCorpus, contractContext, evidence.candidate?.files.find(file => file.path === "main.js")?.sha256); } catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Version contract independent child source invalid" }); }
     for (const pause of [evidence.manualPauseObservation, evidence.gateIsolationCorpus?.manualPause.installedObservation]) {
       if (pause) try { consumeManualPauseProof(pause, pauseContext); } catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Manual pause independent source invalid" }); }
       if (pause && (pause.runId !== evidence.runId || pause.profile !== evidence.profile.name || pause.candidateBundleSha256 !== evidence.candidate?.bundleSha256 ||
@@ -1261,7 +1262,7 @@ function evidenceSchemaWithContext(observerContext?: import("./plugin-event-obse
         const expected = createAcceptanceMatrixReport({
           ...evidence,
           acceptanceMatrix: null,
-        }, observerContext, pauseContext);
+        }, observerContext, pauseContext, contractContext);
         if (matrix.canonicalManifestSha256 !== expected.canonicalManifestSha256) {
           context.addIssue({ code: "custom", message: "Acceptance matrix does not bind this installed-runtime evidence" });
         }
@@ -1357,8 +1358,9 @@ export function createInstalledRuntimeAcceptanceMatrix(
   evidence: InstalledRuntimeEvidence,
   observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
   pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext,
+  contractContext?: import("./contract-package-corpus.js").ContractChildConsumptionContext,
 ): AcceptanceMatrixReport {
-  return createAcceptanceMatrixReport({ ...evidence, acceptanceMatrix: null }, observerContext, pauseContext);
+  return createAcceptanceMatrixReport({ ...evidence, acceptanceMatrix: null }, observerContext, pauseContext, contractContext);
 }
 
 export function serializeEvidence(
@@ -1366,8 +1368,9 @@ export function serializeEvidence(
   privateMarkers: readonly string[] = [],
   observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
   pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext,
+  contractContext?: import("./contract-package-corpus.js").ContractChildConsumptionContext,
 ): string {
-  const validated = evidenceSchemaWithContext(observerContext, pauseContext).parse(evidence);
+  const validated = evidenceSchemaWithContext(observerContext, pauseContext, contractContext).parse(evidence);
   const serialized = `${JSON.stringify(validated, null, 2)}\n`;
   for (const marker of privateMarkers) {
     if (marker.length === 0) continue;
@@ -1387,8 +1390,8 @@ export function serializeEvidence(
   return serialized;
 }
 
-export function parseEvidence(serialized: string, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext): InstalledRuntimeEvidence {
-  return evidenceSchemaWithContext(observerContext, pauseContext).parse(JSON.parse(serialized));
+export function parseEvidence(serialized: string, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext, contractContext?: import("./contract-package-corpus.js").ContractChildConsumptionContext): InstalledRuntimeEvidence {
+  return evidenceSchemaWithContext(observerContext, pauseContext, contractContext).parse(JSON.parse(serialized));
 }
 
 /**
@@ -1402,8 +1405,9 @@ export async function writeEvidenceFile(
   privateMarkers: readonly string[] = [],
   observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
   pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext,
+  contractContext?: import("./contract-package-corpus.js").ContractChildConsumptionContext,
 ): Promise<void> {
-  const serialized = serializeEvidence(evidence, privateMarkers, observerContext, pauseContext);
+  const serialized = serializeEvidence(evidence, privateMarkers, observerContext, pauseContext, contractContext);
   await mkdir(dirname(evidencePath), { recursive: true });
   const temporaryPath = join(
     dirname(evidencePath),
@@ -1425,5 +1429,5 @@ export async function writeEvidenceFile(
   }
   await rm(temporaryPath, { force: true });
   const written = await readFile(evidencePath, "utf8");
-  parseEvidence(written, observerContext, pauseContext);
+  parseEvidence(written, observerContext, pauseContext, contractContext);
 }

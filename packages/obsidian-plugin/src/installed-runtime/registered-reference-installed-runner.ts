@@ -1,3 +1,4 @@
+import { contractDigest, type ContractChildSource } from "./contract-package-corpus.js";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { connect } from "node:net";
@@ -85,6 +86,7 @@ const REJECTION_FIXTURES = [
 }[];
 
 interface LiveRegisteredReferenceRuntime {
+  readonly source: ContractChildSource;
   readonly vault: ProvisionedTestVault;
   readonly identity: PersistedBridgeIdentity;
   readonly endpoint: URL;
@@ -312,7 +314,9 @@ async function startRuntime(
       },
     };
 
-    options.record("transport", "registered-reference-source-vault-identity", { scenarioId: "registered-reference-byte-verification", sourceRunId: acceptance.descriptor.runId, candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profile!.name, vaultIdSha256: createHash("sha256").update(JSON.stringify(identity.vaultId)).digest("hex"), seedManifestSha256: vault.seedManifestSha256 });
+    const sourceIdentity = { scenarioId: "registered-reference-byte-verification", sourceRunId: acceptance.descriptor.runId, candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profile!.name, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: vault.seedManifestSha256 };
+    const source: ContractChildSource = { scenarioId: sourceIdentity.scenarioId, sourceRunId: sourceIdentity.sourceRunId, candidateBundleSha256: sourceIdentity.candidateBundleSha256, profileName: sourceIdentity.profileName, installedMainSha256: sha256(await readFile(join(vault.vaultPath, options.configDirectoryName, "plugins", options.candidate.identity.pluginId, "main.js"))), identity: structuredClone(identity), seedNotes: await Promise.all(vault.seedNotes.map(async note => ({ path: note.path, content: await readFile(join(vault.vaultPath, note.path), "utf8") }))), events: [{ kind: "transport", name: "registered-reference-source-vault-identity", detail: structuredClone(sourceIdentity) }], cleanup: { attempted: false, residualPaths: [] } };
+    options.record("transport", "registered-reference-source-vault-identity", sourceIdentity);
     options.record("transport", "registered-reference-runtime-ready", {
       label,
       endpoint: endpoint.pathname,
@@ -324,6 +328,7 @@ async function startRuntime(
       snapshotOutcome: expectedSnapshotOutcome,
     });
     return {
+      source,
       vault,
       identity,
       endpoint,
@@ -394,7 +399,13 @@ async function cleanupRuntimes(
         firstError ??= new Error(
           `Registered-reference cleanup left residual paths: ${cleanup.residualPaths.join(", ")}`,
         );
-      } else options.record("cleanup", "registered-reference-source-vault-cleaned", { sourceRunId: runtime.acceptance.descriptor.runId, vaultIdSha256: createHash("sha256").update(JSON.stringify(runtime.identity.vaultId)).digest("hex"), cleanupConfirmed: true });
+      } else {
+        const detail = { sourceRunId: runtime.acceptance.descriptor.runId, vaultIdSha256: contractDigest(runtime.identity.vaultId), cleanupConfirmed: true };
+        options.record("cleanup", "registered-reference-source-vault-cleaned", detail);
+        runtime.source.cleanup = structuredClone(cleanup);
+        runtime.source.events.push({ kind: "cleanup", name: "registered-reference-source-vault-cleaned", detail: structuredClone(detail) });
+        options.retainChildSource?.(runtime.source);
+      }
     } catch (error) {
       firstError ??= error;
     }
