@@ -51,6 +51,8 @@ export interface LoopbackMcpClientOptions {
   readonly clientName?: string;
   readonly clientVersion?: string;
   readonly timeoutMs?: number;
+  /** One-shot lifecycle observations must not retain idle HTTP connections. */
+  readonly closeConnection?: boolean;
 }
 
 function assertLoopbackEndpoint(endpoint: URL): void {
@@ -82,7 +84,7 @@ export function createLoopbackMcpClient(
         version: options.clientVersion ?? "1.0.0",
       });
       const transport = new StreamableHTTPClientTransport(endpoint, {
-        requestInit: { headers: { [EXPECTED_VAULT_ID_HEADER]: expectedVaultId } },
+        requestInit: { headers: { [EXPECTED_VAULT_ID_HEADER]: expectedVaultId, ...(options.closeConnection === true ? { Connection: "close" } : {}) } },
       });
       let raw: unknown;
       try {

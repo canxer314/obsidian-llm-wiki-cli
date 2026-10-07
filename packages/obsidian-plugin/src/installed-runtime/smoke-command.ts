@@ -37,7 +37,9 @@ import { runInstalledGateIsolationCorpus } from "./gate-installed-runner.js";
 import { runInstalledPrivacyRecoveryAuthorityCorpus } from "./privacy-recovery-installed-runner.js";
 import { runInstalledCrashRestorationSlice } from "./installed-crash-restoration-slice.js";
 import { installedCrashScenarios, crashScenarioParts } from "./crash-restoration-protocol.js";
-import { runInstalledReleaseLifecycleSlice, runInstalledReleaseUninstallSlice } from "./installed-release-lifecycle-runner.js";
+import { runInstalledReleaseUninstallSlice } from "./installed-release-lifecycle-runner.js";
+import { runInstalledLifecycleSixStateSlice, type LifecycleOperatorObservationRequest } from "./installed-lifecycle-six-state-runner.js";
+import { runOfflineLifecycleRetainedStateSlice } from "./lifecycle-retained-state-slice.js";
 import { MVP_PERF_REF_1 } from "./runtime-profile.js";
 
 export {
@@ -261,6 +263,8 @@ export interface AuthoritativeInstalledRuntimeRunnerOptions {
   readonly reportDirectory?: string;
   readonly releaseArguments?: InstalledRuntimeSmokeArguments;
   readonly obsidianVersion?: string;
+  /** Private operator notification; observes only, never enables/registers. */
+  readonly lifecycleOperatorObservation?: (request: LifecycleOperatorObservationRequest) => Promise<void>;
 }
 
 export function authoritativeInstalledRuntimeRunnerNames(): readonly string[] {
@@ -410,8 +414,12 @@ export function createAuthoritativeInstalledRuntimeRunners(
       if (request.profile !== undefined && request.profileName !== undefined && request.probe !== undefined) {
         const installed = { ...request, profile: request.profile, profileName: request.profileName,
           probe: request.probe, candidate: request.candidate as VerifiedReleaseBundle };
-        const install = await runInstalledReleaseLifecycleSlice(installed);
-        if (install.verdict !== "partial") throw new Error("Installed lifecycle install/repair slice failed");
+        const install = await runInstalledLifecycleSixStateSlice({ ...installed,
+          ...(options.lifecycleOperatorObservation === undefined ? {} : { operatorObservation: options.lifecycleOperatorObservation }),
+        });
+        if (install.verdict !== "partial") throw new Error("Installed lifecycle six-state install/repair slice failed");
+        const retained = await runOfflineLifecycleRetainedStateSlice(installed);
+        if (retained.verdict !== "partial") throw new Error("Offline lifecycle retained queue/Journal repair slice failed");
         const uninstall = await runInstalledReleaseUninstallSlice(installed);
         if (uninstall.verdict !== "partial") throw new Error("Installed lifecycle uninstall/reinstall slice failed");
       }
