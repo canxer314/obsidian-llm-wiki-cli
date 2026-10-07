@@ -130,7 +130,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, fixture.originalBytes, { flag: "wx" });
     }
-    const before = await crashInventory(vault.vaultPath);
+    const before = await crashInventory(vault.vaultPath, configDirectoryName);
     await installCandidateBundle(options.candidate, vault.vaultPath, configDirectoryName);
     const driver = await options.prepareAcceptanceDriver({ vaultPath: vault.vaultPath, pluginId: options.candidate.identity.pluginId, candidateBundleSha256: options.candidate.identity.bundleSha256, configDirectoryName });
     acceptanceCleanup = driver.cleanup;
@@ -168,7 +168,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
         catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
       }, { timeoutMs: options.boundaryTimeoutMs ?? MAX_SLICE_MS, intervalMs: POLL_MS });
       const frame = await readInstalledCrashJournalOrNull(journalPath);
-      const inventory = await crashInventory(vault.vaultPath);
+      const inventory = await crashInventory(vault.vaultPath, configDirectoryName);
       const phase = crashBoundaryPhase(point);
       const original = point === "before_prepared" || point === "after_prepared" || point.startsWith("after_mutation:") || point.startsWith("after_rollback") || point === "before_rolled_back" || point === "after_rolled_back";
       verifyCrashInventory(before, inventory, mutationKind, original ? "original" : "committed", point);
@@ -212,7 +212,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       // unlike PREPARED it is not a rollback case and cannot claim a restored Journal.
       await waitForCondition(async () => { recovered = await status(); return recovered.lookup === "found" && recovered.changeSet.state !== "in_progress"; }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
     }
-    const after = await crashInventory(vault.vaultPath);
+    const after = await crashInventory(vault.vaultPath, configDirectoryName);
     await crashPrivateResidue(vault.vaultPath);
     verifyCrashInventory(before, after, mutationKind, committed ? "committed" : "original");
     if (recovered.lookup !== "found") throw new Error("Installed recovered status missing");
@@ -222,7 +222,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     if (recoveredFrame.phase !== terminalPhase || payload.vaultId !== identity.vaultId || payload.changeSetId !== beforeRecord.changeSetId || JSON.stringify(payload.input) !== JSON.stringify(input)) throw new Error("Installed restart did not recover the bound durable terminal intent");
     const replay = await submit(input, !committed);
     if (replay.outcome !== "registered" || JSON.stringify(replay.changeSet) !== JSON.stringify(recovered.changeSet)) throw new Error("Recovered Bridge did not replay the retained terminal record");
-    verifyCrashInventory(before, await crashInventory(vault.vaultPath), mutationKind, committed ? "committed" : "original");
+    verifyCrashInventory(before, await crashInventory(vault.vaultPath, configDirectoryName), mutationKind, committed ? "committed" : "original");
     eventOrder.push("complete-public-proof-status-and-identical-replay-observed");
     const sentinelPath = "Notes/CrashSentinel.md";
     const sentinel = await submit({ submissionKey: `sentinel-${seed}`, operations: [{ operationId: "post-restore-sentinel", kind: "create_note", path: sentinelPath, content: "# Restore completed\n", ifExists: "reject" }] });

@@ -105,6 +105,28 @@ it("emits no installed marker when the hook phase, frame or whole footprint is f
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+it("binds candidate boundary inventory to the actual config directory without hiding public lookalikes", async () => {
+  const { parkInstalledCrashBoundary, crashProfile, crashDigest, crashInventory } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-hook-config-"));
+  const vaultPath = join(root, "installed-runtime-vault-hook-config");
+  const configDirectoryName = ".candidate-config";
+  const pluginDirectory = join(vaultPath, configDirectoryName, "plugins", "crash-plugin");
+  await mkdir(pluginDirectory, { recursive: true });
+  await writeFile(join(pluginDirectory, "main.js"), "candidate");
+  await mkdir(join(vaultPath, ".obsidian-backup"));
+  await writeFile(join(vaultPath, ".obsidian-backup", "Public.md"), "hello");
+  await mkdir(join(root, "reports"));
+  const created = await createInstalledRuntimeAcceptanceDescriptor({ runId: "hook-config", vaultPath, configDirectoryName, pluginId: "crash-plugin", reportDirectory: join(root, "reports"), candidateBundleSha256: "a".repeat(64) });
+  const input = crashProfile("create_note").buildSubmitInput("hook-config");
+  const command = { sequence: 1, capabilityToken: created.descriptor.capabilityToken, action: "run-crash-restoration-scenario" as const, scenario: "create_note/after_prepared" as const, expectedVaultId: "v", endpoint: "http://127.0.0.1:1234/mcp", submissionKey: "submission-hook-config", input };
+  try {
+    const before = await crashInventory(vaultPath, configDirectoryName);
+    await parkInstalledCrashBoundary({ descriptor: created.descriptor, command, frame: { phase: "PREPARED", vaultId: "v", input }, before, configDirectoryName, park: async () => undefined });
+    expect(await loadCrashBoundaryReport({ ...created.descriptor, vaultId: "v", endpoint: command.endpoint, submissionKey: command.submissionKey })).toMatchObject({ inventorySha256: crashDigest(before) });
+    expect(before.map(entry => entry.path)).toEqual([".obsidian-backup", ".obsidian-backup/Public.md"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 it("rejects private staging/trash byte residue after a terminal restart", async () => {
   const { crashPrivateResidue } = await import("../src/installed-runtime/crash-restoration-protocol.js");
   const root = await mkdtemp(join(tmpdir(), "installed-crash-residue-"));
@@ -467,7 +489,7 @@ it("rejects a private crash command against a dirty durable journal without armi
 
 
 // Orchestration-only fixture. This is deliberately not installed-Obsidian evidence.
-async function arrangeCrashOrchestration(root: string, replayId: string, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint = "after_prepared", mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind = "create_note", fault?: "missing_marker" | "wrong_marker" | "phase_disguise" | "partial_restore" | "early_listener" | "replay_mutation" | "dirty_stop") {
+async function arrangeCrashOrchestration(root: string, replayId: string, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint = "after_prepared", mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind = "create_note", fault?: "missing_marker" | "wrong_marker" | "phase_disguise" | "partial_restore" | "early_listener" | "replay_mutation" | "dirty_stop", configDirectoryName = ".obsidian") {
   const { createServer } = await import("node:http");
   const { readFile } = await import("node:fs/promises");
   const { createHash } = await import("node:crypto");
@@ -557,19 +579,19 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     const phase = crashBoundaryPhase(point);
     const frame = phase === null ? null : await writeFrame(phase);
     if (fault === "missing_marker") return;
-    await writeCrashRestorationBoundaryReport({ descriptor, command: descriptor.command, journalPhase: phase, frameSha256: frame === null ? null : crashDigest(frame), inventorySha256: crashDigest(await crashInventory(vaultPath)) });
+    await writeCrashRestorationBoundaryReport({ descriptor, command: descriptor.command, journalPhase: phase, frameSha256: frame === null ? null : crashDigest(frame), inventorySha256: crashDigest(await crashInventory(vaultPath, configDirectoryName)) });
     const markerPath = crashRestorationBoundaryPath(descriptor.reportDirectory, point, mutationKind, descriptor.command.submissionKey);
     if (fault === "wrong_marker") { const marker = JSON.parse(await readFile(markerPath, "utf8")); await writeFile(markerPath, JSON.stringify({ ...marker, sequence: marker.sequence + 1 })); }
     if (fault === "phase_disguise") await writeFrame("COMMITTED");
   };
   const profile = { name: "orchestration", os: { platform: "linux", build: "test" }, versions: { obsidian: "test", electron: "test", node: "test" }, capabilities: [], profileRequirement: "dedicated_candidate_only" };
   const options = {
-    runId: "orchestration", crashPoint, mutationKind, workingDirectory: root, reportDirectory: join(root, "reports"), candidate, profile,
+    runId: "orchestration", crashPoint, mutationKind, configDirectoryName, workingDirectory: root, reportDirectory: join(root, "reports"), candidate, profile,
     probe: { probeRunning: async () => ({ platform: "linux", osBuild: "test", obsidianVersion: "test", electronVersion: "test", nodeVersion: "test", capabilities: [] }) },
     processControl: { start: async (request: any) => {
       vaultPath = request.vaultPath; stopped = false;
       const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
-      await writeFile(join(vaultPath, ".obsidian", "plugins", "crash-plugin", "data.json"), JSON.stringify({ vaultId: "orchestration-vault", port }));
+      await writeFile(join(vaultPath, configDirectoryName, "plugins", "crash-plugin", "data.json"), JSON.stringify({ vaultId: "orchestration-vault", port }));
       if (descriptor.command.recovery !== undefined) { publishedSequence = descriptor.command.sequence; await publishBoundary(descriptor); if (fault === "early_listener") await new Promise<void>(resolve => server.listen(port, "127.0.0.1", resolve)); }
       else {
         if (descriptor.command.action !== "idle") {
@@ -598,6 +620,76 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
   }, 10);
   return { options, cleanup: async () => { clearInterval(timer); await publish.catch(() => undefined); if (server.listening) await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
+
+it("inventories public config-like files and empty directories while excluding only the actual config directory", async () => {
+  const { crashInventory } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-inventory-config-"));
+  try {
+    for (const directory of [".obsidian", ".candidate-config", ".llm-wiki", ".obsidian-backup", ".obsidian-empty", ".candidate-config-backup"]) {
+      await mkdir(join(root, directory));
+    }
+    for (const directory of [".obsidian", ".candidate-config", ".llm-wiki", ".obsidian-backup"]) {
+      await writeFile(join(root, directory, "Public.md"), "hello");
+    }
+    await writeFile(join(root, ".obsidian-file"), "hello");
+    const defaultInventory = await crashInventory(root);
+    expect(defaultInventory.map(entry => entry.path).sort()).toEqual([
+      ".candidate-config", ".candidate-config-backup", ".candidate-config/Public.md",
+      ".obsidian-backup", ".obsidian-backup/Public.md", ".obsidian-empty", ".obsidian-file",
+    ].sort());
+    const customInventory = await crashInventory(root, ".candidate-config");
+    expect(customInventory.map(entry => entry.path).sort()).toEqual([
+      ".candidate-config-backup", ".obsidian", ".obsidian/Public.md",
+      ".obsidian-backup", ".obsidian-backup/Public.md", ".obsidian-empty", ".obsidian-file",
+    ].sort());
+    expect(customInventory).toContainEqual({ path: ".obsidian-file", kind: "file", bytes: 5, sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" });
+    expect(customInventory).toContainEqual({ path: ".obsidian-empty", kind: "directory" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("uses the actual config directory at every runner inventory observation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-custom-config-"));
+  const fixture = await arrangeCrashOrchestration(root, "bound-change-set", "after_rolled_back", "create_note", undefined, ".candidate-config");
+  const processStart = fixture.options.processControl.start;
+  let generation = 0;
+  try {
+    const outcome = await runInstalledCrashRestorationSlice({ ...fixture.options,
+      processControl: { start: async request => {
+        const handle = await processStart(request);
+        await writeFile(join(request.vaultPath, ".candidate-config", "runtime-settings.json"), String(++generation));
+        return handle;
+      } },
+    });
+    const record = outcome.records[0];
+    for (const inventory of [record.before, record.boundary, record.after]) {
+      expect(inventory.some(entry => entry.path.startsWith(".candidate-config"))).toBe(false);
+      expect(inventory.some(entry => entry.path === "Notes/Welcome.md")).toBe(true);
+    }
+    expect(record.processGenerations).toHaveLength(3);
+    expect(record.wholeStateVerified).toBe(true);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
+
+it("rejects recovery damage to a public .obsidian-backup note at the runner boundary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-public-backup-"));
+  const fixture = await arrangeCrashOrchestration(root, "bound-change-set");
+  let generation = 0;
+  const originalStart = fixture.options.processControl.start;
+  const processControl = { start: async (request: Parameters<typeof originalStart>[0]) => {
+    generation += 1;
+    const note = join(request.vaultPath, ".obsidian-backup", "Public.md");
+    if (generation === 1) {
+      await mkdir(join(request.vaultPath, ".obsidian-backup"));
+      await writeFile(note, "public original bytes");
+    }
+    const handle = await originalStart(request);
+    if (generation === 2) await writeFile(note, "WRONG: public bytes lost during recovery");
+    return handle;
+  } };
+  try {
+    await expect(runInstalledCrashRestorationSlice({ ...fixture.options, processControl })).rejects.toThrow("whole-state inventory mismatch");
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
 
 it("fails closed on missing trigger, wrong marker, disguised phase, early listener, partial restore or replay mutation", async () => {
   for (const fault of ["missing_marker", "wrong_marker", "phase_disguise", "early_listener", "partial_restore", "replay_mutation", "dirty_stop"] as const) {

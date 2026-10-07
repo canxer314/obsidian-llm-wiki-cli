@@ -384,7 +384,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
         const armed = armedCrashBoundary;
         if (armed === undefined || !armed.command.scenario.endsWith(`/${point}`)) return;
         const frame = await changeSetExecution?.loadRecoveryFrame();
-        await parkInstalledCrashBoundary({ ...armed, frame: frame ?? null, ...(execution === undefined ? {} : { execution }) });
+        await parkInstalledCrashBoundary({ ...armed, frame: frame ?? null, configDirectoryName: this.app.vault.configDir, ...(execution === undefined ? {} : { execution }) });
       },
       incompatibleState,
       onSearchSnapshotRefreshScheduled: (observation) => {
@@ -490,7 +490,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
         const identity = await readPersistedBridgeIdentity(basePath, this.manifest.id, this.app.vault.configDir);
         const bound = validateInstalledCrashRecovery(command, frame, identity);
         const { kind } = crashScenarioParts(bound.scenario);
-        armedCrashBoundary = { descriptor: loaded.descriptor, command: bound, before: crashOriginalInventory(await crashInventory(basePath), kind) };
+        armedCrashBoundary = { descriptor: loaded.descriptor, command: bound, before: crashOriginalInventory(await crashInventory(basePath, this.app.vault.configDir), kind) };
       }
     }
     try {
@@ -905,7 +905,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
               runtime.scheduleSearchSnapshotRefresh();
               await runtime.refreshSearchSnapshot();
             }
-            armedCrashBoundary = { descriptor, command: parsed, before: await crashInventory(basePath) };
+            armedCrashBoundary = { descriptor, command: parsed, before: await crashInventory(basePath, this.app.vault.configDir) };
             void installedSemanticEvidenceWire.submit({ endpoint: new URL(parsed.endpoint),
               expectedVaultId: parsed.expectedVaultId, input })
               .finally(() => { armedCrashBoundary = undefined; })

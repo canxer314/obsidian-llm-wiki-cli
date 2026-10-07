@@ -70,11 +70,11 @@ export interface CrashInventoryEntry {
   readonly sha256?: string;
 }
 /** Complete public footprint, not just the primary note; never follows symlinks. */
-export async function crashInventory(vaultPath: string): Promise<CrashInventoryEntry[]> {
+export async function crashInventory(vaultPath: string, configDirectoryName = ".obsidian"): Promise<CrashInventoryEntry[]> {
   const entries: CrashInventoryEntry[] = [];
   const visit = async (relative: string): Promise<void> => {
     for (const name of (await readdir(join(vaultPath, relative))).sort()) {
-      if (relative === "" && (name === ".llm-wiki" || name.startsWith(".obsidian"))) continue;
+      if (relative === "" && (name === ".llm-wiki" || name === configDirectoryName)) continue;
       const path = relative === "" ? name : `${relative}/${name}`;
       const facts = await lstat(join(vaultPath, path));
       if (facts.isSymbolicLink() || (!facts.isDirectory() && !facts.isFile())) throw new Error("Crash inventory contains an unsupported path");
@@ -265,6 +265,7 @@ export async function parkInstalledCrashBoundary(options: {
   readonly command: CrashRestorationCommand;
   readonly frame: unknown;
   readonly before: readonly CrashInventoryEntry[];
+  readonly configDirectoryName?: string;
   readonly execution?: import("../change-set.js").ChangeSetCrashContext;
   readonly park?: () => Promise<void>;
 }): Promise<void> {
@@ -274,7 +275,7 @@ export async function parkInstalledCrashBoundary(options: {
   if (phase === null && (options.execution?.vaultId !== options.command.expectedVaultId || !same(options.execution.input, options.command.input))) throw new Error("Unprepared installed crash marker targets another operation");
   const frame = options.frame as { phase?: string; vaultId?: string; input?: unknown } | null;
   if (phase === null ? frame !== null : frame?.phase !== phase || frame.vaultId !== options.command.expectedVaultId || !same(frame.input, options.command.input)) throw new Error("Installed crash injector did not observe the bound durable frame");
-  const inventory = await crashInventory(options.descriptor.vaultPath);
+  const inventory = await crashInventory(options.descriptor.vaultPath, options.configDirectoryName);
   const original = point === "before_prepared" || point === "after_prepared" || point.startsWith("after_rollback") || point === "before_rolled_back" || point === "after_rolled_back" || point.startsWith("after_mutation:");
   verifyCrashInventory(options.before, inventory, kind, original ? "original" : "committed", point);
   await writeCrashRestorationBoundaryReport({ descriptor: options.descriptor, command: options.command, journalPhase: phase, frameSha256: frame === null ? null : crashDigest(frame), inventorySha256: crashDigest(inventory) });
