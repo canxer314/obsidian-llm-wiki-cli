@@ -480,7 +480,9 @@ export async function runChangeSetSubmissionCorpus(options: {
         `${stepId} compatibility text diverged from structured content`,
       );
     }
-    recordEvent("tool", tool, result.structuredContent);
+    recordEvent("tool", tool, stepId.startsWith("rejection/") && typeof arguments_.submissionKey === "string"
+      ? { submissionKeySha256: submissionKeyDigest(arguments_.submissionKey), result: result.structuredContent }
+      : result.structuredContent);
     return result.structuredContent;
   };
 
@@ -812,7 +814,7 @@ export async function runChangeSetSubmissionCorpus(options: {
     if (options.rejectionScenario !== undefined && options.rejectionScenario !== name) return;
     const before = await rejectionInventory(inventoryContext, input);
     recordEvent("assertion", `${name}:inventory-before`, {
-      entries: before, digest: rejectionInventoryDigest(before),
+      scope: "all-public-vault-files-directories-and-affected-absence", entries: before, digest: rejectionInventoryDigest(before),
     });
     const beforeSequence = eventSequence;
     const proof = await callSubmit(name, input, true);
@@ -844,7 +846,7 @@ export async function runChangeSetSubmissionCorpus(options: {
     };
     const after = await rejectionInventory(inventoryContext, input);
     recordEvent("assertion", `${name}:inventory-after`, {
-      entries: after, digest: rejectionInventoryDigest(after),
+      scope: "all-public-vault-files-directories-and-affected-absence", entries: after, digest: rejectionInventoryDigest(after),
     });
     if (rejectionInventoryDigest(before) !== rejectionInventoryDigest(after)) {
       throw new ChangeSetSubmissionCorpusError(`${name} mutated the Vault`);
@@ -858,8 +860,8 @@ export async function runChangeSetSubmissionCorpus(options: {
         candidateBundleSha256: inventoryContext.candidateBundleSha256,
         vaultIdSha256: sha256Hex(options.expectedVaultId),
       },
-      beforeInventory: { entries: before as ChangeSetCorpusEvidence["admission"]["rejectionClasses"][number]["beforeInventory"]["entries"], digest: rejectionInventoryDigest(before) },
-      afterInventory: { entries: after as ChangeSetCorpusEvidence["admission"]["rejectionClasses"][number]["afterInventory"]["entries"], digest: rejectionInventoryDigest(after) },
+      beforeInventory: { scope: "all-public-vault-files-directories-and-affected-absence", entries: before as ChangeSetCorpusEvidence["admission"]["rejectionClasses"][number]["beforeInventory"]["entries"], digest: rejectionInventoryDigest(before) },
+      afterInventory: { scope: "all-public-vault-files-directories-and-affected-absence", entries: after as ChangeSetCorpusEvidence["admission"]["rejectionClasses"][number]["afterInventory"]["entries"], digest: rejectionInventoryDigest(after) },
       proof, status: status.changeSet, terminal,
       eventOrder: { before: beforeSequence, submit: submitSequence, status: statusSequence, terminal: terminalSequence, after: eventSequence },
     });
@@ -1575,16 +1577,32 @@ export function composeChangeSetCorpusEvidence(options: {
       "Change-set corpus evidence requires admission assertions",
     );
   }
+  const offset = options.events.findIndex((event) => event.name === "change-set-corpus-began");
+  if (offset < 0) throw new ChangeSetSubmissionCorpusError("Change-set corpus event anchor is missing");
   for (const rejection of admission.rejectionClasses) {
+    const terminalEvent = options.events[rejection.eventOrder.terminal + offset - 1];
+    const health = parseHealthResult(terminalEvent?.detail);
+    if (terminalEvent?.name !== "vault_health" || health.outcome !== "observed" ||
+        sha256Hex(health.vault.id) !== rejection.binding.vaultIdSha256 ||
+        health.recovery.state !== rejection.terminal.recoveryState ||
+        health.queue.length !== rejection.terminal.queueLength ||
+        health.queue.currentExecutionId !== rejection.terminal.currentExecutionId ||
+        health.write.gate !== rejection.terminal.writeGate) {
+      throw new ChangeSetSubmissionCorpusError("Rejection terminal does not match observed idle health");
+    }
     for (const [sequence, tool, proof] of [
       [rejection.eventOrder.submit, "vault_change_set_submit", rejection.proof],
       [rejection.eventOrder.status, "vault_change_set_status", rejection.status],
     ] as const) {
-      const offset = options.events.findIndex((event) => event.name === "change-set-corpus-began");
       const event = options.events[sequence + offset - 1];
-      const raw = event?.detail as { changeSet?: { changeSetId?: unknown; state?: unknown; failure?: { code?: unknown } } } | undefined;
-      if (event?.name !== tool || raw?.changeSet?.changeSetId !== proof.changeSetId ||
-          raw.changeSet.state !== proof.state || raw.changeSet.failure?.code !== proof.failureCode) {
+      const detail = event?.detail as { submissionKeySha256?: unknown; result?: unknown } | undefined;
+      const raw = tool === "vault_change_set_submit"
+        ? parseChangeSetSubmitResult(detail?.result)
+        : parseChangeSetStatusResult(detail?.result);
+      const record = "changeSet" in raw ? raw.changeSet : undefined;
+      if (event?.name !== tool || detail?.submissionKeySha256 !== proof.submissionKeySha256 ||
+          record?.changeSetId !== proof.changeSetId || record.state !== proof.state ||
+          !("failure" in record) || record.failure?.code !== proof.failureCode) {
         throw new ChangeSetSubmissionCorpusError("Rejection proof does not match the observed submit/status event");
       }
     }
@@ -1608,7 +1626,7 @@ export function composeChangeSetCorpusEvidence(options: {
       rejectionClasses: admission.rejectionClasses.map((record) => ({
         ...record,
         eventOrder: Object.fromEntries(Object.entries(record.eventOrder).map(([key, sequence]) =>
-          [key, sequence + options.events.findIndex((event) => event.name === "change-set-corpus-began")])) as typeof record.eventOrder,
+          [key, sequence + offset])) as typeof record.eventOrder,
         noMutationDigestUnchanged: true,
       })),
       fifo: { ...admission.fifoReport },
@@ -1622,12 +1640,19 @@ export function composeChangeSetCorpusEvidence(options: {
     },
     replay: { ...replay.replayReport },
     residualCleanup: { ...admission.residualCleanup },
-    eventLog: options.events.map((event, index) => ({
-      sequence: index + 1,
-      kind: event.kind,
-      name: event.name,
-      detailSha256: eventSha256(event.detail),
-    })),
+    eventLog: options.events.map((event, index) => {
+      const rejection = admission.rejectionClasses.find((entry) =>
+        [entry.eventOrder.submit, entry.eventOrder.status, entry.eventOrder.terminal].includes(index + 1 - offset));
+      const detail = rejection === undefined ? event.detail
+        : rejection.eventOrder.terminal + offset === index + 1 ? { ...rejection.terminal, vaultIdSha256: rejection.binding.vaultIdSha256 }
+        : rejection.eventOrder.submit + offset === index + 1 ? rejection.proof : rejection.status;
+      return {
+        sequence: index + 1,
+        kind: event.kind,
+        name: event.name,
+        detailSha256: eventSha256(detail),
+      };
+    }),
     assertions: [...options.assertions],
     verdict: "passed",
   });

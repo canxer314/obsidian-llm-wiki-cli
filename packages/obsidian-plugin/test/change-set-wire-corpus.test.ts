@@ -475,7 +475,7 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
     })).toThrow("complete preflight rejection coverage");
   }, 60_000);
 
-  it.each(["before-inventory", "inventory-hash", "event-order", "status", "binding", "inventory-path", "submit-event"])("refuses fabricated rejection evidence: %s", async (corruption) => {
+  it.each(["before-inventory", "inventory-hash", "event-order", "status", "binding", "inventory-path", "submit-event", "blocked-terminal", "wrong-key"])("refuses fabricated rejection evidence: %s", async (corruption) => {
     const host = await arrangeVault();
     const bridge = await createCorpusBridge(host);
     const events: Array<{ kind: "transport" | "tool" | "assertion" | "cleanup"; name: string; detail: unknown }> = [];
@@ -491,6 +491,15 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
     if (corruption === "event-order") evidence.eventOrder.after = evidence.eventOrder.before;
     if (corruption === "status") evidence.status.state = "intent_applied";
     if (corruption === "binding") evidence.binding.runId = "other-run";
+    if (corruption === "wrong-key") evidence.proof.submissionKeySha256 = evidence.status.submissionKeySha256 = "d".repeat(64);
+    if (corruption === "blocked-terminal") {
+      const offset = events.findIndex(({ name }) => name === "change-set-corpus-began");
+      const event = events[evidence.eventOrder.terminal + offset - 1]!;
+      const health = structuredClone(event.detail) as { recovery: { state: string }; queue: { length: number } };
+      health.recovery.state = "blocked";
+      health.queue.length = 1;
+      event.detail = health;
+    }
     if (corruption === "submit-event") evidence.proof.changeSetId = evidence.status.changeSetId = "fabricated-identity";
     if (corruption === "inventory-path") {
       evidence.beforeInventory.entries[0]!.path = evidence.afterInventory.entries[0]!.path = "fabricated-path";

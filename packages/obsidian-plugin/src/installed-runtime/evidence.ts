@@ -259,6 +259,7 @@ const rejectionInventoryEntrySchema = z.discriminatedUnion("kind", [
   z.object({ path: z.string().min(1), kind: z.literal("absent") }).strict(),
 ]);
 const rejectionInventorySchema = z.object({
+  scope: z.literal("all-public-vault-files-directories-and-affected-absence"),
   entries: z.array(rejectionInventoryEntrySchema).min(1), digest: sha256Schema,
 }).strict();
 
@@ -363,6 +364,16 @@ export const REQUIRED_PREFLIGHT_REJECTIONS = [
   "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination",
 ] as const;
 
+export const PREFLIGHT_REJECTION_FOOTPRINTS: Readonly<Record<string, readonly { path: string; kind: "file" | "directory" | "absent" }[]>> = {
+  "rejection/stale-direct-target": [{ path: "ChangeSetProof/AdmissionProof.md", kind: "file" }],
+  "rejection/read-dependency-stale": [{ path: "Notes/Welcome.md", kind: "file" }, { path: "ChangeSetProof/ReadDep.md", kind: "absent" }],
+  "rejection/attachment-evidence-mismatch": [{ path: "ChangeSetProof/Evidence.bin", kind: "file" }, { path: "ChangeSetProof/copy.bin", kind: "absent" }],
+  "rejection/derived-target-file-parent": [{ path: "ChangeSetProof/AdmissionProof.md", kind: "file" }, { path: "ChangeSetProof/AdmissionProof.md/Child.md", kind: "absent" }],
+  "rejection/absence-condition": [{ path: "ChangeSetProof/AdmissionProof.md", kind: "file" }],
+  "rejection/non-unique-replacement": [{ path: "ChangeSetProof/Editable.md", kind: "file" }],
+  "rejection/occupied-destination": [{ path: "ChangeSetProof/AdmissionProof.md", kind: "file" }, { path: "ChangeSetProof/Editable.md", kind: "file" }],
+};
+
 export const changeSetCorpusEvidenceSchema = z
   .object({
     corpusId: z.literal("change-set-submission-proof"),
@@ -411,8 +422,28 @@ export const changeSetCorpusEvidenceSchema = z
           REQUIRED_PREFLIGHT_REJECTIONS.some((name) => corpus.admission.rejectionClasses.filter((entry) => entry.name === name).length !== 1)) {
         context.addIssue({ code: "custom", message: "Passing evidence requires complete preflight rejection coverage" });
       }
+      for (const field of ["changeSetId", "submissionKeySha256"] as const) {
+        if (new Set(corpus.admission.rejectionClasses.map(({ proof }) => proof[field])).size !== corpus.admission.rejectionClasses.length) {
+          context.addIssue({ code: "custom", message: "Each preflight rejection must have its own Submission Key and Change Set identity" });
+        }
+      }
       for (const rejection of corpus.admission.rejectionClasses) {
+        const expectedFailure = rejection.name === "rejection/non-unique-replacement" ? "exact_match_count_mismatch"
+          : ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch"].includes(rejection.name) ? "stale_observation" : "path_conflict";
+        if (rejection.failureCode !== expectedFailure) {
+          context.addIssue({ code: "custom", message: "Rejection scenario requires its prescribed failure branch" });
+        }
         const { beforeInventory: before, afterInventory: after, eventOrder: order } = rejection;
+        for (const inventory of [before, after]) {
+          const required = [{ path: "Notes", kind: "directory" }, { path: "ChangeSetProof", kind: "directory" },
+            ...(PREFLIGHT_REJECTION_FOOTPRINTS[rejection.name] ?? [])];
+          if (new Set(inventory.entries.map(({ path }) => path)).size !== inventory.entries.length ||
+              required.some(({ path, kind }) => !inventory.entries.some((entry) => entry.path === path && entry.kind === kind)) ||
+              corpus.beforeInventory.entries.some(({ path, sha256, sizeBytes }) =>
+                !inventory.entries.some((entry) => entry.path === path && entry.kind === "file" && entry.sha256 === sha256 && entry.sizeBytes === sizeBytes))) {
+            context.addIssue({ code: "custom", message: "Rejection inventory must cover the complete public footprint, seed bytes and derived directories" });
+          }
+        }
         const digest = (entries: typeof before.entries): string => createHash("sha256")
           .update(JSON.stringify(canonicalEvidenceValue(entries))).digest("hex");
         if (before.digest !== digest(before.entries) || after.digest !== digest(after.entries) ||
@@ -424,11 +455,11 @@ export const changeSetCorpusEvidenceSchema = z
           context.addIssue({ code: "custom", message: "Rejected submit requires unchanged raw-byte inventories around matching terminal proof and status" });
         }
         const eventChecks = [
-          [order.before, "assertion", `${rejection.name}:inventory-before`, { entries: before.entries, digest: before.digest }],
-          [order.submit, "tool", "vault_change_set_submit", null],
-          [order.status, "tool", "vault_change_set_status", null],
-          [order.terminal, "tool", "vault_health", null],
-          [order.after, "assertion", `${rejection.name}:inventory-after`, { entries: after.entries, digest: after.digest }],
+          [order.before, "assertion", `${rejection.name}:inventory-before`, before],
+          [order.submit, "tool", "vault_change_set_submit", rejection.proof],
+          [order.status, "tool", "vault_change_set_status", rejection.status],
+          [order.terminal, "tool", "vault_health", { ...rejection.terminal, vaultIdSha256: rejection.binding.vaultIdSha256 }],
+          [order.after, "assertion", `${rejection.name}:inventory-after`, after],
         ] as const;
         for (const [sequence, kind, name, detail] of eventChecks) {
           const event = corpus.eventLog[sequence - 1];
