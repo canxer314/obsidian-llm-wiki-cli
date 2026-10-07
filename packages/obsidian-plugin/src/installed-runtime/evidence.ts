@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { persistentFifoProofSchema } from "./fifo-observation.js";
 import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -290,6 +291,7 @@ const changeSetRejectionClassSchema = z
 /** FIFO/concurrency report: exactly-once admission plus contended-target exclusion. */
 const changeSetFifoReportSchema = z
   .object({
+    persistentObservation: persistentFifoProofSchema.optional(),
     concurrentSubmissions: z.number().int().positive(),
     applied: z.number().int().nonnegative(),
     distinctChangeSetIds: z.number().int().nonnegative(),

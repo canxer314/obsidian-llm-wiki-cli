@@ -321,6 +321,8 @@ export interface ChangeSetServiceOptions {
   runtimeState?: ChangeSetRuntimeStatePort;
   vaultId?: string;
   crashInjector?: ChangeSetCrashInjector;
+  /** Private installed acceptance seam; never exposed as a Bridge tool. */
+  acceptanceObserver?: (event: import("./installed-runtime/fifo-observation.js").FifoEvent) => void | Promise<void>;
   now?: () => number;
   createChangeSetId?: () => string;
 }
@@ -1723,7 +1725,7 @@ export class ChangeSetService {
       }
       if (options.runtimeState === undefined) throw error;
     }
-    if (!recoveryBlocked) await service.#resumeQueue();
+    if (!recoveryBlocked) await service.#withWriteLease(() => service.#resumeQueue());
     options.runtimeState?.setQueue(service.#queueState(null));
     return service;
   }
@@ -2177,6 +2179,7 @@ export class ChangeSetService {
         );
         if (current.execution !== undefined) current.execution.phase = "terminal";
       });
+      await this.#observeAcceptance(entry, { kind: "recovered", state: "intent_applied" });
       return;
     }
     if (frame.phase === "ROLLED_BACK") {
@@ -2416,11 +2419,21 @@ export class ChangeSetService {
     };
   }
 
+  #writeLeaseHeld = false;
+
+  async #observeAcceptance(entry: ChangeSetRegistryEntry, event: { kind: "enqueued" | "first-mutation" | "committed" } | { kind: "started"; writeLease: true } | { kind: "preflight"; accepted: boolean; writeLease: true } | { kind: "terminal" | "recovered"; state: "intent_applied" | "intent_not_applied" }): Promise<void> {
+    await this.#options.acceptanceObserver?.({ ...event, submissionKey: entry.submissionKey, changeSetId: entry.changeSetId, enqueueSeq: entry.enqueueSeq });
+  }
+
   async #executeEntry(changeSetId: string): Promise<void> {
     const entry = this.#state.entries.find((candidate) => candidate.changeSetId === changeSetId);
     if (entry === undefined) return;
     if (this.#mutationPlan(entry) !== null) {
       await this.#executeMutation(changeSetId);
+      const terminal = this.#state.entries.find(candidate => candidate.changeSetId === changeSetId);
+      if (terminal?.changeSet.state === "intent_applied" || terminal?.changeSet.state === "intent_not_applied") {
+        await this.#observeAcceptance(entry, { kind: "terminal", state: terminal.changeSet.state });
+      }
       return;
     }
     if (
@@ -2852,9 +2865,13 @@ export class ChangeSetService {
     if (head?.changeSetId !== entry.changeSetId) return;
     const plan = this.#mutationPlan(entry);
     if (plan === null) return;
+    if (!this.#writeLeaseHeld) throw new Error("Change Set execution requires the write lease");
+    await this.#observeAcceptance(entry, { kind: "started", writeLease: true });
     this.#currentExecutionId = entry.changeSetId;
     this.#options.runtimeState?.setQueue(this.#queueState(this.#currentExecutionId));
     const checked = await preflight(this.#options.dataSource, plan.input);
+    const preflightAccepted = checked.accepted && JSON.stringify(canonicalize(checked.preview)) === JSON.stringify(canonicalize(plan.preview));
+    await this.#observeAcceptance(entry, { kind: "preflight", accepted: preflightAccepted, writeLease: true });
     // The immutable preview is compared canonically: the registry round-trips
     // through JSON and the contract parser, which may order derived-effect
     // members differently than the raw preflight object (a real process-crash
@@ -3078,6 +3095,12 @@ export class ChangeSetService {
         await execution.persistRecoveryFrame(frame);
       }
       await execution.beginSemanticEvidence?.(semanticRequest);
+      let firstMutationObserved = false;
+      const observeFirstMutation = async (): Promise<void> => {
+        if (firstMutationObserved) return;
+        firstMutationObserved = true;
+        await this.#observeAcceptance(entry, { kind: "first-mutation" });
+      };
       let mutationIndex = 0;
       for (const directory of plan.directories) {
         if ((await execution.pathKind(directory)) !== null) {
@@ -3095,6 +3118,7 @@ export class ChangeSetService {
           ),
         };
         await execution.persistRecoveryFrame(frame);
+        await observeFirstMutation();
         await execution.publishDirectory(stageId, directory);
         await this.#crash(`after_mutation:${mutationIndex++}`);
       }
@@ -3113,6 +3137,7 @@ export class ChangeSetService {
         ) {
           throw new Error("File pre-state changed before mutation");
         }
+        await observeFirstMutation();
         await execution.publishFile!(file.stageId, file.path);
         await this.#crash(`after_file_mutation:${stagedPublishIndex++}`);
       }
@@ -3120,6 +3145,7 @@ export class ChangeSetService {
         if (mutation.kind === "move") {
           throw new Error("Note move mutation reached the unified executor");
         }
+        await observeFirstMutation();
         await MUTATION_KIND_DESCRIPTORS[mutation.kind].execute(execution, mutation);
         await this.#crash(`after_mutation:${mutationIndex++}`);
       }
@@ -3210,6 +3236,7 @@ export class ChangeSetService {
         finalPaths,
       });
       committedDurable = true;
+      await this.#observeAcceptance(entry, { kind: "committed" });
       await this.#crash("after_committed");
       await this.#updateEntry(entry.changeSetId, (current) => {
         current.changeSet = this.#appliedRecord(current, plan.preview, finalPaths);
@@ -3245,9 +3272,11 @@ export class ChangeSetService {
       release = resolve;
     });
     await previous;
+    this.#writeLeaseHeld = true;
     try {
       return await operation();
     } finally {
+      this.#writeLeaseHeld = false;
       release();
     }
   }
@@ -3442,6 +3471,7 @@ export class ChangeSetService {
     nextState.nextEnqueueSeq += 1;
     nextState.entries.push(entry);
     await this.#save(nextState);
+    await this.#observeAcceptance(entry, { kind: "enqueued" });
     return parseChangeSetSubmitResult({
       outcome: "registered",
       changeSet,

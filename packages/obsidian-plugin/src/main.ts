@@ -57,6 +57,7 @@ import {
   isRegisteredSubpathResult,
 } from "./obsidian-search-data-source.js";
 import { RecoveryJournalIncompatibleError } from "./recovery-journal.js";
+import { createInstalledFifoObserver } from "./installed-runtime/installed-fifo-observer.js";
 import {
   activateInstalledRuntimeAcceptanceDriver,
   type InstalledRuntimeAcceptanceActivation,
@@ -152,6 +153,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const activateAcceptanceDriver = adapter instanceof FileSystemAdapter;
+    const fifoObserver = activateAcceptanceDriver ? await createInstalledFifoObserver({
+      vaultPath: basePath, pluginId: this.manifest.id,
+      configDirectoryName: this.app.vault.configDir,
+    }) : undefined;
     let installedSemanticEvidence:
       | ReturnType<typeof createInstalledSemanticEvidenceScenarioControl>
       | undefined;
@@ -373,6 +378,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       },
       changeSetDataSource,
       changeSetExecution,
+      ...(fifoObserver === undefined ? {} : { acceptanceObserver: fifoObserver }),
       crashInjector: async (point, execution) => {
         const armed = armedCrashBoundary;
         if (armed === undefined || !armed.command.scenario.endsWith(`/${point}`)) return;
