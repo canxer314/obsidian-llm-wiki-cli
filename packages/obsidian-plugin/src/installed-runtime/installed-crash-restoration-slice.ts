@@ -32,6 +32,7 @@ export function verifyInstalledMoveObserverSource(record: InstalledCrashRestorat
   for (const [index, generation] of record.processGenerations.entries()) {
     const retained = context.observations[index]!;
     const { binding } = retained.verification;
+    if (index === record.processGenerations.length - 1 && retained.verification.forbidVaultMutationsAfterSequence === undefined) throw new Error("Installed move observer replay boundary missing from retained source context");
     const verified = verifyPluginEventObserverWindow(retained.verification);
     const source = retained.source;
     const window = { ...verified, supervisorPid: retained.supervisorPid, supervisedProcessTreeVerified: true as const };
@@ -178,6 +179,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     let observerBinding = observer?.binding;
     const observerPins: { generation: number; supervisorPid: number; binding: import("./plugin-event-observer.js").PluginEventObserverBinding }[] = [];
     let observerSequence = 0;
+    let replayObservationSequence: number | undefined;
     let observerFrom: InstalledCrashPoint = "after_prepared";
     let observerTo: InstalledCrashPoint = "after_prepared";
     const observerWindows: NonNullable<InstalledCrashRestorationSliceRecord["observer"]>["windows"][number][] = [];
@@ -212,7 +214,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       let events: Awaited<ReturnType<typeof observerEvents>> = [];
       await waitForCondition(async () => { try { events = await observerEvents(true); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
       const files = [...vault.seedNotes.map(note => ({ path: note.path, before: new TextEncoder().encode(note.content), after: new TextEncoder().encode(note.content) })), ...profile.files.map(file => ({ path: file.path, before: file.originalBytes, after: file.committedBytes }))];
-      const verification = { binding: observerBinding, candidatePluginId: options.candidate.identity.pluginId, files, maxSilenceMs: 2_000, requiredVisibleStates, requiredCallbackPaths: changed.map(file => file.path) };
+      const verification = { binding: observerBinding, candidatePluginId: options.candidate.identity.pluginId, files, maxSilenceMs: 2_000, requiredVisibleStates, requiredCallbackPaths: changed.map(file => file.path), ...(replayObservationSequence === undefined ? {} : { forbidVaultMutationsAfterSequence: replayObservationSequence }) };
       const window = { ...verifyPluginEventObserverWindow({ ...verification, events, expectedPid: events[0]!.payload.pid }), supervisorPid: processHandle.pid, supervisedProcessTreeVerified: true as const };
       const retained = await retainPluginEventObserverSource({ ...verification, window, scenario: running!.generation === 1 ? "success" : rollback && running!.generation === 2 ? "rollback" : "startup-recovery", reportDirectory: options.reportDirectory, configDirectoryName, supervisorPid: processHandle.pid });
       observerContext.observations.push(retained); observerSources.push(retained.source); observerWindows.push(window);
@@ -323,9 +325,9 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     const recoveredFrame = await readInstalledCrashJournal(journalPath);
     const payload = recoveredFrame.payload as { vaultId?: string; changeSetId?: string; input?: unknown };
     if (recoveredFrame.phase !== terminalPhase || payload.vaultId !== identity.vaultId || payload.changeSetId !== beforeRecord.changeSetId || JSON.stringify(payload.input) !== JSON.stringify(input)) throw new Error("Installed restart did not recover the bound durable terminal intent");
-    const replaySequence = observerBinding === undefined ? undefined : (await observerEvents()).length;
+    replayObservationSequence = observerBinding === undefined ? undefined : (await observerEvents()).length;
     const replay = await submit(input, !committed);
-    if (replaySequence !== undefined && (await observerEvents()).slice(replaySequence).some(event => {
+    if (replayObservationSequence !== undefined && (await observerEvents()).slice(replayObservationSequence).some(event => {
       const payload = event.payload as typeof event.payload & { path?: string };
       return ["create", "modify", "rename", "delete"].includes(payload.kind) && profile.files.some(file => file.path === payload.path);
     })) throw new Error("Installed move replay performed a duplicate closure rewrite");
@@ -361,11 +363,18 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
   } finally {
     try { await stop(); } catch { shutdownUnconfirmed = true; }
     if (shutdownUnconfirmed) throw new ObsidianProcessError("Generated crash-slice shutdown was not confirmed; roots retained", "obsidian_stop_failed");
+    if (failure !== undefined) {
+      // A rejected/unproven run is not terminal recovery evidence. Keep the driver,
+      // Journal and hidden mutation input together so a later startup can recover.
+      const journal = await readInstalledCrashJournalOrNull(join(vault.vaultPath, ".llm-wiki", "recovery-journal.bin")).then(frame => ({ verified: true as const, phase: frame?.phase ?? null })).catch(() => ({ verified: false as const, phase: null }));
+      const privateFootprint = await inspectCrashPrivateFootprint(vault.vaultPath).catch(() => null);
+      options.record("cleanup", `installed-crash-${label}-retained`, { attempted: false, cleanupSucceeded: false, rootsRetained: true, journal, privateFootprint, eventOrder });
+      throw failure;
+    }
     await acceptanceCleanup?.();
     const cleanup = await cleanupTestVault(vault);
     if (!cleanup.attempted || cleanup.residualPaths.length > 0) throw new Error("Installed crash slice left generated Vault residue");
     options.record("cleanup", `installed-crash-${label}-cleanup`, { residualPaths: cleanup.residualPaths.length, eventOrder });
-    if (failure !== undefined) throw failure;
   }
   if (proof === undefined) throw new Error("Installed crash slice did not produce proof");
   const record = { ...proof, processGenerations: generations, cleanupSucceeded: true as const, verdict: "passed" as const };

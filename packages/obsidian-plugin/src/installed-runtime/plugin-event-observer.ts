@@ -26,9 +26,13 @@ export function verifyPluginEventObserverWindow(options: {
   requiredTransition?: { path: string; states: readonly Uint8Array[] };
   /** Fixed crash runner's reached actions; default correctness corpus still requires every changed target. */
   requiredCallbackPaths?: readonly string[];
+  /** Private replay boundary: no second Vault mutation may occur through authenticated seal. */
+  forbidVaultMutationsAfterSequence?: number;
   files: readonly { path: string; before: Uint8Array | null; after: Uint8Array | null; allowFixtureLifecycleAbsence?: boolean }[]; maxSilenceMs: number;
 }) {
   const events = z.array(eventSchema).min(4).parse(options.events);
+  const replayBoundary = options.forbidVaultMutationsAfterSequence;
+  if (replayBoundary !== undefined && (!Number.isSafeInteger(replayBoundary) || replayBoundary < 3 || replayBoundary >= events.length || !events.slice(0, replayBoundary).some(event => event.payload.kind === "window-begin"))) throw new Error("Observer replay boundary is outside authenticated observation window");
   const files = new Map(options.files.map(file => [file.path, file]));
   let ready = false, started = false, active = false, ended = false, previousAt = 0;
   let eventCount = 0, indexingCount = 0;
@@ -43,6 +47,7 @@ export function verifyPluginEventObserverWindow(options: {
       if (p[key] !== options.binding[key]) throw new Error("Observer report identity binding changed");
     }
     if (p.pid !== options.expectedPid || p.sequence !== index + 1 || p.at < previousAt) throw new Error("Observer process/sequence order changed");
+    if (replayBoundary !== undefined && p.sequence > replayBoundary && ["create", "modify", "rename", "delete"].includes(p.kind)) throw new Error("Installed move replay performed a duplicate closure rewrite");
     if (active && p.at - previousAt > options.maxSilenceMs) throw new Error("Observer failed during observation window");
     previousAt = p.at;
     if (active && p.vaultId !== options.binding.vaultId) throw new Error("Observer event Managed Vault binding changed");

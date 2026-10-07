@@ -1501,6 +1501,14 @@ it("restores the complete note move and referrer closure through fixed Node MCP 
     const result = await runInstalledCrashRestorationSlice({ ...fixture.options, moveObserverContext });
     expect(result.records[0].observer?.windows).toHaveLength(2);
     expect(result.records[0]).toMatchObject({ mutationKind: "move_note", proofState: "intent_not_applied", cleanupSucceeded: true });
+    const { verifyInstalledMoveObserverSource } = await import("../src/installed-runtime/installed-crash-restoration-slice.js");
+    const replayContext = structuredClone(moveObserverContext) as import("../src/installed-runtime/installed-crash-restoration-slice.js").InstalledMoveObserverContext;
+    const finalVerification = replayContext.observations.at(-1)!.verification;
+    delete finalVerification.forbidVaultMutationsAfterSequence;
+    expect(() => verifyInstalledMoveObserverSource(result.records[0], replayContext)).toThrow(/replay boundary missing/);
+    // Consume the actual authenticated recovery callbacks after cleanup, not a fabricated public verdict.
+    finalVerification.forbidVaultMutationsAfterSequence = 3;
+    expect(() => verifyInstalledMoveObserverSource(result.records[0], replayContext)).toThrow(/duplicate closure rewrite/);
     expect(fixture.eventLogs).toHaveLength(2);
     expect(fixture.eventLogs[0]).toContain('"point":"after_file_mutation:0"');
   } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
