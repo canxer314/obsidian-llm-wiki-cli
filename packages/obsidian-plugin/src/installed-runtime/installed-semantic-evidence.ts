@@ -1063,7 +1063,7 @@ export function createInstalledSemanticEvidenceScenarioControl(
             ? {
                 submissionKey,
                 operations: [{
-                  operationId: `trash-${submissionKey}`,
+                  operationId: diagnosticSuffix === undefined ? `trash-${submissionKey}` : `privacy_operation_${diagnosticSuffix}`,
                   kind: "trash",
                   path: TRASH_NOTE_PATH,
                   targetVersion: `sha256:${createHash("sha256").update(trashNoteBytes).digest("hex")}`,

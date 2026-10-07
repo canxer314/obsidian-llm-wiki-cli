@@ -59,6 +59,21 @@ describe("installed diagnostic privacy bundle seam", () => {
       await expect(prepareInstalledDiagnosticPrivacyFixture(vault, "sources", "vault-a")).rejects.toMatchObject({ code: "EEXIST" });
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+  it.each(["request", "operation-id"])("rejects a deterministic %s token leaked alone rather than the full private request", async category => {
+    const root = await mkdtemp(join(tmpdir(), "privacy-request-token-"));
+    try {
+      const vault = await provisionTestVault({ workingDirectory: root, runId: "sources" });
+      const fixture = await prepareInstalledDiagnosticPrivacyFixture(vault, "sources", "vault-a");
+      const suffix = fixture.environment.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER.slice("privacy_environment_".length);
+      const requestToken = `privacy_request_${suffix}`;
+      const operationId = `privacy_operation_${suffix}`;
+      const privateMarkers = await observeInstalledDiagnosticPrivacySources({ fixture, vault,
+        journalPayload: { vaultId: "private_observed_vault", changeSetId: "private_observed_change", input: { submissionKey: `installed-semantic-${requestToken}`, operations: [{ operationId }] }, footprint: [{ before: { bytesBase64: Buffer.from(`privacy_before_image_${suffix}`).toString("base64") } }] },
+        vaultId: "private_observed_vault", capabilityToken: "private_observed_capability", environment: fixture.environment, username: "private_observed_username" });
+      const bundle = resign({ ...createStandardDiagnosticBundle(evidence), machineEvents: [{ sequence: 1, code: "recovery_blocked", stackSymbols: [category === "request" ? requestToken : operationId] }] });
+      expect(() => verifyInstalledDiagnosticPrivacyBundle(bundle, privateMarkers)).toThrow("private marker");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("rejects a before-image token leaked without the rest of the private before-image bytes", async () => {
     const root = await mkdtemp(join(tmpdir(), "privacy-before-token-"));
     try {

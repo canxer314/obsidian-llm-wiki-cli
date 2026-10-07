@@ -119,7 +119,7 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
           await client.connect(new StreamableHTTPClientTransport(bridge.endpoint, { requestInit: { headers: { "X-Expected-Vault-ID": vaultPath } } }));
           try {
             const result = await client.callTool({ name: "vault_change_set_submit", arguments: { submissionKey,
-              operations: [{ operationId: "trash", kind: "trash", path: "blocked.md", targetVersion: contentVersion(bytes) }] } });
+              operations: [{ operationId: diagnosticSources ? `privacy_operation_${suffix}` : "trash", kind: "trash", path: "blocked.md", targetVersion: contentVersion(bytes) }] } });
             if (result.structuredContent === undefined) throw new Error(JSON.stringify(result));
             const submitted = parseChangeSetSubmitResult(result.structuredContent);
             expect(submitted.outcome).toBe("registered");

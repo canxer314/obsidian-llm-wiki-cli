@@ -54,7 +54,7 @@ export async function observeInstalledDiagnosticPrivacySources(options: {
   for (const [key, value] of Object.entries(options.fixture.environment)) {
     if (options.environment[key] !== value) throw new Error("Installed diagnostic process environment source was not observed");
   }
-  const payload = options.journalPayload as { vaultId?: unknown; changeSetId?: unknown; input?: { submissionKey?: unknown }; effects?: unknown; targets?: unknown } | null;
+  const payload = options.journalPayload as { vaultId?: unknown; changeSetId?: unknown; input?: { submissionKey?: unknown; operations?: readonly { operationId?: unknown }[] }; effects?: unknown; targets?: unknown } | null;
   if (payload === null || typeof payload !== "object" || payload.vaultId !== options.vaultId || typeof payload.changeSetId !== "string" ||
       payload.input === undefined || typeof payload.input.submissionKey !== "string") throw new Error("Installed diagnostic journal request/identity sources are missing");
   const beforeImages: string[] = [];
@@ -80,6 +80,9 @@ export async function observeInstalledDiagnosticPrivacySources(options: {
   if (options.username === undefined || options.username.length === 0) throw new Error("Installed diagnostic process username source was not observed");
   return [...options.fixture.markers,
     { category: "request", value: JSON.stringify(payload.input) },
+    { category: "request", value: payload.input.submissionKey.slice("installed-semantic-".length) },
+    ...(payload.input.operations ?? []).filter(operation => typeof operation.operationId === "string" && operation.operationId.length > 0)
+      .map(operation => ({ category: "raw-id" as const, value: operation.operationId as string })),
     ...beforeImages.flatMap(value => [{ category: "before-image" as const, value },
       ...[...value.matchAll(/privacy_before_image_[a-f0-9]{20}/gu)].map(([token]) => ({ category: "before-image" as const, value: token }))]),
     { category: "raw-key", value: payload.input.submissionKey },
