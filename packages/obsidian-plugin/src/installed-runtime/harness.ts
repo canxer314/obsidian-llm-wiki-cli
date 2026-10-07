@@ -1152,9 +1152,9 @@ export async function runInstalledRuntimeHarness(
               }
               try {
               contractCrossCalls.push(await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId: scenario.id, endpoint, expectedVaultId: identity.vaultId, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate!.identity.bundleSha256, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: vault.seedManifestSha256 }, quotaMetadataPath: "ContractFixtures/QuotaMetadata.md", seedNotes: vault.seedNotes, invalidUtf8Path: "ContractFixtures/InvalidUtf8.md", readFixtureBytes: async path => {
-                if (!["Projects/Bridge.md", "ContractFixtures/InvalidUtf8.md"].includes(path)) throw new Error("Contract fixture byte observation escaped generated scope");
+                if (!["Projects/Bridge.md", "ContractFixtures/InvalidUtf8.md", "Notes/Transport.md"].includes(path)) throw new Error("Contract fixture byte observation escaped generated scope");
                 return new Uint8Array(await readFile(join(vault.vaultPath, path)));
-              }, continuationTiming: options.contractContinuationTiming, restart: async () => {
+              }, continuationTiming: options.contractContinuationTiming, observeProgramState: async () => ({ registryBytes: new Uint8Array(await readFile(join(vault.vaultPath, configDirectoryName, "plugins", state.candidate!.identity.pluginId, "data.json"))), inventory: (await takeInventory(vault.vaultPath)).filter(entry => !entry.path.startsWith(configDirectoryName + "/") && !entry.path.startsWith(".llm-wiki/")) }), restart: async () => {
                 await stopObsidian();
                 handle = await options.processControl.start({ vaultPath: vault.vaultPath, profileDirectory: vault.profileDirectory });
                 if (profile === null || options.probe.probeRunning === undefined) throw new Error("Contract restart requires a registered installed runtime probe");

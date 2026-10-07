@@ -238,6 +238,53 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     row.evidenceSha256 = contractDigest(row.proof);
     expect(() => createAcceptanceMatrixReport(forged)).toThrow(/source Vault.*(record|provenance)/i);
   });
+  it("rejects replay observation strings without durable registry and raw inventory proof", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    row.proof.programProof = null; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/durable.*(proof|registry)/i);
+  });
+  it("rejects a durable replay entry borrowed from a different canonical request", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    for (const state of [row.proof.programProof!.beforeRepeat, row.proof.programProof!.afterRepeat]) state.entries[0]!.fingerprint = "sha256:" + "b".repeat(64);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/durable.*request|fingerprint/i);
+  });
+  it("rejects an empty public inventory claiming replay executed once", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    row.proof.programProof!.beforeRepeat.inventory = []; row.proof.programProof!.afterRepeat.inventory = [];
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/public.*inventory|first.*effect/i);
+  });
+  it("rejects replay record digests detached from actual status wire output", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "change-set-same-key-replay")!;
+    row.proof.programProof!.responseRecordSha256 = "b".repeat(64);
+    for (const state of [row.proof.programProof!.beforeRepeat, row.proof.programProof!.afterRepeat]) state.entries[0]!.recordSha256 = "b".repeat(64);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/wire.*record|record.*wire/i);
+  });
+  it("rejects quota lifecycle reports without rejected-issuance capacity evidence", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "continuation-quota-and-lifecycle-cleanup")!;
+    row.observations = row.observations.filter(entry => entry.name !== "rejected-issuance-has-no-retained-authority"); row.proof.observations = row.observations; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/cross.call behavior.*quota/i);
+  });
+  it("rejects graph transition declarations without their actual discover request and output", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    row.proof.graphTransitions = []; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/graph.*(wire|transition).*proof/i);
+  });
+  it("rejects Semantic successor summaries missing one actual graph transition", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    row.observations = row.observations.filter(entry => entry.facts.transition !== "rename"); row.proof.observations = row.observations;
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/(?:successor|graph).*transition/i);
+  });
   it("does not replace successor graph cross-call behavior with native snapshot summary", () => {
     const forged = evidence();
     const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;

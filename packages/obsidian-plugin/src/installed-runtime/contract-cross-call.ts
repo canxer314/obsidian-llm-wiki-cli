@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import * as contract from "@llm-wiki/vault-contracts";
 
+import { parseChangeSetRegistryState } from "../change-set.js";
 import { ContractPackageCorpusError, contractDigest, validateContractDependentReport, type ContractToolName, type VersionContractPackage } from "./contract-package-corpus.js";
 
 export interface ContractCrossCallEvidence {
@@ -13,6 +14,8 @@ export interface ContractCrossCallEvidence {
   readonly authoritySha256: string;
   readonly binding: import("./contract-package-corpus.js").ContractPackageCorpusEvidence["binding"] | null;
   readonly observations: readonly { sequence: number; name: string; requestSha256: string; responseSha256: string; facts: Readonly<Record<string, string | number | boolean>> }[];
+  readonly graphTransitions?: import("zod").z.infer<typeof import("./contract-package-corpus.js").contractGraphTransitionSchema>[];
+  readonly programProof?: import("zod").z.infer<typeof import("./contract-package-corpus.js").contractProgramProofSchema> | null;
   readonly cleanup: { readonly sessionsClosed: boolean };
   readonly verdict: "passed" | "blocked";
   readonly requiredCorpus: string | null;
@@ -41,10 +44,12 @@ export async function runContractCrossCallScenario(options: {
   readonly endpoint: URL;
   readonly expectedVaultId: string;
   readonly seedNotes?: readonly { path: string; content: string }[];
+  readonly observeProgramState?: () => Promise<{ registryBytes: Uint8Array; inventory: readonly { path: string; sha256: string; sizeBytes: number }[] }>;
   readonly restart?: () => Promise<{ endpoint: URL; expectedVaultId: string }>;
   readonly invalidUtf8Path?: string;
   readonly readFixtureBytes?: (path: string) => Promise<Uint8Array | null>;
   readonly continuationTiming?: "full-real-time" | "binding-only";
+  readonly submissionKeySuffix?: string;
   readonly quotaMetadataPath?: string;
   readonly binding?: NonNullable<ContractCrossCallEvidence["binding"]>;
   readonly dependency?: NonNullable<ContractCrossCallEvidence["dependency"]>;
@@ -54,6 +59,7 @@ export async function runContractCrossCallScenario(options: {
   if (scenario === undefined) throw new ContractPackageCorpusError("Unknown cross-call scenario");
   if (options.endpoint.protocol !== "http:" || options.endpoint.hostname !== "127.0.0.1" || options.endpoint.pathname !== "/mcp" || options.expectedVaultId.length === 0) throw new ContractPackageCorpusError("Cross-call requires identity-bound loopback MCP");
   const observations: ContractCrossCallEvidence["observations"][number][] = [];
+  const graphTransitions: NonNullable<ContractCrossCallEvidence["graphTransitions"]> = [];
   const clients: Client[] = [];
   const observe = (name: string, input: unknown, output: unknown, facts: Record<string, string | number | boolean>): void => { observations.push({ sequence: observations.length + 1, name, requestSha256: contractDigest(input), responseSha256: contractDigest(output), facts }); };
   const connect = async (): Promise<Client> => {
@@ -70,6 +76,13 @@ export async function runContractCrossCallScenario(options: {
     return parsed;
   };
   let requiredCorpus: string | null = null;
+  let programProof: ContractCrossCallEvidence["programProof"] = null;
+  const observeProgramState = async () => {
+    const raw = await options.observeProgramState!();
+    const parsed = JSON.parse(Buffer.from(raw.registryBytes).toString("utf8"));
+    const registry = parseChangeSetRegistryState("changeSets" in parsed ? parsed.changeSets : parsed);
+    return { registrySha256: createHash("sha256").update(raw.registryBytes).digest("hex"), nextEnqueueSeq: registry.nextEnqueueSeq, entries: registry.entries.map(entry => ({ submissionKeySha256: contractDigest(entry.submissionKey), fingerprint: entry.fingerprint, changeSetIdSha256: contractDigest(entry.changeSetId), enqueueSeq: entry.enqueueSeq, recordSha256: contractDigest(entry.changeSet), state: entry.changeSet.state, phase: entry.execution?.phase ?? null })), inventory: [...raw.inventory].sort((a, b) => a.path.localeCompare(b.path)) };
+  };
   try {
     switch (scenario.execution) {
       case "identity-health": {
@@ -106,13 +119,37 @@ export async function runContractCrossCallScenario(options: {
         if (fixture === undefined) throw new ContractPackageCorpusError("Cross-call program missing");
           const program = JSON.parse(await readFile(join(options.authority.packageRoot, "fixtures/v1", fixture), "utf8")) as { steps: { call: string; arguments: Record<string, unknown>; capture?: string; expect: { outcome?: string; lookup?: string; state?: string; failureCode?: string; sameChangeSetAs?: string; code?: string } }[] };
         const captured = new Map<string, string>(); const client = await connect();
-        for (const step of program.steps) {
+        const needsRepeatProof = ["change-set-same-key-replay", "change-set-key-conflict"].includes(scenario.id);
+        if (needsRepeatProof && options.observeProgramState === undefined) { requiredCorpus = "durable-registry-public-inventory"; break; }
+        const beforeSubmission = needsRepeatProof ? await observeProgramState() : null;
+        let beforeRepeat: Awaited<ReturnType<typeof observeProgramState>> | null = null;
+        let responseRecordSha256 = "";
+        for (const [stepIndex, step] of program.steps.entries()) {
           const tool = step.call === "submit" ? "vault_change_set_submit" : "vault_change_set_status";
           const value = await call(client, tool, step.arguments) as { outcome?: string; lookup?: string; code?: string; changeSet?: { changeSetId: string; state: string; failure?: { code: string } } };
           if (step.expect.outcome !== undefined && value.outcome !== step.expect.outcome || step.expect.lookup !== undefined && value.lookup !== step.expect.lookup || step.expect.code !== undefined && value.code !== step.expect.code || step.expect.failureCode !== undefined && value.changeSet?.failure?.code !== step.expect.failureCode || step.expect.state !== undefined && (step.expect.state === "in_progress" ? !["in_progress", "intent_applied"].includes(value.changeSet?.state ?? "") : value.changeSet?.state !== step.expect.state) || step.expect.sameChangeSetAs !== undefined && value.changeSet?.changeSetId !== captured.get(step.expect.sameChangeSetAs)) throw new ContractPackageCorpusError("Cross-call program behavior mismatch");
           // Installed execution can terminalize before the response; never demand a synthetic in_progress state.
           if (step.capture !== undefined && value.changeSet !== undefined) captured.set(step.capture, value.changeSet.changeSetId);
           observe("program-expectation", step.expect, value, { expectationMatched: true });
+          if (needsRepeatProof && stepIndex === 0) {
+            const key = step.arguments.submissionKey;
+            const deadline = Date.now() + 30_000;
+            while (true) {
+              const status = contract.parseChangeSetStatusResult(await call(client, "vault_change_set_status", { submissionKey: key }));
+              if (status.lookup === "found" && status.changeSet.state === "intent_applied") { responseRecordSha256 = contractDigest(status.changeSet); observe("durable-status-record", { submissionKey: key }, status, { recordSha256: responseRecordSha256, changeSetIdSha256: contractDigest(status.changeSet.changeSetId) }); break; }
+              if (status.lookup === "found" && status.changeSet.state !== "in_progress" || Date.now() >= deadline) throw new ContractPackageCorpusError("Replay baseline did not durably apply");
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            beforeRepeat = await observeProgramState();
+          }
+        }
+        if (needsRepeatProof) {
+          const afterRepeat = await observeProgramState();
+          const keySha256 = contractDigest(program.steps[0]!.arguments.submissionKey);
+          const entry = beforeRepeat!.entries.filter(entry => entry.submissionKeySha256 === keySha256);
+          if (entry.length !== 1 || entry[0]!.state !== "intent_applied" || entry[0]!.recordSha256 !== responseRecordSha256 || contractDigest(beforeRepeat) !== contractDigest(afterRepeat) || beforeSubmission!.entries.some(entry => entry.submissionKeySha256 === keySha256) || beforeRepeat!.nextEnqueueSeq !== beforeSubmission!.nextEnqueueSeq + 1) throw new ContractPackageCorpusError("Replay/conflict changed durable registry or public raw bytes");
+          programProof = { submissionKeySha256: keySha256, requestSha256: contractDigest(program.steps[0]!.arguments), responseRecordSha256, beforeSubmission: beforeSubmission!, beforeRepeat: beforeRepeat!, afterRepeat };
+          observe("durable-repeat-no-side-effects", { requestSha256: programProof.requestSha256 }, programProof, { durableRecordPreserved: true, completePublicInventoryPreserved: true, noDuplicateEnqueue: true });
         }
         break;
       }
@@ -123,7 +160,8 @@ export async function runContractCrossCallScenario(options: {
         const first = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: source.path }] }));
         if (!("outcome" in first) || first.outcome !== "page" || first.continuation === null) throw new ContractPackageCorpusError("Frozen scenario did not issue transport pages");
         const changed = source.content + "\ncontract-frozen-successor\n";
-        const args = { submissionKey: "contract-frozen-" + options.authority.manifestSha256.slice(0, 12), operations: [{ operationId: "change-source", kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(source.content), edit: { kind: "replace_whole", replacement: changed.startsWith("﻿") ? changed.slice(1) : changed } }] };
+        const args = { submissionKey: "contract-frozen-" + options.authority.manifestSha256.slice(0, 12) + (options.submissionKeySuffix === undefined ? "" : "-" + options.submissionKeySuffix), operations: [{ operationId: "change-source", kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(source.content), edit: { kind: "replace_whole", replacement: changed.startsWith("﻿") ? changed.slice(1) : changed } }] };
+        try {
         const submit = contract.parseChangeSetSubmitResult(await call(client, "vault_change_set_submit", args));
         if (submit.outcome !== "registered" || submit.changeSet.state === "intent_not_applied") { requiredCorpus = "mutation-executor"; break; }
         let terminal: string = submit.changeSet.state;
@@ -149,14 +187,30 @@ export async function runContractCrossCallScenario(options: {
         }
         if (reconstructed !== source.content) throw new ContractPackageCorpusError("Frozen continuation changed with source bytes");
         observe("frozen-after-source-change", { beforeSha256: contractDigestBytes(source.content) }, { afterSha256: contractDigestBytes(changed), reconstructedSha256: contractDigestBytes(reconstructed) }, { sourceChanged: true, exactFrozenBytes: true, pageCount: pages.length, sizeBytes: offset });
+        } finally {
+        const cleanupStatusDeadline = Date.now() + 30_000;
+        let mutationApplied = false;
+        while (true) {
+          const status = contract.parseChangeSetStatusResult(await call(client, "vault_change_set_status", { submissionKey: args.submissionKey }));
+          if (status.lookup === "found" && status.changeSet.state === "intent_applied") { mutationApplied = true; break; }
+          if (status.lookup === "found" && status.changeSet.state !== "in_progress") break;
+          if (status.lookup !== "found" || Date.now() >= cleanupStatusDeadline) throw new ContractPackageCorpusError("Frozen source mutation state uncertain; cleanup cannot be confirmed");
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        if (mutationApplied) {
         const restore = { submissionKey: args.submissionKey + "-restore", operations: [{ operationId: "restore-source", kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(changed), edit: { kind: "replace_whole", replacement: source.content.startsWith("﻿") ? source.content.slice(1) : source.content } }] };
         await call(client, "vault_change_set_submit", restore);
         const restoreDeadline = Date.now() + 30_000;
         while (true) {
           const status = contract.parseChangeSetStatusResult(await call(client, "vault_change_set_status", { submissionKey: restore.submissionKey }));
           if (status.lookup === "found" && status.changeSet.state === "intent_applied") break;
+          if (status.lookup === "found" && status.changeSet.state !== "in_progress") throw new ContractPackageCorpusError("Frozen source cleanup rejected; bytes may remain changed");
           if (Date.now() >= restoreDeadline) throw new ContractPackageCorpusError("Frozen source cleanup unconfirmed");
           await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        }
+        const restored = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "metadata", path: source.path }] }));
+        if (!("outcome" in restored) || restored.outcome !== "items" || restored.items[0]?.outcome !== "satisfied" || restored.items[0].result.contentVersion !== "sha256:" + contractDigestBytes(source.content)) throw new ContractPackageCorpusError("Frozen source cleanup bytes unconfirmed");
         }
         break;
       }
@@ -237,7 +291,8 @@ export async function runContractCrossCallScenario(options: {
         }
         const refused = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }] }));
         if (!("code" in refused) || refused.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Ninth live chain accepted");
-        for (const initial of tokens) {
+        let replacementToken: string | null = null;
+        for (const [chainIndex, initial] of tokens.entries()) {
           let token: string | null = initial;
           while (token !== null) {
             const page = contract.parseContinueResult(await call(client, "vault_continue", { continuation: token }));
@@ -246,7 +301,18 @@ export async function runContractCrossCallScenario(options: {
           }
           const replay = contract.parseContinueResult(await call(client, "vault_continue", { continuation: initial }));
           if (!("code" in replay) || replay.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Quota consumed token still live");
+          if (chainIndex === 0) {
+            const replacement = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }] }));
+            if (!("outcome" in replacement) || replacement.outcome !== "page" || replacement.continuation === null) throw new ContractPackageCorpusError("Rejected issuance leaked chain authority after one completion");
+            replacementToken = replacement.continuation;
+          }
         }
+        while (replacementToken !== null) {
+          const page = contract.parseContinueResult(await call(client, "vault_continue", { continuation: replacementToken }));
+          if (!("outcome" in page) || page.outcome !== "page") throw new ContractPackageCorpusError("Replacement chain unavailable after rejected issuance");
+          replacementToken = page.continuation;
+        }
+        observe("rejected-issuance-has-no-retained-authority", {}, refused, { replacementAcceptedImmediately: true, remainingSevenPreserved: true, rejectedTokenPublished: false });
         const next = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }] }));
         if (!("outcome" in next) || next.outcome !== "page" || next.continuation === null) throw new ContractPackageCorpusError("Completion did not release capacity");
         await client.close();
@@ -355,6 +421,7 @@ export async function runContractCrossCallScenario(options: {
           const inherited = options.predecessorProof;
           if (inherited !== undefined) {
             if (!isExecutedContractCrossCallEvidence(inherited, options.endpoint.toString(), contractDigest(options.expectedVaultId)) || inherited.scenarioId !== scenario.id || inherited.authoritySha256 !== options.authority.manifestSha256) throw new ContractPackageCorpusError("Frozen predecessor report is not the executed scenario");
+            graphTransitions.push(...(inherited.graphTransitions ?? []).map(entry => structuredClone(entry)));
             for (const entry of inherited.observations.filter(entry => entry.name !== "validated-installed-dependent-proof")) observations.push({ ...entry, sequence: observations.length + 1 });
           } else {
             const source = options.seedNotes?.find(note => note.path === "Notes/Transport.md");
@@ -396,6 +463,70 @@ export async function runContractCrossCallScenario(options: {
             } finally { await apply("restore-link", changed, source.content); }
             const restored = contract.parseDiscoverResult(await call(client, "vault_discover", query));
             if (restored.outcome !== "results" || restored.items.length !== 0) throw new ContractPackageCorpusError("Successor graph cleanup did not remove relation");
+            const targetPath = "Notes/ContractSuccessorTarget.md";
+            const renamedPath = "Notes/ContractSuccessorRenamed.md";
+            const targetContent = "# Contract successor target\n";
+            const linkedSource = source.content + "\n[[ContractSuccessorTarget]]\n";
+            const mutate = async (suffix: string, operations: Record<string, unknown>[]) => {
+              const args = { submissionKey: `contract-successor-${suffix}-${options.authority.manifestSha256.slice(0, 12)}`, operations };
+              const submitted = contract.parseChangeSetSubmitResult(await call(client, "vault_change_set_submit", args));
+              if (submitted.outcome !== "registered") throw new ContractPackageCorpusError("Successor transition was not registered");
+              const deadline = Date.now() + 30_000;
+              while (true) {
+                const status = contract.parseChangeSetStatusResult(await call(client, "vault_change_set_status", { submissionKey: args.submissionKey }));
+                if (status.lookup === "found" && status.changeSet.state === "intent_applied") return;
+                if (status.lookup === "found" && status.changeSet.state !== "in_progress" || Date.now() >= deadline) throw new ContractPackageCorpusError("Successor transition did not apply");
+                await new Promise(resolve => setTimeout(resolve, 25));
+              }
+            };
+            const graphQuery = (target: string, unresolved: boolean) => ({ query: { all: [{ path: { exact: source.path } }, unresolved ? { unresolvedLink: { target } } : { graph: { relation: "links_to", path: target, maxDepth: 1 } }] }, projection: { matches: false, references: true }, order: { by: "path", direction: "asc" }, page: { maxItems: 100, continuation: null } });
+            const sourceBytes = async () => {
+              const bytes = await options.readFixtureBytes?.(source.path);
+              if (bytes === undefined || bytes === null) throw new ContractPackageCorpusError("Successor transition raw source bytes absent");
+              return Buffer.from(bytes).toString("utf8");
+            };
+            const transition = async (name: string, operations: Record<string, unknown>[], target: string, unresolved: boolean) => {
+              const acceptedBytes = await sourceBytes();
+              const frozen = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: source.path }] }));
+              if (!("outcome" in frozen) || frozen.outcome !== "page" || frozen.continuation === null) throw new ContractPackageCorpusError("Successor transition frozen predecessor absent");
+              const before = contract.parseDiscoverResult(await call(client, "vault_discover", graphQuery(target, unresolved)));
+              await mutate(name, operations);
+              const after = contract.parseDiscoverResult(await call(client, "vault_discover", graphQuery(target, unresolved)));
+              const successorBytes = await sourceBytes();
+              if (before.outcome !== "results" || after.outcome !== "results" || before.items.length !== 0 || after.items.length !== 1 || after.items[0]?.path !== source.path || after.items[0].contentVersion !== "sha256:" + contractDigestBytes(successorBytes) || !after.items[0].references?.some(reference => unresolved ? reference.target === target && reference.resolvedPath === null : reference.resolvedPath === target)) throw new ContractPackageCorpusError("Successor transition graph is not coherent with raw bytes");
+              let page = frozen; let reconstructed = ""; let offset = 0;
+              while (true) {
+                for (const item of page.items) {
+                  if (!("content" in item) || !("start" in item) || item.start !== offset || Buffer.byteLength(item.content) !== item.end - item.start) throw new ContractPackageCorpusError("Successor transition predecessor ranges invalid");
+                  reconstructed += item.content; offset = item.end;
+                }
+                if (page.continuation === null) break;
+                const next = contract.parseContinueResult(await call(client, "vault_continue", { continuation: page.continuation }));
+                if (!("outcome" in next) || next.outcome !== "page") throw new ContractPackageCorpusError("Successor transition invalidated frozen predecessor");
+                page = next;
+              }
+              if (reconstructed !== acceptedBytes) throw new ContractPackageCorpusError("Successor transition predecessor bytes changed");
+              graphTransitions.push({ transition: name as "unresolved-link" | "target-creation" | "rename" | "deletion", request: contract.parseDiscoverInput(graphQuery(target, unresolved)), before, after, acceptedBytesSha256: contractDigestBytes(acceptedBytes), reconstructedSha256: contractDigestBytes(reconstructed), successorBytesSha256: contractDigestBytes(successorBytes) });
+              observe("successor-transition-frozen-predecessor", { transition: name, beforeGraphSha256: contractDigest(before), acceptedBytesSha256: contractDigestBytes(acceptedBytes) }, { afterGraphSha256: contractDigest(after), successorBytesSha256: contractDigestBytes(successorBytes), reconstructedSha256: contractDigestBytes(reconstructed) }, { transition: name, beforeGraphSha256: contractDigest(before), afterGraphSha256: contractDigest(after), acceptedBytesSha256: contractDigestBytes(acceptedBytes), reconstructedSha256: contractDigestBytes(reconstructed), successorContentVersion: after.items[0].contentVersion, graphChanged: true, exactFrozenBytes: true });
+            };
+            if (options.readFixtureBytes === undefined) { requiredCorpus = "successor-graph-byte-observation"; break; }
+            try {
+              await transition("unresolved-link", [{ operationId: "add-unresolved", kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(source.content), edit: { kind: "replace_whole", replacement: linkedSource.startsWith("﻿") ? linkedSource.slice(1) : linkedSource } }], "ContractSuccessorTarget", true);
+              await transition("target-creation", [{ operationId: "create-target", kind: "create_note", path: targetPath, content: targetContent, ifExists: "reject" }], targetPath, false);
+              await transition("rename", [{ operationId: "rename-target", kind: "move", sourcePath: targetPath, destinationPath: renamedPath, targetVersion: "sha256:" + contractDigestBytes(targetContent), linkEffect: "update_resolved_references" }], renamedPath, false);
+              await transition("deletion", [{ operationId: "delete-target", kind: "trash", path: renamedPath, targetVersion: "sha256:" + contractDigestBytes(targetContent) }], "ContractSuccessorRenamed", true);
+            } finally {
+              const current = await sourceBytes();
+              if (current !== source.content) await mutate("restore-transitions", [{ operationId: "restore-transitions", kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(current), edit: { kind: "replace_whole", replacement: source.content.startsWith("﻿") ? source.content.slice(1) : source.content } }]);
+              for (const path of [targetPath, renamedPath]) {
+                const metadata = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "metadata", path }] }));
+                if (!("outcome" in metadata) || metadata.outcome !== "items") throw new ContractPackageCorpusError("Successor cleanup metadata unavailable");
+                const item = metadata.items[0];
+                if (item?.outcome === "satisfied") await mutate("cleanup-" + (path === targetPath ? "target" : "renamed"), [{ operationId: "cleanup-target", kind: "trash", path, targetVersion: item.result.contentVersion }]);
+                else if (item?.outcome !== "not_satisfied") throw new ContractPackageCorpusError("Successor cleanup absence unconfirmed");
+              }
+              if (await sourceBytes() !== source.content) throw new ContractPackageCorpusError("Successor cleanup raw source differs");
+            }
             observe("successor-graph-frozen-predecessor", {}, { beforeSha256: contractDigestBytes(source.content), changedSha256: contractDigestBytes(changed) }, { graphChanged: true, frozenPredecessorExact: true, restored: true });
           }
         }
@@ -409,7 +540,7 @@ export async function runContractCrossCallScenario(options: {
       }
     }
   } finally { await Promise.all(clients.map(client => client.close())); }
-  const evidence: ContractCrossCallEvidence = { scenarioId: scenario.id, authoritySha256: options.authority.manifestSha256, binding: options.binding ?? null, observations, cleanup: { sessionsClosed: true }, verdict: requiredCorpus === null ? "passed" : "blocked", requiredCorpus, dependency: options.dependency ?? null };
+  const evidence: ContractCrossCallEvidence = { scenarioId: scenario.id, authoritySha256: options.authority.manifestSha256, binding: options.binding ?? null, observations, programProof, graphTransitions, cleanup: { sessionsClosed: true }, verdict: requiredCorpus === null ? "passed" : "blocked", requiredCorpus, dependency: options.dependency ?? null };
   executedCrossCalls.set(evidence, { endpoint: options.endpoint.toString(), vaultIdSha256: contractDigest(options.expectedVaultId), snapshotSha256: contractDigest(evidence) });
   return evidence;
 }
