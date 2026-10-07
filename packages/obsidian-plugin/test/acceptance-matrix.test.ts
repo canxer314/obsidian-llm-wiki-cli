@@ -83,9 +83,38 @@ function evidence(): InstalledRuntimeEvidence {
     canonicalManifestSha256: DIGEST,
     tools: ["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_change_set_status"],
   };
+  const rejectionNames = ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent", "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination"];
+  const inventoryEntries = [{ kind: "directory" as const, path: "Notes" }];
+  const inventory = { entries: inventoryEntries, digest: createHash("sha256").update(JSON.stringify(inventoryEntries)).digest("hex") };
+  const inventoryEventDigest = createHash("sha256").update(JSON.stringify({ digest: inventory.digest, entries: inventory.entries })).digest("hex");
+  const rejectionProof = { submissionKeySha256: DIGEST, changeSetId: "rejected", state: "intent_not_applied" as const, failureCode: "stale_observation" as const, executed: false };
+  const idle = { recoveryState: "none" as const, queueLength: 0 as const, currentExecutionId: null, writeGate: "open" as const };
+  const seedInventory = { scope: "Notes/", entries: [], digest: DIGEST };
   const changeSet = {
     ...corpus(ASSERTIONS.changeSet),
-    admission: { submissions: [{ executed: true, state: "intent_applied" }] },
+    corpusId: "change-set-submission-proof", seedManifestSha256: DIGEST,
+    beforeInventory: seedInventory, afterInventory: seedInventory,
+    admission: {
+      submissions: [{ submissionKeySha256: DIGEST, changeSetId: "applied", state: "intent_applied", failureCode: null, executed: true }],
+      rejectionClasses: rejectionNames.map((name, index) => ({
+        name, failureCode: "stale_observation", noMutationDigestUnchanged: true,
+        binding: { runId: "acceptance-run", runtimeProfileId: "MVP-PERF-REF-1", candidateBundleSha256: DIGEST, vaultIdSha256: createHash("sha256").update("vault").digest("hex") },
+        beforeInventory: inventory, afterInventory: inventory, proof: rejectionProof, status: rejectionProof, terminal: idle,
+        eventOrder: { before: index * 5 + 1, submit: index * 5 + 2, status: index * 5 + 3, terminal: index * 5 + 4, after: index * 5 + 5 },
+      })),
+      fifo: { concurrentSubmissions: 1, applied: 1, distinctChangeSetIds: 1, contendedTarget: { submissions: 2, winners: 1, rejected: 1, noPartialMutation: true } },
+      recovery: [{ name: "recovery", recoveredThroughOriginalKey: true, changedContentRejected: true, changedKeyCreatedNoChangeSet: true }],
+      immutableRecords: [{ submissionKeySha256: DIGEST, changeSetId: "applied", state: "intent_applied", requestedEffectIds: ["operation"], derivedEffectIds: [], pathCount: 1 }],
+    },
+    replay: { keysReplayed: 1, identitiesPreserved: 1, recordsUnchanged: 1, conflictingReusesRejected: 1 },
+    residualCleanup: idle,
+    eventLog: rejectionNames.flatMap((name, index) => [
+      { sequence: index * 5 + 1, kind: "assertion", name: `${name}:inventory-before`, detailSha256: inventoryEventDigest },
+      { sequence: index * 5 + 2, kind: "tool", name: "vault_change_set_submit", detailSha256: DIGEST },
+      { sequence: index * 5 + 3, kind: "tool", name: "vault_change_set_status", detailSha256: DIGEST },
+      { sequence: index * 5 + 4, kind: "tool", name: "vault_health", detailSha256: DIGEST },
+      { sequence: index * 5 + 5, kind: "assertion", name: `${name}:inventory-after`, detailSha256: inventoryEventDigest },
+    ]), verdict: "passed",
   };
   const gate = {
     ...corpus(ASSERTIONS.gate),

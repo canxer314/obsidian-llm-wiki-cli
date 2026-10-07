@@ -302,12 +302,12 @@ async function arrangeRun(
         verdict: "passed",
       },
     }),
-    runChangeSetCorpus: async ({ seedNotes, record, assertion }) => {
+    runChangeSetCorpus: async ({ seedNotes, record, assertion, inventoryContext, expectedVaultId }) => {
       const seeded =
         seedNotes.find(({ path }) => path === "Notes/Welcome.md")?.content ?? "";
       const digest = createHash("sha256").update(seeded, "utf8").digest("hex");
       const entries = [{ path: "Notes/Welcome.md", sha256: digest, sizeBytes: 0 }];
-      record("assertion", "stubbed-change-set-corpus-began", {
+      record("assertion", "change-set-corpus-began", {
         corpusId: "change-set-submission-proof",
       });
       record("cleanup", "change-set-idle-state", {
@@ -316,6 +316,19 @@ async function arrangeRun(
         currentExecutionId: null,
         writeGate: "open",
       });
+      const inventoryEntries = [{ kind: "directory" as const, path: "Notes" }];
+      const inventoryDigest = createHash("sha256").update(JSON.stringify(inventoryEntries)).digest("hex");
+      const inventory = { entries: inventoryEntries, digest: inventoryDigest };
+      const rejectionName = "rejection/stale-direct-target";
+      const rejectionNames = ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent", "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination"];
+      for (const name of rejectionNames) {
+        record("assertion", `${name}:inventory-before`, inventory);
+        record("tool", "vault_change_set_submit", { changeSet: { changeSetId: "rejected-fixture", state: "intent_not_applied", failure: { code: "stale_observation" } } });
+        record("tool", "vault_change_set_status", { changeSet: { changeSetId: "rejected-fixture", state: "intent_not_applied", failure: { code: "stale_observation" } } });
+        record("tool", "vault_health", {});
+        record("assertion", `${name}:inventory-after`, inventory);
+      }
+      const proof = { submissionKeySha256: "b".repeat(64), changeSetId: "rejected-fixture", state: "intent_not_applied" as const, failureCode: "stale_observation" as const, executed: false };
       const assertions = [
         "submission/valid-create:no-validate-apply-handshake",
         "rejection/stale-direct-target:no-mutation-inventory",
@@ -359,9 +372,13 @@ async function arrangeRun(
             executed: true,
           },
         ],
-        rejectionClasses: [
-          { name: "rejection/stale-direct-target", failureCode: "stale_observation" },
-        ],
+        rejectionClasses: rejectionNames.map((name, index) => ({
+            name, failureCode: "stale_observation", noMutationDigestUnchanged: true,
+            binding: { runId: inventoryContext!.runId, runtimeProfileId: inventoryContext!.runtimeProfileId, candidateBundleSha256: inventoryContext!.candidateBundleSha256, vaultIdSha256: createHash("sha256").update(expectedVaultId).digest("hex") },
+            beforeInventory: inventory, afterInventory: inventory, proof, status: proof,
+            eventOrder: { before: index * 5 + 3, submit: index * 5 + 4, status: index * 5 + 5, terminal: index * 5 + 6, after: index * 5 + 7 },
+            terminal: { recoveryState: "none", queueLength: 0, currentExecutionId: null, writeGate: "open" },
+          })),
         fifoReport: {
           concurrentSubmissions: 1,
           applied: 1,

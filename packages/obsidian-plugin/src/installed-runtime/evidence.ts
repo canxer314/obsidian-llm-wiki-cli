@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -18,6 +19,17 @@ import {
  * privacy guard is fail closed: serializing evidence that contains any
  * registered private marker throws instead of writing.
  */
+
+function canonicalEvidenceValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalEvidenceValue);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, nested]) => [key, canonicalEvidenceValue(nested)]));
+}
+function digestEvidenceValue(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonicalEvidenceValue(value))).digest("hex");
+}
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 
@@ -236,12 +248,40 @@ const changeSetSubmissionProofSchema = z
   })
   .strict();
 
-/** One preflight rejection class: the stable failure code and no-mutation proof. */
+const changeSetIdleRejectionSchema = z.object({
+  recoveryState: z.literal("none"), queueLength: z.literal(0),
+  currentExecutionId: z.null(), writeGate: z.literal("open"),
+}).strict();
+
+const rejectionInventoryEntrySchema = z.discriminatedUnion("kind", [
+  z.object({ path: z.string().min(1), kind: z.literal("file"), sha256: sha256Schema, sizeBytes: z.number().int().nonnegative() }).strict(),
+  z.object({ path: z.string().min(1), kind: z.literal("directory") }).strict(),
+  z.object({ path: z.string().min(1), kind: z.literal("absent") }).strict(),
+]);
+const rejectionInventorySchema = z.object({
+  entries: z.array(rejectionInventoryEntrySchema).min(1), digest: sha256Schema,
+}).strict();
+
+/** Actual raw-byte observations bracket each rejected submit and terminal status. */
 const changeSetRejectionClassSchema = z
   .object({
     name: z.string().min(1),
     failureCode: z.enum(["stale_observation", "path_conflict", "exact_match_count_mismatch"]),
     noMutationDigestUnchanged: z.literal(true),
+    binding: z.object({
+      runId: z.string().min(1), runtimeProfileId: z.string().min(1),
+      candidateBundleSha256: sha256Schema, vaultIdSha256: sha256Schema,
+    }).strict(),
+    beforeInventory: rejectionInventorySchema,
+    afterInventory: rejectionInventorySchema,
+    proof: changeSetSubmissionProofSchema,
+    status: changeSetSubmissionProofSchema,
+    eventOrder: z.object({
+      before: z.number().int().positive(), submit: z.number().int().positive(),
+      status: z.number().int().positive(), terminal: z.number().int().positive(),
+      after: z.number().int().positive(),
+    }).strict(),
+    terminal: changeSetIdleRejectionSchema,
   })
   .strict();
 
@@ -317,7 +357,13 @@ const changeSetIdleStateSchema = z
  * wire-observed Bridge idle state (no recovery frame, drained queue, open
  * write gate), never a skipped green.
  */
-const changeSetCorpusEvidenceSchema = z
+export const REQUIRED_PREFLIGHT_REJECTIONS = [
+  "rejection/stale-direct-target", "rejection/read-dependency-stale",
+  "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent",
+  "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination",
+] as const;
+
+export const changeSetCorpusEvidenceSchema = z
   .object({
     corpusId: z.literal("change-set-submission-proof"),
     seedManifestSha256: sha256Schema,
@@ -360,6 +406,40 @@ const changeSetCorpusEvidenceSchema = z
       const executed = corpus.admission.submissions.filter((record) => record.executed);
       if (executed.length === 0) {
         context.addIssue({ code: "custom", message: "A passing change-set corpus requires executed proofs" });
+      }
+      if (corpus.admission.rejectionClasses.length !== REQUIRED_PREFLIGHT_REJECTIONS.length ||
+          REQUIRED_PREFLIGHT_REJECTIONS.some((name) => corpus.admission.rejectionClasses.filter((entry) => entry.name === name).length !== 1)) {
+        context.addIssue({ code: "custom", message: "Passing evidence requires complete preflight rejection coverage" });
+      }
+      for (const rejection of corpus.admission.rejectionClasses) {
+        const { beforeInventory: before, afterInventory: after, eventOrder: order } = rejection;
+        const digest = (entries: typeof before.entries): string => createHash("sha256")
+          .update(JSON.stringify(canonicalEvidenceValue(entries))).digest("hex");
+        if (before.digest !== digest(before.entries) || after.digest !== digest(after.entries) ||
+            before.digest !== after.digest ||
+            rejection.proof.state !== "intent_not_applied" || rejection.proof.executed ||
+            rejection.proof.failureCode !== rejection.failureCode ||
+            JSON.stringify(rejection.proof) !== JSON.stringify(rejection.status) ||
+            !(order.before < order.submit && order.submit < order.status && order.status < order.terminal && order.terminal < order.after)) {
+          context.addIssue({ code: "custom", message: "Rejected submit requires unchanged raw-byte inventories around matching terminal proof and status" });
+        }
+        const eventChecks = [
+          [order.before, "assertion", `${rejection.name}:inventory-before`, { entries: before.entries, digest: before.digest }],
+          [order.submit, "tool", "vault_change_set_submit", null],
+          [order.status, "tool", "vault_change_set_status", null],
+          [order.terminal, "tool", "vault_health", null],
+          [order.after, "assertion", `${rejection.name}:inventory-after`, { entries: after.entries, digest: after.digest }],
+        ] as const;
+        for (const [sequence, kind, name, detail] of eventChecks) {
+          const event = corpus.eventLog[sequence - 1];
+          if (event?.kind !== kind || event.name !== name ||
+              (detail !== null && event.detailSha256 !== digestEvidenceValue(detail))) {
+            context.addIssue({ code: "custom", message: "Rejection inventory must bind actual ordered corpus events" });
+          }
+        }
+        if (JSON.stringify(rejection.binding) !== JSON.stringify(corpus.admission.rejectionClasses[0]!.binding)) {
+          context.addIssue({ code: "custom", message: "Rejection evidence cannot mix run, Vault, candidate or profile identities" });
+        }
       }
       if (corpus.admission.rejectionClasses.some((entry) => !entry.noMutationDigestUnchanged)) {
         context.addIssue({ code: "custom", message: "Every rejection class must prove no mutation" });
@@ -1117,6 +1197,14 @@ export const installedRuntimeEvidenceSchema = z
   })
   .strict()
   .superRefine((evidence, context) => {
+    for (const rejection of evidence.changeSetCorpus?.admission.rejectionClasses ?? []) {
+      if (rejection.binding.runId !== evidence.runId ||
+          rejection.binding.runtimeProfileId !== evidence.profile.name ||
+          rejection.binding.candidateBundleSha256 !== evidence.candidate?.bundleSha256 ||
+          rejection.binding.vaultIdSha256 !== createHash("sha256").update(evidence.bridgeIdentity?.vaultId ?? "").digest("hex")) {
+        context.addIssue({ code: "custom", message: "Rejection evidence must bind this verified candidate, run, Managed Vault and runtime profile" });
+      }
+    }
     if (evidence.verdict === "passed") {
       try {
         const matrix = requireAcceptanceMatrix(evidence.acceptanceMatrix);
