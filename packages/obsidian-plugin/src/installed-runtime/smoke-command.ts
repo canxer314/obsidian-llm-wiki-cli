@@ -36,6 +36,7 @@ import { runInstalledRegisteredReferenceRewriteCorpus } from "./registered-refer
 import { runInstalledGateIsolationCorpus } from "./gate-installed-runner.js";
 import { runInstalledPrivacyRecoveryAuthorityCorpus } from "./privacy-recovery-installed-runner.js";
 import { runInstalledCrashRestorationSlice } from "./installed-crash-restoration-slice.js";
+import { installedCrashScenarios, crashScenarioParts } from "./crash-restoration-protocol.js";
 import { runInstalledReleaseLifecycleSlice, runInstalledReleaseUninstallSlice } from "./installed-release-lifecycle-runner.js";
 import { MVP_PERF_REF_1 } from "./runtime-profile.js";
 
@@ -211,6 +212,7 @@ export const AUTHORITATIVE_INSTALLED_RUNTIME_RUNNER_NAMES = [
   "runPrivacyRecoveryAuthorityCorpus",
   "runReleaseLifecycleCorpus",
   "runCrashRestorationRetainedAuthorityCorpus",
+  "runPluginEventObserverCorpus",
   "semanticEvidenceScenarioRunner",
 ] as const;
 
@@ -224,6 +226,7 @@ type HarnessAuthoritativeInstalledRuntimeRunners = Required<
     | "runPrivacyRecoveryAuthorityCorpus"
     | "runReleaseLifecycleCorpus"
     | "runCrashRestorationRetainedAuthorityCorpus"
+    | "runPluginEventObserverCorpus"
     | "semanticEvidenceScenarioRunner"
   >
 >;
@@ -399,9 +402,9 @@ export function createAuthoritativeInstalledRuntimeRunners(
       ...request,
       operatorReportTimeoutMs: request.operatorReportTimeoutMs ?? 180_000,
       recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes",
+      diagnosticPrivacy: true,
       recoveryControls: true,
-      // Exact Notes/Welcome.md seed selection; no Vault content enters reports.
-      contentConfirmation: { expectedSelectionSha256: "8c683128e39b84e2261c09b4417d294ad8e0278cfd8203c3a618007c5cf74697" },
+      // A33 uses the exact deterministic generated selection; no raw selection enters public proof.
     }),
     runReleaseLifecycleCorpus: async (request) => {
       if (request.profile !== undefined && request.profileName !== undefined && request.probe !== undefined) {
@@ -423,17 +426,30 @@ export function createAuthoritativeInstalledRuntimeRunners(
       if (request.installed === undefined) {
         throw new Error("Crash acceptance requires installed candidate, profile, process and descriptor inputs for the installed Obsidian acceptance driver");
       }
-      for (const mutationKind of ["create_note", "edit_body"] as const) {
-        for (const crashPoint of ["after_prepared", "after_committed"] as const) {
-          const partial = await runInstalledCrashRestorationSlice({
-            ...request.installed,
-            crashPoint, mutationKind,
-            reportDirectory: options.reportDirectory ?? request.installed.reportDirectory,
-          });
-          request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
-        }
+      for (const scenario of installedCrashScenarios) {
+        const { kind: mutationKind, point: crashPoint } = crashScenarioParts(scenario);
+        const partial = await runInstalledCrashRestorationSlice({ ...request.installed, crashPoint, mutationKind, reportDirectory: options.reportDirectory ?? request.installed.reportDirectory });
+        request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
       }
-      throw new Error("Installed create-note/edit-body PREPARED rollback and COMMITTED replay slices are partial; full crash and retained-authority acceptance are still required");
+      throw new Error("Installed create/exact/whole/frontmatter/multi complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
+    },
+    runPluginEventObserverCorpus: async request => {
+      if (options.runId === undefined || options.reportDirectory === undefined) return unavailableRunner("Enabled plugin observer corpus");
+      const { runPluginEventObserverCorpus } = await import("./plugin-event-observer-corpus.js");
+      let binding: InstalledRuntimeAcceptanceDescriptor | undefined;
+      return runPluginEventObserverCorpus({ ...request,
+        reportDirectory: join(options.reportDirectory, "enabled-plugin-correctness"),
+        prepareAcceptanceDriver: async input => {
+          const created = await createInstalledRuntimeAcceptanceDescriptor({ ...input, runId: request.runId });
+          binding = created.descriptor;
+          return { ...created,
+            requestSemanticEvidenceScenario: input => requestInstalledSemanticEvidenceScenario({ ...input, descriptorPath: created.path, descriptor: created.descriptor }),
+            cleanup: async () => { await rm(created.path, { force: true }); },
+          };
+        },
+        semanticEvidenceScenarioRunner: createInstalledSemanticEvidenceScenarioRunner({ runId: request.runId,
+          get reportDirectory() { return binding?.reportDirectory; }, binding: () => binding }),
+      });
     },
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:

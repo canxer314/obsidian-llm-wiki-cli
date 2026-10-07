@@ -5,6 +5,7 @@ import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { z } from "zod";
+import { pluginEventObserverCorpusEvidenceSchema } from "./plugin-event-observer-evidence.js";
 import { referenceSingleSpanProofSchema } from "./registered-reference-single-span.js";
 
 import {
@@ -1190,7 +1191,7 @@ export const crashRestorationRetainedAuthorityCorpusEvidenceSchema = z
     }
   });
 
-export const installedRuntimeEvidenceSchema = z
+function evidenceSchemaWithContext(observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext) { return z
   .object({
     schemaVersion: z.literal(1),
     runId: z.string().min(1),
@@ -1221,6 +1222,7 @@ export const installedRuntimeEvidenceSchema = z
     releaseLifecycleCorpus: releaseLifecycleCorpusEvidenceSchema.nullable().optional(),
     crashRestorationRetainedAuthorityCorpus:
       crashRestorationRetainedAuthorityCorpusEvidenceSchema.nullable().optional(),
+    pluginEventObserverCorpus: pluginEventObserverCorpusEvidenceSchema.nullable().optional(),
     acceptanceMatrix: z.custom<AcceptanceMatrixReport>().nullable().optional(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z
@@ -1253,7 +1255,7 @@ export const installedRuntimeEvidenceSchema = z
         const expected = createAcceptanceMatrixReport({
           ...evidence,
           acceptanceMatrix: null,
-        });
+        }, observerContext);
         if (matrix.canonicalManifestSha256 !== expected.canonicalManifestSha256) {
           context.addIssue({ code: "custom", message: "Acceptance matrix does not bind this installed-runtime evidence" });
         }
@@ -1304,6 +1306,8 @@ export const installedRuntimeEvidenceSchema = z
     },
   );
 
+}
+export const installedRuntimeEvidenceSchema = evidenceSchemaWithContext();
 export type PublicWireCorpusEvidence = z.infer<typeof publicWireCorpusEvidenceSchema>;
 export type ChangeSetCorpusEvidence = z.infer<typeof changeSetCorpusEvidenceSchema>;
 export type GateIsolationCorpusEvidence = z.infer<typeof gateIsolationCorpusEvidenceSchema>;
@@ -1345,15 +1349,17 @@ export class EvidenceWriteError extends Error {
  */
 export function createInstalledRuntimeAcceptanceMatrix(
   evidence: InstalledRuntimeEvidence,
+  observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
 ): AcceptanceMatrixReport {
-  return createAcceptanceMatrixReport({ ...evidence, acceptanceMatrix: null });
+  return createAcceptanceMatrixReport({ ...evidence, acceptanceMatrix: null }, observerContext);
 }
 
 export function serializeEvidence(
   evidence: InstalledRuntimeEvidence,
   privateMarkers: readonly string[] = [],
+  observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
 ): string {
-  const validated = installedRuntimeEvidenceSchema.parse(evidence);
+  const validated = evidenceSchemaWithContext(observerContext).parse(evidence);
   const serialized = `${JSON.stringify(validated, null, 2)}\n`;
   for (const marker of privateMarkers) {
     if (marker.length === 0) continue;
@@ -1373,8 +1379,8 @@ export function serializeEvidence(
   return serialized;
 }
 
-export function parseEvidence(serialized: string): InstalledRuntimeEvidence {
-  return installedRuntimeEvidenceSchema.parse(JSON.parse(serialized));
+export function parseEvidence(serialized: string, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext): InstalledRuntimeEvidence {
+  return evidenceSchemaWithContext(observerContext).parse(JSON.parse(serialized));
 }
 
 /**
@@ -1386,8 +1392,9 @@ export async function writeEvidenceFile(
   evidencePath: string,
   evidence: InstalledRuntimeEvidence,
   privateMarkers: readonly string[] = [],
+  observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
 ): Promise<void> {
-  const serialized = serializeEvidence(evidence, privateMarkers);
+  const serialized = serializeEvidence(evidence, privateMarkers, observerContext);
   await mkdir(dirname(evidencePath), { recursive: true });
   const temporaryPath = join(
     dirname(evidencePath),
@@ -1409,5 +1416,5 @@ export async function writeEvidenceFile(
   }
   await rm(temporaryPath, { force: true });
   const written = await readFile(evidencePath, "utf8");
-  parseEvidence(written);
+  parseEvidence(written, observerContext);
 }

@@ -8,6 +8,42 @@ import { createLinuxObsidianProcessControl } from "../src/installed-runtime/obsi
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
+it("registers the dedicated Windows profile before spawn and enables the supplied renderer probe", async () => {
+  const { createWindowsObsidianProcessControl } = await import("../src/installed-runtime/obsidian-process.js");
+  const { EventEmitter } = await import("node:events");
+  const { readFile } = await import("node:fs/promises");
+  const root = await mkdtemp(join(tmpdir(), "windows-installed-launch-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const vaultPath = join(root, "installed-runtime-vault-windows");
+  const profileDirectory = join(root, "profile");
+  let launchArguments: readonly string[] = [];
+  const child = Object.assign(new EventEmitter(), {
+    pid: 1234,
+    exitCode: null as number | null,
+    signalCode: null,
+    kill: () => { queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0); }); return true; },
+  });
+  const control = createWindowsObsidianProcessControl({
+    executablePath: "Obsidian.exe",
+    spawnImpl: ((path: string, args: readonly string[]) => {
+      if (path === "taskkill") {
+        const killer = new EventEmitter();
+        queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0); killer.emit("exit", 0); });
+        return killer;
+      }
+      launchArguments = args;
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    }) as never,
+  });
+  const handle = await control.start({ vaultPath, profileDirectory });
+  const registration = JSON.parse(await readFile(join(profileDirectory, "obsidian.json"), "utf8"));
+  expect(Object.values(registration.vaults)).toEqual([{ path: vaultPath, ts: expect.any(Number), open: true }]);
+  expect(launchArguments).toContain("--remote-debugging-port=0");
+  expect(launchArguments).toContain("--remote-debugging-address=127.0.0.1");
+  await handle.stop();
+});
+
 it("terminates a process that ignores the initial stop signal", async () => {
   const root = await mkdtemp(join(tmpdir(), "linux-process-tree-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
