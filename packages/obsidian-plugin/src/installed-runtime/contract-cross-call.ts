@@ -177,6 +177,10 @@ export async function runContractCrossCallScenario(options: {
         observe("original-client-token-preserved", { tokenSha256: contractDigest(token) }, second, { ownerTokenPreserved: true, elapsedMs: replacementIssuedAt - start });
         const replay = contract.parseContinueResult(await call(client, "vault_continue", { continuation: token }));
         if (!("code" in replay) || replay.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Consumed token replay accepted");
+        observe("consumed-token-replay-rejected", { tokenSha256: contractDigest(token) }, replay, { consumedRejected: true });
+        const malformed = contract.parseContinueResult(await call(client, "vault_continue", { continuation: "contract-not-a-token" }));
+        if (!("code" in malformed) || malformed.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Malformed token did not expose only continuation_unavailable");
+        observe("malformed-token-rejected", {}, malformed, { malformedRejected: true });
         let next: string | null = second.continuation;
         if (options.continuationTiming === "binding-only") requiredCorpus = "continuation-expiry-sliding-time";
         else {

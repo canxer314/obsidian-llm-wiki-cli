@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { defaultContractPackageRoot, loadVersionContractPackage, runContractFixtureWireCorpus, completeContractPackageCorpus, contractDigest, type ContractFixtureWireEvidence, type VersionContractPackage } from "./contract-package-corpus.js";
 import { runContractCrossCallScenario, type ContractCrossCallEvidence } from "./contract-cross-call.js";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { connect } from "node:net";
 import { dirname, join } from "node:path";
 
@@ -268,6 +268,7 @@ export interface InstalledRuntimeHarnessOptions {
   readonly runContractCrossCall?: typeof runContractCrossCallScenario;
   readonly completeContractPackage?: typeof completeContractPackageCorpus;
   readonly contractContinuationTiming?: "full-real-time" | "binding-only";
+  readonly prepareContractInvalidUtf8Fixture?: (options: { readonly vaultPath: string; readonly path: string }) => Promise<() => Promise<void>>;
   /**
    * Write-side corpus seams (issue #175). The admission phase runs in the
    * initial Obsidian window; the replay phase reconnects after the controlled
@@ -385,6 +386,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<ReleaseLifecycleCorpusOutcome>;
+  readonly runPersistentFifoCorpus?: typeof import("./fifo-installed-runner.js").runInstalledPersistentFifoCorpus;
   readonly runCrashRestorationRetainedAuthorityCorpus?: (options: {
     readonly installed?: import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions;
     readonly workingDirectory: string;
@@ -767,7 +769,6 @@ export async function runInstalledRuntimeHarness(
       // Generated acceptance Vault only. Exclusive writes cannot overwrite an
       // existing fixture or a Primary Operator note.
       const contractFiles: readonly [string, string | Uint8Array][] = [
-        ["ContractFixtures/InvalidUtf8.md", Uint8Array.from([0xc3, 0x28])],
         ["ContractFixtures/QuotaMetadata.md", `---\nquota: ${"q".repeat(4_718_592)}\n---\n# Quota\n`],
         ["Projects/Bridge.md", "---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n"],
         ["Root.md", "# Root\n[[Projects/Bridge]]\n"],
@@ -962,6 +963,8 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  let persistentFifo: import("./fifo-observation.js").PersistentFifoProof | undefined;
+
   // Shared event/assertion collectors for both change-set corpus phases so the
   // closed evidence block spans the initial admission and the post-restart
   // replay with monotonic event sequences.
@@ -1111,6 +1114,15 @@ export async function runInstalledRuntimeHarness(
             const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
             contractWire = await (options.runContractPackageWire ?? runContractFixtureWireCorpus)({ authority: contractAuthority, endpoint, expectedVaultId: identity.vaultId });
             for (const scenario of contractAuthority.scenarios) {
+              const invalidPath = "ContractFixtures/InvalidUtf8.md";
+              let removeInvalid: (() => Promise<void>) | undefined;
+              if (scenario.id === "invalid-utf8-no-trusted-result") {
+                removeInvalid = await (options.prepareContractInvalidUtf8Fixture ?? (async ({ vaultPath, path }) => {
+                  await writeFile(join(vaultPath, path), Uint8Array.from([0xc3, 0x28]), { flag: "wx" });
+                  return async () => { await rm(join(vaultPath, path)); };
+                }))({ vaultPath: vault.vaultPath, path: invalidPath });
+              }
+              try {
               contractCrossCalls.push(await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId: scenario.id, endpoint, expectedVaultId: identity.vaultId, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate!.identity.bundleSha256, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: vault.seedManifestSha256 }, quotaMetadataPath: "ContractFixtures/QuotaMetadata.md", seedNotes: vault.seedNotes, invalidUtf8Path: "ContractFixtures/InvalidUtf8.md", readFixtureBytes: async path => {
                 if (!["Projects/Bridge.md", "ContractFixtures/InvalidUtf8.md"].includes(path)) throw new Error("Contract fixture byte observation escaped generated scope");
                 return new Uint8Array(await readFile(join(vault.vaultPath, path)));
@@ -1130,6 +1142,15 @@ export async function runInstalledRuntimeHarness(
                 await client.observeHealth(endpoint, found.vaultId);
                 return { endpoint, expectedVaultId: found.vaultId };
               } }));
+              } finally {
+                if (removeInvalid !== undefined) {
+                  await removeInvalid();
+                  await waitForCondition(async () => {
+                    const observation = await client.observeHealth(endpoint, identity.vaultId);
+                    return observation.health.readiness.searchSnapshot === "ready";
+                  }, { timeoutMs: timeouts.startupMs });
+                }
+              }
             }
           } catch (error) {
             fail("public_wire_corpus", "public_wire_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
@@ -1441,6 +1462,25 @@ export async function runInstalledRuntimeHarness(
       );
     }
   }
+  if (state.failure === null && options.runPersistentFifoCorpus !== undefined) {
+    try {
+      const candidate = state.candidate;
+      if (candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined) {
+        throw new Error("Installed persistent FIFO requires verified candidate, profile and private observation descriptor");
+      }
+      persistentFifo = await options.runPersistentFifoCorpus({
+        runId, workingDirectory: options.workingDirectory, reportDirectory: dirname(options.evidencePath),
+        candidate, profile, client, processControl: options.processControl, configDirectoryName, timeouts,
+        probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+        prepareAcceptanceDriver: async request => {
+          const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+          if (!("path" in prepared) || !("descriptor" in prepared)) throw new Error("Installed FIFO descriptor binding unavailable");
+          return prepared as Awaited<ReturnType<import("./fifo-installed-runner.js").InstalledFifoOptions["prepareAcceptanceDriver"]>>;
+        },
+        record: recordChangeSetEvent, assertion: recordChangeSetAssertion,
+      });
+    } catch (error) { fail("change_set_corpus", "change_set_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
+  }
   if (state.failure === null) {
     await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
       stage: "change_set_replay",
@@ -1544,6 +1584,7 @@ export async function runInstalledRuntimeHarness(
           assertions: changeSetAssertions,
         })
       : null;
+  if (changeSetCorpus !== null && persistentFifo !== undefined) changeSetCorpus.admission.fifo.persistentObservation = persistentFifo;
   const gateIsolationCorpus: GateIsolationCorpusEvidence | null =
     state.gateIsolation !== null
       ? composeGateIsolationCorpusEvidence({

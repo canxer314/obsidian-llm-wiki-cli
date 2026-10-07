@@ -1,4 +1,5 @@
 import { unitContractReport, contractDigest } from "./helpers/contract-report.js";
+import { syntheticFifoProof } from "./helpers/fifo-proof.js";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -237,8 +238,13 @@ async function arrangeRun(
     candidateVerification: { expectedTag: CANDIDATE_TAG, expectedPluginId: "candidate-bridge" },
     workingDirectory: root,
     evidencePath: join(root, "evidence", `${runId}.json`),
-    probe: probe(),
+    probe: { ...probe(), probeRunning: async () => MATCHING_OBSERVED },
     processControl: createFakeObsidianProcessControl(),
+    // Invalid bytes are ephemeral, never present while the installed snapshot starts.
+    prepareContractInvalidUtf8Fixture: async ({ vaultPath, path }) => {
+      await writeFile(join(vaultPath, path), Uint8Array.from([0xc3, 0x28]), { flag: "wx" });
+      return async () => rm(join(vaultPath, path));
+    },
     prepareInstalledRuntimeAcceptanceDriver: async () => ({
       requestSemanticEvidenceScenario: async () => undefined,
       cleanup: async () => undefined,
@@ -247,8 +253,12 @@ async function arrangeRun(
     runId,
     // Public runner-seam unit shapes only, never installed proof.
     runContractPackageWire: async ({ authority }) => ({ authoritySha256: authority.manifestSha256, inputs: [], outputs: [], outputFixtures: [], unknownFieldRejections: [], eventLog: [], cleanup: { sessionClosed: true }, verdict: "passed" }),
-    runContractCrossCall: async ({ authority, scenarioId }) => ({ scenarioId, authoritySha256: authority.manifestSha256, observations: [], cleanup: { sessionsClosed: true }, verdict: "blocked", requiredCorpus: "unit-boundary" }),
+    runContractCrossCall: async ({ authority, scenarioId }) => ({ scenarioId, authoritySha256: authority.manifestSha256, binding: null, dependency: null, observations: [], cleanup: { sessionsClosed: true }, verdict: "blocked", requiredCorpus: "unit-boundary" }),
     completeContractPackage: ({ binding }) => unitContractReport(binding),
+    runPersistentFifoCorpus: async ({ runId, profile, candidate, assertion }) => {
+      assertion("concurrency/persistent-fifo:repreflight-and-restart-proven");
+      return syntheticFifoProof(runId, profile.name, candidate.identity.bundleSha256);
+    },
     runPublicWireCorpus: async ({ fixtureSeed }) => ({
       evidence: {
         fixtureSeed: createHash("sha256").update(fixtureSeed, "utf8").digest("hex"),
@@ -1238,6 +1248,30 @@ describe("installed-runtime harness failure projection", () => {
     expect(result.failure?.stage).toBe("semantic_evidence_search_snapshot_corpus");
     expect(runs).toBe(0);
     expect(result.evidence.semanticEvidenceSearchSnapshotCorpus).toBeNull();
+    expect(result.evidence.cleanup?.residualPaths).toEqual([]);
+  });
+
+  it("keeps invalid UTF-8 out of startup snapshots and confirms its per-scenario cleanup", async () => {
+    const control = createFakeObsidianProcessControl();
+    let observedDuringScenario = false;
+    let vaultPath = "";
+    const { options } = await arrangeRun("run-invalid-utf8-isolated", {
+      processControl: { start: async request => {
+        vaultPath = request.vaultPath;
+        await expect(stat(join(request.vaultPath, "ContractFixtures/InvalidUtf8.md"))).rejects.toMatchObject({ code: "ENOENT" });
+        return control.start(request);
+      } },
+      runContractCrossCall: async ({ authority, scenarioId }) => {
+        if (scenarioId === "invalid-utf8-no-trusted-result") {
+          expect([...await readFile(join(vaultPath, "ContractFixtures/InvalidUtf8.md"))]).toEqual([195, 40]);
+          observedDuringScenario = true;
+        }
+        if (scenarioId === "structured-graph-discovery-composition") await expect(stat(join(vaultPath, "ContractFixtures/InvalidUtf8.md"))).rejects.toMatchObject({ code: "ENOENT" });
+        return { scenarioId, authoritySha256: authority.manifestSha256, binding: null, dependency: null, observations: [], cleanup: { sessionsClosed: true }, verdict: "blocked", requiredCorpus: "unit-boundary" };
+      },
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(observedDuringScenario).toBe(true);
     expect(result.evidence.cleanup?.residualPaths).toEqual([]);
   });
 
