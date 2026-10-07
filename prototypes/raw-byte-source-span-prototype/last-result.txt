@@ -1,0 +1,105 @@
+=> {
+  "prototype": true,
+  "runtime": {
+    "cliReportedObsidian": "1.13.4",
+    "electron": "39.6.0",
+    "node": "22.22.0",
+    "platform": "win32"
+  },
+  "capabilities": {
+    "adapterConstructorMinifiedName": "e",
+    "readBinary": "function",
+    "writeBinary": "function",
+    "createBinary": "function",
+    "vaultRead": "function"
+  },
+  "fixture": {
+    "byteLength": 126,
+    "utf16Length": 68,
+    "bomHex": "efbbbf",
+    "crlfCount": 4,
+    "loneLfCount": 0,
+    "includesCjk": true,
+    "includesAstralEmoji": true,
+    "binaryCreateExact": true,
+    "vaultTextEqualsRawDecode": false,
+    "vaultTextStripsOnlyBom": true
+  },
+  "links": [
+    {
+      "cached": {
+        "position": {
+          "start": {
+            "line": 3,
+            "col": 5,
+            "offset": 30
+          },
+          "end": {
+            "line": 3,
+            "col": 18,
+            "offset": 43
+          }
+        },
+        "link": "目标笔记",
+        "original": "[[目标笔记|别名😀]]",
+        "displayText": "别名😀"
+      },
+      "candidateCount": 1,
+      "mapping": {
+        "key": "49:76",
+        "utf16Span": [
+          31,
+          44
+        ],
+        "utf8Span": [
+          49,
+          76
+        ]
+      },
+      "verified": true
+    },
+    {
+      "cached": {
+        "position": {
+          "start": {
+            "line": 3,
+            "col": 24,
+            "offset": 49
+          },
+          "end": {
+            "line": 3,
+            "col": 37,
+            "offset": 62
+          }
+        },
+        "link": "目标笔记",
+        "original": "[[目标笔记|别名😀]]",
+        "displayText": "别名😀"
+      },
+      "candidateCount": 1,
+      "mapping": {
+        "key": "90:117",
+        "utf16Span": [
+          50,
+          63
+        ],
+        "utf8Span": [
+          90,
+          117
+        ]
+      },
+      "verified": true
+    }
+  ],
+  "rewrite": {
+    "targetOccurrence": 2,
+    "replacement": "[[重命名目标|别名😀]]",
+    "firstOccurrenceUntouched": true,
+    "exactPrefixPreserved": true,
+    "exactSuffixPreserved": true,
+    "bomPreserved": true,
+    "crlfCountPreserved": true,
+    "binaryWriteExact": true
+  },
+  "passed": true
+}
