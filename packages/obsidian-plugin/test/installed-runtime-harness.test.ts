@@ -1,13 +1,18 @@
 import { inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
 import { unitContractReport, unitContractSourceVault, contractDigest } from "./helpers/contract-report.js";
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
-import { createHash } from "node:crypto";
+import { syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
+import { createHash, createHmac } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as crashCorpus from "../src/installed-runtime/crash-restoration-retained-authority-corpus.js";
+import { observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
+import { EVENT_OBSERVER_PLUGIN_SOURCE } from "../src/installed-runtime/plugin-event-observer-plugin.js";
+import { verifyPluginEventObserverWindow } from "../src/installed-runtime/plugin-event-observer.js";
+import { observerProjectionSha256 } from "../src/installed-runtime/plugin-event-observer-evidence.js";
 import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
 const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 
@@ -159,6 +164,10 @@ function createFakeObsidianProcessControl(
       const enabled = JSON.parse(
         await readFile(join(configDirectory, "community-plugins.json"), "utf8"),
       ) as string[];
+      if (enabled.includes("llm-wiki-event-observer")) {
+        // Synthetic report producer only, never real Obsidian plugin acceptance.
+        return { pid: process.pid, stop: async () => { starts -= 1; } };
+      }
       const pluginId = enabled[0];
       if (typeof pluginId !== "string") {
         throw new ObsidianProcessError("No enabled candidate plugin", "obsidian_start_failed");
@@ -271,6 +280,11 @@ async function arrangeRun(
         row.evidenceSha256 = contractDigest(row.proof);
       }
       return report;
+    },
+    runManualPauseCorpus: async ({ runId, profile, candidate, retainSource }) => {
+      const fixture = syntheticManualPauseSource(runId, profile.name, candidate.identity.bundleSha256, candidate.identity.files.find(file => file.path === "main.js")!.sha256);
+      retainSource?.(fixture.source);
+      return fixture.proof;
     },
     runPersistentFifoCorpus: async ({ runId, profile, candidate, assertion }) => {
       assertion("concurrency/persistent-fifo:repreflight-and-restart-proven");
@@ -492,6 +506,41 @@ async function arrangeRun(
         "gates/recovery-blocked-precedence:single-effective-gate",
       ]) assertion(name);
       return stubGateIsolationOutcome();
+    },
+    runPluginEventObserverCorpus: async request => {
+      const fixture = observerSourceFixture({ runId: request.runId, candidateBundleSha256: request.candidate.identity.bundleSha256, installedMainSha256: request.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: request.profile.name, pluginId: request.candidate.identity.pluginId, runtime: MATCHING_OBSERVED });
+      fixture.proof.sourceReports = [];
+      for (const observation of fixture.context.observations) {
+        const binding = observation.verification.binding;
+        binding.vaultPath = join(root, `installed-runtime-vault-${request.runId}-observer-${observation.scenario}`);
+        const plugins = join(binding.vaultPath, ".obsidian", "plugins");
+        await mkdir(join(plugins, "llm-wiki-event-observer"), { recursive: true });
+        await mkdir(join(plugins, request.candidate.identity.pluginId), { recursive: true });
+        await writeFile(join(plugins, "llm-wiki-event-observer", "main.js"), EVENT_OBSERVER_PLUGIN_SOURCE);
+        await writeFile(join(plugins, request.candidate.identity.pluginId, "main.js"), await readFile(join(candidate, "main.js")));
+        await writeFile(join(plugins, request.candidate.identity.pluginId, "data.json"), JSON.stringify({ vaultId: binding.vaultId, port: 12345 }));
+        await writeFile(join(binding.vaultPath, ".obsidian", "community-plugins.json"), JSON.stringify(["llm-wiki-event-observer", request.candidate.identity.pluginId]));
+        await writeFile(join(plugins, "llm-wiki-event-observer", "event-observer.json"), JSON.stringify({ binding }));
+        const handle = await request.processControl.start({ vaultPath: binding.vaultPath, profileDirectory: join(root, "synthetic-observer-profile") });
+        observation.verification.expectedPid = process.pid;
+        const events = observation.verification.events as { payload: Record<string, unknown>; mac: string }[];
+        for (const event of events) {
+          event.payload.vaultPath = binding.vaultPath; event.payload.pid = process.pid;
+          event.mac = createHmac("sha256", binding.capabilityToken).update(JSON.stringify(event.payload)).digest("hex");
+        }
+        const window = { ...verifyPluginEventObserverWindow(observation.verification), supervisorPid: process.pid, supervisedProcessTreeVerified: true as const };
+        const reportDirectory = join(root, "synthetic-observer-reports", observation.scenario);
+        await mkdir(reportDirectory, { recursive: true });
+        await writeFile(join(reportDirectory, `observer-generation-${binding.generation}.sealed.jsonl`), events.map(event => JSON.stringify(event)).join("\n"));
+        await request.retainObservation({ ...observation.verification, scenario: observation.scenario, reportDirectory, configDirectoryName: ".obsidian", supervisorPid: process.pid, window });
+        const scenario = fixture.proof.scenarios.find(item => item.scenario === observation.scenario)!;
+        scenario.vaultPathSha256 = a26Digest(binding.vaultPath);
+        scenario.windows[binding.generation - 1] = window as typeof scenario.windows[number];
+        fixture.proof.sourceReports.push({ ...observation.source, vaultPathSha256: scenario.vaultPathSha256, rendererPid: process.pid, supervisorPid: process.pid, transcriptSha256: window.transcriptSha256, projectionSha256: observerProjectionSha256(window) });
+        await handle.stop();
+        await rm(binding.vaultPath, { recursive: true, force: true });
+      }
+      return fixture.proof;
     },
     runRegisteredReferenceRewriteCorpus: async ({ record, assertion }) => {
       const sourceIdentity = unitSourceIdentity("registered-reference-byte-verification", `${runId}-reference-unit-child`);
@@ -831,6 +880,33 @@ function stubGateIsolationOutcome(): GateIsolationOutcome {
 }
 
 describe("installed-runtime harness orchestration", () => {
+  it("independently rejects a replacement observer key or generation after the supervised startup pin", async () => {
+    // These are Node orchestration fixtures, not registered installed acceptance.
+    for (const field of ["capabilityToken", "generation", "supervisorPid"] as const) {
+      const { root, options } = await arrangeRun(`independent-observer-pin-${field}`);
+      const runner = options.runPluginEventObserverCorpus!;
+      let attempted = false;
+      try {
+        const result = await runInstalledRuntimeHarness({ ...options,
+          runPluginEventObserverCorpus: request => runner({ ...request,
+            retainObservation: async observation => {
+              attempted = true;
+              const altered = { ...observation, binding: { ...observation.binding } };
+              if (field === "capabilityToken") altered.binding.capabilityToken = "f".repeat(64);
+              if (field === "generation") altered.binding.generation += 1;
+              if (field === "supervisorPid") altered.supervisorPid = 1;
+              await request.retainObservation(altered);
+            },
+          }),
+        });
+        expect(attempted).toBe(true);
+        expect(result.verdict).toBe("failed");
+        expect(result.failure).toMatchObject({ stage: "plugin_event_observer_corpus", code: "plugin_event_observer_corpus_failed" });
+        expect(result.evidence.acceptanceMatrix).toBeNull();
+        expect((await result.readEvidence()).verdict).toBe("failed");
+      } finally { await rm(root, { recursive: true, force: true }); }
+    }
+  });
   it("cleans a stopped gate runtime when its running profile is rejected", async () => {
     const { root, candidate } = await arrangeRun("gate-profile-cleanup");
     const { verifyReleaseBundle } = await import("../src/release/verify-release-bundle.js");
@@ -942,6 +1018,13 @@ describe("installed-runtime harness orchestration", () => {
     for (const path of starts) await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
   }, 30_000);
 
+  it("fails closed when the real plugin observer runner is missing instead of accepting a second MCP client", async () => {
+    const { options } = await arrangeRun("run-missing-event-observer", { runPluginEventObserverCorpus: undefined });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure?.code).toBe("plugin_event_observer_corpus_failed");
+    expect(result.evidence.pluginEventObserverCorpus).toBeNull();
+  });
   it("checks running versions before executing any acceptance corpus", async () => {
     let corpusCalls = 0;
     const { options } = await arrangeRun("run-live-version-mismatch", {
@@ -1017,8 +1100,30 @@ describe("installed-runtime harness orchestration", () => {
     expect(result.failure).toBeNull();
     expect(processControl.starts).toBe(2);
 
-    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    const evidence = await result.readEvidence();
     expect(evidence).toEqual(result.evidence);
+    await expect(stat(join(root, "installed-runtime-vault-run-pass-observer-success"))).rejects.toMatchObject({ code: "ENOENT" });
+    const publicText = await readFile(result.evidencePath, "utf8");
+    expect(publicText).not.toContain("capabilityToken");
+    expect(publicText).not.toContain("rawBytesBase64");
+    const changed = JSON.parse(publicText) as InstalledRuntimeEvidence;
+    const window = changed.pluginEventObserverCorpus!.scenarios[0]!.windows[0]!;
+    const source = changed.pluginEventObserverCorpus!.sourceReports[0]!;
+    window.pid = source.rendererPid = 1;
+    window.supervisorPid = source.supervisorPid = 1;
+    window.transcriptSha256 = source.transcriptSha256 = "0".repeat(64);
+    await writeFile(result.evidencePath, JSON.stringify(changed));
+    await expect(result.readEvidence()).rejects.toThrow(/independent.*source/);
+    await writeFile(result.evidencePath, publicText);
+    expect(await result.readEvidence()).toEqual(result.evidence);
+    const substitutedPause = JSON.parse(publicText) as InstalledRuntimeEvidence;
+    const pause = substitutedPause.gateIsolationCorpus!.manualPause.installedObservation!;
+    pause.toolRows[0]!.requestSha256 = "0".repeat(64);
+    pause.localActions[0].afterSha256 = "0".repeat(64);
+    await writeFile(result.evidencePath, JSON.stringify(substitutedPause));
+    await expect(result.readEvidence()).rejects.toThrow(/independent actual source/);
+    await writeFile(result.evidencePath, publicText);
+    expect(await result.readEvidence()).toEqual(result.evidence);
     expect(evidence.profile.name).toBe(INNER_PROFILE.name);
     expect(evidence.profile.mismatches).toEqual([]);
     expect(evidence.candidate?.pluginId).toBe("candidate-bridge");
@@ -1103,6 +1208,16 @@ describe("installed-runtime harness orchestration", () => {
 });
 
 describe("installed-runtime harness failure projection", () => {
+  it("fails closed when a pause runner returns only a public proof without retained source", async () => {
+    const { options } = await arrangeRun("run-pause-missing-source", {
+      runManualPauseCorpus: async ({ runId, profile, candidate }) => syntheticManualPauseSource(runId, profile.name, candidate.identity.bundleSha256, candidate.identity.files.find(file => file.path === "main.js")!.sha256).proof,
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({ stage: "gate_isolation_corpus", code: "gate_isolation_corpus_failed" });
+    expect(result.evidence.manualPauseObservation).toBeNull();
+    expect((await result.readEvidence()).verdict).toBe("failed");
+  });
   it("records invalid evidence for an unregistered profile", async () => {
     const { root, options } = await arrangeRun("run-unregistered", {
       profileName: "NOT-REGISTERED",
@@ -1113,7 +1228,7 @@ describe("installed-runtime harness failure projection", () => {
       stage: "preflight",
       code: "unregistered_profile",
     });
-    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    const evidence = await result.readEvidence();
     expect(evidence.verdict).toBe("invalid");
     expect(evidence.observations).toEqual([]);
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
@@ -1570,7 +1685,7 @@ describe("installed-runtime harness failure projection", () => {
       stage: "gate_isolation_corpus",
       code: "gate_isolation_corpus_failed",
     });
-    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    const evidence = await result.readEvidence();
     expect(evidence.verdict).toBe("failed");
     expect(evidence.gateIsolationCorpus).toBeNull();
     expect(evidence.semanticEvidenceSearchSnapshotCorpus?.verdict).toBe("passed");
@@ -1590,7 +1705,7 @@ describe("installed-runtime harness failure projection", () => {
       stage: "registered_reference_rewrite_corpus",
       code: "registered_reference_rewrite_corpus_failed",
     });
-    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    const evidence = await result.readEvidence();
     expect(evidence.verdict).toBe("failed");
     expect(evidence.registeredReferenceRewriteCorpus).toBeNull();
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
@@ -1608,7 +1723,7 @@ describe("installed-runtime harness failure projection", () => {
       stage: "semantic_evidence_search_snapshot_corpus",
       code: "semantic_evidence_search_snapshot_corpus_failed",
     });
-    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    const evidence = await result.readEvidence();
     expect(evidence.verdict).toBe("failed");
     expect(evidence.semanticEvidenceSearchSnapshotCorpus).toBeNull();
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
@@ -1626,7 +1741,7 @@ describe("installed-runtime harness failure projection", () => {
       stage: "privacy_recovery_authority_corpus",
       code: "privacy_recovery_authority_corpus_failed",
     });
-    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    const evidence = await result.readEvidence();
     expect(evidence.verdict).toBe("failed");
     expect(evidence.privacyRecoveryAuthorityCorpus).toBeNull();
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
@@ -1674,7 +1789,7 @@ describe("installed-runtime harness failure projection", () => {
       stage: "crash_restoration_retained_authority_corpus",
       code: "crash_restoration_retained_authority_corpus_failed",
     });
-    const evidence = parseEvidence(await readFile(result.evidencePath, "utf8"));
+    const evidence = await result.readEvidence();
     expect(evidence.verdict).toBe("failed");
     expect(evidence.crashRestorationRetainedAuthorityCorpus).toBeNull();
     // Restart replay has not run, so this corpus is still incomplete.

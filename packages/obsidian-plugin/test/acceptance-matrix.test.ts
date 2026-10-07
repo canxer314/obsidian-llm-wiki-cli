@@ -1,14 +1,21 @@
 import { unitContractReport, bindUnitContractSiblings } from "./helpers/contract-report.js";
 import { CONTRACT_PACKAGE_ASSERTION, contractDigest } from "../src/installed-runtime/contract-package-corpus.js";
 import { createHash } from "node:crypto";
+import { syntheticManualPauseProof, syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
 import { describe, expect, it } from "vitest";
 
 import {
-  createAcceptanceMatrixReport,
+  createAcceptanceMatrixReport as composeMatrix,
   validateAcceptanceMatrixReport,
   type InstalledRuntimeEvidence,
 } from "../src/index.js";
 
+import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
+let pauseFixture: ReturnType<typeof syntheticManualPauseSource>;
+function createAcceptanceMatrixReport(report: InstalledRuntimeEvidence) {
+  const context = observerSourceFixture({ runId: "acceptance-run", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
+  return composeMatrix(report, context, pauseFixture.context);
+}
 const DIGEST = "a".repeat(64);
 
 function corpus(
@@ -100,6 +107,7 @@ function syntheticFifoProof() {
 }
 
 function evidence(): InstalledRuntimeEvidence {
+  pauseFixture = syntheticManualPauseSource("acceptance-run", "MVP-PERF-REF-1", DIGEST, DIGEST);
   const publicWire = {
     ...corpus(ASSERTIONS.publicWire),
     canonicalManifestSha256: DIGEST,
@@ -152,6 +160,7 @@ function evidence(): InstalledRuntimeEvidence {
   };
   const gate = {
     ...corpus(ASSERTIONS.gate),
+    manualPause: { installedObservation: pauseFixture.proof },
     residualCleanup: {
       "vault-a": { writeGate: "open" },
       "vault-b": { writeGate: "open" },
@@ -181,7 +190,7 @@ function evidence(): InstalledRuntimeEvidence {
       observed: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] },
       mismatches: [],
     },
-    candidate: { pluginId: "bridge", pluginVersion: "1.0.0", minAppVersion: "1.13.4", bundleSha256: DIGEST, files: [] },
+    candidate: { pluginId: "bridge", pluginVersion: "1.0.0", minAppVersion: "1.13.4", bundleSha256: DIGEST, files: [{ path: "main.js", sha256: DIGEST, sizeBytes: 17 }] },
     bridgeIdentity: { vaultId: "vault", listener: { address: "127.0.0.1", port: 32123 }, versions: { bridge: "1", plugin: "1", protocol: "1", persistentStateSchema: 1, recoveryJournalSchema: 1 } },
     inputHashes: { candidateBundleSha256: DIGEST, vaultSeedManifestSha256: DIGEST },
     beforeInventory: [],
@@ -200,6 +209,7 @@ function evidence(): InstalledRuntimeEvidence {
     privacyRecoveryAuthorityCorpus: privacy as NonNullable<InstalledRuntimeEvidence["privacyRecoveryAuthorityCorpus"]>,
     releaseLifecycleCorpus: { ...corpus(ASSERTIONS.lifecycle), cleanup: { residualPaths: [] } } as NonNullable<InstalledRuntimeEvidence["releaseLifecycleCorpus"]>,
     crashRestorationRetainedAuthorityCorpus: { ...corpus(ASSERTIONS.crash), cleanup: { fixtureResidue: 0 } } as NonNullable<InstalledRuntimeEvidence["crashRestorationRetainedAuthorityCorpus"]>,
+    pluginEventObserverCorpus: observerReportFixture({ runId: "acceptance-run", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }),
     acceptanceMatrix: null,
     verdict: "passed",
     failure: null,
@@ -363,6 +373,116 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     forged.contractPackageCorpus!.fixtures[0]!.evidencePointer = "wire/inputs/999";
     expect(() => createAcceptanceMatrixReport(forged)).toThrow(/fixture.*pointer/i);
   });
+  it("rejects coordinated pause transcript and local-report hash substitution with observer context preserved", () => {
+    const report = evidence();
+    const proof = report.gateIsolationCorpus!.manualPause.installedObservation!;
+    for (const row of proof.toolRows) {
+      row.requestSha256 = row.structuredSha256 = row.textSha256 = "0".repeat(64);
+      if (row.continuationInSha256 !== null) row.continuationInSha256 = "0".repeat(64);
+      if (row.continuationOutSha256 !== null) row.continuationOutSha256 = "0".repeat(64);
+    }
+    for (const action of proof.localActions) action.beforeSha256 = action.afterSha256 = "0".repeat(64);
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/pause.*source/iu);
+  });
+  it("refuses boolean-only manual pause claims without bound installed drain and local actions", () => {
+    const missing = evidence();
+    delete missing.gateIsolationCorpus!.manualPause.installedObservation;
+    expect(() => createAcceptanceMatrixReport(missing)).toThrow(/A-30.*pause/u);
+  });
+  it("requires external source context even for a self-consistent public observer report", () => {
+    const report = evidence();
+    expect(() => composeMatrix(report, undefined, pauseFixture.context)).toThrow(/independently retained source context/);
+  });
+  // Independent consumer regressions. The baseline is only a synthetic Node
+  // report fixture; none of these cases is installed acceptance evidence.
+  it("independently rejects coordinated PID1 and zero-transcript substitution", () => {
+    const report = evidence();
+    expect(createAcceptanceMatrixReport(report).scenarios.find(s => s.id === "A-37")?.verdict).toBe("passed");
+    const corpus = report.pluginEventObserverCorpus!;
+    const window = corpus.scenarios[0]!.windows[0]!;
+    const source = corpus.sourceReports.find(s => s.scenario === "success" && s.generation === 1)!;
+    window.pid = source.rendererPid = 1;
+    window.supervisorPid = source.supervisorPid = 1;
+    window.transcriptSha256 = source.transcriptSha256 = "0".repeat(64);
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/independent.*source/);
+  });
+  it("independently rejects rollback array order contradicting actual sequence order", () => {
+    const report = evidence();
+    const corpus = report.pluginEventObserverCorpus!;
+    const window = corpus.scenarios[1]!.windows[0]!;
+    // The array says after then before, but event sequence says before then after.
+    window.observations.forEach((observation, index) => { observation.sequence = [6, 7, 4, 5][index]!; });
+    const source = corpus.sourceReports.find(s => s.scenario === "rollback" && s.generation === 1)!;
+    source.projectionSha256 = createHash("sha256").update(JSON.stringify({ observations: window.observations, protocolOrder: window.protocolOrder })).digest("hex");
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("independently rejects recovery callbacks predating observer ready and recovery window", () => {
+    const report = evidence();
+    const corpus = report.pluginEventObserverCorpus!;
+    const window = corpus.scenarios[2]!.windows[1]!;
+    window.protocolOrder.forEach((event, index) => { event.sequence = 20 + index; });
+    window.observationWindow.lastSequence = 23;
+    const source = corpus.sourceReports.find(s => s.scenario === "startup-recovery" && s.generation === 2)!;
+    source.projectionSha256 = createHash("sha256").update(JSON.stringify({ observations: window.observations, protocolOrder: window.protocolOrder })).digest("hex");
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("rejects A37 heartbeat-only summaries despite positive declared coverage counters", () => {
+    const report = evidence();
+    for (const scenario of report.pluginEventObserverCorpus!.scenarios) for (const window of scenario.windows) {
+      window.observations = [{ sequence: 4, kind: "heartbeat" as never, pathSha256: DIGEST, bytesSha256: DIGEST, sizeBytes: 100 }];
+    }
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("rejects A37 a single resolved callback with no bytes despite claimed coverage", () => {
+    const report = evidence();
+    for (const scenario of report.pluginEventObserverCorpus!.scenarios) for (const window of scenario.windows) {
+      window.observations = [{ sequence: 4, kind: "resolved", pathSha256: DIGEST, bytesSha256: null, sizeBytes: 0 }];
+    }
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("rejects A37 complete-looking callbacks whose raw bytes are not the fixed before/after fixture", () => {
+    const report = evidence();
+    for (const scenario of report.pluginEventObserverCorpus!.scenarios) for (const window of scenario.windows) {
+      for (const observation of window.observations) { observation.bytesSha256 = null; observation.sizeBytes = 0; }
+    }
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("rejects A37 substituted observer source hash or renderer PID despite valid coverage", () => {
+    for (const field of ["observerMainSha256", "pid"] as const) {
+      const report = evidence(); const window = report.pluginEventObserverCorpus!.scenarios[0]!.windows[0]!;
+      if (field === "pid") window.pid = 99999; else window.observerMainSha256 = "f".repeat(64);
+      expect(() => createAcceptanceMatrixReport(report)).toThrow();
+    }
+  });
+  it("refuses A37 from the old second-client assertion without real plugin windows", () => {
+    const report = evidence(); report.pluginEventObserverCorpus = null;
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/real enabled plugin/);
+  });
+  it("rejects unconfirmed observer cleanup and borrowed candidate/run evidence", () => {
+    const unclean = evidence(); unclean.pluginEventObserverCorpus!.scenarios[0]!.cleanup.residualPaths.push("fixture");
+    expect(() => createAcceptanceMatrixReport(unclean)).toThrow();
+    const borrowed = evidence(); borrowed.pluginEventObserverCorpus!.scenarios[0]!.runId = "another-run";
+    expect(() => createAcceptanceMatrixReport(borrowed)).toThrow(/binding/);
+  });
+  it("independently refuses A-30 promotion after coordinated wire and local report digest substitution", () => {
+    const report = evidence();
+    expect(createAcceptanceMatrixReport(report).scenarios.find(s => s.id === "A-30")?.verdict).toBe("passed");
+    const proof = report.gateIsolationCorpus!.manualPause.installedObservation!;
+    const substituted = "0".repeat(64);
+    for (const row of proof.toolRows) {
+      row.requestSha256 = substituted;
+      row.structuredSha256 = substituted;
+      row.textSha256 = substituted;
+      if (row.continuationInSha256 !== null) row.continuationInSha256 = substituted;
+      if (row.continuationOutSha256 !== null) row.continuationOutSha256 = substituted;
+    }
+    for (const action of proof.localActions) {
+      action.beforeSha256 = substituted;
+      action.afterSha256 = substituted;
+    }
+    // The A-37 independent source context remains unchanged and valid.
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/pause.*source/iu);
+  });
   it("maps A-26 to the independent second verified span, not rename-all", () => {
     expect(createAcceptanceMatrixReport(evidence()).scenarios.find(({ id }) => id === "A-26")?.assertion)
       .toBe("span/second-equal-spelling-only:untouched-bytes-exact");
@@ -377,8 +497,8 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     const report = createAcceptanceMatrixReport(evidence());
     expect(report.scenarios).toHaveLength(44);
     expect(new Set(report.scenarios.map((scenario) => scenario.id))).toHaveLength(44);
-    expect(report.childManifests).toHaveLength(9);
-    expect(new Set(report.childManifests.map((child) => child.corpusId))).toHaveLength(9);
+    expect(report.childManifests).toHaveLength(10);
+    expect(new Set(report.childManifests.map((child) => child.corpusId))).toHaveLength(10);
     expect(validateAcceptanceMatrixReport(report)).toEqual(report);
   });
 
@@ -407,8 +527,8 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
       assertion: "continuation/quota-exhaustion:rejects-without-evicting-live-state",
     });
     expect(report.scenarios.find(({ id }) => id === "A-37")).toMatchObject({
-      corpusId: "registered-reference-rewrite",
-      assertion: "observer:no-half-written-markdown",
+      corpusId: "plugin-event-observer",
+      assertion: "observer:real-enabled-plugin-complete-before-after-success-rollback-startup-recovery",
     });
     expect(report.scenarios.find(({ id }) => id === "A-42")).toMatchObject({
       corpusId: "public-wire",

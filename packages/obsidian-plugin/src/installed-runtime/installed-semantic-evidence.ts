@@ -916,7 +916,13 @@ export function createInstalledSemanticEvidenceScenarioControl(
       let beforeInventorySha256 = canonicalInventoryDigest(
         await inventoryVault(options.vaultPath),
       );
-      const submissionKey = `installed-semantic-${options.createSubmissionKey?.() ?? randomUUID()}`;
+      const privacyMarker = process.env.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER;
+      const diagnosticSuffix = isTrashScenario && privacyMarker !== undefined && /^privacy_environment_[a-f0-9]{20}$/u.test(privacyMarker)
+        ? privacyMarker.slice("privacy_environment_".length) : undefined;
+      const trashNoteBytes = diagnosticSuffix === undefined ? TRASH_NOTE_BYTES : Buffer.concat([
+        Buffer.from(TRASH_NOTE_BYTES), Buffer.from(`\nprivacy_before_image_${diagnosticSuffix}\n`, "utf8"),
+      ]);
+      const submissionKey = `installed-semantic-${diagnosticSuffix === undefined ? options.createSubmissionKey?.() ?? randomUUID() : `privacy_request_${diagnosticSuffix}`}`;
       active = {
         submissionKey,
         scenario: request.scenario,
@@ -982,8 +988,8 @@ export function createInstalledSemanticEvidenceScenarioControl(
           ? [
               {
                 path: TRASH_NOTE_PATH,
-                bytes: TRASH_NOTE_BYTES,
-                version: `sha256:${createHash("sha256").update(TRASH_NOTE_BYTES).digest("hex")}`,
+                bytes: trashNoteBytes,
+                version: `sha256:${createHash("sha256").update(trashNoteBytes).digest("hex")}`,
               },
               {
                 path: TRASH_REFERENCE_PATH,
@@ -1057,10 +1063,10 @@ export function createInstalledSemanticEvidenceScenarioControl(
             ? {
                 submissionKey,
                 operations: [{
-                  operationId: `trash-${submissionKey}`,
+                  operationId: diagnosticSuffix === undefined ? `trash-${submissionKey}` : `privacy_operation_${diagnosticSuffix}`,
                   kind: "trash",
                   path: TRASH_NOTE_PATH,
-                  targetVersion: `sha256:${createHash("sha256").update(TRASH_NOTE_BYTES).digest("hex")}`,
+                  targetVersion: `sha256:${createHash("sha256").update(trashNoteBytes).digest("hex")}`,
                 }],
               }
             : isMoveScenario

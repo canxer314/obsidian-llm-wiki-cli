@@ -86,7 +86,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
       dataSource: ChangeSetPreflightDataSource;
       execution?: ChangeSetExecutionAdapter;
       vaultId?: string;
-      crashInjector?: (point: string) => void | Promise<void>;
+      crashInjector?: (point: string, context?: import("./change-set.js").ChangeSetCrashContext) => void | Promise<void>;
       acceptanceObserver?: import("./change-set.js").ChangeSetServiceOptions["acceptanceObserver"];
     };
     incompatibleState?: boolean;
@@ -130,7 +130,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
     };
     readonly matched: boolean;
   }): void;
-  crashInjector?: (point: string) => void | Promise<void>;
+  crashInjector?: (point: string, context?: import("./change-set.js").ChangeSetCrashContext) => void | Promise<void>;
   acceptanceObserver?: import("./change-set.js").ChangeSetServiceOptions["acceptanceObserver"];
 }
 
@@ -803,8 +803,8 @@ export class ManagedVaultBridgeRuntime {
    * through the local interactive Primary Operator entry point; no Agent
    * Session route can reach it.
    */
-  async createStandardDiagnosticBundle(): Promise<StandardDiagnosticBundle> {
-    return createStandardDiagnosticBundle(await this.#collectDiagnosticEvidence());
+  async createStandardDiagnosticBundle(correlationSalt?: Uint8Array): Promise<StandardDiagnosticBundle> {
+    return createStandardDiagnosticBundle(await this.#collectDiagnosticEvidence(), correlationSalt);
   }
 
   /**

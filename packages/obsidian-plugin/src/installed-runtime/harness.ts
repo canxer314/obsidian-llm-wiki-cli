@@ -3,7 +3,8 @@ import { defaultContractPackageRoot, loadVersionContractPackage, runContractFixt
 import { runContractCrossCallScenario, type ContractCrossCallEvidence } from "./contract-cross-call.js";
 import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { connect } from "node:net";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, relative } from "node:path";
+import { consumeManualPauseProof, manualPauseSourceDigest, type ManualPauseConsumptionContext } from "./manual-pause-source.js";
 
 import {
   CandidateBundleError,
@@ -22,6 +23,7 @@ import {
 } from "./acceptance-matrix.js";
 import {
   writeEvidenceFile,
+  parseEvidence,
   type ChangeSetCorpusEvidence,
   type GateIsolationCorpusEvidence,
   type InstalledRuntimeEvidence,
@@ -144,6 +146,7 @@ export type HarnessStage =
   | "change_set_replay"
   | "gate_isolation_corpus"
   | "registered_reference_rewrite_corpus"
+  | "plugin_event_observer_corpus"
   | "semantic_evidence_search_snapshot_corpus"
   | "privacy_recovery_authority_corpus"
   | "release_lifecycle_corpus"
@@ -198,6 +201,7 @@ export type HarnessFailureCode =
   | "change_set_replay_failed"
   | "gate_isolation_corpus_failed"
   | "registered_reference_rewrite_corpus_failed"
+  | "plugin_event_observer_corpus_failed"
   | "semantic_evidence_search_snapshot_corpus_failed"
   | "privacy_recovery_authority_corpus_failed"
   | "release_lifecycle_corpus_failed"
@@ -387,6 +391,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<ReleaseLifecycleCorpusOutcome>;
+  readonly runManualPauseCorpus?: typeof import("./manual-pause-installed-runner.js").runInstalledManualPauseCorpus;
   readonly runPersistentFifoCorpus?: typeof import("./fifo-installed-runner.js").runInstalledPersistentFifoCorpus;
   readonly runCrashRestorationRetainedAuthorityCorpus?: (options: {
     readonly installed?: import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions;
@@ -394,6 +399,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<CrashRestorationRetainedAuthorityCorpusOutcome>;
+  readonly runPluginEventObserverCorpus?: (options: Omit<import("./plugin-event-observer-corpus.js").PluginEventObserverCorpusOptions, "prepareAcceptanceDriver" | "semanticEvidenceScenarioRunner" | "reportDirectory">) => Promise<unknown>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -409,6 +415,8 @@ export interface InstalledRuntimeHarnessResult {
   readonly failure: HarnessFailure | null;
   readonly evidence: InstalledRuntimeEvidence;
   readonly evidencePath: string;
+  /** Private re-consumption closure retains source context, never serialized in public evidence. */
+  readonly readEvidence: () => Promise<InstalledRuntimeEvidence>;
 }
 
 /** Failures that invalidate the run's environment rather than the candidate. */
@@ -488,6 +496,9 @@ export async function runInstalledRuntimeHarness(
   const now = options.now ?? (() => new Date().toISOString());
   const runId = options.runId ?? randomUUID();
   const startedAt = now();
+  let pluginEventObserverCorpus: import("./plugin-event-observer-evidence.js").PluginEventObserverCorpusEvidence | null = null;
+  let observerContext: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext | undefined;
+  let pauseContext: ManualPauseConsumptionContext | undefined;
   const client = options.client ?? createLoopbackMcpClient();
   const configDirectoryName = options.configDirectoryName ?? ".obsidian";
   const timeouts = {
@@ -974,6 +985,7 @@ export async function runInstalledRuntimeHarness(
   }
 
   let persistentFifo: import("./fifo-observation.js").PersistentFifoProof | undefined;
+  let manualPause: import("./manual-pause-observation.js").ManualPauseProof | undefined;
 
   // Shared event/assertion collectors for both change-set corpus phases so the
   // closed evidence block spans the initial admission and the post-restart
@@ -1261,6 +1273,34 @@ export async function runInstalledRuntimeHarness(
       },
     });
   }
+  // Independently runnable A-30 proof is collected before the broader gate
+  // corpus can intentionally fail as partial. It never promotes that corpus.
+  if (state.failure === null && options.runManualPauseCorpus !== undefined) {
+    try {
+      const candidate = state.candidate;
+      if (candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined) {
+        throw new Error("Installed manual pause requires verified candidate, profile and observation descriptor");
+      }
+      pauseContext = { runId, candidateBundleSha256: candidate.identity.bundleSha256, installedMainSha256: candidate.identity.files.find(file => file.path === "main.js")!.sha256, profile: profile.name };
+      manualPause = await options.runManualPauseCorpus({
+        runId, workingDirectory: options.workingDirectory, reportDirectory: dirname(options.evidencePath),
+        candidate, profile, client, processControl: options.processControl, configDirectoryName, timeouts,
+        probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+        prepareAcceptanceDriver: async request => {
+          const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+          if (!("path" in prepared) || !("descriptor" in prepared)) throw new Error("Installed manual pause descriptor binding unavailable");
+          return prepared as Awaited<ReturnType<import("./fifo-installed-runner.js").InstalledFifoOptions["prepareAcceptanceDriver"]>>;
+        },
+        retainSource: source => {
+          if (pauseContext!.source !== undefined || source.runId !== pauseContext!.runId || source.candidateBundleSha256 !== pauseContext!.candidateBundleSha256 || source.installedMainSha256 !== pauseContext!.installedMainSha256 || source.profile !== pauseContext!.profile) throw new Error("Manual pause independent source pin mismatch");
+          pauseContext!.source = structuredClone(source);
+          pauseContext!.sourceSha256 = manualPauseSourceDigest(source);
+        },
+        record: recordGateIsolationEvent, assertion: recordGateIsolationAssertion,
+      });
+      consumeManualPauseProof(manualPause, pauseContext);
+    } catch (error) { manualPause = undefined; fail("gate_isolation_corpus", "gate_isolation_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
+  }
   // The gate-isolation corpus (issue #177) runs between the initial window and
   // the controlled restart: it provisions and starts its own two dedicated
   // generated test Vaults through the harness seams, so it runs while no other
@@ -1313,6 +1353,56 @@ export async function runInstalledRuntimeHarness(
             }
           }
         }
+  }
+  // Separate generated correctness runtimes enable the independent plugin; the
+  // registered candidate-only baseline Vault/profile is never modified.
+  if (state.failure === null) {
+    try {
+      if (options.runPluginEventObserverCorpus === undefined || state.candidate === null || profile === null) throw new Error("Real enabled plugin observer corpus runner is required");
+      const { pluginEventObserverCorpusEvidenceSchema } = await import("./plugin-event-observer-evidence.js");
+      const { retainPluginEventObserverSource } = await import("./plugin-event-observer-corpus.js");
+      observerContext = { runId, candidateBundleSha256: state.candidate.identity.bundleSha256,
+        installedMainSha256: state.candidate.identity.files.find(file => file.path === "main.js")!.sha256,
+        profileName: profile.name, candidatePluginId: state.candidate.identity.pluginId, observations: [] };
+      const starts = new Map<string, { pid: number; binding: import("./plugin-event-observer.js").PluginEventObserverBinding }>();
+      const observerProcessControl = { ...options.processControl, start: async (request: Parameters<typeof options.processControl.start>[0]) => {
+        const vaultRelative = relative(resolve(options.workingDirectory), resolve(request.vaultPath));
+        if (vaultRelative.startsWith("..") || vaultRelative !== `installed-runtime-vault-${runId}-observer-success` && vaultRelative !== `installed-runtime-vault-${runId}-observer-rollback` && vaultRelative !== `installed-runtime-vault-${runId}-observer-startup-recovery`) throw new Error("Observer startup is not an isolated generated correctness Vault");
+        const { pluginEventObserverBindingSchema } = await import("./plugin-event-observer.js");
+        const config = JSON.parse(await readFile(join(request.vaultPath, configDirectoryName, "plugins", "llm-wiki-event-observer", "event-observer.json"), "utf8")) as { binding: unknown };
+        const binding = pluginEventObserverBindingSchema.parse(config.binding);
+        if (binding.vaultPath !== request.vaultPath || binding.runId !== runId || binding.candidateBundleSha256 !== observerContext!.candidateBundleSha256 || binding.installedMainSha256 !== observerContext!.installedMainSha256 || binding.profileName !== observerContext!.profileName) throw new Error("Observer startup source pin differs from verified run");
+        const handle = await options.processControl.start(request);
+        if (handle.pid === undefined) throw new Error("Observer supervised PID missing");
+        starts.set(request.vaultPath, { pid: handle.pid, binding });
+        return handle;
+      } };
+      pluginEventObserverCorpus = pluginEventObserverCorpusEvidenceSchema.parse(await options.runPluginEventObserverCorpus({
+        runId, workingDirectory: options.workingDirectory, candidate: state.candidate, processControl: observerProcessControl,
+        client, profile: profile!, probe: options.probe, configDirectoryName, timeouts,
+        retainObservation: async observation => {
+          const reportRelative = relative(resolve(options.workingDirectory), resolve(observation.reportDirectory));
+          if (reportRelative.startsWith("..") || resolve(observation.reportDirectory) === resolve(observation.binding.vaultPath) || relative(resolve(observation.binding.vaultPath), resolve(observation.reportDirectory)).split(/[\\/]/u)[0] !== ".." ||
+              observation.binding.vaultPath !== join(options.workingDirectory, `installed-runtime-vault-${runId}-observer-${observation.scenario}`)) throw new Error("Observer source escaped private correctness runstore");
+          const start = starts.get(observation.binding.vaultPath);
+          if (start === undefined || start.pid !== observation.supervisorPid ||
+              Object.entries(start.binding).some(([key, value]) => key !== "vaultId" && observation.binding[key as keyof typeof start.binding] !== value) ||
+              start.binding.vaultId !== null && start.binding.vaultId !== observation.binding.vaultId || observation.binding.runId !== runId ||
+              observation.binding.candidateBundleSha256 !== observerContext!.candidateBundleSha256 || observation.binding.installedMainSha256 !== observerContext!.installedMainSha256 ||
+              observation.binding.profileName !== profile!.name || observation.candidatePluginId !== observerContext!.candidatePluginId) throw new Error("Observer source not bound to independently supervised run");
+          const { EXACT_FIXTURE, EXACT_ORIGINAL_BYTES, EXACT_COMMITTED_BYTES } = await import("../corpus/edit-fixtures.js");
+          const target = observation.files.find(file => file.path === EXACT_FIXTURE.path);
+          const expectedBytes = observation.scenario === "startup-recovery" && observation.binding.generation === 2 ? EXACT_ORIGINAL_BYTES : EXACT_COMMITTED_BYTES;
+          if (target === undefined || target.before === null || target.after === null || !Buffer.from(target.before).equals(EXACT_ORIGINAL_BYTES) || !Buffer.from(target.after).equals(EXACT_COMMITTED_BYTES) ||
+              observation.requiredVisibleStates?.some(item => item.path !== EXACT_FIXTURE.path || !Buffer.from(item.bytes).equals(expectedBytes) && !(observation.scenario === "rollback" && Buffer.from(item.bytes).equals(EXACT_ORIGINAL_BYTES))) ||
+              !observation.requiredVisibleStates?.some(item => Buffer.from(item.bytes).equals(expectedBytes))) throw new Error("Observer source fixture policy differs from fixed correctness corpus");
+          const retained = await retainPluginEventObserverSource(observation);
+          observerContext!.observations.push(retained);
+        },
+      }));
+    } catch (error) {
+      fail("plugin_event_observer_corpus", "plugin_event_observer_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
+    }
   }
   // The registered-reference rewrite corpus (issue #178) runs between the
   // initial window and the controlled restart, alongside the gate-isolation
@@ -1622,6 +1712,7 @@ export async function runInstalledRuntimeHarness(
           assertions: gateIsolationAssertions,
         })
       : null;
+  if (gateIsolationCorpus !== null && manualPause !== undefined) gateIsolationCorpus.manualPause.installedObservation = manualPause;
   const registeredReferenceRewriteCorpus: RegisteredReferenceRewriteCorpusEvidence | null =
     state.registeredReferenceRewrite !== null
       ? composeRegisteredReferenceRewriteCorpusEvidence({
@@ -1752,11 +1843,13 @@ export async function runInstalledRuntimeHarness(
     publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
     changeSetCorpus,
     gateIsolationCorpus,
+    manualPauseObservation: manualPause ?? null,
     registeredReferenceRewriteCorpus,
     semanticEvidenceSearchSnapshotCorpus,
     privacyRecoveryAuthorityCorpus,
     releaseLifecycleCorpus,
     crashRestorationRetainedAuthorityCorpus,
+    pluginEventObserverCorpus,
     acceptanceMatrix: null,
     verdict,
     failure:
@@ -1782,7 +1875,7 @@ export async function runInstalledRuntimeHarness(
         if (index >= 0) contractCrossCalls[index] = proof; else contractCrossCalls.push(proof);
       }
       evidence.contractPackageCorpus = (options.completeContractPackage ?? completeContractPackageCorpus)({ authority: contractAuthority, wire: contractWire, crossCalls: contractCrossCalls, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, beforeInventorySha256: contractDigest(state.beforeInventory), afterInventorySha256: contractDigest(state.afterInventory), cleanup: state.cleanup });
-      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence);
+      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence, observerContext, pauseContext);
       (evidence as InstalledRuntimeEvidence & { acceptanceMatrix: AcceptanceMatrixReport }).acceptanceMatrix =
         state.acceptanceMatrix;
     } catch (error) {
@@ -1812,8 +1905,9 @@ export async function runInstalledRuntimeHarness(
     state.vault?.profileDirectory ?? "",
     options.workingDirectory,
   ];
-  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers);
-  return { verdict: evidence.verdict, failure: state.failure, evidence, evidencePath: options.evidencePath };
+  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers, observerContext, pauseContext);
+  return { verdict: evidence.verdict, failure: state.failure, evidence, evidencePath: options.evidencePath,
+    readEvidence: async () => parseEvidence(await readFile(options.evidencePath, "utf8"), observerContext, pauseContext) };
 }
 
 // The phase and its observation are recorded together so the evidence

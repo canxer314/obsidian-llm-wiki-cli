@@ -74,20 +74,29 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     });
     expect(cancelled).not.toContain("private selected text");
     const selectedBundle = createContentInclusiveDiagnosticBundle(evidence, "private selected text");
+    await expect(activation!.recordContentInclusiveDiagnosticCopy({
+      vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
+      confirmationId: "forged-copy", outcome: "copied", selection: "private selected text",
+      bundle: selectedBundle, copiedTextSha256: "0".repeat(64),
+    })).rejects.toThrow("copied bytes");
     await activation!.recordContentInclusiveDiagnosticCopy({
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       confirmationId: "another-fresh-confirmation", outcome: "copied", selection: "private selected text",
-      bundle: selectedBundle,
+      bundle: selectedBundle, copiedTextSha256: createHash("sha256").update(JSON.stringify(selectedBundle)).digest("hex"),
     });
     const copied = await readFile(join(reports, `local-content-inclusive-diagnostic-copy-${createHash("sha256").update("another-fresh-confirmation").digest("hex")}.json`), "utf8");
     expect(JSON.parse(copied)).toMatchObject({ outcome: "copied", generated: true, copied: true,
       checksumVerified: true, bundleChecksum: selectedBundle.checksum.canonicalPayload });
-    expect(copied).not.toContain("private selected text");
+    expect(JSON.parse(copied).bundle.selection.content).toBe("private selected text");
     const loadedContent = await loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "content-inclusive-diagnostic-copy", confirmationId: "another-fresh-confirmation",
       expectedSelectionSha256: createHash("sha256").update("private selected text").digest("hex") });
     expect(loadedContent).toMatchObject({ action: "content-inclusive-diagnostic-copy", outcome: "copied", copied: true });
+    const copiedPath = join(reports, `local-content-inclusive-diagnostic-copy-${createHash("sha256").update("another-fresh-confirmation").digest("hex")}.json`);
+    await writeFile(copiedPath, JSON.stringify({ ...JSON.parse(copied), copiedTextSha256: "0".repeat(64) }), { mode: 0o600 });
+    await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor, vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"), action: "content-inclusive-diagnostic-copy", confirmationId: "another-fresh-confirmation", expectedSelectionSha256: createHash("sha256").update("private selected text").digest("hex") })).rejects.toThrow("copied bytes");
+    await writeFile(copiedPath, copied, { mode: 0o600 });
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "content-inclusive-diagnostic-copy", confirmationId: "another-fresh-confirmation",
@@ -169,20 +178,23 @@ it("publishes only a valid Vault-bound standard diagnostic copy and preserves it
     await expect(loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "stale-failed-baseline" })).rejects.toThrow("baseline transition");
-    const currentFailed = createStandardDiagnosticBundle({ ...evidence, health: blocked.health,
+    const failedEntry = { changeSetId: "failed-change", submissionKey: "failed-key", enqueueSeq: 1,
+      state: "result_unproven", executionPhase: "terminal" };
+    const currentFailed = createStandardDiagnosticBundle({ ...evidence, health: blocked.health, changeSets: [failedEntry],
       journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
         { slot: 0, state: "valid", checksum: "valid", sequence: 1, phase: "PREPARED", frameSchemaVersion: 1, changeSetId: "failed-change" },
         { slot: 1, state: "valid", checksum: "valid", sequence: 2, phase: "FAILED", frameSchemaVersion: 1, changeSetId: "failed-change" },
       ] } });
+    const acceptedPaused = createStandardDiagnosticBundle({ ...evidence, health: paused.health, journal: paused.journal, changeSets: [failedEntry] });
     await activation!.recordLocalWriteControl({
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       invocationId: "valid-baseline", action: "accept-recovery-baseline", outcome: "accepted",
-      before: currentFailed, after: paused,
+      before: currentFailed, after: acceptedPaused,
     });
     expect(await loadInstalledLocalOperatorReport({ descriptor: created.descriptor,
       vaultId: "local-vault", endpoint: new URL("http://127.0.0.1:32123/mcp"),
       action: "accept-recovery-baseline", invocationId: "valid-baseline" })).toMatchObject({ outcome: "accepted" });
-    const clearedBlocked = createStandardDiagnosticBundle({ ...evidence, health: blocked.health,
+    const clearedBlocked = createStandardDiagnosticBundle({ ...evidence, health: blocked.health, changeSets: [failedEntry],
       journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
         { slot: 0, state: "empty", checksum: "not_present" },
         { slot: 1, state: "empty", checksum: "not_present" },

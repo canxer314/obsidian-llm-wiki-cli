@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
-import { loadInstalledLocalOperatorReport, waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport } from "../src/installed-runtime/local-operator-report.js";
-import { createStandardDiagnosticBundle } from "../src/diagnostic-bundle.js";
+import { loadInstalledLocalOperatorReport, waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport, verifyInstalledLocalControlSources } from "../src/installed-runtime/local-operator-report.js";
+import { createStandardDiagnosticBundle, type StandardDiagnosticEvidence } from "../src/diagnostic-bundle.js";
 
 async function controlDiscoveryFixture() {
   const root = await mkdtemp(join(tmpdir(), "local-control-discovery-"));
@@ -41,6 +41,162 @@ async function controlDiscoveryFixture() {
   return { root, reportDirectory, options, report, write, writeThroughProtocol,
     cleanup: async () => { activation?.dispose(); await rm(root, { recursive: true, force: true }); } };
 }
+
+it("rejects an accepted baseline whose FAILED Journal belongs to another terminal Change Set", async () => {
+  const fixture = await controlDiscoveryFixture();
+  try {
+    const invocationId = randomUUID();
+    const evidence = {
+      vaultId: "report-vault",
+      versions: { bridge: "0.1.0", plugin: "0.1.0", protocol: "1.0", persistentStateSchema: 2, recoveryJournalSchema: 3 },
+      health: { readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recovery: "blocked",
+        write: { gate: "blocked", state: "paused", pauseSource: null }, effectiveGate: "recovery_blocked", overall: "blocked", reasonCodes: [], operatorAction: "review_recovery" },
+      listener: { address: "127.0.0.1", port: 32123 }, queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
+      lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" },
+      journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
+        { slot: 0, state: "valid", checksum: "valid", sequence: 1, phase: "FAILED", frameSchemaVersion: 3, changeSetId: "wrong-change-set" },
+        { slot: 1, state: "empty", checksum: "not_present" },
+      ] },
+      changeSets: [{ changeSetId: "terminal-unproven", submissionKey: "original", enqueueSeq: 1, state: "result_unproven", executionPhase: "terminal" }], machineEvents: [],
+    };
+    const before = createStandardDiagnosticBundle(evidence);
+    const after = createStandardDiagnosticBundle({ ...evidence, health: { ...evidence.health, recovery: "none",
+      write: { gate: "open", state: "paused", pauseSource: "manual" }, effectiveGate: "writes_paused", operatorAction: "resume_writes" },
+      journal: { ...evidence.journal, frames: [{ slot: 0, state: "empty", checksum: "not_present" }, { slot: 1, state: "empty", checksum: "not_present" }] } });
+    await fixture.write({ ...fixture.report(invocationId), outcome: "accepted", before, after });
+    await expect(waitForNextInstalledLocalControlReport(fixture.options)).rejects.toThrow("unique associated terminal");
+  } finally { await fixture.cleanup(); }
+});
+
+async function acceptedBaselineFixture() {
+  const fixture = await controlDiscoveryFixture();
+  const evidence = {
+    vaultId: "report-vault", versions: { bridge: "0.1.0", plugin: "0.1.0", protocol: "1.0", persistentStateSchema: 2, recoveryJournalSchema: 3 },
+    health: { readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recovery: "blocked",
+      write: { gate: "blocked", state: "paused", pauseSource: null }, effectiveGate: "recovery_blocked", overall: "blocked", reasonCodes: [], operatorAction: "review_recovery" },
+    listener: { address: "127.0.0.1", port: 32123 }, queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
+    lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" },
+    journal: { availability: "available", journalVersion: 1, headerChecksum: "valid", frames: [
+      { slot: 0, state: "valid", checksum: "valid", sequence: 1, phase: "FAILED", frameSchemaVersion: 3, changeSetId: "terminal-unproven" },
+      { slot: 1, state: "empty", checksum: "not_present" },
+    ] },
+    changeSets: [{ changeSetId: "terminal-unproven", submissionKey: "original", enqueueSeq: 1, state: "result_unproven", executionPhase: "terminal" }], machineEvents: [],
+  };
+  const write = async (beforeEvidence: unknown = evidence, afterEvidence: unknown = { ...evidence,
+    health: { ...evidence.health, recovery: "none", write: { gate: "open", state: "paused", pauseSource: "manual" }, effectiveGate: "writes_paused", operatorAction: "resume_writes" },
+    journal: { ...evidence.journal, frames: [{ slot: 0, state: "empty", checksum: "not_present" }, { slot: 1, state: "empty", checksum: "not_present" }] },
+  }) => fixture.write({ ...fixture.report(randomUUID()), outcome: "accepted",
+    before: createStandardDiagnosticBundle(beforeEvidence), after: createStandardDiagnosticBundle(afterEvidence) });
+  return { ...fixture, evidence, writeBaseline: write };
+}
+
+it("matches each opaque control bundle against independently supplied source identities and state", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    const actual = fixture.evidence as StandardDiagnosticEvidence;
+    const beforeSalt = randomBytes(32);
+    const afterSalt = randomBytes(32);
+    const report = { before: createStandardDiagnosticBundle(actual, beforeSalt), after: createStandardDiagnosticBundle(actual, afterSalt),
+      diagnosticCorrelationSalts: { before: beforeSalt.toString("hex"), after: afterSalt.toString("hex") } };
+    expect(report.before.vault.alias).not.toBe(report.after.vault.alias);
+    expect(() => verifyInstalledLocalControlSources(report, { before: actual, after: actual })).not.toThrow();
+    expect(() => verifyInstalledLocalControlSources({ before: report.before, after: report.after }, { before: actual, after: actual })).toThrow("correlation is missing");
+    for (const phase of ["before", "after"] as const) {
+      for (const field of ["vault", "change-set", "key", "terminal", "journal", "health"] as const) {
+        const foreign = structuredClone(actual);
+        if (field === "vault") (foreign as any).vaultId = "foreign-vault";
+        if (field === "change-set") {
+          (foreign.changeSets[0] as any).changeSetId = "foreign-change-set";
+          (foreign.journal.frames[0] as any).changeSetId = "foreign-change-set";
+        }
+        if (field === "key") (foreign.changeSets[0] as any).submissionKey = "foreign-key";
+        if (field === "terminal") (foreign.changeSets[0] as any).state = "intent_not_applied";
+        if (field === "journal") (foreign.journal.frames[0] as any).sequence = 2;
+        if (field === "health") (foreign.health as any).overall = "degraded";
+        const changed = { ...report, [phase]: createStandardDiagnosticBundle(foreign, phase === "before" ? beforeSalt : afterSalt) };
+        expect(() => verifyInstalledLocalControlSources(changed, { before: actual, after: actual })).toThrow(`${phase} diagnostic does not match`);
+      }
+    }
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects accepted baseline evidence with execution still in flight", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    await fixture.writeBaseline({ ...fixture.evidence, queue: { currentExecutionId: "active", length: 1, headChangeSetId: "active" } });
+    await expect(waitForNextInstalledLocalControlReport(fixture.options)).rejects.toThrow("in-flight");
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects a rejected resume report that quietly opens writes", async () => {
+  const fixture = await controlDiscoveryFixture();
+  try {
+    const value = fixture.report(randomUUID(), "resume-writes");
+    const { checksum: _, ...beforeContent } = value.before;
+    const before = { ...beforeContent, health: { ...beforeContent.health,
+      write: { gate: "open", state: "paused", pauseSource: "manual" }, effectiveGate: "writes_paused" } };
+    const canonical = (input: unknown): unknown => Array.isArray(input) ? input.map(canonical) : typeof input === "object" && input !== null ?
+      Object.fromEntries(Object.entries(input).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)])) : input;
+    await fixture.write({ ...value, before: { ...before, checksum: { algorithm: "sha256", canonicalPayload:
+      `sha256:${createHash("sha256").update(JSON.stringify(canonical(before))).digest("hex")}` } } } as unknown as typeof value);
+    await expect(waitForNextInstalledLocalControlReport({ ...fixture.options, action: "resume-writes" })).rejects.toThrow("rejected resume changed");
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects a failed baseline that clears its FAILED Journal", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    const invocationId = randomUUID();
+    await fixture.write({ ...fixture.report(invocationId), before: createStandardDiagnosticBundle(fixture.evidence),
+      after: createStandardDiagnosticBundle({ ...fixture.evidence, journal: { ...fixture.evidence.journal,
+        frames: [{ slot: 0, state: "empty", checksum: "not_present" }, { slot: 1, state: "empty", checksum: "not_present" }] } }) });
+    await expect(waitForNextInstalledLocalControlReport(fixture.options)).rejects.toThrow("rejected baseline changed journal");
+  } finally { await fixture.cleanup(); }
+});
+
+it.each(["missing", "corrupt", "duplicate", "nonterminal", "auto-resume", "historical-rewrite"])("fails closed on %s baseline evidence", async mode => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    const before = mode === "missing" ? { ...fixture.evidence, journal: { availability: "unavailable", frames: [] } } :
+      mode === "corrupt" ? { ...fixture.evidence, journal: { ...fixture.evidence.journal, frames: [{ slot: 0, state: "invalid", checksum: "invalid" }, { slot: 1, state: "empty", checksum: "not_present" }] } } :
+      mode === "duplicate" ? { ...fixture.evidence, changeSets: [...fixture.evidence.changeSets, { ...fixture.evidence.changeSets[0], changeSetId: "duplicate", submissionKey: "duplicate-key", enqueueSeq: 2 }] } :
+      mode === "nonterminal" ? { ...fixture.evidence, changeSets: [{ ...fixture.evidence.changeSets[0], executionPhase: null }] } : fixture.evidence;
+    const after = { ...fixture.evidence, health: { ...fixture.evidence.health, recovery: "none",
+      write: { gate: "open", state: mode === "auto-resume" ? "writable" : "paused", pauseSource: mode === "auto-resume" ? null : "manual" },
+      effectiveGate: mode === "auto-resume" ? null : "writes_paused" },
+      journal: { ...fixture.evidence.journal, frames: [{ slot: 0, state: "empty", checksum: "not_present" }, { slot: 1, state: "empty", checksum: "not_present" }] },
+      changeSets: mode === "historical-rewrite" ? [{ ...fixture.evidence.changeSets[0], state: "intent_not_applied" }] : fixture.evidence.changeSets };
+    await fixture.writeBaseline(before, after);
+    await expect(waitForNextInstalledLocalControlReport(fixture.options)).rejects.toThrow();
+  } finally { await fixture.cleanup(); }
+});
+
+it("consumes a unique associated FAILED Journal acceptance that remains manually paused", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    await fixture.writeBaseline();
+    expect(await waitForNextInstalledLocalControlReport(fixture.options)).toMatchObject({ outcome: "accepted", after: { health: { recovery: "none", write: { state: "paused" } } } });
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects a rejected resume that clears Journal evidence or rewrites terminal history", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    await fixture.write({ ...fixture.report(randomUUID(), "resume-writes"), before: createStandardDiagnosticBundle(fixture.evidence),
+      after: createStandardDiagnosticBundle({ ...fixture.evidence, journal: { ...fixture.evidence.journal,
+        frames: [{ slot: 0, state: "empty", checksum: "not_present" }, { slot: 1, state: "empty", checksum: "not_present" }] } }) });
+    await expect(waitForNextInstalledLocalControlReport({ ...fixture.options, action: "resume-writes" })).rejects.toThrow("rejected resume changed journal");
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects accepted baseline with a readable FAILED frame alongside a corrupt Journal slot", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    await fixture.writeBaseline({ ...fixture.evidence, journal: { ...fixture.evidence.journal,
+      frames: [fixture.evidence.journal.frames[0], { slot: 1, state: "invalid", checksum: "invalid" }] } });
+    await expect(waitForNextInstalledLocalControlReport(fixture.options)).rejects.toThrow("corrupt Journal");
+  } finally { await fixture.cleanup(); }
+});
 
 it("discovers the operator-generated invocation without requiring a caller-invented baseline ID", async () => {
   const fixture = await controlDiscoveryFixture();
