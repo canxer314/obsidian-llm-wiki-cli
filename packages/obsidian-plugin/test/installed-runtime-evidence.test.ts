@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { syntheticFifoProof } from "./helpers/fifo-proof.js";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -638,6 +639,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
           return { ...rejectionFixture(), name, failureCode, proof, status: proof, eventOrder: { before: index * 5 + 1, submit: index * 5 + 2, status: index * 5 + 3, terminal: index * 5 + 4, after: index * 5 + 5 } };
         }),
         fifo: {
+          persistentObservation: syntheticFifoProof("run-evidence", "MVP-PERF-REF-1", DIGEST),
           concurrentSubmissions: 2,
           applied: 2,
           distinctChangeSetIds: 2,
@@ -692,7 +694,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
         "rejection/occupied-destination:path_conflict",
         "submission/replay-identical-key:no-re-execution",
         "submission/conflicting-key-reuse:no-new-change-set",
-        "concurrency/independent-batch:applied-exactly-once",
+        "concurrency/persistent-fifo:repreflight-and-restart-proven",
         "recovery/missing-response:recovered-through-original-key",
         "preview/final-status-replay:immutable-effect-evidence",
       ],
