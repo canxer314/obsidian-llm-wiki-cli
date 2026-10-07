@@ -53,6 +53,10 @@ describe("version contract package authority", () => {
     const wrong = await runContractCrossCallScenario({ authority, scenarioId: "mismatched-identity-rejected", endpoint: bridge.endpoint, expectedVaultId: "contract-vault" });
     expect(wrong.verdict).toBe("passed");
     expect(wrong.observations).toHaveLength(7);
+    const missing = await runContractCrossCallScenario({ authority, scenarioId: "missing-identity-rejected", endpoint: bridge.endpoint, expectedVaultId: "contract-vault" });
+    expect(missing.observations).toHaveLength(7);
+    const noFallback = await runContractCrossCallScenario({ authority, scenarioId: "section-occurrence-no-fallback", endpoint: bridge.endpoint, expectedVaultId: "contract-vault" });
+    expect(noFallback.verdict).toBe("passed");
     const blocked = await runContractCrossCallScenario({ authority, scenarioId: "change-set-seven-day-retention", endpoint: bridge.endpoint, expectedVaultId: "contract-vault" });
     expect(blocked.verdict).toBe("blocked");
     expect(blocked.observations).toEqual([]);
@@ -89,6 +93,10 @@ describe("version contract package authority", () => {
     expect(mixed.observations.some(row => row.name === "ordered-duplicate-exact-bytes")).toBe(true);
     const limits = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "exact-read-limit-and-grouping", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", seedNotes: vault.seedNotes });
     expect(limits.verdict).toBe("passed");
+    for (const scenarioId of ["change-set-same-key-replay", "change-set-key-conflict", "change-set-preflight-rejection"]) {
+      const program = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId, endpoint: bridge.endpoint, expectedVaultId: "frozen-vault" });
+      expect(program.verdict).toBe("passed");
+    }
     const quotaMetadataPath = "Notes/QuotaMetadata.md";
     const quotaValue = "q".repeat(4_718_592);
     await writeFile(join(vault.vaultPath, quotaMetadataPath), `---\nquota: ${quotaValue}\n---\n# Quota\n`);
@@ -106,8 +114,38 @@ describe("version contract package authority", () => {
     expect(uncertain.verdict).toBe("blocked");
     expect(uncertain.requiredCorpus).toBe("controlled-installed-restart");
     expect(uncertain.observations.some(row => row.name === "submit-wire-response-discarded")).toBe(true);
+    const recovered = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "change-set-uncertain-response-recovery", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", restart: async () => { await bridge.stop(); await bridge.start(); return { endpoint: bridge.endpoint, expectedVaultId: "frozen-vault" }; } });
+    expect(recovered.verdict).toBe("passed");
+    expect(recovered.observations.some(row => row.name === "original-key-recovered-after-restart")).toBe(true);
+    const graphBytes = Buffer.from("---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n");
+    const rootBytes = Buffer.from("# Root\n[[Projects/Bridge]]\n");
+    const targetBytes = Buffer.from("# Target Note\n");
+    const allBytes = { "Projects/Bridge.md": graphBytes, "Root.md": rootBytes, "Target Note.md": targetBytes, "Notes/Transport.md": await readFile(join(vault.vaultPath, "Notes/Transport.md")) };
+    const snapshot = new SearchSnapshotManager({ listMarkdownPaths: async () => Object.keys(allBytes), readBinary: async path => (allBytes as Record<string, Uint8Array>)[path] ?? null, semanticEvidence: async path => {
+      if (path === "Notes/Transport.md") {
+        const content = allBytes[path].toString(); const original = "[[Target Note]]"; const offset = content.indexOf(original);
+        return { frontmatter: null, tags: [], headings: [], references: offset < 0 ? [] : [{ profile: "wikilink", target: "Target Note", resolvedPath: "Target Note.md", original, position: { start: { line: -1, col: -1, offset: offset - 1 }, end: { line: -1, col: -1, offset: offset - 1 + original.length } } }], resolvedLinks: offset < 0 ? {} : { "Target Note.md": 1 }, unresolvedLinks: {} };
+      }
+      const content = path === "Projects/Bridge.md" ? graphBytes.toString() : rootBytes.toString();
+      const original = path === "Projects/Bridge.md" ? "[[Target Note|target]]" : "[[Projects/Bridge]]";
+      const offset = content.indexOf(original);
+      return { frontmatter: path === "Projects/Bridge.md" ? { status: "active" } : null, tags: path === "Projects/Bridge.md" ? ["#architecture"] : [], headings: path === "Projects/Bridge.md" ? [{ heading: "Design", level: 1 }] : [], references: path === "Target Note.md" ? [] : [{ profile: "wikilink", target: path === "Projects/Bridge.md" ? "Target Note" : "Projects/Bridge", resolvedPath: path === "Projects/Bridge.md" ? "Target Note.md" : "Projects/Bridge.md", original, position: { start: { line: -1, col: -1, offset }, end: { line: -1, col: -1, offset: offset + original.length } } }], resolvedLinks: path === "Projects/Bridge.md" ? { "Target Note.md": 1 } : path === "Root.md" ? { "Projects/Bridge.md": 1 } : {}, unresolvedLinks: path === "Projects/Bridge.md" ? { "Missing Note": 1 } : {} };
+    } });
+    await snapshot.rebuild();
+    const graphExecution = await createFileSystemChangeSetExecutionAdapter({ journalPath: join(vault.vaultPath, ".obsidian/contract-state/graph-journal.bin"), slotCapacity: 8 * 1024 * 1024, host: await createNodeFileSystemChangeSetHost({ basePath: vault.vaultPath, stateDirectory: join(vault.vaultPath, ".obsidian/contract-state"), referenced: async () => false, awaitSemanticEvidence: async () => undefined, publishSearchSnapshot: async () => { allBytes["Notes/Transport.md"] = await readFile(join(vault.vaultPath, "Notes/Transport.md")); await snapshot.rebuild(); } }) });
+    let graphRegistry: ChangeSetRegistryState | undefined;
+    const graphBridge = createBridgeInstance({ port: 0, health: { vault: { id: "graph-vault", name: "Generated", path: vault.vaultPath }, readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "writable", pauseSource: null }, queue: { currentExecutionId: null, length: 0, headChangeSetId: null }, lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" }, effectiveGate: null, overall: "healthy", reasonCodes: [], operatorAction: "none" }, discoverService: new VaultDiscoverService(snapshot), readDataSource: { readBinary: readBytes, parseFrontmatter: () => null, headings: () => null }, changeSets: { execution: graphExecution, vaultId: "graph-vault", store: { load: async () => graphRegistry, save: async state => { graphRegistry = state; } }, dataSource: { readBinary: readBytes, isContained: async () => true, pathKind: async path => { try { return (await stat(join(vault.vaultPath, path))).isDirectory() ? "directory" : "file"; } catch { return null; } } } } });
+    bridges.push(graphBridge); await graphBridge.start();
+    const graph = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "structured-graph-discovery-composition", endpoint: graphBridge.endpoint, expectedVaultId: "graph-vault", readFixtureBytes: async () => graphBytes });
+    expect(graph.verdict).toBe("passed");
+    await expect(runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "structured-graph-discovery-composition", endpoint: graphBridge.endpoint, expectedVaultId: "graph-vault", readFixtureBytes: async () => Buffer.from("wrong bytes") })).rejects.toThrow(/raw bytes/);
+    const predecessor = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "successor-search-snapshot-graph-evidence", endpoint: graphBridge.endpoint, expectedVaultId: "graph-vault", seedNotes: vault.seedNotes });
+    expect(predecessor.verdict).toBe("blocked");
+    expect(predecessor.requiredCorpus).toBe("semantic-evidence-search-snapshot");
+    expect(predecessor.observations.some(row => row.name === "successor-graph-frozen-predecessor")).toBe(true);
+    await graphBridge.stop(); await bridge.stop(); await execution.close?.(); await graphExecution.close?.();
     await cleanupTestVault(vault);
-  });
+  }, 60_000);
   it("closes coverage over the actual package, refusing missing, duplicate and unknown entries", async () => {
     const authority = await loadVersionContractPackage(packageRoot);
     const faulty = await copyPackage();

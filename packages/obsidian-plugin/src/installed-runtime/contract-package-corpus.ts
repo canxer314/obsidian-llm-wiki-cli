@@ -78,7 +78,8 @@ function exactCoverage(actual: readonly string[], expected: readonly string[], l
 const executedWire = new WeakMap<object, { endpoint: string; expectedVaultId: string; snapshotSha256: string }>();
 export const contractCorpusBindingSchema = z.object({ runId: z.string().min(1), profileName: z.string().min(1), candidateBundleSha256: digest, vaultIdSha256: digest, seedManifestSha256: digest }).strict();
 export const contractObservationSchema = z.object({ sequence: z.number().int().positive(), name: z.string().min(1), requestSha256: digest, responseSha256: digest, facts: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])) }).strict();
-export const contractCrossCallProofSchema = z.object({ scenarioId: z.string().min(1), authoritySha256: digest, binding: contractCorpusBindingSchema.nullable(), observations: z.array(contractObservationSchema), cleanup: z.object({ sessionsClosed: z.boolean() }).strict(), verdict: z.enum(["passed", "blocked"]), requiredCorpus: z.string().nullable(), dependency: z.object({ binding: contractCorpusBindingSchema, reportSha256: digest, report: z.unknown() }).strict().nullable() }).strict();
+export const contractSourceVaultSchema = z.object({ scenarioId: z.string().min(1), sourceRunId: z.string().min(1), candidateBundleSha256: digest, profileName: z.string().min(1), vaultIdSha256: digest, seedManifestSha256: digest, identityEventSha256: digest, cleanupEventSha256: digest }).strict();
+export const contractCrossCallProofSchema = z.object({ scenarioId: z.string().min(1), authoritySha256: digest, binding: contractCorpusBindingSchema.nullable(), observations: z.array(contractObservationSchema), cleanup: z.object({ sessionsClosed: z.boolean() }).strict(), verdict: z.enum(["passed", "blocked"]), requiredCorpus: z.string().nullable(), dependency: z.object({ binding: contractCorpusBindingSchema, sourceVaults: z.array(contractSourceVaultSchema), reportSha256: digest, report: z.unknown() }).strict().nullable() }).strict();
 const wireInputSchema = z.object({ id: z.string(), tool: z.enum(toolNames), valid: z.boolean(), requestSha256: digest, responseSha256: digest.nullable(), rejected: z.boolean() }).strict();
 const wireEvidenceSchema = z.object({ authoritySha256: digest, inputs: z.array(wireInputSchema), outputs: z.array(z.object({ tool: z.enum(toolNames), root: z.string(), responseSha256: digest, requestEvidencePointer: z.string(), structuredTextIdentical: z.literal(true) }).strict()).length(6), outputFixtures: z.array(z.object({ id: z.string(), root: z.string(), valid: z.boolean(), mode: z.literal("validator-only"), associatedOutputPointer: z.string() }).strict()), unknownFieldRejections: z.array(z.object({ tool: z.enum(toolNames), requestSha256: digest }).strict()).length(6), eventLog: z.array(z.object({ sequence: z.number().int().positive(), kind: z.enum(["tool", "assertion", "cleanup"]), name: z.string(), detailSha256: digest }).strict()).min(1), cleanup: z.object({ sessionClosed: z.literal(true) }).strict(), verdict: z.literal("passed") }).strict();
 export const contractPackageCorpusEvidenceSchema = z.object({
@@ -107,6 +108,14 @@ export const contractPackageCorpusEvidenceSchema = z.object({
     exactCoverage(value.wire.outputFixtures.map(row => row.id), packaged.fixtures.flatMap(f => f.fields.filter(field => field.direction === "output").map(field => f.path + "#" + field.pointer)), "reported wire output fixtures");
     exactCoverage(value.wire.outputs.map(row => row.tool), toolNames, "reported real outputs");
     exactCoverage(value.wire.unknownFieldRejections.map(row => row.tool), toolNames, "reported unknown field rejections");
+    for (const rejection of value.wire.unknownFieldRejections) {
+      const base = packaged.fixtures.flatMap(fixture => fixture.valid ? fixture.fields.filter(field => field.direction === "input" && field.tool === rejection.tool).map(field => ({ fixture, field })) : [])[0];
+      const fixtureValue = base === undefined ? {} : JSON.parse(readFileSync(join(defaultContractPackageRoot(), base.fixture.path), "utf8"));
+      const request = base === undefined || base.field.pointer === "" ? fixtureValue : fixtureValue[base.field.pointer.slice(1)];
+      const expected = contractDigest({ ...request, __contract_unknown_field: true });
+      const rows = value.wire.inputs.filter(input => input.id === `unknown-field/${rejection.tool}`);
+      if (rejection.requestSha256 !== expected || rows.length !== 1 || rows[0]!.requestSha256 !== expected || !rows[0]!.rejected || rows[0]!.valid || rows[0]!.tool !== rejection.tool) throw new ContractPackageCorpusError("Unknown-field rejection evidence does not bind its rejected request");
+    }
     for (const root of value.roots) {
       const authoritative = packaged.roots.find(entry => entry.path === root.id)!;
       if (root.sha256 !== authoritative.sha256) throw new ContractPackageCorpusError("Reported root digest differs from authority");
@@ -127,6 +136,9 @@ export const contractPackageCorpusEvidenceSchema = z.object({
       if (row.evidencePointer !== `wire/${field.direction === "input" ? "inputs" : "outputFixtures"}/${index}` || entries[index]?.valid !== fixture.valid) throw new ContractPackageCorpusError("Fixture evidence pointer does not resolve to its execution/validation");
       if (field.direction === "input") {
         const input = value.wire.inputs[index]!;
+        const fixtureValue = JSON.parse(readFileSync(join(defaultContractPackageRoot(), fixture.path), "utf8"));
+        const request = field.pointer === "" ? fixtureValue : fixtureValue[field.pointer.slice(1)];
+        if (input.requestSha256 !== contractDigest(request)) throw new ContractPackageCorpusError("Fixture request digest differs from version authority");
         if (input.tool !== field.tool || input.rejected === fixture.valid || fixture.valid && input.responseSha256 === null) throw new ContractPackageCorpusError("Fixture input execution result does not match authority");
       } else {
         const output = value.wire.outputFixtures[index]!;
@@ -141,6 +153,12 @@ export const contractPackageCorpusEvidenceSchema = z.object({
       if (scenario.execution === "dependent-corpus") {
         const source = row.proof.dependency;
         if (source === null || contractDigest(source.binding) !== contractDigest(value.binding) || source.reportSha256 !== contractDigest(source.report)) throw new ContractPackageCorpusError("Cross-call dependent source report, binding or digest is absent");
+        if (source.sourceVaults.length === 0) throw new ContractPackageCorpusError("Dependent source Vault provenance is absent");
+        for (const vault of source.sourceVaults) if (!vault.sourceRunId.startsWith(value.binding.runId + "-") || vault.candidateBundleSha256 !== value.binding.candidateBundleSha256 || vault.profileName !== value.binding.profileName || vault.cleanupEventSha256 === "0".repeat(64)) throw new ContractPackageCorpusError("Dependent source Vault provenance or cleanup does not bind parent run");
+        for (const vault of source.sourceVaults) {
+          const identityDetails = { scenarioId: vault.scenarioId, sourceRunId: vault.sourceRunId, candidateBundleSha256: vault.candidateBundleSha256, profileName: vault.profileName, vaultIdSha256: vault.vaultIdSha256, seedManifestSha256: vault.seedManifestSha256 };
+          if (vault.identityEventSha256 !== contractDigest(identityDetails) || vault.cleanupEventSha256 !== contractDigest({ sourceRunId: vault.sourceRunId, vaultIdSha256: vault.vaultIdSha256, cleanupConfirmed: true })) throw new ContractPackageCorpusError("Source Vault identity or cleanup event digest is detached from provenance");
+        }
         validateContractDependentReport(row.id, source.report);
       } else if (row.proof.dependency !== null) throw new ContractPackageCorpusError("Non-dependent cross-call contains an unknown source report");
       assertContractCrossCallBehavior(scenario, row.observations);
@@ -149,7 +167,7 @@ export const contractPackageCorpusEvidenceSchema = z.object({
   for (const entries of [value.roots, value.sharedDefinitions, value.fixtures, value.crossCalls]) if (new Set(entries.map(entry => entry.id)).size !== entries.length) context.addIssue({ code: "custom", message: "Duplicate contract coverage" });
   if (!value.eventLog.every((entry, index) => entry.sequence === index + 1) || value.crossCalls.some(call => !call.observations.every((entry, index) => entry.sequence === index + 1))) context.addIssue({ code: "custom", message: "Contract observation sequence mismatch" });
 });
-const dependentGateReportSchema = z.object({ kind: z.literal("installed-contract-gate-proof"), scenarioId: z.string().min(1), source: z.literal("installed-obsidian"), calls: z.array(z.object({ sequence: z.number().int().positive(), tool: z.enum(toolNames), arguments: z.record(z.string(), z.unknown()), structuredContent: z.unknown(), compatibilityText: z.string(), isError: z.boolean(), rawAccessCount: z.number().int().nonnegative() }).strict()).min(1), identities: z.array(z.object({ vaultIdSha256: digest, endpointSha256: digest, healthSha256: digest, stateSha256: digest }).strict()), cleanup: z.object({ attempted: z.literal(true), residualPaths: z.array(z.string()).length(0) }).strict() }).strict();
+const dependentGateReportSchema = z.object({ kind: z.literal("installed-contract-gate-proof"), scenarioId: z.string().min(1), source: z.literal("installed-obsidian"), calls: z.array(z.object({ sequence: z.number().int().positive(), tool: z.enum(toolNames), requestSha256: digest, responseSha256: digest, compatibilitySha256: digest, outcome: z.enum(["incompatible", "operationally_blocked", "observed", "page"]), gate: z.enum(["incompatible_protocol", "recovery_blocked", "starting", "snapshot_unavailable"]).nullable(), isError: z.boolean(), rawAccessCount: z.number().int().nonnegative() }).strict()).min(1), identities: z.array(z.object({ vaultIdSha256: digest, endpointSha256: digest, healthSha256: digest, stateSha256: digest }).strict()), cleanup: z.object({ attempted: z.literal(true), residualPaths: z.array(z.string()).length(0) }).strict() }).strict();
 export function validateContractDependentReport(scenarioId: string, report: unknown): void {
   if (scenarioId === "registered-reference-byte-verification") {
     const source = registeredReferenceRewriteCorpusEvidenceSchema.parse(report);
@@ -163,21 +181,18 @@ export function validateContractDependentReport(scenarioId: string, report: unkn
   } else {
     const source = dependentGateReportSchema.parse(report);
     if (source.scenarioId !== scenarioId || !source.calls.every((row, index) => row.sequence === index + 1)) throw new ContractPackageCorpusError("Dependent installed source scenario/order mismatch");
-    for (const row of source.calls) {
-      const parsed = validators[row.tool].output.parse(row.structuredContent);
-      if (row.compatibilityText !== JSON.stringify(parsed)) throw new ContractPackageCorpusError("Dependent installed structured/text mismatch");
-    }
+    for (const row of source.calls) if (row.responseSha256 !== row.compatibilitySha256) throw new ContractPackageCorpusError("Dependent installed structured/text mismatch");
     if (scenarioId === "schema-compatible-incompatible-health") {
       const health = source.calls.find(row => row.tool === "vault_health");
-      if (health === undefined || contract.parseHealthResult(health.structuredContent).outcome !== "incompatible" || health.isError) throw new ContractPackageCorpusError("Minimal incompatible health behavior is absent");
+      if (health === undefined || health.outcome !== "incompatible" || health.isError) throw new ContractPackageCorpusError("Minimal incompatible health behavior is absent");
     } else if (scenarioId === "two-vault-coexistence") {
       if (source.identities.length !== 2 || new Set(source.identities.map(row => row.vaultIdSha256)).size !== 2 || new Set(source.identities.map(row => row.endpointSha256)).size !== 2 || new Set(source.identities.map(row => row.stateSha256)).size !== 2) throw new ContractPackageCorpusError("Two-Vault identity endpoint state isolation is absent");
     } else if (scenarioId === "content-read-operational-block") {
-      for (const tool of ["vault_discover", "vault_read", "vault_continue"] as const) if (!source.calls.some(row => row.tool === tool && (row.structuredContent as { outcome?: string }).outcome === "operationally_blocked" && row.rawAccessCount === 0)) throw new ContractPackageCorpusError("Content gate did not precede all raw access");
+      for (const tool of ["vault_discover", "vault_read", "vault_continue"] as const) if (!source.calls.some(row => row.tool === tool && row.outcome === "operationally_blocked" && row.rawAccessCount === 0)) throw new ContractPackageCorpusError("Content gate did not precede all raw access");
     } else if (scenarioId === "continuation-operational-gate-precedence") {
-      const blocked = source.calls.find(row => row.tool === "vault_continue" && (row.structuredContent as { outcome?: string }).outcome === "operationally_blocked");
-      const resumed = source.calls.find(row => row.tool === "vault_continue" && (row.structuredContent as { outcome?: string }).outcome === "page");
-      if (blocked === undefined || resumed === undefined || blocked.rawAccessCount !== 0 || contractDigest(blocked.arguments) !== contractDigest(resumed.arguments) || blocked.sequence >= resumed.sequence) throw new ContractPackageCorpusError("Operational gate consumed or inspected continuation token");
+      const blocked = source.calls.find(row => row.tool === "vault_continue" && row.outcome === "operationally_blocked");
+      const resumed = source.calls.find(row => row.tool === "vault_continue" && row.outcome === "page");
+      if (blocked === undefined || resumed === undefined || blocked.rawAccessCount !== 0 || blocked.requestSha256 !== resumed.requestSha256 || blocked.sequence >= resumed.sequence) throw new ContractPackageCorpusError("Operational gate consumed or inspected continuation token");
     } else throw new ContractPackageCorpusError("Unknown dependent installed proof");
   }
 }
@@ -193,7 +208,7 @@ export function assertContractCrossCallBehavior(scenario: VersionContractPackage
     "invalid-utf8": [["invalid-utf8-untrusted-rejection", { fixtureInvalidUtf8: true, noTrustedResult: true, notSatisfiedNotSubstituted: true }]],
     "structured-graph": [["combined-structured-graph-raw-byte-projection", { allPredicatesMatched: true, frontmatterOutlineMatchesReferences: true, rawByteVersionMatched: true }]],
     "uncertain-response": [["submit-wire-response-discarded", { actuallyReceived: true, deliberatelyUnavailable: true }], ["original-key-recovered-after-restart", { identityPreserved: true, originalKeyRecovered: true }]],
-    "client-bound-sliding": [["wrong-client-token-rejected", { wrongClientRejected: true }], ["original-client-token-preserved", { ownerTokenPreserved: true }], ["real-time-sliding-lifetime", { replacementSurvivesOriginalExpiry: true }], ["real-time-token-expiry", { expiredRejected: true }]],
+    "client-bound-sliding": [["consumed-token-replay-rejected", { consumedRejected: true }], ["malformed-token-rejected", { malformedRejected: true }], ["wrong-client-token-rejected", { wrongClientRejected: true }], ["original-client-token-preserved", { ownerTokenPreserved: true }], ["real-time-sliding-lifetime", { replacementSurvivesOriginalExpiry: true }], ["real-time-token-expiry", { expiredRejected: true }]],
     "quota-cleanup": [["quota-preserved-and-session-capacity-released", { eightChainsSurvived: true, ninthRejected: true, completionReleasedCapacity: true, closedSessionTokenRejected: true }], ["retained-byte-quota-no-eviction", { acceptedChains: 1, secondRejected: true, acceptedChainDrained: true }], ["expiry-releases-retained-capacity", { expiredTokenRejected: true, capacityReleased: true }], ["bridge-teardown-releases-retained-capacity", { oldTokenRejected: true, capacityReleased: true }]],
   };
   if (scenario.execution === "missing-identity" || scenario.execution === "wrong-identity") {
@@ -204,6 +219,7 @@ export function assertContractCrossCallBehavior(scenario: VersionContractPackage
     // A string naming another corpus is not proof. Its installed producer must
     // supply a validated, content-addressed source report before this can pass.
     if (!has("validated-installed-dependent-proof", { requiredCorpus: scenario.requiredCorpus, sourceReportValidated: true, bindingMatched: true, cleanupConfirmed: true })) throw new ContractPackageCorpusError("Cross-call dependent installed behavior is absent");
+    if (scenario.id === "successor-search-snapshot-graph-evidence" && !has("successor-graph-frozen-predecessor", { graphChanged: true, frozenPredecessorExact: true, restored: true })) throw new ContractPackageCorpusError("Successor graph frozen predecessor behavior is absent");
   } else if (!(requirements[scenario.execution] ?? []).every(([name, facts]) => has(name, facts))) throw new ContractPackageCorpusError(`Cross-call behavior is incomplete: ${scenario.id}`);
   for (const row of observations) {
     if (row.name === "real-time-token-expiry" && Number(row.facts.elapsedMs) < 900_000 || row.name === "real-time-sliding-lifetime" && (Number(row.facts.originalAgeMs) < 900_000 || Number(row.facts.replacementAgeMs) >= 900_000) || row.name === "expiry-releases-retained-capacity" && Number(row.facts.elapsedMs) < 900_000) throw new ContractPackageCorpusError("Cross-call real-time lifetime behavior is incomplete");

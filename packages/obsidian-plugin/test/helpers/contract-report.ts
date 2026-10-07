@@ -4,19 +4,32 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { CONTRACT_PACKAGE_ASSERTION, contractDigest, versionContractAuthorityDigest, defaultContractPackageRoot, type ContractPackageCorpusEvidence, type ContractToolName } from "../../src/installed-runtime/contract-package-corpus.js";
 
+export function unitContractSourceVault(binding: ContractPackageCorpusEvidence["binding"], scenarioId: string) {
+  const identity = { scenarioId, sourceRunId: binding.runId + "-unit-child", candidateBundleSha256: binding.candidateBundleSha256, profileName: binding.profileName, vaultIdSha256: "a".repeat(64), seedManifestSha256: "a".repeat(64) };
+  return { ...identity, identityEventSha256: contractDigest(identity), cleanupEventSha256: contractDigest({ sourceRunId: identity.sourceRunId, vaultIdSha256: identity.vaultIdSha256, cleanupConfirmed: true }) };
+}
+
 /** Unit report shape only. Never an installed runtime or executed producer. */
 export function unitContractReport(binding: ContractPackageCorpusEvidence["binding"]): ContractPackageCorpusEvidence {
   const authority = JSON.parse(readFileSync(fileURLToPath(new URL("../../../contracts/fixtures/v1/acceptance-manifest.json", import.meta.url)), "utf8"));
   const hash = "a".repeat(64);
   const authorityHash = versionContractAuthorityDigest(defaultContractPackageRoot());
-  const inputs: ContractPackageCorpusEvidence["wire"]["inputs"] = authority.fixtures.flatMap((fixture: { path: string; valid: boolean; fields: { pointer: string; direction: string; tool: ContractToolName }[] }) => fixture.fields.filter(field => field.direction === "input").map(field => ({ id: fixture.path + "#" + field.pointer, tool: field.tool, valid: fixture.valid, requestSha256: hash, responseSha256: fixture.valid ? hash : null, rejected: !fixture.valid })));
-  inputs.push({ id: "roots/vault_health/input", tool: "vault_health", valid: true, requestSha256: hash, responseSha256: hash, rejected: false });
+  const inputs: ContractPackageCorpusEvidence["wire"]["inputs"] = authority.fixtures.flatMap((fixture: { path: string; valid: boolean; fields: { pointer: string; direction: string; tool: ContractToolName }[] }) => fixture.fields.filter(field => field.direction === "input").map(field => ({ id: fixture.path + "#" + field.pointer, tool: field.tool, valid: fixture.valid, requestSha256: contractDigest((() => { const value = JSON.parse(readFileSync(fileURLToPath(new URL("../../../contracts/" + fixture.path, import.meta.url)), "utf8")); return field.pointer === "" ? value : value[field.pointer.slice(1)]; })()), responseSha256: fixture.valid ? hash : null, rejected: !fixture.valid })));
+  inputs.push({ id: "roots/vault_health/input", tool: "vault_health", valid: true, requestSha256: contractDigest({}), responseSha256: hash, rejected: false });
+  const unknownFieldRejections = (["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_change_set_status"] as const).map(tool => {
+    const base = authority.fixtures.flatMap((fixture: { path: string; valid: boolean; fields: { pointer: string; direction: string; tool: ContractToolName }[] }) => fixture.valid ? fixture.fields.filter(field => field.direction === "input" && field.tool === tool).map(field => ({ fixture, field })) : [])[0];
+    const value = base === undefined ? {} : JSON.parse(readFileSync(fileURLToPath(new URL("../../../contracts/" + base.fixture.path, import.meta.url)), "utf8"));
+    const request = base === undefined || base.field.pointer === "" ? value : value[base.field.pointer.slice(1)];
+    const requestSha256 = contractDigest({ ...request, __contract_unknown_field: true });
+    inputs.push({ id: `unknown-field/${tool}`, tool, valid: false, requestSha256, responseSha256: null, rejected: true });
+    return { tool, requestSha256 };
+  });
   const outputs: ContractPackageCorpusEvidence["wire"]["outputs"] = authority.roots.filter((root: { direction: string }) => root.direction === "output").map((root: { path: string; tool: ContractToolName }) => ({ tool: root.tool, root: root.path, responseSha256: hash, requestEvidencePointer: `inputs/${inputs.findIndex(input => input.tool === root.tool && input.valid)}`, structuredTextIdentical: true }));
   const outputFixtures: ContractPackageCorpusEvidence["wire"]["outputFixtures"] = authority.fixtures.flatMap((fixture: { path: string; valid: boolean; fields: { pointer: string; direction: string; tool: ContractToolName }[] }) => fixture.fields.filter(field => field.direction === "output").map(field => ({ id: fixture.path + "#" + field.pointer, root: outputs.find(output => output.tool === field.tool)!.root, valid: fixture.valid, mode: "validator-only", associatedOutputPointer: `outputs/${outputs.findIndex(output => output.tool === field.tool)}` })));
   const eventLog = [{ sequence: 1, kind: "cleanup" as const, name: "unit-report-shape-only", detailSha256: hash }];
   return {
     corpusId: "version-contract-package", contractVersion: "1.0.0", authoritySha256: authorityHash, binding,
-    wire: { authoritySha256: authorityHash, inputs, outputs, outputFixtures, unknownFieldRejections: outputs.map(output => ({ tool: output.tool, requestSha256: hash })), eventLog, cleanup: { sessionClosed: true }, verdict: "passed" },
+    wire: { authoritySha256: authorityHash, inputs, outputs, outputFixtures, unknownFieldRejections, eventLog, cleanup: { sessionClosed: true }, verdict: "passed" },
     roots: authority.roots.map((root: { path: string; tool: ContractToolName; direction: string; sha256: string }) => ({ id: root.path, sha256: root.sha256, evidencePointer: root.direction === "input" ? `wire/inputs/${inputs.findIndex(row => row.tool === root.tool && row.valid)}` : `wire/outputs/${outputs.findIndex(row => row.tool === root.tool)}` })),
     sharedDefinitions: authority.sharedDefinitions.map((def: { root: string; pointer: string }) => ({ id: def.root + def.pointer, rootEvidencePointer: `roots/${authority.roots.findIndex((root: { path: string }) => root.path === def.root)}` })),
     fixtures: authority.fixtures.flatMap((fixture: { path: string; valid: boolean; fields: { pointer: string; direction: "input" | "output" }[] }) => fixture.fields.map(field => ({ id: fixture.path + "#" + field.pointer, valid: fixture.valid, direction: field.direction, mode: field.direction === "input" ? "executed" : "validator-only", evidencePointer: field.direction === "input" ? `wire/inputs/${inputs.findIndex(row => row.id === fixture.path + "#" + field.pointer)}` : `wire/outputFixtures/${outputFixtures.findIndex(row => row.id === fixture.path + "#" + field.pointer)}` }))),
@@ -32,14 +45,15 @@ export function unitContractReport(binding: ContractPackageCorpusEvidence["bindi
         "invalid-utf8": [["invalid-utf8-untrusted-rejection", { fixtureInvalidUtf8: true, noTrustedResult: true, notSatisfiedNotSubstituted: true }]],
         "structured-graph": [["combined-structured-graph-raw-byte-projection", { allPredicatesMatched: true, frontmatterOutlineMatchesReferences: true, rawByteVersionMatched: true }]],
         "uncertain-response": [["submit-wire-response-discarded", { actuallyReceived: true, deliberatelyUnavailable: true }], ["original-key-recovered-after-restart", { identityPreserved: true, originalKeyRecovered: true }]],
-        "client-bound-sliding": [["wrong-client-token-rejected", { wrongClientRejected: true }], ["original-client-token-preserved", { ownerTokenPreserved: true }], ["real-time-sliding-lifetime", { replacementSurvivesOriginalExpiry: true, originalAgeMs: 910000, replacementAgeMs: 310000 }], ["real-time-token-expiry", { expiredRejected: true, elapsedMs: 901000 }]],
+        "client-bound-sliding": [["consumed-token-replay-rejected", { consumedRejected: true }], ["malformed-token-rejected", { malformedRejected: true }], ["wrong-client-token-rejected", { wrongClientRejected: true }], ["original-client-token-preserved", { ownerTokenPreserved: true }], ["real-time-sliding-lifetime", { replacementSurvivesOriginalExpiry: true, originalAgeMs: 910000, replacementAgeMs: 310000 }], ["real-time-token-expiry", { expiredRejected: true, elapsedMs: 901000 }]],
         "quota-cleanup": [["quota-preserved-and-session-capacity-released", { eightChainsSurvived: true, ninthRejected: true, completionReleasedCapacity: true, closedSessionTokenRejected: true }], ["retained-byte-quota-no-eviction", { acceptedChains: 1, secondRejected: true, acceptedChainDrained: true }], ["expiry-releases-retained-capacity", { expiredTokenRejected: true, capacityReleased: true, elapsedMs: 901000 }], ["bridge-teardown-releases-retained-capacity", { oldTokenRejected: true, capacityReleased: true }]],
       };
       if (scenario.execution === "missing-identity" || scenario.execution === "wrong-identity") rows[scenario.execution] = ["initialize", ...Array(6).fill("tools/call")].map(name => [name, { status: 403, rejectedBeforeDispatch: true }]);
       if (scenario.execution === "dependent-corpus") rows[scenario.execution] = [["validated-installed-dependent-proof", { requiredCorpus: scenario.requiredCorpus!, sourceReportValidated: true, bindingMatched: true, cleanupConfirmed: true }]];
+      if (scenario.id === "successor-search-snapshot-graph-evidence") rows[scenario.execution]!.push(["successor-graph-frozen-predecessor", { graphChanged: true, frozenPredecessorExact: true, restored: true }]);
       const observations = rows[scenario.execution]!.map(([name, facts], row) => ({ sequence: row + 1, name, facts, requestSha256: hash, responseSha256: hash }));
       const dependencyReport = scenario.execution === "dependent-corpus" ? unitDependencyReport(scenario.id) : null;
-      const proof = { scenarioId: scenario.id, authoritySha256: authorityHash, binding, observations, cleanup: { sessionsClosed: true }, verdict: "passed" as const, requiredCorpus: null, dependency: dependencyReport === null ? null : { binding, reportSha256: contractDigest(dependencyReport), report: dependencyReport } };
+      const proof = { scenarioId: scenario.id, authoritySha256: authorityHash, binding, observations, cleanup: { sessionsClosed: true }, verdict: "passed" as const, requiredCorpus: null, dependency: dependencyReport === null ? null : { binding, sourceVaults: [unitContractSourceVault(binding, scenario.id)], reportSha256: contractDigest(dependencyReport), report: dependencyReport } };
       return { id: scenario.id, evidenceSha256: contractDigest(proof), evidencePointer: `crossCalls/${index}/observations`, source: "real-loopback" as const, observations, proof };
     }),
     beforeInventorySha256: hash, afterInventorySha256: hash, cleanup: { attempted: true, residualPaths: [], sessionClosed: true }, eventLog, assertions: [CONTRACT_PACKAGE_ASSERTION], verdict: "passed",
@@ -64,11 +78,30 @@ function unitDependencyReport(id: string): unknown {
     return { kind: "installed-contract-retention-proof", retentionMs: 604800000, timeBoundaryFixtureSha256: hash, before, afterRestart: before, afterRetention: { lookup: "expired", vault: before.vault }, cleanupConfirmed: true };
   }
   const calls: unknown[] = [];
-  const call = (tool: string, arguments_: unknown, structuredContent: unknown) => calls.push({ sequence: calls.length + 1, tool, arguments: arguments_, structuredContent, compatibilityText: JSON.stringify(structuredContent), isError: false, rawAccessCount: 0 });
+  const call = (tool: string, arguments_: unknown, structuredContent: unknown) => { const value = structuredContent as { outcome: string; gate?: { code: string } }; calls.push({ sequence: calls.length + 1, tool, requestSha256: contractDigest(arguments_), responseSha256: contractDigest(structuredContent), compatibilitySha256: contractDigest(structuredContent), outcome: value.outcome, gate: value.gate?.code ?? null, isError: false, rawAccessCount: 0 }); };
   if (id === "schema-compatible-incompatible-health") call("vault_health", {}, read("valid/incompatible.json"));
   if (id === "two-vault-coexistence") call("vault_health", {}, read("valid/incompatible.json"));
   if (id === "content-read-operational-block") for (const tool of ["vault_discover", "vault_read", "vault_continue"]) call(tool, {}, { outcome: "operationally_blocked", gate: { code: "recovery_blocked" } });
   if (id === "continuation-operational-gate-precedence") { call("vault_continue", { continuation: "token" }, { outcome: "operationally_blocked", gate: { code: "recovery_blocked" } }); call("vault_continue", { continuation: "token" }, { outcome: "page", items: [{ index: 0, item: { outcome: "not_satisfied" } }], continuation: null, complete: true }); }
   return { kind: "installed-contract-gate-proof", scenarioId: id, source: "installed-obsidian", calls, identities: [hash, "b".repeat(64)].map(value => ({ vaultIdSha256: value, endpointSha256: value, healthSha256: value, stateSha256: value })), cleanup: { attempted: true, residualPaths: [] } };
+}
+export function bindUnitContractSiblings(evidence: { contractSourceVaults?: ReturnType<typeof unitContractSourceVault>[]; contractPackageCorpus?: ContractPackageCorpusEvidence | null; registeredReferenceRewriteCorpus: unknown; semanticEvidenceSearchSnapshotCorpus: unknown; beforeInventory: unknown; afterInventory: unknown }): void {
+  const report = evidence.contractPackageCorpus!;
+  for (const [id, key] of [["registered-reference-byte-verification", "registeredReferenceRewriteCorpus"], ["successor-search-snapshot-graph-evidence", "semanticEvidenceSearchSnapshotCorpus"]] as const) {
+    const row = report.crossCalls.find(row => row.id === id)!;
+    const source = row.proof.dependency!;
+    const sibling = evidence[key] as Record<string, unknown>;
+    const merged = { ...(source.report as Record<string, unknown>), ...sibling };
+    if (id === "successor-search-snapshot-graph-evidence") {
+      merged.coverage = { ...(source.report as { coverage: Record<string, unknown> }).coverage, ...(sibling.coverage as Record<string, unknown>) };
+      if (Array.isArray(sibling.scenarios)) merged.scenarios = [...sibling.scenarios, ...(source.report as { scenarios: unknown[] }).scenarios];
+    }
+    const prefix = id === "registered-reference-byte-verification" ? "registered-reference" : "semantic";
+    merged.eventLog = [...(merged.eventLog as unknown[]), ...source.sourceVaults.flatMap(vault => [{ kind: "transport", name: `${prefix}-source-vault-identity`, detailSha256: vault.identityEventSha256 }, { kind: "cleanup", name: `${prefix}-source-vault-cleaned`, detailSha256: vault.cleanupEventSha256 }])].map((event, index) => ({ ...(event as object), sequence: index + 1 }));
+    evidence[key] = merged; source.report = structuredClone(merged); source.reportSha256 = contractDigest(merged); row.evidenceSha256 = contractDigest(row.proof);
+  }
+  evidence.contractSourceVaults = structuredClone(report.crossCalls.filter(row => ["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"].includes(row.id)).flatMap(row => row.proof.dependency!.sourceVaults));
+  report.beforeInventorySha256 = contractDigest(evidence.beforeInventory);
+  report.afterInventorySha256 = contractDigest(evidence.afterInventory);
 }
 export { contractDigest };

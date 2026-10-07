@@ -449,6 +449,8 @@ export interface InstalledRuntimeSmokeArguments {
   workdir?: string;
   evidence?: string;
   profile: string;
+  contractScenario?: string;
+  contractTiming?: "full-real-time" | "binding-only";
 }
 
 export async function resolveInstalledRuntimePreviousRelease(options: {
@@ -506,6 +508,10 @@ export function parseInstalledRuntimeSmokeArguments(
       case "--evidence":
         parsed.evidence = value;
         break;
+      case "--contract-scenario": parsed.contractScenario = value; break;
+      case "--contract-timing":
+        if (value !== "full-real-time" && value !== "binding-only") throw new Error("Unknown contract timing mode");
+        parsed.contractTiming = value; break;
       case "--profile":
         parsed.profile = value ?? MVP_PERF_REF_1.name;
         break;

@@ -312,9 +312,15 @@ async function startRuntime(
       },
     };
 
+    options.record("transport", "registered-reference-source-vault-identity", { scenarioId: "registered-reference-byte-verification", sourceRunId: acceptance.descriptor.runId, candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profile!.name, vaultIdSha256: createHash("sha256").update(JSON.stringify(identity.vaultId)).digest("hex"), seedManifestSha256: vault.seedManifestSha256 });
     options.record("transport", "registered-reference-runtime-ready", {
       label,
       endpoint: endpoint.pathname,
+      sourceRunId: acceptance.descriptor.runId,
+      candidateBundleSha256: options.candidate.identity.bundleSha256,
+      profileName: options.profile!.name,
+      vaultIdSha256: createHash("sha256").update(JSON.stringify(identity.vaultId)).digest("hex"),
+      seedManifestSha256: vault.seedManifestSha256,
       snapshotOutcome: expectedSnapshotOutcome,
     });
     return {
@@ -388,7 +394,7 @@ async function cleanupRuntimes(
         firstError ??= new Error(
           `Registered-reference cleanup left residual paths: ${cleanup.residualPaths.join(", ")}`,
         );
-      }
+      } else options.record("cleanup", "registered-reference-source-vault-cleaned", { sourceRunId: runtime.acceptance.descriptor.runId, vaultIdSha256: createHash("sha256").update(JSON.stringify(runtime.identity.vaultId)).digest("hex"), cleanupConfirmed: true });
     } catch (error) {
       firstError ??= error;
     }

@@ -1,4 +1,4 @@
-import { unitContractReport } from "./helpers/contract-report.js";
+import { unitContractReport, bindUnitContractSiblings } from "./helpers/contract-report.js";
 import { CONTRACT_PACKAGE_ASSERTION, contractDigest } from "../src/installed-runtime/contract-package-corpus.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -165,7 +165,7 @@ function evidence(): InstalledRuntimeEvidence {
     ...corpus(ASSERTIONS.privacy),
     authority: { baselineAcceptanceLocalOnly: true },
   };
-  return {
+  const result: InstalledRuntimeEvidence = {
     schemaVersion: 1,
     runId: "acceptance-run",
     startedAt: "2026-09-29T00:00:00.000Z",
@@ -205,12 +205,62 @@ function evidence(): InstalledRuntimeEvidence {
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
   };
+  bindUnitContractSiblings(result);
+  return result;
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
   it("does not treat six handwritten tool calls as the A-39 version contract proof", () => {
     const missing = evidence(); missing.contractPackageCorpus = null;
     expect(() => createAcceptanceMatrixReport(missing)).toThrow(/version-contract-package.*absent/i);
+  });
+  it("rejects a foreign source Vault behind a matching parent report", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    row.proof.dependency!.sourceVaults[0]!.sourceRunId = "foreign-run-child";
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/source Vault.*parent run/i);
+  });
+  it("rejects source Vault digests detached from their recorded identity", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    row.proof.dependency!.sourceVaults[0]!.identityEventSha256 = "b".repeat(64);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/identity.*digest|provenance/i);
+  });
+  it("rejects a semantic source Vault substituted behind the same sibling report", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    const vault = row.proof.dependency!.sourceVaults[0]!;
+    vault.seedManifestSha256 = "b".repeat(64);
+    const { identityEventSha256: _identity, cleanupEventSha256: _cleanup, ...details } = vault;
+    vault.identityEventSha256 = contractDigest(details);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/source Vault.*(record|provenance)/i);
+  });
+  it("does not replace successor graph cross-call behavior with native snapshot summary", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    row.observations = row.observations.filter(entry => entry.name !== "successor-graph-frozen-predecessor"); row.proof.observations = row.observations;
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/frozen.*predecessor/i);
+  });
+  it("rejects a contract source borrowed from a different sibling corpus", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    (row.proof.dependency!.report as { scenarioManifestSha256: string }).scenarioManifestSha256 = "b".repeat(64);
+    row.proof.dependency!.reportSha256 = contractDigest(row.proof.dependency!.report);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/source.*sibling/i);
+  });
+  it("rejects raw continuation authority in publicly persisted dependency reports", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "continuation-operational-gate-precedence")!;
+    const calls = (row.proof.dependency!.report as { calls: { arguments: unknown; compatibilityText: string; structuredContent: unknown }[] }).calls;
+    for (const call of calls) { call.arguments = { continuation: "private-token-must-not-be-published" }; call.compatibilityText = JSON.stringify(call.structuredContent); }
+    row.proof.dependency!.reportSha256 = contractDigest(row.proof.dependency!.report);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow();
   });
   it("rejects dependent sources reduced to assertion strings even after rehashing", () => {
     const forged = evidence();
@@ -229,6 +279,24 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     const forged = evidence();
     forged.contractPackageCorpus!.crossCalls[0]!.observations = [{ sequence: 1, name: "fixture-loaded", requestSha256: DIGEST, responseSha256: DIGEST, facts: { fixtureLoaded: true } }];
     expect(() => createAcceptanceMatrixReport(forged)).toThrow(/cross-call.*(behavior|digest)/i);
+  });
+  it("rejects an executed fixture request digest not derived from the version authority", () => {
+    const forged = evidence();
+    const input = forged.contractPackageCorpus!.wire.inputs.find(row => row.id.startsWith("fixtures/"))!;
+    input.requestSha256 = "b".repeat(64);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/fixture.*request.*(digest|authority)/i);
+  });
+  it("rejects unknown-field rejection evidence detached from its rejected wire request", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.wire.unknownFieldRejections[0]!.requestSha256 = "b".repeat(64);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/unknown.field.*(request|evidence)/i);
+  });
+  it("requires consumed and malformed continuation rejection in addition to client binding", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "single-use-client-bound-sliding-continuation")!;
+    row.observations = row.observations.filter(entry => entry.name !== "consumed-token-replay-rejected" && entry.name !== "malformed-token-rejected");
+    row.proof.observations = row.observations; row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/cross.call behavior.*continuation/i);
   });
   it("rejects contract fixture pointers detached from their executed request", () => {
     const forged = evidence();

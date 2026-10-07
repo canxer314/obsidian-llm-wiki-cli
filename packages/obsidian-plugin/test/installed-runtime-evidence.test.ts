@@ -1,4 +1,4 @@
-import { unitContractReport, contractDigest } from "./helpers/contract-report.js";
+import { unitContractReport, contractDigest, bindUnitContractSiblings } from "./helpers/contract-report.js";
 import { createHash } from "node:crypto";
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -750,6 +750,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
     failure: null,
     cleanup: { attempted: true, residualPaths: [] },
   };
+  bindUnitContractSiblings(evidence);
   return evidence;
 }
 

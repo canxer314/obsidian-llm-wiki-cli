@@ -16,7 +16,7 @@ export interface ContractCrossCallEvidence {
   readonly cleanup: { readonly sessionsClosed: boolean };
   readonly verdict: "passed" | "blocked";
   readonly requiredCorpus: string | null;
-  readonly dependency: { readonly binding: NonNullable<ContractCrossCallEvidence["binding"]>; readonly reportSha256: string; readonly report: unknown } | null;
+  readonly dependency: { readonly binding: NonNullable<ContractCrossCallEvidence["binding"]>; readonly sourceVaults: import("zod").z.infer<typeof import("./contract-package-corpus.js").contractSourceVaultSchema>[]; readonly reportSha256: string; readonly report: unknown } | null;
 }
 const executedCrossCalls = new WeakMap<object, { endpoint: string; vaultIdSha256: string; snapshotSha256: string }>();
 export const isExecutedContractCrossCallEvidence = (value: unknown, endpoint: string, vaultIdSha256: string): value is ContractCrossCallEvidence => {
@@ -48,6 +48,7 @@ export async function runContractCrossCallScenario(options: {
   readonly quotaMetadataPath?: string;
   readonly binding?: NonNullable<ContractCrossCallEvidence["binding"]>;
   readonly dependency?: NonNullable<ContractCrossCallEvidence["dependency"]>;
+  readonly predecessorProof?: ContractCrossCallEvidence;
 }): Promise<ContractCrossCallEvidence> {
   const scenario = options.authority.scenarios.find(s => s.id === options.scenarioId);
   if (scenario === undefined) throw new ContractPackageCorpusError("Unknown cross-call scenario");
@@ -350,9 +351,58 @@ export async function runContractCrossCallScenario(options: {
         observe("original-key-recovered-after-restart", {}, after, { identityPreserved: true, originalKeyRecovered: true }); break;
       }
       case "dependent-corpus": {
+        if (scenario.id === "successor-search-snapshot-graph-evidence") {
+          const inherited = options.predecessorProof;
+          if (inherited !== undefined) {
+            if (!isExecutedContractCrossCallEvidence(inherited, options.endpoint.toString(), contractDigest(options.expectedVaultId)) || inherited.scenarioId !== scenario.id || inherited.authoritySha256 !== options.authority.manifestSha256) throw new ContractPackageCorpusError("Frozen predecessor report is not the executed scenario");
+            for (const entry of inherited.observations.filter(entry => entry.name !== "validated-installed-dependent-proof")) observations.push({ ...entry, sequence: observations.length + 1 });
+          } else {
+            const source = options.seedNotes?.find(note => note.path === "Notes/Transport.md");
+            if (source === undefined) { requiredCorpus = "successor-graph-generated-fixture"; break; }
+            const client = await connect();
+            const first = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: source.path }] }));
+            if (!("outcome" in first) || first.outcome !== "page" || first.continuation === null) throw new ContractPackageCorpusError("Successor graph predecessor token absent");
+            const changed = source.content + "\n[[Target Note]]\n";
+            const apply = async (suffix: string, before: string, replacement: string): Promise<void> => {
+              const args = { submissionKey: `contract-successor-${suffix}-${options.authority.manifestSha256.slice(0, 12)}`, operations: [{ operationId: suffix, kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(before), edit: { kind: "replace_whole", replacement: replacement.startsWith("﻿") ? replacement.slice(1) : replacement } }] };
+              await call(client, "vault_change_set_submit", args);
+              const deadline = Date.now() + 30_000;
+              while (true) {
+                const status = contract.parseChangeSetStatusResult(await call(client, "vault_change_set_status", { submissionKey: args.submissionKey }));
+                if (status.lookup === "found" && status.changeSet.state === "intent_applied") return;
+                if (status.lookup === "found" && status.changeSet.state !== "in_progress" || Date.now() >= deadline) throw new ContractPackageCorpusError("Successor graph public mutation failed");
+                await new Promise(resolve => setTimeout(resolve, 25));
+              }
+            };
+            const query = { query: { all: [{ path: { prefix: source.path } }, { graph: { relation: "links_to", path: "Target Note.md", maxDepth: 1 } }] }, projection: { matches: false, references: true }, order: { by: "path", direction: "asc" }, page: { maxItems: 100, continuation: null } };
+            const beforeGraph = contract.parseDiscoverResult(await call(client, "vault_discover", query));
+            if (beforeGraph.outcome !== "results" || beforeGraph.items.length !== 0) throw new ContractPackageCorpusError("Successor graph baseline has unexpected relation");
+            await apply("add-link", source.content, changed);
+            try {
+              const successor = contract.parseDiscoverResult(await call(client, "vault_discover", query));
+              if (successor.outcome !== "results" || successor.items.length !== 1 || successor.items[0]?.contentVersion !== "sha256:" + contractDigestBytes(changed) || !successor.items[0].references?.some(reference => reference.resolvedPath === "Target Note.md")) throw new ContractPackageCorpusError("Successor graph did not associate new relation with changed bytes");
+              let reconstructed = ""; let offset = 0; let token: string | null = first.continuation; let page = first;
+              while (true) {
+                for (const item of page.items) {
+                  if (!("content" in item) || !("start" in item) || item.start !== offset || Buffer.byteLength(item.content) !== item.end - item.start) throw new ContractPackageCorpusError("Successor predecessor byte ranges invalid");
+                  offset = item.end; reconstructed += item.content;
+                }
+                if (token === null) break;
+                const next = contract.parseContinueResult(await call(client, "vault_continue", { continuation: token }));
+                if (!("outcome" in next) || next.outcome !== "page") throw new ContractPackageCorpusError("Successor graph invalidated accepted predecessor continuation");
+                page = next; token = next.continuation;
+              }
+              if (reconstructed !== source.content) throw new ContractPackageCorpusError("Successor graph changed frozen predecessor result");
+            } finally { await apply("restore-link", changed, source.content); }
+            const restored = contract.parseDiscoverResult(await call(client, "vault_discover", query));
+            if (restored.outcome !== "results" || restored.items.length !== 0) throw new ContractPackageCorpusError("Successor graph cleanup did not remove relation");
+            observe("successor-graph-frozen-predecessor", {}, { beforeSha256: contractDigestBytes(source.content), changedSha256: contractDigestBytes(changed) }, { graphChanged: true, frozenPredecessorExact: true, restored: true });
+          }
+        }
         const dependency = options.dependency;
         if (dependency === undefined) { requiredCorpus = scenario.requiredCorpus; break; }
         if (options.binding === undefined || contractDigest(dependency.binding) !== contractDigest(options.binding) || dependency.reportSha256 !== contractDigest(dependency.report)) throw new ContractPackageCorpusError("Dependent installed report binding/digest mismatch");
+        if (dependency.sourceVaults.length === 0) { requiredCorpus = "installed-source-vault-provenance"; break; }
         validateContractDependentReport(scenario.id, dependency.report);
         observe("validated-installed-dependent-proof", dependency.binding, { reportSha256: dependency.reportSha256 }, { requiredCorpus: scenario.requiredCorpus, sourceReportValidated: true, bindingMatched: true, cleanupConfirmed: true });
         break;

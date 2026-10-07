@@ -1,4 +1,5 @@
-import { unitContractReport, contractDigest } from "./helpers/contract-report.js";
+import { inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
+import { unitContractReport, unitContractSourceVault, contractDigest } from "./helpers/contract-report.js";
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -232,6 +233,8 @@ async function arrangeRun(
   const root = await mkdtemp(join(tmpdir(), "installed-runtime-harness-"));
   const candidate = join(root, "candidate");
   await writeCandidateBundle(candidate);
+  const candidateIdentity = await inspectCandidateBundle(candidate);
+  const unitSourceIdentity = (scenarioId: string, sourceRunId: string) => ({ scenarioId, sourceRunId, candidateBundleSha256: candidateIdentity.bundleSha256, profileName: INNER_PROFILE.name, vaultIdSha256: "a".repeat(64), seedManifestSha256: "a".repeat(64) });
   const options: InstalledRuntimeHarnessOptions = {
     profileName: INNER_PROFILE.name,
     candidateBundleDirectory: candidate,
@@ -253,8 +256,22 @@ async function arrangeRun(
     runId,
     // Public runner-seam unit shapes only, never installed proof.
     runContractPackageWire: async ({ authority }) => ({ authoritySha256: authority.manifestSha256, inputs: [], outputs: [], outputFixtures: [], unknownFieldRejections: [], eventLog: [], cleanup: { sessionClosed: true }, verdict: "passed" }),
-    runContractCrossCall: async ({ authority, scenarioId }) => ({ scenarioId, authoritySha256: authority.manifestSha256, binding: null, dependency: null, observations: [], cleanup: { sessionsClosed: true }, verdict: "blocked", requiredCorpus: "unit-boundary" }),
-    completeContractPackage: ({ binding }) => unitContractReport(binding),
+    runContractCrossCall: async ({ authority, scenarioId, binding, dependency }) => ({ scenarioId, authoritySha256: authority.manifestSha256, binding: binding ?? null, dependency: dependency === undefined ? null : { ...dependency, sourceVaults: dependency.sourceVaults.length === 0 ? [unitContractSourceVault(binding!, scenarioId)] : dependency.sourceVaults }, observations: [], cleanup: { sessionsClosed: true }, verdict: "blocked", requiredCorpus: "unit-boundary" }),
+    completeContractPackage: ({ binding, beforeInventorySha256, afterInventorySha256, crossCalls }) => {
+      const report = unitContractReport(binding);
+      report.beforeInventorySha256 = beforeInventorySha256; report.afterInventorySha256 = afterInventorySha256;
+      for (const proof of crossCalls) if (proof.dependency !== null) {
+        const row = report.crossCalls.find(row => row.id === proof.scenarioId)!;
+        row.proof.dependency = proof.dependency;
+        if (proof.scenarioId === "registered-reference-byte-verification") {
+          const source = proof.dependency.report as { eventLog: { sequence: number; kind: string; name: string; detailSha256: string }[] };
+          for (const vault of proof.dependency.sourceVaults) source.eventLog.push({ sequence: source.eventLog.length + 1, kind: "transport", name: "registered-reference-source-vault-identity", detailSha256: vault.identityEventSha256 }, { sequence: source.eventLog.length + 2, kind: "cleanup", name: "registered-reference-source-vault-cleaned", detailSha256: vault.cleanupEventSha256 });
+          proof.dependency.reportSha256 = contractDigest(source);
+        }
+        row.evidenceSha256 = contractDigest(row.proof);
+      }
+      return report;
+    },
     runPersistentFifoCorpus: async ({ runId, profile, candidate, assertion }) => {
       assertion("concurrency/persistent-fifo:repreflight-and-restart-proven");
       return syntheticFifoProof(runId, profile.name, candidate.identity.bundleSha256);
@@ -477,6 +494,9 @@ async function arrangeRun(
       return stubGateIsolationOutcome();
     },
     runRegisteredReferenceRewriteCorpus: async ({ record, assertion }) => {
+      const sourceIdentity = unitSourceIdentity("registered-reference-byte-verification", `${runId}-reference-unit-child`);
+      record("transport", "registered-reference-source-vault-identity", sourceIdentity);
+      record("cleanup", "registered-reference-source-vault-cleaned", { sourceRunId: sourceIdentity.sourceRunId, vaultIdSha256: sourceIdentity.vaultIdSha256, cleanupConfirmed: true });
       record("assertion", "stubbed-registered-reference-rewrite", {});
       record("cleanup", "stubbed-registered-reference-rewrite-cleanup", {});
       for (const name of [
@@ -517,6 +537,9 @@ async function arrangeRun(
     },
     isolateSemanticEvidenceScenarios: false,
     runSemanticEvidenceSearchSnapshotCorpus: async ({ record, assertion }) => {
+      const sourceIdentity = unitSourceIdentity("create_note/clean", `${runId}-semantic-unit-child`);
+      record("transport", "semantic-source-vault-identity", sourceIdentity);
+      record("cleanup", "semantic-source-vault-cleaned", { sourceRunId: sourceIdentity.sourceRunId, vaultIdSha256: sourceIdentity.vaultIdSha256, cleanupConfirmed: true });
       record("transport", "stubbed-semantic-evidence-connected", {});
       record("assertion", "stubbed-semantic-evidence", {});
       record("cleanup", "stubbed-semantic-evidence-cleanup", {});
@@ -572,6 +595,7 @@ function stubSemanticEvidenceSearchSnapshotOutcome(): SemanticEvidenceSearchSnap
         afterInventorySha256: "b".repeat(64),
         cleanupSucceeded: true,
       },
+      ...["move_note", "trash_note"].map(mutationKind => ({ scenario: `${mutationKind}/clean`, source: "installed-obsidian" as const, mutationKind, proofState: "intent_applied" as const, statusProofState: "intent_applied" as const, journalPhase: "COMMITTED" as const, evidenceDeadlineMs: 5000 as const, successBarrierDeadlineMs: 5000 as const, evidenceSessions: [{ mode: "apply" as const, outcome: "converged" as const, virtualElapsedMs: 250 }], quietWindowResets: 1, acceptedSnapshotRounds: 1, rejectedSnapshotRounds: 0, successorSnapshot: { baselineVersion: 1, version: 2, immutable: true, publishedBeforeIntentApplied: true }, durableCommitBeforeIntentApplied: true, writesBlocked: false, beforeInventorySha256: "a".repeat(64), afterInventorySha256: "b".repeat(64), cleanupSucceeded: true as const })),
     ],
     coverage: {
       delayedOlderContentVersionRejected: true,
@@ -1015,7 +1039,7 @@ describe("installed-runtime harness orchestration", () => {
     expect(evidence.gateIsolationCorpus?.corpusId).toBe("per-vault-gate-isolation-proof");
     expect(evidence.gateIsolationCorpus?.vaults).toHaveLength(2);
     expect(evidence.semanticEvidenceSearchSnapshotCorpus?.verdict).toBe("passed");
-    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(1);
+    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(3);
     expect(evidence.privacyRecoveryAuthorityCorpus?.verdict).toBe("passed");
     expect(evidence.privacyRecoveryAuthorityCorpus?.authority.agentStateMutations).toBe(0);
     expect(evidence.releaseLifecycleCorpus?.verdict).toBe("passed");
@@ -1197,7 +1221,7 @@ describe("installed-runtime harness failure projection", () => {
           workingDirectory: ".",
         });
         const outcome = stubSemanticEvidenceSearchSnapshotOutcome();
-        return { ...outcome, scenarios: [first, second] };
+        return { ...outcome, scenarios: [first, second, ...outcome.scenarios.slice(1)] };
       },
     });
 
@@ -1251,6 +1275,18 @@ describe("installed-runtime harness failure projection", () => {
     expect(result.evidence.cleanup?.residualPaths).toEqual([]);
   });
 
+  it("runs one selected contract scenario and persists partial proof without A39 promotion", async () => {
+    const calls: string[] = [];
+    const { options } = await arrangeRun("run-contract-standalone", { contractScenarioId: "missing-identity-rejected", runContractCrossCall: async ({ authority, scenarioId, binding }) => {
+      calls.push(scenarioId);
+      return { scenarioId, authoritySha256: authority.manifestSha256, binding: binding ?? null, dependency: null, observations: [], cleanup: { sessionsClosed: true }, verdict: "blocked", requiredCorpus: "unit-boundary" };
+    } });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(calls).toEqual(["missing-identity-rejected"]);
+    expect(result.evidence.contractPackageExecution?.complete).toBe(false);
+    expect(result.evidence.contractPackageCorpus).toBeNull();
+    expect(result.verdict).not.toBe("passed");
+  });
   it("keeps invalid UTF-8 out of startup snapshots and confirms its per-scenario cleanup", async () => {
     const control = createFakeObsidianProcessControl();
     let observedDuringScenario = false;
@@ -1538,7 +1574,7 @@ describe("installed-runtime harness failure projection", () => {
     expect(evidence.verdict).toBe("failed");
     expect(evidence.gateIsolationCorpus).toBeNull();
     expect(evidence.semanticEvidenceSearchSnapshotCorpus?.verdict).toBe("passed");
-    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(1);
+    expect(evidence.semanticEvidenceSearchSnapshotCorpus?.scenarios).toHaveLength(3);
     expect(await readFile(result.evidencePath, "utf8")).not.toContain(root);
   });
 

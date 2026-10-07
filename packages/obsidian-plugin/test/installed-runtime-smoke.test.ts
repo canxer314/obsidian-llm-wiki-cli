@@ -57,6 +57,11 @@ describe("installed-runtime authoritative command", () => {
     });
   });
 
+  it("selects one manifest contract scenario without permitting a missing selector", () => {
+    expect(parseInstalledRuntimeSmokeArguments(["--contract-scenario", "identity-health-binding", "--contract-timing", "binding-only"])).toMatchObject({ contractScenario: "identity-health-binding", contractTiming: "binding-only" });
+    for (const argv of [["--contract-scenario"], ["--contract-scenario", "--profile", "MVP-PERF-REF-1"], ["--contract-timing", "virtual-time"]]) expect(() => parseInstalledRuntimeSmokeArguments(argv)).toThrow();
+  });
+
   it("accepts a previous release pinned to an immutable tag", () => {
     expect(
       parseInstalledRuntimeSmokeArguments([

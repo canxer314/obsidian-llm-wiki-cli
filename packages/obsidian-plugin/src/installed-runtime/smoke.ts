@@ -11,6 +11,7 @@
  *   npm run smoke:installed-runtime -- \
  *     --registration <registration.json> --workdir <dir> [--candidate <dir>] \
  *     [--profile MVP-PERF-REF-1] [--evidence <path>] \
+ *     [--contract-scenario <manifest-id>] [--contract-timing full-real-time|binding-only] \
  *     --previous-release <dir> --previous-release-tag <vX.Y.Z> \
  *     [--previous-release-attestation <file>]
  *
@@ -133,7 +134,7 @@ async function main(): Promise<number> {
   const args = parseInstalledRuntimeSmokeArguments(process.argv.slice(2));
   if (args.registration === undefined || args.workdir === undefined) {
     process.stderr.write(
-      "Usage: run-installed-runtime-smoke --registration <file> --workdir <dir> [--candidate <dir>] [--profile <name>] [--evidence <path>] --previous-release <dir> --previous-release-tag <vX.Y.Z> [--previous-release-attestation <file>]\n",
+      "Usage: run-installed-runtime-smoke --registration <file> --workdir <dir> [--candidate <dir>] [--profile <name>] [--evidence <path>] [--contract-scenario <manifest-id>] [--contract-timing full-real-time|binding-only] --previous-release <dir> --previous-release-tag <vX.Y.Z> [--previous-release-attestation <file>]\n",
     );
     return 2;
   }
@@ -155,6 +156,8 @@ async function main(): Promise<number> {
   });
   const result = await runInstalledRuntimeHarness({
     profileName: args.profile,
+    contractScenarioId: args.contractScenario,
+    contractContinuationTiming: args.contractTiming,
     candidateBundleDirectory: candidate,
     workingDirectory: workdir,
     evidencePath,
