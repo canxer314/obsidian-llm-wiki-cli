@@ -183,18 +183,6 @@ function childManifests(evidence: InstalledRuntimeEvidence, observerContext?: im
   const gate = requireCorpus(evidence.gateIsolationCorpus, "gate-isolation corpus");
   const rewrite = requireCorpus(evidence.registeredReferenceRewriteCorpus, "registered-reference rewrite corpus");
   const semantic = requireCorpus(evidence.semanticEvidenceSearchSnapshotCorpus, "Semantic Evidence/Search Snapshot corpus");
-  for (const [id, sibling] of [["registered-reference-byte-verification", rewrite], ["successor-search-snapshot-graph-evidence", semantic]] as const) {
-    const source = contract.crossCalls.find(row => row.id === id)?.proof.dependency;
-    if (source === null || source === undefined || source.reportSha256 !== sha256(sibling)) throw new AcceptanceMatrixError("Version contract source report does not match its sibling installed corpus");
-    for (const vault of source.sourceVaults) {
-      if (!(evidence.contractSourceVaults ?? []).some(record => sha256(record) === sha256(vault))) throw new AcceptanceMatrixError("Version contract source Vault provenance does not match its independently recorded installed runtime");
-    }
-    for (const vault of source.sourceVaults) {
-      const events = sibling.eventLog;
-      const prefix = id === "registered-reference-byte-verification" ? "registered-reference" : "semantic";
-      if (!events.some(event => event.name === `${prefix}-source-vault-identity` && event.detailSha256 === vault.identityEventSha256) || !events.some(event => event.name === `${prefix}-source-vault-cleaned` && event.detailSha256 === vault.cleanupEventSha256)) throw new AcceptanceMatrixError("Version contract source Vault event provenance is detached from its sibling");
-    }
-  }
   if (contract.beforeInventorySha256 !== sha256(evidence.beforeInventory) || contract.afterInventorySha256 !== sha256(evidence.afterInventory)) throw new AcceptanceMatrixError("Version contract inventory binding does not match this installed run");
   const privacy = requireCorpus(evidence.privacyRecoveryAuthorityCorpus, "privacy/recovery authority corpus");
   const lifecycle = requireCorpus(evidence.releaseLifecycleCorpus, "release-lifecycle corpus");
@@ -313,7 +301,7 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence,
     changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);
   }
   const children = childManifests(evidence, observerContext);
-  consumeContractChildSources(evidence.contractPackageCorpus!, contractContext, evidence.candidate.files.find(file => file.path === "main.js")?.sha256);
+  consumeContractChildSources(evidence.contractPackageCorpus!, contractContext, evidence);
   const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
     const childIndex = children.findIndex((child) => child.corpusId === corpusId);
     const child = children[childIndex];

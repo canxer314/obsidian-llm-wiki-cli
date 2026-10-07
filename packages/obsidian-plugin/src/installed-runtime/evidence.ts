@@ -1242,7 +1242,7 @@ function evidenceSchemaWithContext(observerContext?: import("./plugin-event-obse
   })
   .strict()
   .superRefine((evidence, context) => {
-    if (evidence.contractPackageCorpus) try { consumeContractChildSources(evidence.contractPackageCorpus, contractContext, evidence.candidate?.files.find(file => file.path === "main.js")?.sha256); } catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Version contract independent child source invalid" }); }
+    if (evidence.contractPackageCorpus) try { consumeContractChildSources(evidence.contractPackageCorpus, contractContext, evidence); } catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Version contract independent child source invalid" }); }
     for (const pause of [evidence.manualPauseObservation, evidence.gateIsolationCorpus?.manualPause.installedObservation]) {
       if (pause) try { consumeManualPauseProof(pause, pauseContext); } catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Manual pause independent source invalid" }); }
       if (pause && (pause.runId !== evidence.runId || pause.profile !== evidence.profile.name || pause.candidateBundleSha256 !== evidence.candidate?.bundleSha256 ||

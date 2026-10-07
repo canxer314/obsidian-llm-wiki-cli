@@ -1235,6 +1235,37 @@ describe("installed-runtime evidence record", () => {
       expect(parsePublicEvidence(await readFile(path, "utf8"), observerContext, retained, contractContext)).toEqual(report);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+  it.each(["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"])("independently refuses detached sibling source on failed run for %s", async id => {
+    const report = acceptedEvidence();
+    const observer = independentObserverContext();
+    const pause = pauseFixture.context;
+    const retained = structuredClone(contractContext);
+    const text = serializePublicEvidence(report, [], observer, pause, retained);
+    expect(parsePublicEvidence(text, observer, pause, retained)).toEqual(report);
+    report.verdict = "failed";
+    report.failure = { stage: "acceptance_matrix", code: "acceptance_matrix_failed" };
+    report.acceptanceMatrix = null;
+    const failedText = serializePublicEvidence(report, [], observer, pause, retained);
+    expect(parsePublicEvidence(failedText, observer, pause, retained)).toEqual(report);
+    // Preserve the dependency and private source pins; detach only the sibling.
+    const sibling = id === "registered-reference-byte-verification" ? report.registeredReferenceRewriteCorpus! : report.semanticEvidenceSearchSnapshotCorpus!;
+    sibling.scenarioManifestSha256 = "e".repeat(64);
+    const prefix = id === "registered-reference-byte-verification" ? "registered-reference" : "semantic";
+    for (const event of sibling.eventLog) if (event.name === prefix + "-source-vault-identity") event.detailSha256 = "f".repeat(64);
+    report.verdict = "passed";
+    report.failure = null;
+    expect(() => composeMatrix(report, observer, pause, retained)).toThrow(/source.*sibling/i);
+    report.verdict = "failed";
+    report.failure = { stage: "acceptance_matrix", code: "acceptance_matrix_failed" };
+    expect.soft(() => serializePublicEvidence(report, [], observer, pause, retained)).toThrow(/child|source|sibling|pin/i);
+    expect.soft(() => parsePublicEvidence(JSON.stringify(report), observer, pause, retained)).toThrow(/child|source|sibling|pin/i);
+    const directory = await mkdtemp(join(tmpdir(), "independent-471-failed-source-"));
+    const path = join(directory, "proof.json");
+    try {
+      await expect.soft(writePublicEvidence(path, report, [], observer, pause, retained)).rejects.toThrow(/child|source|sibling|pin/i);
+      await expect.soft(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("does not bypass independent child source validation when a retained contract report is on a failed run", () => {
     const report = acceptedEvidence();
     report.verdict = "failed";

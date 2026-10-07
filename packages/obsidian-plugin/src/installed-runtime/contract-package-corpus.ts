@@ -7,7 +7,7 @@ import { join } from "node:path";
 import * as contract from "@llm-wiki/vault-contracts";
 import type { ContractCrossCallEvidence } from "./contract-cross-call.js";
 import { isExecutedContractCrossCallEvidence } from "./contract-cross-call.js";
-import { registeredReferenceRewriteCorpusEvidenceSchema, semanticEvidenceSearchSnapshotCorpusEvidenceSchema } from "./evidence.js";
+import { registeredReferenceRewriteCorpusEvidenceSchema, semanticEvidenceSearchSnapshotCorpusEvidenceSchema, type InstalledRuntimeEvidence } from "./evidence.js";
 import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -95,7 +95,17 @@ export function contractSeedDigest(seedNotes: readonly { path: string; content: 
   const manifest = seedNotes.map(note => `${createHash("sha256").update(note.content).digest("hex")}  ${note.path}`).sort().join("\n") + "\n";
   return createHash("sha256").update(manifest).digest("hex");
 }
-export function consumeContractChildSources(report: ContractPackageCorpusEvidence, context: ContractChildConsumptionContext | undefined, installedMainSha256: string | undefined): void {
+export function consumeContractChildSources(report: ContractPackageCorpusEvidence, context: ContractChildConsumptionContext | undefined, evidence: Pick<InstalledRuntimeEvidence, "candidate" | "registeredReferenceRewriteCorpus" | "semanticEvidenceSearchSnapshotCorpus" | "contractSourceVaults">): void {
+  const installedMainSha256 = evidence.candidate?.files.find(file => file.path === "main.js")?.sha256;
+  for (const [id, sibling] of [["registered-reference-byte-verification", evidence.registeredReferenceRewriteCorpus], ["successor-search-snapshot-graph-evidence", evidence.semanticEvidenceSearchSnapshotCorpus]] as const) {
+    const source = report.crossCalls.find(row => row.id === id)?.proof.dependency;
+    if (source === null || source === undefined || sibling === null || source.reportSha256 !== contractDigest(sibling)) throw new ContractPackageCorpusError("Version contract source report does not match its sibling installed corpus");
+    for (const vault of source.sourceVaults) {
+      if (!(evidence.contractSourceVaults ?? []).some(record => contractDigest(record) === contractDigest(vault))) throw new ContractPackageCorpusError("Version contract source Vault provenance does not match its independently recorded installed runtime");
+      const prefix = id === "registered-reference-byte-verification" ? "registered-reference" : "semantic";
+      if (!sibling.eventLog.some(event => event.name === `${prefix}-source-vault-identity` && event.detailSha256 === vault.identityEventSha256) || !sibling.eventLog.some(event => event.name === `${prefix}-source-vault-cleaned` && event.detailSha256 === vault.cleanupEventSha256)) throw new ContractPackageCorpusError("Version contract source Vault event provenance is detached from its sibling");
+    }
+  }
   if (context === undefined || context.runId !== report.binding.runId || context.candidateBundleSha256 !== report.binding.candidateBundleSha256 || context.profileName !== report.binding.profileName || context.installedMainSha256 !== installedMainSha256) throw new ContractPackageCorpusError("Version contract independent child source context absent or mismatched");
   for (const id of ["registered-reference-byte-verification", "successor-search-snapshot-graph-evidence"]) {
     const dependency = report.crossCalls.find(row => row.id === id)!.proof.dependency!;
