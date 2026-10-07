@@ -304,12 +304,12 @@ async function arrangeRun(
         verdict: "passed",
       },
     }),
-    runChangeSetCorpus: async ({ seedNotes, record, assertion }) => {
+    runChangeSetCorpus: async ({ seedNotes, record, assertion, inventoryContext, expectedVaultId }) => {
       const seeded =
         seedNotes.find(({ path }) => path === "Notes/Welcome.md")?.content ?? "";
       const digest = createHash("sha256").update(seeded, "utf8").digest("hex");
       const entries = [{ path: "Notes/Welcome.md", sha256: digest, sizeBytes: 0 }];
-      record("assertion", "stubbed-change-set-corpus-began", {
+      record("assertion", "change-set-corpus-began", {
         corpusId: "change-set-submission-proof",
       });
       record("cleanup", "change-set-idle-state", {
@@ -318,6 +318,39 @@ async function arrangeRun(
         currentExecutionId: null,
         writeGate: "open",
       });
+      const inventoryEntries = [
+        { kind: "directory" as const, path: "Notes" }, { kind: "directory" as const, path: "ChangeSetProof" },
+        { kind: "file" as const, path: "Notes/Welcome.md", sha256: digest, sizeBytes: 0 },
+        { kind: "file" as const, path: "ChangeSetProof/AdmissionProof.md", sha256: digest, sizeBytes: 44 },
+        { kind: "file" as const, path: "ChangeSetProof/Editable.md", sha256: digest, sizeBytes: 26 },
+        { kind: "file" as const, path: "ChangeSetProof/Evidence.bin", sha256: digest, sizeBytes: 5 },
+        { kind: "absent" as const, path: "ChangeSetProof/ReadDep.md" },
+        { kind: "absent" as const, path: "ChangeSetProof/copy.bin" },
+        { kind: "absent" as const, path: "ChangeSetProof/AdmissionProof.md/Child.md" },
+      ].map((entry) => Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))) as Array<{kind:"file";path:string;sha256:string;sizeBytes:number}|{kind:"directory"|"absent";path:string}>;
+      const inventoryDigest = createHash("sha256").update(JSON.stringify(inventoryEntries)).digest("hex");
+      const inventory = { scope: "all-public-vault-files-directories-and-affected-absence" as const, entries: inventoryEntries, digest: inventoryDigest };
+      const rejectionNames = ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent", "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination"];
+      const proofs = rejectionNames.map((name, index) => ({ submissionKeySha256: createHash("sha256").update(name).digest("hex"), changeSetId: `rejected-${index}`, state: "intent_not_applied" as const, failureCode: name === "rejection/non-unique-replacement" ? "exact_match_count_mismatch" as const : index < 3 ? "stale_observation" as const : "path_conflict" as const, executed: false }));
+      for (const [index, name] of rejectionNames.entries()) {
+        const proof = proofs[index]!;
+        const changeSet = { changeSetId: proof.changeSetId, state: proof.state, failure: proof.failureCode === "path_conflict" ? { code: proof.failureCode, operationId: "operation", path: "ChangeSetProof/AdmissionProof.md" } : proof.failureCode === "exact_match_count_mismatch" ? { code: proof.failureCode, operationId: "operation", actualOccurrences: 2 } : { code: proof.failureCode } };
+        const vault = { writeGate: "open", writeState: "writable" };
+        record("assertion", `${name}:inventory-before`, inventory);
+        record("tool", "vault_change_set_submit", { submissionKeySha256: proof.submissionKeySha256, result: { outcome: "registered", changeSet, vault } });
+        record("tool", "vault_change_set_status", { submissionKeySha256: proof.submissionKeySha256, result: { lookup: "found", changeSet, vault } });
+        record("tool", "vault_health", {
+          outcome: "observed", vault: { id: expectedVaultId, name: "fixture", path: inventoryContext!.vaultPath },
+          versions: { bridge: "1", plugin: "1", protocol: "1.0", persistentStateSchema: 1, recoveryJournalSchema: 1 },
+          readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" },
+          recovery: { state: "none" }, write: { gate: "open", state: "writable", pauseSource: null },
+          queue: { currentExecutionId: null, length: 0, headChangeSetId: null },
+          lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" },
+          listener: { address: "127.0.0.1", port: 32123 },
+          effectiveGate: null, overall: "healthy", reasonCodes: [], operatorAction: "none",
+        });
+        record("assertion", `${name}:inventory-after`, inventory);
+      }
       const assertions = [
         "submission/valid-create:no-validate-apply-handshake",
         "rejection/stale-direct-target:no-mutation-inventory",
@@ -361,9 +394,13 @@ async function arrangeRun(
             executed: true,
           },
         ],
-        rejectionClasses: [
-          { name: "rejection/stale-direct-target", failureCode: "stale_observation" },
-        ],
+        rejectionClasses: rejectionNames.map((name, index) => ({
+            name, failureCode: proofs[index]!.failureCode, noMutationDigestUnchanged: true,
+            binding: { runId: inventoryContext!.runId, runtimeProfileId: inventoryContext!.runtimeProfileId, candidateBundleSha256: inventoryContext!.candidateBundleSha256, vaultIdSha256: createHash("sha256").update(expectedVaultId).digest("hex") },
+            beforeInventory: inventory, afterInventory: inventory, proof: proofs[index]!, status: proofs[index]!,
+            eventOrder: { before: index * 5 + 3, submit: index * 5 + 4, status: index * 5 + 5, terminal: index * 5 + 6, after: index * 5 + 7 },
+            terminal: { recoveryState: "none", queueLength: 0, currentExecutionId: null, writeGate: "open" },
+          })),
         fifoReport: {
           concurrentSubmissions: 1,
           applied: 1,

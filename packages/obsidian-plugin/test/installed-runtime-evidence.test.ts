@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,7 @@ import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/
 import { createHash } from "node:crypto";
 const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const DIGEST = "a".repeat(64);
+const REJECTION_NAMES = ["rejection/stale-direct-target", "rejection/read-dependency-stale", "rejection/attachment-evidence-mismatch", "rejection/derived-target-file-parent", "rejection/absence-condition", "rejection/non-unique-replacement", "rejection/occupied-destination"];
 
 function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
   InstalledRuntimeEvidence["semanticEvidenceSearchSnapshotCorpus"]
@@ -435,6 +437,42 @@ function crashRestorationRetainedAuthorityEvidence(): NonNullable<
   };
 }
 
+
+// Synthetic orchestration/schema fixture, never installed acceptance evidence.
+function rejectionFixture() {
+  const entries = [
+    { kind: "directory" as const, path: "Notes" },
+    { kind: "directory" as const, path: "ChangeSetProof" },
+    { kind: "file" as const, path: "Notes/Welcome.md", sha256: DIGEST, sizeBytes: 42 },
+    { kind: "file" as const, path: "ChangeSetProof/AdmissionProof.md", sha256: DIGEST, sizeBytes: 44 },
+    { kind: "file" as const, path: "ChangeSetProof/Editable.md", sha256: DIGEST, sizeBytes: 26 },
+    { kind: "file" as const, path: "ChangeSetProof/Evidence.bin", sha256: DIGEST, sizeBytes: 5 },
+    { kind: "absent" as const, path: "ChangeSetProof/ReadDep.md" },
+    { kind: "absent" as const, path: "ChangeSetProof/copy.bin" },
+    { kind: "absent" as const, path: "ChangeSetProof/AdmissionProof.md/Child.md" },
+  ].map((entry) => Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))) as Array<{kind:"file";path:string;sha256:string;sizeBytes:number}|{kind:"directory"|"absent";path:string}>;
+  const digest = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+  const proof = { submissionKeySha256: DIGEST, changeSetId: "rejected-fixture", state: "intent_not_applied" as const, failureCode: "stale_observation" as const, executed: false };
+  return {
+    name: "rejection/stale-direct-target", failureCode: "stale_observation" as const, noMutationDigestUnchanged: true as const,
+    binding: { runId: "run-evidence", runtimeProfileId: "MVP-PERF-REF-1", candidateBundleSha256: DIGEST, vaultIdSha256: createHash("sha256").update("vault-evidence").digest("hex") },
+    beforeInventory: { scope: "all-public-vault-files-directories-and-affected-absence" as const, entries, digest }, afterInventory: { scope: "all-public-vault-files-directories-and-affected-absence" as const, entries, digest }, proof, status: proof,
+    eventOrder: { before: 1, submit: 2, status: 3, terminal: 4, after: 5 },
+    terminal: { recoveryState: "none" as const, queueLength: 0 as const, currentExecutionId: null, writeGate: "open" as const },
+  };
+}
+function rejectionFixtureEvents() {
+  const fixture = rejectionFixture();
+  const detailSha256 = createHash("sha256").update(JSON.stringify({ digest: fixture.beforeInventory.digest, entries: fixture.beforeInventory.entries, scope: fixture.beforeInventory.scope })).digest("hex");
+  return [
+    { sequence: 1, kind: "assertion" as const, name: `${fixture.name}:inventory-before`, detailSha256 },
+    { sequence: 2, kind: "tool" as const, name: "vault_change_set_submit", detailSha256: DIGEST },
+    { sequence: 3, kind: "tool" as const, name: "vault_change_set_status", detailSha256: DIGEST },
+    { sequence: 4, kind: "tool" as const, name: "vault_health", detailSha256: createHash("sha256").update(JSON.stringify({ currentExecutionId: null, queueLength: 0, recoveryState: "none", vaultIdSha256: fixture.binding.vaultIdSha256, writeGate: "open" })).digest("hex") },
+    { sequence: 5, kind: "assertion" as const, name: `${fixture.name}:inventory-after`, detailSha256 },
+  ];
+}
+
 function passingEvidence(): InstalledRuntimeEvidence {
   const evidence: InstalledRuntimeEvidence = {
     schemaVersion: 1,
@@ -595,13 +633,11 @@ function passingEvidence(): InstalledRuntimeEvidence {
             executed: true,
           },
         ],
-        rejectionClasses: [
-          {
-            name: "rejection/stale-direct-target",
-            failureCode: "stale_observation",
-            noMutationDigestUnchanged: true,
-          },
-        ],
+        rejectionClasses: REJECTION_NAMES.map((name, index) => {
+          const failureCode = name === "rejection/non-unique-replacement" ? "exact_match_count_mismatch" as const : index < 3 ? "stale_observation" as const : "path_conflict" as const;
+          const proof = { ...rejectionFixture().proof, failureCode, changeSetId: `rejected-${index}`, submissionKeySha256: createHash("sha256").update(name).digest("hex") };
+          return { ...rejectionFixture(), name, failureCode, proof, status: proof, eventOrder: { before: index * 5 + 1, submit: index * 5 + 2, status: index * 5 + 3, terminal: index * 5 + 4, after: index * 5 + 5 } };
+        }),
         fifo: {
           concurrentSubmissions: 2,
           applied: 2,
@@ -644,14 +680,12 @@ function passingEvidence(): InstalledRuntimeEvidence {
         currentExecutionId: null,
         writeGate: "open",
       },
-      eventLog: [
-        {
-          sequence: 1,
-          kind: "assertion",
-          name: "change-set-corpus-began",
-          detailSha256: DIGEST,
-        },
-      ],
+      eventLog: REJECTION_NAMES.flatMap((name, index) => rejectionFixtureEvents().map((event) => {
+        const failureCode = name === "rejection/non-unique-replacement" ? "exact_match_count_mismatch" : index < 3 ? "stale_observation" : "path_conflict";
+        const proof = { ...rejectionFixture().proof, failureCode, changeSetId: `rejected-${index}`, submissionKeySha256: createHash("sha256").update(name).digest("hex") };
+        const canonicalProof = Object.fromEntries(Object.entries(proof).sort(([left], [right]) => left.localeCompare(right)));
+        return { ...event, sequence: event.sequence + index * 5, name: event.name.replace("rejection/stale-direct-target", name), detailSha256: [2, 3].includes(event.sequence) ? createHash("sha256").update(JSON.stringify(canonicalProof)).digest("hex") : event.detailSha256 };
+      })),
       assertions: [
         "submission/valid-create:no-validate-apply-handshake",
         "rejection/stale-direct-target:no-mutation-inventory",
@@ -717,6 +751,61 @@ function passingEvidence(): InstalledRuntimeEvidence {
 }
 
 describe("installed-runtime evidence record", () => {
+  it.each(["submit", "status"] as const)("refuses %s event hash detached from rejection proof and key", (phase) => {
+    const evidence = acceptedEvidence();
+    const rejection = evidence.changeSetCorpus!.admission.rejectionClasses[0]!;
+    evidence.changeSetCorpus!.eventLog[rejection.eventOrder[phase] - 1]!.detailSha256 = "f".repeat(64);
+    expect(() => createInstalledRuntimeAcceptanceMatrix(evidence)).toThrow();
+  });
+
+  it("refuses Notes-only inventories pretending to prove all rejected effects", () => {
+    const evidence = acceptedEvidence();
+    const rejection = evidence.changeSetCorpus!.admission.rejectionClasses[0]!;
+    rejection.beforeInventory.entries = rejection.afterInventory.entries = [{ path: "Notes", kind: "directory" }];
+    const digest = createHash("sha256").update('[{"kind":"directory","path":"Notes"}]').digest("hex");
+    rejection.beforeInventory.digest = rejection.afterInventory.digest = digest;
+    const eventHash = createHash("sha256").update(JSON.stringify({ digest, entries: [{ kind: "directory", path: "Notes" }], scope: rejection.beforeInventory.scope })).digest("hex");
+    evidence.changeSetCorpus!.eventLog[rejection.eventOrder.before - 1]!.detailSha256 = eventHash;
+    evidence.changeSetCorpus!.eventLog[rejection.eventOrder.after - 1]!.detailSha256 = eventHash;
+    expect(() => createInstalledRuntimeAcceptanceMatrix(evidence)).toThrow();
+  });
+
+  it("refuses a blocked terminal event hash behind an idle summary", () => {
+    const evidence = acceptedEvidence();
+    const rejection = evidence.changeSetCorpus!.admission.rejectionClasses[0]!;
+    evidence.changeSetCorpus!.eventLog[rejection.eventOrder.terminal - 1]!.detailSha256 = createHash("sha256")
+      .update(JSON.stringify({ currentExecutionId: null, queueLength: 1, recoveryState: "blocked", vaultIdSha256: rejection.binding.vaultIdSha256, writeGate: "open" })).digest("hex");
+    expect(() => createInstalledRuntimeAcceptanceMatrix(evidence)).toThrow();
+  });
+
+  it("refuses a rejection with a different legal failure branch", () => {
+    const evidence = acceptedEvidence();
+    const rejection = evidence.changeSetCorpus!.admission.rejectionClasses[0]!;
+    rejection.failureCode = "path_conflict";
+    rejection.proof.failureCode = rejection.status.failureCode = "path_conflict";
+    expect(() => createInstalledRuntimeAcceptanceMatrix(evidence)).toThrow();
+  });
+
+  it.each(["changeSetId", "submissionKeySha256"] as const)("refuses cross-scenario reused rejection %s", (field) => {
+    const evidence = acceptedEvidence();
+    const rejections = evidence.changeSetCorpus!.admission.rejectionClasses;
+    for (const rejection of rejections) {
+      rejection.proof[field] = "shared-rejection-identity";
+      rejection.status[field] = "shared-rejection-identity";
+      if (field === "submissionKeySha256") rejection.proof[field] = rejection.status[field] = DIGEST;
+    }
+    expect(() => {
+      evidence.acceptanceMatrix = createInstalledRuntimeAcceptanceMatrix(evidence);
+      serializeEvidence(evidence);
+    }).toThrow();
+  });
+
+  it("refuses A-15 from assertions without real rejection inventory proof", () => {
+    const evidence = acceptedEvidence();
+    evidence.changeSetCorpus!.admission.rejectionClasses = [];
+    expect(() => createInstalledRuntimeAcceptanceMatrix(evidence)).toThrow();
+  });
+
   it("round-trips a passing record through serialization and parsing", () => {
     const evidence = acceptedEvidence();
     evidence.acceptanceMatrix = createInstalledRuntimeAcceptanceMatrix(evidence);
@@ -1014,6 +1103,7 @@ describe("installed-runtime evidence record", () => {
       ...acceptedEvidence(),
       candidate: null,
       bridgeIdentity: null,
+      changeSetCorpus: null,
       inputHashes: { candidateBundleSha256: null, vaultSeedManifestSha256: null },
       beforeInventory: null,
       afterInventory: null,
