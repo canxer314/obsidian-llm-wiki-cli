@@ -8,6 +8,7 @@ import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { parseChangeSetRegistryState } from "../change-set.js";
 import { installedRuntimeAcceptanceDescriptorSchema } from "./acceptance-driver-protocol.js";
 import { installCandidateBundle } from "./candidate-bundle.js";
+import { HealthObservationError } from "./loopback-client.js";
 import { preflightRuntimeProfile } from "./runtime-profile.js";
 import { provisionTestVault, cleanupTestVault, snapshotInventory, compareInventories } from "./test-vault.js";
 import { readPersistedBridgeIdentity, waitForCondition, type ObsidianProcessHandle } from "./obsidian-process.js";
@@ -75,7 +76,11 @@ export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOpt
     const { vaultId, port } = identity as { vaultId: string; port: number };
     observedPort = port;
     const endpoint = new URL(`http://127.0.0.1:${port}/mcp`);
-    await waitForCondition(async () => (await options.client.observeHealth(endpoint, vaultId)).health.readiness.searchSnapshot === "ready", { timeoutMs: options.timeouts.startupMs, intervalMs: 25 });
+    const waitReady = () => waitForCondition(async () => {
+      try { return (await options.client.observeHealth(endpoint, vaultId)).health.readiness.searchSnapshot === "ready"; }
+      catch (error) { if (error instanceof HealthObservationError && error.code === "health_unreachable") return false; throw error; }
+    }, { timeoutMs: options.timeouts.startupMs, intervalMs: 25 });
+    await waitReady();
     // Arm before the next process startup; the observer must exist before open()
     // resumes a durable queue. Only generated fixture/observer authority is armed.
     await stop();
@@ -89,7 +94,7 @@ export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOpt
     await writeFile(next, JSON.stringify(descriptor), { flag: "wx", mode: 0o600 });
     await rename(next, driver.path);
     await start();
-    await waitForCondition(async () => (await options.client.observeHealth(endpoint, vaultId)).health.readiness.searchSnapshot === "ready", { timeoutMs: options.timeouts.startupMs, intervalMs: 25 });
+    await waitReady();
     const inputs: ChangeSetSubmitInput[] = [
       { submissionKey: keys[0], operations: [{ operationId: "head", kind: "create_note", ifExists: "reject", path: "FifoProof/Head.md", content: "# Head\n" }] },
       { submissionKey: keys[1], operations: [{ operationId: "target", kind: "edit_body", path: targetPath, targetVersion: version(originalTarget), edit: { kind: "replace_whole", replacement: "# Stale target write\n" } }] },
@@ -140,6 +145,7 @@ export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOpt
     await Promise.all(pending);
     await start();
     await waitForCondition(async () => (await registry()).entries.filter(e => keys.includes(e.submissionKey)).every(e => e.execution?.phase === "terminal"), { timeoutMs: options.timeouts.startupMs, intervalMs: 25 });
+    await waitReady();
     const terminal = await registry();
     const eventsBeforeReplay = await loadFifoEvents(descriptor);
     for (const input of inputs) {
@@ -160,7 +166,7 @@ export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOpt
     evidence = { scope: "persistent-fifo-and-pre-mutation-repreflight", source: "installed-obsidian", runId: options.runId,
       candidateBundleSha256: descriptor.candidateBundleSha256, installedMainSha256: descriptor.installedMainSha256,
       profile: options.profile.name, vaultIdSha256: fifoDigest(vaultId), seed: vault.seedManifestSha256,
-      canonicalManifestSha256: fifoDigest(JSON.stringify(inputs)), beforeInventorySha256: comparison.beforeDigest, afterInventorySha256: comparison.afterDigest,
+      canonicalManifestSha256: fifoDigest(JSON.stringify({ inputs, seedManifest: seeds.map(([path, content]) => ({ path, sha256: fifoDigest(content) })) })), beforeInventorySha256: comparison.beforeDigest, afterInventorySha256: comparison.afterDigest,
       enqueue: queued.map(e => ({ enqueueSeq: e.enqueueSeq, changeSetId: fifoDigest(e.changeSetId), submissionKey: fifoDigest(e.submissionKey) })),
       staleKeys: keys.slice(1, 3).map(fifoDigest),
       events: events.map(e => "submissionKey" in e ? { ...e, submissionKey: fifoDigest(e.submissionKey), changeSetId: fifoDigest(e.changeSetId) } : e),
