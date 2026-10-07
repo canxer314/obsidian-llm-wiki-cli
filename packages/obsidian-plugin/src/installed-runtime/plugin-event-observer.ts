@@ -95,6 +95,7 @@ export function verifyPluginEventObserverWindow(options: {
   }
   const changedTargets = options.files.filter(file => file.before === null || file.after === null || !Buffer.from(file.before).equals(file.after));
   for (const target of changedTargets) {
+    if (!observations.some(observation => observation.pathSha256 === hash(target.path) && ["create", "modify", "rename", "delete"].includes(observation.kind))) throw new Error("Observer target lacks real Vault callback bytes");
     if (!observations.some(observation => observation.pathSha256 === hash(target.path) && (observation.kind === "changed" || observation.kind === "resolved"))) throw new Error("Observer target lacks real indexing callback bytes");
   }
   if (!ready || !started || !ended || active || eventCount === 0 || indexingCount === 0) throw new Error("Observer window lacks live event/indexing coverage");

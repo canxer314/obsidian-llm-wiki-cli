@@ -39,7 +39,13 @@ describe("enabled plugin event/indexing report boundary", () => {
         event.mac = createHmac("sha256", binding.capabilityToken).update(JSON.stringify(event.payload)).digest("hex");
       }
     }
-    expect(() => verify(events)).toThrow(/live event\/indexing coverage|target.*indexing/);
+    expect(() => verify(events)).toThrow(/live event\/indexing coverage|target.*indexing|Vault callback/);
+  });
+  it("rejects indexing-only observations that omit the mutation Vault callback", () => {
+    const events = transcript(before);
+    events[3]!.payload.kind = "resolved";
+    events[3]!.mac = createHmac("sha256", binding.capabilityToken).update(JSON.stringify(events[3]!.payload)).digest("hex");
+    expect(() => verify(events)).toThrow(/Vault callback/);
   });
   it("rejects rollback evidence whose complete before bytes were only observed before complete after bytes", () => {
     expect(() => verifyPluginEventObserverWindow({ binding, events: transcript(before), candidatePluginId: "candidate", expectedPid: 1234,
