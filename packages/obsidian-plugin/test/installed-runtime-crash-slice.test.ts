@@ -401,25 +401,38 @@ it("rejects a crash descriptor for a foreign Vault, plugin, or installed entry p
     tag: "v0.1.0", repository: "test/crash", workflowRef: "test", attestationSource: "local-candidate",
   });
   let starts = 0;
-  try {
-    for (const changed of [
-      { vaultPath: join(root, "foreign-vault") },
-      { pluginId: "foreign-plugin" },
-      { installedMainSha256: "f".repeat(64) },
-    ]) {
-      await expect(runInstalledCrashRestorationSlice({
-        runId: "binding", workingDirectory: root, reportDirectory: join(root, "reports"), candidate,
-        processControl: { start: async () => { starts += 1; throw new Error("Unexpected runtime startup"); } },
-        client: {}, profile: {}, probe: {}, timeouts: { startupMs: 10, stopMs: 10, portClosedMs: 10 },
-        prepareAcceptanceDriver: async (request) => {
-          const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "binding", reportDirectory: join(root, "reports") });
-          return { ...created, descriptor: { ...created.descriptor, ...changed }, cleanup: async () => undefined };
-        },
-        record: () => undefined, assertion: () => undefined,
-      } as InstalledCrashRestorationSliceOptions)).rejects.toThrow("descriptor is not candidate/run bound");
-    }
-    expect(starts).toBe(0);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  const retainedDescriptors: string[] = [];
+  for (const [index, changed] of [
+    { vaultPath: join(root, "foreign-vault") },
+    { pluginId: "foreign-plugin" },
+    { installedMainSha256: "f".repeat(64) },
+  ].entries()) {
+    const caseRoot = join(root, `case-${index}`);
+    const runId = `binding-${index}`;
+    const reportDirectory = join(caseRoot, "reports");
+    await mkdir(caseRoot);
+    await expect(runInstalledCrashRestorationSlice({
+      runId, workingDirectory: caseRoot, reportDirectory, candidate,
+      processControl: { start: async () => { starts += 1; throw new Error("Unexpected runtime startup"); } },
+      client: {}, profile: {}, probe: {}, timeouts: { startupMs: 10, stopMs: 10, portClosedMs: 10 },
+      prepareAcceptanceDriver: async (request) => {
+        const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId, reportDirectory });
+        retainedDescriptors.push(created.path);
+        return { ...created, descriptor: { ...created.descriptor, ...changed }, cleanup: async () => undefined };
+      },
+      record: () => undefined, assertion: () => undefined,
+    } as InstalledCrashRestorationSliceOptions)).rejects.toThrow("descriptor is not candidate/run bound");
+  }
+  expect(starts).toBe(0);
+  expect(retainedDescriptors).toHaveLength(3);
+  const { readFile } = await import("node:fs/promises");
+  for (const [index, path] of retainedDescriptors.entries()) {
+    const descriptor = JSON.parse(await readFile(path, "utf8"));
+    expect(descriptor.runId).toBe(`binding-${index}`);
+    expect(await readdir(descriptor.vaultPath)).toContain(".obsidian");
+  }
+  // Rejected runs retain their independent generated recovery inputs; do not
+  // delete one failed root to make the next counterexample reach its target.
 });
 
 it("rejects an installed crash command targeting a remote endpoint even with the correct capability", async () => {
