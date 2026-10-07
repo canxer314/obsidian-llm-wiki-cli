@@ -35,7 +35,7 @@ export async function prepareInstalledDiagnosticPrivacyFixture(vault: Provisione
   for (const file of files) await writeFile(join(vault.vaultPath, file.path), file.content, { flag: "wx", mode: 0o600 });
   const environment = { LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER: marker("environment"), LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_CREDENTIAL: marker("credential") };
   const markers = ["body", "frontmatter", "attachment", "credential", "environment"].map(category => ({ category: category as DiagnosticPrivateMarkerCategory, value: marker(category as DiagnosticPrivateMarkerCategory) }));
-  return { seed, manifestSha256: diagnosticSha256(diagnosticCanonicalJson(files)), files, markers, environment, selectedContent,
+  return { seed, manifestSha256: diagnosticSha256(diagnosticCanonicalJson(files.map(file => ({ path: file.path, contentSha256: diagnosticSha256(file.content) })))), files, markers, environment, selectedContent,
     expectedSelectionSha256: diagnosticSha256(selectedContent) };
 }
 
@@ -111,8 +111,36 @@ const proofSchema = z.object({
   cleanup: z.object({ verified: z.literal(true), vaultCount: z.literal(2), residualCount: z.literal(0) }).strict(),
 }).strict();
 
-/** Public composition boundary consumes only redacted evidence with exact current-run binding. */
-export function validateInstalledDiagnosticPrivacyProof(value: unknown, binding: { readonly runId: string; readonly candidateBundleSha256: string; readonly profileName: string; readonly installedMainSha256: string }): z.infer<typeof proofSchema> {
+export interface InstalledDiagnosticTrustedObservation {
+  readonly binding: { readonly runId: string; readonly candidateBundleSha256: string; readonly profileName: string; readonly installedMainSha256: string };
+  readonly vaults: readonly {
+    readonly label: "vault-a" | "vault-b"; readonly vaultIdSha256: string;
+    readonly runtime: import("./runtime-profile.js").ObservedRuntimeEnvironment;
+    readonly seed: string; readonly files: readonly { readonly path: string; readonly contentSha256: string }[];
+    readonly standardBundle: StandardDiagnosticBundle;
+    readonly markers: readonly { readonly category: DiagnosticPrivateMarkerCategory; readonly sha256: string; readonly length: number }[];
+    readonly journalEnqueueSeq?: number;
+    readonly beforeInventory: readonly { readonly pathSha256: string; readonly sha256: string; readonly sizeBytes: number }[];
+    readonly afterInventory: readonly { readonly pathSha256: string; readonly sha256: string; readonly sizeBytes: number }[];
+    readonly beforePrivateState: readonly { readonly pathSha256: string; readonly sha256: string; readonly sizeBytes: number }[];
+    readonly afterPrivateState: readonly { readonly pathSha256: string; readonly sha256: string; readonly sizeBytes: number }[];
+  }[];
+  readonly confirmations: readonly { readonly outcome: "cancelled" | "copied"; readonly confirmationIdSha256: string; readonly selectionSha256: string; readonly copiedTextSha256?: string; readonly bundleChecksum?: string }[];
+  readonly events: readonly { readonly sequence: number; readonly name: string; readonly detailSha256: string }[];
+  readonly removedRoots: readonly { readonly label: "vault-a" | "vault-b"; readonly kind: "vault" | "profile" | "reports"; readonly rootSha256: string }[];
+}
+export interface InstalledDiagnosticTrustedContext {
+  /** The run composition obtains this independently from the actual runner, never from the proof under validation. */
+  readonly observation: InstalledDiagnosticTrustedObservation;
+  /** Pinned by the external run composition when the runner delivers its source transcript. */
+  readonly expectedObservationSha256: string;
+}
+
+/** Public composition boundary requires the independently retained actual runner observation. */
+export function validateInstalledDiagnosticPrivacyProof(value: unknown, binding: { readonly runId: string; readonly candidateBundleSha256: string; readonly profileName: string; readonly installedMainSha256: string }, trusted?: InstalledDiagnosticTrustedContext): z.infer<typeof proofSchema> {
+  if (trusted === undefined) throw new Error("Installed diagnostic proof requires an independent trusted observation");
+  if (!/^[a-f0-9]{64}$/u.test(trusted.expectedObservationSha256) || diagnosticSha256(diagnosticCanonicalJson(trusted.observation)) !== trusted.expectedObservationSha256 ||
+      diagnosticCanonicalJson(trusted.observation.binding) !== diagnosticCanonicalJson(binding)) throw new Error("Installed diagnostic trusted observation source binding does not match");
   const proof = proofSchema.parse(value);
   const profile = lookupRegisteredRuntimeProfile(binding.profileName);
   if (profile === null || proof.runId !== binding.runId || proof.candidateBundleSha256 !== binding.candidateBundleSha256 || proof.profileName !== binding.profileName ||
@@ -148,6 +176,35 @@ export function validateInstalledDiagnosticPrivacyProof(value: unknown, binding:
   for (const confirmation of proof.confirmations) {
     if (proof.eventLog.find(event => event.name === `vault-a-${confirmation.outcome}-local-content-report-observed`)?.detailSha256 !== diagnosticSha256(diagnosticCanonicalJson(confirmation))) {
       throw new Error("Installed diagnostic copied checksum does not match its observed confirmation event");
+    }
+  }
+  const source = trusted.observation;
+  if (source.vaults.length !== 2 || source.confirmations.length !== 2 || source.removedRoots.length !== 6 ||
+      diagnosticCanonicalJson(source.events) !== diagnosticCanonicalJson(proof.eventLog) ||
+      diagnosticCanonicalJson(source.confirmations) !== diagnosticCanonicalJson(proof.confirmations)) throw new Error("Installed diagnostic trusted observation transcript is incomplete or differs");
+  for (const observed of source.vaults) {
+    const summary = proof.vaults.find(vault => vault.label === observed.label);
+    if (summary === undefined || summary.vaultIdSha256 !== observed.vaultIdSha256 || diagnosticCanonicalJson(summary.runtime) !== diagnosticCanonicalJson(observed.runtime) ||
+        summary.seed !== observed.seed || summary.manifestSha256 !== diagnosticSha256(diagnosticCanonicalJson(observed.files)) ||
+        summary.markerCount !== observed.markers.length || summary.markerManifestSha256 !== diagnosticSha256(diagnosticCanonicalJson(observed.markers)) ||
+        summary.beforeInventorySha256 !== diagnosticSha256(diagnosticCanonicalJson(observed.beforeInventory)) || summary.afterInventorySha256 !== diagnosticSha256(diagnosticCanonicalJson(observed.afterInventory)) ||
+        summary.beforePrivateStateSha256 !== diagnosticSha256(diagnosticCanonicalJson(observed.beforePrivateState)) || summary.afterPrivateStateSha256 !== diagnosticSha256(diagnosticCanonicalJson(observed.afterPrivateState))) {
+      throw new Error("Installed diagnostic marker/manifest/inventory facts differ from the trusted observation");
+    }
+    if (!verifyStandardDiagnosticBundle(observed.standardBundle) || summary.checksum !== observed.standardBundle.checksum.canonicalPayload ||
+        new Set(observed.markers.map(marker => marker.category)).size !== DIAGNOSTIC_PRIVATE_MARKER_CATEGORIES.length ||
+        observed.markers.some(marker => !DIAGNOSTIC_PRIVATE_MARKER_CATEGORIES.includes(marker.category) || !/^[a-f0-9]{64}$/u.test(marker.sha256) || marker.length < 1)) throw new Error("Installed diagnostic trusted observation standard bundle/source coverage is invalid");
+    // Recheck source-marker absence without retaining raw private marker bytes.
+    const strings: string[] = [];
+    const collect = (value: unknown): void => { if (typeof value === "string") strings.push(value); else if (Array.isArray(value)) value.forEach(collect); else if (typeof value === "object" && value !== null) Object.values(value).forEach(collect); };
+    collect(observed.standardBundle);
+    for (const marker of observed.markers) for (const text of strings) for (let offset = 0; offset + marker.length <= text.length; offset += 1) {
+      if (diagnosticSha256(text.slice(offset, offset + marker.length)) === marker.sha256) throw new Error("Installed diagnostic trusted observation contains a private marker");
+    }
+    const aliases = verifyInstalledDiagnosticPrivacyBundle(observed.standardBundle, [], observed.journalEnqueueSeq === undefined ? undefined : { journalEnqueueSeq: observed.journalEnqueueSeq, journalPhase: "FAILED" });
+    if (aliases.correlatedJournalAliases !== summary.correlatedJournalAliases) throw new Error("Installed diagnostic trusted observation alias facts differ");
+    for (const kind of ["vault", "profile", "reports"] as const) {
+      if (source.removedRoots.filter(root => root.label === observed.label && root.kind === kind && /^[a-f0-9]{64}$/u.test(root.rootSha256)).length !== 1) throw new Error("Installed diagnostic trusted cleanup source is incomplete");
     }
   }
   return proof;

@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { runInstalledDiagnosticPrivacyAcceptance } from "../src/installed-runtime/privacy-recovery-installed-runner.js";
-import { validateInstalledDiagnosticPrivacyProof } from "../src/installed-runtime/installed-diagnostic-privacy.js";
+import { validateInstalledDiagnosticPrivacyProof, diagnosticCanonicalJson } from "../src/installed-runtime/installed-diagnostic-privacy.js";
 import { userInfo } from "node:os";
 import { readInstalledCrashJournal } from "../src/installed-runtime/installed-crash-restoration-slice.js";
 import { prepareInstalledDiagnosticPrivacyFixture } from "../src/installed-runtime/installed-diagnostic-privacy.js";
@@ -72,6 +72,7 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
   const options = {
     runId: "privacy-report", workingDirectory: root, candidate, configDirectoryName: ".obsidian", operatorReportTimeoutMs: 500,
     ...(mode === "blocked" ? { recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes" } : {}),
+    ...(diagnosticSources ? { retainDiagnosticObservation: async () => undefined } : {}),
     profileName: profile.name, profile, probe: { probeRunning: async () => ({ platform: profile.os.platform, osBuild: profile.os.build,
       obsidianVersion: profile.versions.obsidian, electronVersion: profile.versions.electron, nodeVersion: profile.versions.node, capabilities: profile.capabilities }) },
     client: createLoopbackMcpClient(), processControl: { start: async ({ vaultPath, diagnosticPrivacyEnvironment }: { vaultPath: string; diagnosticPrivacyEnvironment?: Record<string, string> }) => {
@@ -258,6 +259,13 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
   return { root, options, events, cleanup: async () => { for (const timer of scenarioTimers) clearInterval(timer); await Promise.all(writes); for (const bridge of bridges.values()) await bridge.stop(); for (const execution of executions.values()) await execution.close?.(); await rm(root, { recursive: true, force: true }); } };
 }
 
+it("requires an external source-retention consumer before issuing a composable A33 proof", async () => {
+  const fixture = await reportFixture("blocked", "missing", false, "real", true);
+  try {
+    await expect(runInstalledDiagnosticPrivacyAcceptance({ ...fixture.options, retainDiagnosticObservation: undefined })).rejects.toThrow("source retention");
+  } finally { await fixture.cleanup(); }
+});
+
 it("rejects private durable mutation after explicit wire rejection even with unchanged health/status", async () => {
   const fixture = await reportFixture("blocked", "missing", false, "real", true, false, false, true);
   try {
@@ -292,12 +300,38 @@ it("rejects second Vault private-state mutation even when public health/status a
 it("composes a redacted A33 proof only after all live report observations and cleanup (inner seam, not installed acceptance)", async () => {
   const fixture = await reportFixture("blocked", "missing", false, "real", true);
   try {
-    const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true });
+    let trusted: import("../src/installed-runtime/installed-diagnostic-privacy.js").InstalledDiagnosticTrustedContext | undefined;
+    const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true, retainDiagnosticObservation: async context => { trusted = context; } });
     expect(result.verdict).toBe("partial");
     expect(result.diagnosticProof).toMatchObject({ scope: "installed-diagnostic-privacy-A33", verdict: "passed", wireRejections: 16,
       cleanup: { verified: true, vaultCount: 2, residualCount: 0 } });
     const binding = { runId: fixture.options.runId, candidateBundleSha256: fixture.options.candidate.identity.bundleSha256, profileName: profile.name, installedMainSha256: fixture.options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 };
-    expect(validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding)).toEqual(result.diagnosticProof);
+    // A public proof cannot promote itself to trusted evidence; context is retained from the actual runner separately.
+    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding)).toThrow("trusted observation");
+    const restoredContext = JSON.parse(JSON.stringify(trusted!));
+    expect(validateInstalledDiagnosticPrivacyProof(JSON.parse(JSON.stringify(result.diagnosticProof)), binding, restoredContext)).toEqual(result.diagnosticProof);
+    expect(JSON.stringify(restoredContext)).not.toContain("privacy_body_");
+    expect(JSON.stringify(restoredContext)).not.toContain(fixture.root);
+    for (const mutation of ["marker-count", "marker-manifest", "copied-bytes", "fixture-manifest", "cleanup"] as const) {
+      const forged = structuredClone(result.diagnosticProof!);
+      if (mutation === "marker-count") (forged.vaults[0] as any).markerCount = 12000;
+      if (mutation === "marker-manifest") (forged.vaults[0] as any).markerManifestSha256 = "5".repeat(64);
+      if (mutation === "fixture-manifest") (forged.vaults[0] as any).manifestSha256 = "5".repeat(64);
+      if (mutation === "copied-bytes") (forged.confirmations[1] as any).copiedTextSha256 = "6".repeat(64);
+      if (mutation === "cleanup") (forged.eventLog as any).pop();
+      for (const event of forged.eventLog) {
+        if (event.name.endsWith("standard-local-report-observed")) (event as any).detailSha256 = createHash("sha256").update(diagnosticCanonicalJson(forged.vaults[event.name.startsWith("vault-a") ? 0 : 1])).digest("hex");
+        if (event.name.endsWith("local-content-report-observed")) (event as any).detailSha256 = createHash("sha256").update(diagnosticCanonicalJson(forged.confirmations[event.name.includes("cancelled") ? 0 : 1])).digest("hex");
+      }
+      expect(() => validateInstalledDiagnosticPrivacyProof(forged, binding, restoredContext)).toThrow();
+    }
+    const wrongSource = structuredClone(restoredContext);
+    wrongSource.observation.binding.runId = "foreign-run";
+    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, wrongSource)).toThrow("source binding");
+    const missingCleanup = structuredClone(restoredContext);
+    missingCleanup.observation.removedRoots = [];
+    expect(() => validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, missingCleanup)).toThrow("source binding");
+    expect(validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding, trusted)).toEqual(result.diagnosticProof);
     for (const invalid of [
       { ...result.diagnosticProof, runId: "foreign" },
       { ...result.diagnosticProof, vaults: result.diagnosticProof!.vaults.map(vault => ({ ...vault, installedMainSha256: "0".repeat(64) })) },
@@ -309,7 +343,7 @@ it("composes a redacted A33 proof only after all live report observations and cl
       { ...result.diagnosticProof, confirmations: result.diagnosticProof!.confirmations.map(confirmation => confirmation.outcome === "copied" ? { ...confirmation, copiedTextSha256: "0".repeat(64) } : confirmation) },
       { ...result.diagnosticProof, eventLog: result.diagnosticProof!.eventLog.filter(event => event.name.endsWith("generated-vault")).map((event, index) => ({ ...event, sequence: index + 1 })) },
       { ...result.diagnosticProof, confirmations: [result.diagnosticProof!.confirmations[0], { ...result.diagnosticProof!.confirmations[1], selectionSha256: "0".repeat(64) }] },
-    ]) expect(() => validateInstalledDiagnosticPrivacyProof(invalid, binding)).toThrow();
+    ]) expect(() => validateInstalledDiagnosticPrivacyProof(invalid, binding, trusted)).toThrow();
     expect(result.diagnosticProof!.vaults).toHaveLength(2);
     expect(result.diagnosticProof!.vaults[0]!.markerCategories).toHaveLength(12);
     expect(result.diagnosticProof!.confirmations.map(item => item.outcome)).toEqual(["cancelled", "copied"]);
@@ -322,7 +356,7 @@ it("composes a redacted A33 proof only after all live report observations and cl
 it("requires installed process source evidence instead of upgrading a standard report to A33 passed", async () => {
   const fixture = await reportFixture("blocked");
   try {
-    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true })).rejects.toThrow("process environment source");
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true, retainDiagnosticObservation: async () => undefined })).rejects.toThrow("process environment source");
   } finally { await fixture.cleanup(); }
 });
 

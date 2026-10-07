@@ -30,7 +30,7 @@ import {
 import { cleanupTestVault, provisionTestVault, snapshotInventory, type ProvisionedTestVault } from "./test-vault.js";
 import { diagnosticSha256, diagnosticCanonicalJson, prepareInstalledDiagnosticPrivacyFixture, observeInstalledDiagnosticPrivacySources,
   verifyInstalledDiagnosticPrivacyBundle, validateInstalledDiagnosticPrivacyProof, INSTALLED_DIAGNOSTIC_PRIVACY_COVERAGE, DIAGNOSTIC_PRIVATE_MARKER_CATEGORIES,
-  type InstalledDiagnosticPrivacyFixture } from "./installed-diagnostic-privacy.js";
+  type InstalledDiagnosticPrivacyFixture, type InstalledDiagnosticTrustedObservation, type InstalledDiagnosticTrustedContext } from "./installed-diagnostic-privacy.js";
 import type { VerifiedCandidateBundle } from "./candidate-bundle.js";
 import type { LoopbackMcpClient } from "./loopback-client.js";
 import type { ObsidianProcessControl } from "./obsidian-process.js";
@@ -49,6 +49,8 @@ export interface InstalledPrivacyBoundaryOptions {
   readonly contentConfirmation?: { readonly expectedSelectionSha256: string };
   /** Strict A33 observation; never invokes a local command or confirmation. */
   readonly diagnosticPrivacy?: true;
+  /** Host run composition retains this source separately; it must never be sourced from a submitted public proof. */
+  readonly retainDiagnosticObservation?: (context: InstalledDiagnosticTrustedContext) => Promise<void>;
   readonly profileName: string;
   readonly profile: RegisteredRuntimeProfile;
   readonly probe: RuntimeEnvironmentProbe;
@@ -299,9 +301,15 @@ async function startVault(options: SliceOptions, label: LiveVault["label"]): Pro
   }
 }
 
+async function observeInventories(runtime: LiveVault, configDirectoryName: string) {
+  const entries = await snapshotInventory(runtime.vault.vaultPath);
+  const redact = (entry: typeof entries[number]) => ({ pathSha256: diagnosticSha256(entry.path), sha256: entry.sha256, sizeBytes: entry.sizeBytes });
+  return { content: entries.filter(entry => !entry.path.startsWith(configDirectoryName + "/") && !entry.path.startsWith(".llm-wiki/")).map(redact),
+    privateState: entries.filter(entry => entry.path.startsWith(".llm-wiki/") || entry.path.endsWith("/data.json")).map(redact) };
+}
+
 async function privateStateInventorySha256(runtime: LiveVault): Promise<string> {
-  return diagnosticSha256(diagnosticCanonicalJson((await snapshotInventory(runtime.vault.vaultPath))
-    .filter(entry => entry.path.startsWith(".llm-wiki/") || entry.path.endsWith("/data.json"))));
+  return diagnosticSha256(diagnosticCanonicalJson((await observeInventories(runtime, "")).privateState));
 }
 
 async function observeStatus(runtime: LiveVault): Promise<string> {
@@ -355,7 +363,8 @@ async function rejectDetailedHealth(runtime: LiveVault, arguments_: Record<strin
   }
 }
 
-async function stopAndClean(options: RunnerOptions, runtimes: readonly LiveVault[]): Promise<void> {
+async function stopAndClean(options: RunnerOptions, runtimes: readonly LiveVault[]): Promise<InstalledDiagnosticTrustedObservation["removedRoots"]> {
+  const removedRoots: InstalledDiagnosticTrustedObservation["removedRoots"][number][] = [];
   let failure: unknown;
   for (const runtime of [...runtimes].reverse()) {
     try { await runtime.client.close(); } catch (error) { failure ??= error; }
@@ -377,14 +386,18 @@ async function stopAndClean(options: RunnerOptions, runtimes: readonly LiveVault
         try { await stat(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
       }));
       if (report.attempted !== true || report.residualPaths.length > 0 || retained.some(Boolean)) throw new Error("Privacy/recovery cleanup left generated paths or was not confirmed");
+      removedRoots.push(...(["vault", "profile", "reports"] as const).map((kind, index) => ({ label: runtime.label, kind,
+        rootSha256: diagnosticSha256([runtime.vault.vaultPath, runtime.vault.profileDirectory, runtime.descriptor.reportDirectory][index]!) })));
       options.record("cleanup", `${runtime.label}-generated-vault`, { residualCount: report.residualPaths.length });
     } catch (error) { failure ??= error; }
   }
   if (failure !== undefined) throw failure;
+  return removedRoots;
 }
 
 /** Proves only the installed Agent authority boundary; local diagnostics and recovery transitions remain human-required. */
 export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: RunnerOptions): Promise<InstalledPrivacyAuthorityBoundarySliceResult> => {
+  if (rawOptions.diagnosticPrivacy === true && rawOptions.retainDiagnosticObservation === undefined) throw new Error("Installed diagnostic composable proof requires external source retention");
   if (!Number.isSafeInteger(rawOptions.operatorReportTimeoutMs) || rawOptions.operatorReportTimeoutMs < 1) {
     throw new Error("Local Primary Operator report timeout must be a positive integer");
   }
@@ -416,7 +429,9 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     const diagnosticVaults: InstalledDiagnosticPrivacyProof["vaults"][number][] = [];
     const diagnosticConfirmations: InstalledDiagnosticPrivacyProof["confirmations"][number][] = [];
     let journalPayload: unknown;
-    const contentInventories = await Promise.all(runtimes.map(async runtime => diagnosticSha256(diagnosticCanonicalJson((await snapshotInventory(runtime.vault.vaultPath)).filter(entry => !entry.path.startsWith(options.configDirectoryName + "/") && !entry.path.startsWith(".llm-wiki/"))))));
+    const observedVaults: InstalledDiagnosticTrustedObservation["vaults"][number][] = [];
+    const inventorySources = await Promise.all(runtimes.map(runtime => observeInventories(runtime, options.configDirectoryName)));
+    const contentInventories = inventorySources.map(inventory => diagnosticSha256(diagnosticCanonicalJson(inventory.content)));
     const privateInventories = await Promise.all(runtimes.map(privateStateInventorySha256));
     const authorityNames = [
       "vault_diagnostic_bundle",
@@ -545,13 +560,21 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
           runtime.label === "vault-a" ? { journalEnqueueSeq: journalSequence as number, journalPhase: "FAILED" } : undefined);
         if (verified.markerCategories.length !== DIAGNOSTIC_PRIVATE_MARKER_CATEGORIES.length ||
             (runtime.label === "vault-a" && verified.correlatedJournalAliases < 1)) throw new Error("Installed diagnostic marker coverage or alias correlation is incomplete");
-        const inventory = diagnosticSha256(diagnosticCanonicalJson((await snapshotInventory(runtime.vault.vaultPath)).filter(entry => !entry.path.startsWith(options.configDirectoryName + "/") && !entry.path.startsWith(".llm-wiki/"))));
+        const index = runtime.label === "vault-a" ? 0 : 1;
+        const afterInventory = await observeInventories(runtime, options.configDirectoryName);
+        const inventory = diagnosticSha256(diagnosticCanonicalJson(afterInventory.content));
+        const sourceMarkers = [...markers, { category: "raw-id" as const, value: runtime.identity.vaultId }].map(marker => ({ category: marker.category, sha256: diagnosticSha256(marker.value), length: marker.value.length }));
+        observedVaults.push({ label: runtime.label, vaultIdSha256: diagnosticSha256(runtime.identity.vaultId), runtime: runtime.observedRuntime,
+          seed: runtime.privacyFixture.seed, files: runtime.privacyFixture.files.map(file => ({ path: file.path, contentSha256: diagnosticSha256(file.content) })),
+          standardBundle: structuredClone(report.bundle), markers: sourceMarkers, ...(index === 0 ? { journalEnqueueSeq: journalSequence as number } : {}),
+          beforeInventory: inventorySources[index]!.content, afterInventory: afterInventory.content,
+          beforePrivateState: inventorySources[index]!.privateState, afterPrivateState: afterInventory.privateState });
         diagnosticVaults.push({ label: runtime.label, vaultIdSha256: diagnosticSha256(runtime.identity.vaultId),
           installedMainSha256: runtime.descriptor.installedMainSha256, runtime: runtime.observedRuntime,
           seed: runtime.privacyFixture.seed, manifestSha256: runtime.privacyFixture.manifestSha256,
           beforeInventorySha256: contentInventories[runtime.label === "vault-a" ? 0 : 1]!, afterInventorySha256: inventory,
           beforePrivateStateSha256: privateInventories[runtime.label === "vault-a" ? 0 : 1]!, afterPrivateStateSha256: await privateStateInventorySha256(runtime),
-          ...verified, markerManifestSha256: diagnosticSha256(diagnosticCanonicalJson(markers.map(marker => ({ category: marker.category, sha256: diagnosticSha256(marker.value) })))) });
+          ...verified, markerManifestSha256: diagnosticSha256(diagnosticCanonicalJson(sourceMarkers)) });
       }
       const serialized = JSON.stringify(report.bundle);
       for (const marker of [runtime.identity.vaultId, runtime.vault.vaultPath, runtime.vault.profileDirectory, runtime.descriptor.capabilityToken]) {
@@ -649,20 +672,26 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     }
     let diagnosticProof: InstalledDiagnosticPrivacyProof | undefined;
     if (options.diagnosticPrivacy === true) {
-      const finalB = diagnosticSha256(diagnosticCanonicalJson((await snapshotInventory(runtimes[1]!.vault.vaultPath)).filter(entry => !entry.path.startsWith(options.configDirectoryName + "/") && !entry.path.startsWith(".llm-wiki/"))));
+      const finalB = diagnosticSha256(diagnosticCanonicalJson((await observeInventories(runtimes[1]!, options.configDirectoryName)).content));
       if (finalB !== contentInventories[1] || await privateStateInventorySha256(runtimes[1]!) !== privateInventories[1] || (await observeHealth(runtimes[1]!)).digest !== before[1]!.digest || await observeStatus(runtimes[1]!) !== statusBefore[1]) {
         throw new Error("Installed diagnostic local actions changed second Vault inventory or state");
       }
       if (diagnosticVaults.length !== 2 || diagnosticConfirmations.length !== 2 ||
           diagnosticConfirmations[0]!.confirmationIdSha256 === diagnosticConfirmations[1]!.confirmationIdSha256) throw new Error("Installed diagnostic proof lacks distinct confirmations or both reports");
-      await stopAndClean(options, runtimes);
+      const removedRoots = await stopAndClean(options, runtimes);
       cleaned = true;
+      const sourceBinding = { runId: options.runId, candidateBundleSha256: options.candidate.identity.bundleSha256,
+        profileName: options.profileName, installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 };
+      const observation: InstalledDiagnosticTrustedObservation = { binding: sourceBinding, vaults: observedVaults,
+        confirmations: structuredClone(diagnosticConfirmations), events: structuredClone(proofEvents), removedRoots };
+      const trustedContext: InstalledDiagnosticTrustedContext = { observation, expectedObservationSha256: diagnosticSha256(diagnosticCanonicalJson(observation)) };
       diagnosticProof = { schemaVersion: 1, scope: "installed-diagnostic-privacy-A33", verdict: "passed",
         runId: options.runId, candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profileName,
         coverage: [...INSTALLED_DIAGNOSTIC_PRIVACY_COVERAGE],
         vaults: diagnosticVaults, confirmations: diagnosticConfirmations, wireRejections: (authorityNames.length + 2) * 2,
         secondVaultUnchanged: true, eventLog: proofEvents, cleanup: { verified: true, vaultCount: 2, residualCount: 0 } };
-      validateInstalledDiagnosticPrivacyProof(diagnosticProof, { runId: options.runId, candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profileName, installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 });
+      validateInstalledDiagnosticPrivacyProof(diagnosticProof, sourceBinding, trustedContext);
+      await options.retainDiagnosticObservation?.(trustedContext);
       options.assertion("diagnostics:installed-A33-complete");
     }
     return {
@@ -697,9 +726,12 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
 
 /** Standalone A33 runner. Only Primary Operator standard copies and fresh cancel/confirm are observed. */
 export async function runInstalledDiagnosticPrivacyAcceptance(options: InstalledPrivacyBoundaryOptions): Promise<InstalledDiagnosticPrivacyProof> {
-  const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...options, diagnosticPrivacy: true, recoveryControls: undefined });
+  if (options.retainDiagnosticObservation === undefined) throw new Error("Installed diagnostic composable proof requires external source retention");
+  let trusted: InstalledDiagnosticTrustedContext | undefined;
+  const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...options, diagnosticPrivacy: true, recoveryControls: undefined,
+    retainDiagnosticObservation: async context => { trusted = context; await options.retainDiagnosticObservation?.(context); } });
   if (result.diagnosticProof === undefined) throw new Error("Installed A33 diagnostic proof is missing");
   validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, { runId: options.runId,
-    candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profileName, installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 });
+    candidateBundleSha256: options.candidate.identity.bundleSha256, profileName: options.profileName, installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 }, trusted);
   return result.diagnosticProof;
 }
