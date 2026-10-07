@@ -1,3 +1,4 @@
+import { consumeManualPauseProof, manualPauseSourceDigest, type ManualPauseConsumptionContext } from "./manual-pause-source.js";
 import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
 import { dirname, join, resolve, relative } from "node:path";
@@ -488,6 +489,7 @@ export async function runInstalledRuntimeHarness(
   const startedAt = now();
   let pluginEventObserverCorpus: import("./plugin-event-observer-evidence.js").PluginEventObserverCorpusEvidence | null = null;
   let observerContext: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext | undefined;
+  let pauseContext: ManualPauseConsumptionContext | undefined;
   const client = options.client ?? createLoopbackMcpClient();
   const configDirectoryName = options.configDirectoryName ?? ".obsidian";
   const timeouts = {
@@ -1173,6 +1175,7 @@ export async function runInstalledRuntimeHarness(
       if (candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined) {
         throw new Error("Installed manual pause requires verified candidate, profile and observation descriptor");
       }
+      pauseContext = { runId, candidateBundleSha256: candidate.identity.bundleSha256, installedMainSha256: candidate.identity.files.find(file => file.path === "main.js")!.sha256, profile: profile.name };
       manualPause = await options.runManualPauseCorpus({
         runId, workingDirectory: options.workingDirectory, reportDirectory: dirname(options.evidencePath),
         candidate, profile, client, processControl: options.processControl, configDirectoryName, timeouts,
@@ -1182,9 +1185,15 @@ export async function runInstalledRuntimeHarness(
           if (!("path" in prepared) || !("descriptor" in prepared)) throw new Error("Installed manual pause descriptor binding unavailable");
           return prepared as Awaited<ReturnType<import("./fifo-installed-runner.js").InstalledFifoOptions["prepareAcceptanceDriver"]>>;
         },
+        retainSource: source => {
+          if (pauseContext!.source !== undefined || source.runId !== pauseContext!.runId || source.candidateBundleSha256 !== pauseContext!.candidateBundleSha256 || source.installedMainSha256 !== pauseContext!.installedMainSha256 || source.profile !== pauseContext!.profile) throw new Error("Manual pause independent source pin mismatch");
+          pauseContext!.source = structuredClone(source);
+          pauseContext!.sourceSha256 = manualPauseSourceDigest(source);
+        },
         record: recordGateIsolationEvent, assertion: recordGateIsolationAssertion,
       });
-    } catch (error) { fail("gate_isolation_corpus", "gate_isolation_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
+      consumeManualPauseProof(manualPause, pauseContext);
+    } catch (error) { manualPause = undefined; fail("gate_isolation_corpus", "gate_isolation_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
   }
   // The gate-isolation corpus (issue #177) runs between the initial window and
   // the controlled restart: it provisions and starts its own two dedicated
@@ -1749,7 +1758,7 @@ export async function runInstalledRuntimeHarness(
 
   if (evidence.verdict === "passed") {
     try {
-      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence, observerContext);
+      state.acceptanceMatrix = createAcceptanceMatrixReport(evidence, observerContext, pauseContext);
       (evidence as InstalledRuntimeEvidence & { acceptanceMatrix: AcceptanceMatrixReport }).acceptanceMatrix =
         state.acceptanceMatrix;
     } catch (error) {
@@ -1775,9 +1784,9 @@ export async function runInstalledRuntimeHarness(
     state.vault?.profileDirectory ?? "",
     options.workingDirectory,
   ];
-  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers, observerContext);
+  await writeEvidenceFile(options.evidencePath, evidence, privateMarkers, observerContext, pauseContext);
   return { verdict: evidence.verdict, failure: state.failure, evidence, evidencePath: options.evidencePath,
-    readEvidence: async () => parseEvidence(await readFile(options.evidencePath, "utf8"), observerContext) };
+    readEvidence: async () => parseEvidence(await readFile(options.evidencePath, "utf8"), observerContext, pauseContext) };
 }
 
 // The phase and its observation are recorded together so the evidence

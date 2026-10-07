@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { syntheticManualPauseProof } from "./helpers/manual-pause-proof.js";
+import { syntheticManualPauseProof, syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,9 +9,10 @@ import {
 } from "../src/index.js";
 
 import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
+let pauseFixture: ReturnType<typeof syntheticManualPauseSource>;
 function createAcceptanceMatrixReport(report: InstalledRuntimeEvidence) {
   const context = observerSourceFixture({ runId: "acceptance-run", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
-  return composeMatrix(report, context);
+  return composeMatrix(report, context, pauseFixture.context);
 }
 const DIGEST = "a".repeat(64);
 
@@ -104,6 +105,7 @@ function syntheticFifoProof() {
 }
 
 function evidence(): InstalledRuntimeEvidence {
+  pauseFixture = syntheticManualPauseSource("acceptance-run", "MVP-PERF-REF-1", DIGEST, DIGEST);
   const publicWire = {
     ...corpus(ASSERTIONS.publicWire),
     canonicalManifestSha256: DIGEST,
@@ -156,7 +158,7 @@ function evidence(): InstalledRuntimeEvidence {
   };
   const gate = {
     ...corpus(ASSERTIONS.gate),
-    manualPause: { installedObservation: syntheticManualPauseProof("acceptance-run", "MVP-PERF-REF-1", DIGEST) },
+    manualPause: { installedObservation: pauseFixture.proof },
     residualCleanup: {
       "vault-a": { writeGate: "open" },
       "vault-b": { writeGate: "open" },
@@ -213,13 +215,25 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("rejects coordinated pause transcript and local-report hash substitution with observer context preserved", () => {
+    const report = evidence();
+    const proof = report.gateIsolationCorpus!.manualPause.installedObservation!;
+    for (const row of proof.toolRows) {
+      row.requestSha256 = row.structuredSha256 = row.textSha256 = "0".repeat(64);
+      if (row.continuationInSha256 !== null) row.continuationInSha256 = "0".repeat(64);
+      if (row.continuationOutSha256 !== null) row.continuationOutSha256 = "0".repeat(64);
+    }
+    for (const action of proof.localActions) action.beforeSha256 = action.afterSha256 = "0".repeat(64);
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/pause.*source/iu);
+  });
   it("refuses boolean-only manual pause claims without bound installed drain and local actions", () => {
     const missing = evidence();
     delete missing.gateIsolationCorpus!.manualPause.installedObservation;
     expect(() => createAcceptanceMatrixReport(missing)).toThrow(/A-30.*pause/u);
   });
   it("requires external source context even for a self-consistent public observer report", () => {
-    expect(() => composeMatrix(evidence())).toThrow(/independently retained source context/);
+    const report = evidence();
+    expect(() => composeMatrix(report, undefined, pauseFixture.context)).toThrow(/independently retained source context/);
   });
   // Independent consumer regressions. The baseline is only a synthetic Node
   // report fixture; none of these cases is installed acceptance evidence.

@@ -1,3 +1,5 @@
+import { createStandardDiagnosticBundle } from "../../src/diagnostic-bundle.js";
+import { projectManualPauseWire, manualPauseSourceDigest, type ManualPauseConsumptionContext, type ManualPauseWireObservation } from "../../src/installed-runtime/manual-pause-source.js";
 import { createHash } from "node:crypto";
 import { compareInventories } from "../../src/installed-runtime/test-vault.js";
 import { manualPauseProofSchema } from "../../src/installed-runtime/manual-pause-observation.js";
@@ -42,4 +44,46 @@ export function syntheticManualPauseProof(runId: string, profile: string, candid
     toolRows,
     unboundKeySha256: digest("unbound"), contentSha256: digest("content"), independentProgressChangeSetIdSha256: digest("b-progress"),
     cleanup: [{ attempted: true, residualPaths: [] }, { attempted: true, residualPaths: [] }], cleanupSucceeded: true, verdict: "passed" });
+}
+
+/** Independently built literal source fixture, not copied from a caller's public proof. */
+export function syntheticManualPauseSource(runId: string, profile: string, candidateBundleSha256: string, installedMainSha256: string) {
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  const baseline = syntheticManualPauseProof(runId, profile, candidateBundleSha256);
+  const versions = { bridge: "0.1.0", plugin: "0.1.0", protocol: "1.0", persistentStateSchema: 2, recoveryJournalSchema: 1 };
+  const lifecycle = { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" };
+  const rawHealth = (phase: "pausing" | "paused" | "resumed") => {
+    const summary = baseline.health[phase];
+    return { outcome: "observed", vault: { id: "vault-a", name: "fixture", path: "/generated/a" }, versions, listener: { address: "127.0.0.1", port: 32123 },
+      readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recovery: { state: "none" }, write: summary.write,
+      queue: { currentExecutionId: phase === "pausing" ? "cs-1" : null, length: summary.queue.length, headChangeSetId: phase === "pausing" ? "cs-1" : phase === "paused" ? "cs-2" : null },
+      lifecycle, effectiveGate: phase === "resumed" ? null : { code: "writes_paused" }, overall: "healthy", reasonCodes: [], operatorAction: "none" };
+  };
+  const wire: ManualPauseWireObservation[] = [];
+  const add = (name: ManualPauseWireObservation["name"], phase: ManualPauseWireObservation["phase"], input: Record<string, unknown>, response: unknown, vaultId = "vault-a", isError = false) => {
+    wire.push({ sequence: wire.length + 1, phase, name, vaultId, endpoint: "http://127.0.0.1:32123/mcp", arguments: input, result: { structuredContent: response, content: [{ type: "text", text: JSON.stringify(response) }], isError } });
+  };
+  const record = (seq: number, applied: boolean) => applied ? { changeSetId: `cs-${seq}`, state: "intent_applied", preview: { requestedEffects: [], derivedEffects: [], paths: [] }, requestedEffects: [], derivedEffects: [], paths: [] } : { changeSetId: `cs-${seq}`, state: "in_progress" };
+  const status = (seq: number, phase: "paused" | "resumed") => add("vault_change_set_status", phase, { submissionKey: `key-${seq}` }, { lookup: "found", changeSet: record(seq, phase === "resumed" || seq === 1), vault: { writeGate: "open", writeState: phase === "paused" ? "paused" : "writable" } });
+  add("vault_health", "pausing", {}, rawHealth("pausing")); add("vault_health", "paused", {}, rawHealth("paused"));
+  for (const seq of [1, 2, 3, 4]) status(seq, "paused");
+  add("vault_change_set_submit", "paused", { submissionKey: "unbound", operations: [{ operationId: "new", kind: "create_note", ifExists: "reject", path: "ManualPauseProof/Head.md", content: "# New\n" }] }, { outcome: "operationally_blocked", gate: { code: "writes_paused" } }, "vault-a", true);
+  add("vault_change_set_status", "paused", { submissionKey: "unbound" }, { lookup: "unknown", vault: { writeGate: "open", writeState: "paused" } });
+  add("vault_discover", "paused", { query: { path: { prefix: "ManualPauseProof/" } }, projection: { matches: false }, order: { by: "path", direction: "asc" }, page: { maxItems: 1000, continuation: null } }, { outcome: "results", ordering: { by: "path", direction: "asc", tieBreaker: "path_utf8_bytes" }, items: [], complete: true, continuation: null });
+  const page = (start: number, end: number, bytes: string, complete: boolean) => ({ outcome: "page", items: [{ index: 0, path: "ManualPauseProof/Content.md", contentVersion: `sha256:${hash("content")}`, sizeBytes: 7, kind: "exact", start, end, content: bytes, complete }], continuation: complete ? null : "token", complete });
+  add("vault_read", "paused", { items: [{ kind: "exact", path: "ManualPauseProof/Content.md" }] }, page(0, 3, "con", false));
+  add("vault_continue", "paused", { continuation: "token" }, page(3, 7, "tent", true));
+  add("vault_change_set_status", "paused", { submissionKey: "b-key" }, { lookup: "found", changeSet: { ...record(1, true), changeSetId: "b-progress" }, vault: { writeGate: "open", writeState: "writable" } }, "vault-b");
+  add("vault_health", "resumed", {}, rawHealth("resumed")); for (const seq of [1, 2, 3, 4]) status(seq, "resumed");
+  const diagnostic = (phase: "pausing" | "paused" | "resumed") => {
+    const value = rawHealth(phase);
+    return createStandardDiagnosticBundle({ vaultId: "vault-a", versions, health: { readiness: value.readiness, recovery: "none", write: phase === "pausing" ? { gate: "open", state: "writable", pauseSource: null } : value.write, effectiveGate: phase === "resumed" || phase === "pausing" ? null : "writes_paused", overall: "healthy", reasonCodes: [], operatorAction: "none" }, listener: value.listener, queue: value.queue, lifecycle, journal: { availability: "unavailable", frames: [] }, changeSets: [], machineEvents: [] });
+  };
+  const localReports = ["pause-writes", "resume-writes"].map((action, index) => ({ schemaVersion: 1, runId, candidateBundleSha256, installedMainSha256, capabilityToken: "c".repeat(64), vaultId: "vault-a", endpoint: "http://127.0.0.1:32123/mcp", invocationId: action, action, outcome: "accepted", before: diagnostic(index === 0 ? "pausing" : "paused"), after: diagnostic(index === 0 ? "paused" : "resumed") }));
+  const { toolRows: _rows, localActions: _actions, verdict: _verdict, cleanupSucceeded: _clean, ...facts } = baseline;
+  facts.installedMainSha256 = installedMainSha256;
+  const source = { runId, candidateBundleSha256, installedMainSha256, profile, wire, localReports, facts } as NonNullable<ManualPauseConsumptionContext["source"]>;
+  const context: ManualPauseConsumptionContext = { runId, candidateBundleSha256, installedMainSha256, profile, source, sourceSha256: manualPauseSourceDigest(source) };
+  const proof = manualPauseProofSchema.parse({ ...facts, toolRows: wire.map(projectManualPauseWire), localActions: localReports.map(report => ({ action: report.action, invocationIdSha256: hash(report.invocationId), beforeSha256: hash(JSON.stringify(report.before)), afterSha256: hash(JSON.stringify(report.after)) })), verdict: "passed", cleanupSucceeded: true });
+  return { source, context, proof };
 }

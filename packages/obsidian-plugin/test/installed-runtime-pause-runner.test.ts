@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { expect, it } from "vitest";
 import { brandVerifiedCandidateBundle, inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
 import { manualPauseProofSchema } from "../src/installed-runtime/manual-pause-observation.js";
+import { consumeManualPauseProof, manualPauseSourceDigest, type ManualPauseConsumptionContext } from "../src/installed-runtime/manual-pause-source.js";
 import { runInstalledManualPauseCorpus } from "../src/installed-runtime/manual-pause-installed-runner.js";
 import { createInstalledRuntimeAcceptanceDescriptor, activateInstalledRuntimeAcceptanceDriver } from "../src/installed-runtime/smoke-command.js";
 import { createBridgeInstance } from "../src/bridge-instance.js";
@@ -69,7 +70,8 @@ async function wireFixture(mode: "real" | "missing" | "forged" | "foreign-report
       listener: health.listener, queue: health.queue, lifecycle: health.lifecycle, journal: { availability: "unavailable", frames: [] },
       changeSets: state.changeSets.entries.map((e: any) => ({ changeSetId: e.changeSetId, submissionKey: e.submissionKey, enqueueSeq: e.enqueueSeq, state: e.changeSet.state, executionPhase: e.execution?.phase ?? null })), machineEvents: [] });
   };
-  const options = { runId: "pause-wire", workingDirectory: root, reportDirectory: join(root, "reports"), candidate, profile,
+  const context: ManualPauseConsumptionContext = { runId: "pause-wire", candidateBundleSha256: candidate.identity.bundleSha256, installedMainSha256: candidate.identity.files.find(file => file.path === "main.js")!.sha256, profile: profile.name };
+  const options = { runId: "pause-wire", retainSource: (source: NonNullable<ManualPauseConsumptionContext["source"]>) => { context.source = structuredClone(source); context.sourceSha256 = manualPauseSourceDigest(source); }, workingDirectory: root, reportDirectory: join(root, "reports"), candidate, profile,
     operatorReportTimeoutMs: 800, timeouts: { startupMs: 1500, stopMs: 1500, portClosedMs: 1500 }, client: healthClient,
     probe: { probe: async () => ({ platform: profile.os.platform, osBuild: profile.os.build, capabilities: profile.capabilities }),
       probeRunning: async () => ({ platform: profile.os.platform, osBuild: profile.os.build, capabilities: profile.capabilities,
@@ -140,7 +142,7 @@ async function wireFixture(mode: "real" | "missing" | "forged" | "foreign-report
         }
       })());
     } };
-  return { options, root, records, cleanup: async () => { await Promise.allSettled(jobs); for (const b of bridges.values()) await b.stop(); for (const e of executions) await e.close(); await rm(root, { recursive: true, force: true }); } };
+  return { options, context, root, records, cleanup: async () => { await Promise.allSettled(jobs); for (const b of bridges.values()) await b.stop(); for (const e of executions) await e.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
 it("observes real-wire pausing/drain, retained FIFO, independent resume and Vault B progress through the process/report seam", async () => {
@@ -153,6 +155,19 @@ it("observes real-wire pausing/drain, retained FIFO, independent resume and Vaul
     expect(manualPauseProofSchema.safeParse({ ...proof, capabilityToken: "c".repeat(64) }).success).toBe(false);
     expect(proof.toolRows.map(row => row.tool)).toEqual(expect.arrayContaining(["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_change_set_status"]));
     expect(proof.toolRows.every(row => row.structuredSha256 === row.textSha256)).toBe(true);
+    const forged = structuredClone(proof);
+    for (const row of forged.toolRows) {
+      row.requestSha256 = row.structuredSha256 = row.textSha256 = "0".repeat(64);
+      if (row.continuationInSha256 !== null) row.continuationInSha256 = "0".repeat(64);
+      if (row.continuationOutSha256 !== null) row.continuationOutSha256 = "0".repeat(64);
+    }
+    for (const action of forged.localActions) action.beforeSha256 = action.afterSha256 = "0".repeat(64);
+    expect(consumeManualPauseProof(proof, fixture.context)).toEqual(proof);
+    expect(() => consumeManualPauseProof(forged, fixture.context)).toThrow(/independent actual source/u);
+    expect(() => consumeManualPauseProof(proof)).toThrow(/independently retained source/u);
+    const changedSource = structuredClone(fixture.context);
+    changedSource.source!.localReports[0]!.before = changedSource.source!.localReports[0]!.after;
+    expect(() => consumeManualPauseProof(proof, changedSource)).toThrow(/pin/u);
     expect(fixture.records.filter(e => e.name === "manual-pause-observed")).toHaveLength(1);
   } finally { await fixture.cleanup(); }
 }, 20000);

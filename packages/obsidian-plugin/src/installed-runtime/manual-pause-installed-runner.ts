@@ -19,7 +19,8 @@ import { waitForNextInstalledLocalControlReport } from "./local-operator-report.
 import { HealthObservationError, type ObservedHealth } from "./loopback-client.js";
 import type { InstalledFifoOptions } from "./fifo-installed-runner.js";
 
-export type InstalledManualPauseOptions = InstalledFifoOptions & { readonly operatorReportTimeoutMs?: number };
+import { projectManualPauseWire, consumeManualPauseProof, manualPauseSourceDigest, type ManualPauseSource, type ManualPauseWireObservation } from "./manual-pause-source.js";
+export type InstalledManualPauseOptions = InstalledFifoOptions & { readonly operatorReportTimeoutMs?: number; readonly retainSource?: (source: ManualPauseSource) => void };
 const contentPath = "ManualPauseProof/Content.md";
 const content = "# Generated pause content\n" + "Generated acceptance bytes.\n".repeat(12000);
 const paths = ["Head", "First", "Second", "Third"].map(name => `ManualPauseProof/${name}.md`);
@@ -62,8 +63,11 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
   const cleanup: CleanupReport[] = [];
   const contentClients = new Map<LiveVault, Client>();
   const toolRows: ManualPauseProof["toolRows"] = [];
+  const wire: ManualPauseWireObservation[] = [];
+  const localReports: ManualPauseSource["localReports"] = [];
   let phase: ManualPauseProof["toolRows"][number]["phase"] = "setup";
   let requestSequence = 0;
+  let facts: Omit<ManualPauseSource["facts"], "cleanup"> | undefined;
   let evidence: Omit<ManualPauseProof, "cleanup" | "cleanupSucceeded" | "verdict"> | undefined;
   let succeeded = false;
   const prepare = async (label: "vault-a" | "vault-b") => {
@@ -133,19 +137,9 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
       const value = parse(result.structuredContent);
       if ((result.isError === true) !== expectedError || !Array.isArray(result.content) || result.content.length !== 1 ||
           result.content[0]?.type !== "text" || result.content[0].text !== JSON.stringify(value)) throw new Error("Manual pause wire representation/error mismatch");
-      const fragments = value.outcome === "page" ? value.items.filter((fragment: any) => "content" in fragment) : [];
-      toolRows.push({ sequence, source: "loopback-mcp", phase: requestPhase, tool: name as ManualPauseProof["toolRows"][number]["tool"], contract: `${name}:v1`,
-        vaultIdSha256: fifoDigest(item.vaultId!), requestSha256: fifoDigest(JSON.stringify({ name, arguments: arguments_ })),
-        structuredSha256: fifoDigest(JSON.stringify(result.structuredContent)), textSha256: fifoDigest(result.content[0].text),
-        schemaValid: true, textIdentical: true, isError: result.isError === true, branch: value.outcome ?? value.lookup,
-        gate: value.gate?.code === "writes_paused" ? "writes_paused" : null,
-        submissionKeySha256: typeof arguments_.submissionKey === "string" ? fifoDigest(arguments_.submissionKey) : null,
-        changeSetIdSha256: value.changeSet ? fifoDigest(value.changeSet.changeSetId) : null, state: value.changeSet?.state ?? null,
-        continuationInSha256: typeof arguments_.continuation === "string" ? fifoDigest(arguments_.continuation) : null,
-        continuationOutSha256: typeof value.continuation === "string" ? fifoDigest(value.continuation) : null,
-        contentVersion: fragments.length ? fragments[0].contentVersion.slice(7) : null,
-        start: fragments.length ? fragments[0].start : null, end: fragments.length ? fragments.at(-1).end : null,
-        pageBytes: fragments.length ? fragments.reduce((sum: number, fragment: any) => sum + Buffer.byteLength(fragment.content), 0) : null });
+      const observation: ManualPauseWireObservation = structuredClone({ sequence, phase: requestPhase, name: name as ManualPauseWireObservation["name"], vaultId: item.vaultId!, endpoint: item.endpoint!.toString(), arguments: arguments_, result: { structuredContent: result.structuredContent, content: result.content, isError: result.isError === true } });
+      wire.push(observation);
+      toolRows.push(projectManualPauseWire(observation));
       options.record("tool", `manual-pause/${name}`, toolRows.at(-1));
       return value;
     } finally { if (!persistent) await client.close().catch(() => {}); }
@@ -291,7 +285,8 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
       const comparison = compareInventories(before, after);
       return { before, after, ...comparison, addedPaths: [...comparison.addedPaths], removedPaths: [...comparison.removedPaths], changedPaths: [...comparison.changedPaths] };
     };
-    evidence = { scope: "manual-pause-drain-and-fifo", source: "installed-obsidian", runId: options.runId, profile: options.profile.name,
+    localReports.push(structuredClone(pause), structuredClone(resume));
+    facts = { scope: "manual-pause-drain-and-fifo", source: "installed-obsidian", runId: options.runId, profile: options.profile.name,
       candidateBundleSha256: a.descriptor.candidateBundleSha256, installedMainSha256: a.descriptor.installedMainSha256,
       canonicalManifestSha256: fifoDigest(JSON.stringify({ scenario: "manual-pause-drain-and-fifo-v1", paths, contentSha256: fifoDigest(content), operations: inputs.map(input => input.operations) })),
       vaults: [a, b].map((item, index) => ({ label: index === 0 ? "vault-a" : "vault-b", vaultIdSha256: fifoDigest(item.vaultId!), seed: item.vault.seedManifestSha256,
@@ -301,10 +296,11 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
       enqueue: entries.map(entry => ({ ...entry, submissionKey: fifoDigest(entry.submissionKey), changeSetId: fifoDigest(entry.changeSetId) })),
       events: finalEvents.map(event => "submissionKey" in event ? { ...event, submissionKey: fifoDigest(event.submissionKey), changeSetId: fifoDigest(event.changeSetId) } : event),
       pausingEventCount, pausedEventCount, resumeEventCount, health: { pausing: healthSummary(pausing), paused: healthSummary(paused), resumed: healthSummary(resumed) },
+      unboundKeySha256: fifoDigest(unbound), contentSha256: fifoDigest(content), independentProgressChangeSetIdSha256: fifoDigest(progress.changeSet.changeSetId) };
+    evidence = { ...structuredClone(facts),
       localActions: [{ action: pause.action, invocationIdSha256: fifoDigest(pause.invocationId), beforeSha256: fifoDigest(JSON.stringify(pause.before)), afterSha256: fifoDigest(JSON.stringify(pause.after)) },
         { action: resume.action, invocationIdSha256: fifoDigest(resume.invocationId), beforeSha256: fifoDigest(JSON.stringify(resume.before)), afterSha256: fifoDigest(JSON.stringify(resume.after)) }],
-      toolRows: toolRows.sort((left, right) => left.sequence - right.sequence),
-      unboundKeySha256: fifoDigest(unbound), contentSha256: fifoDigest(content), independentProgressChangeSetIdSha256: fifoDigest(progress.changeSet.changeSetId) };
+      toolRows: toolRows.sort((left, right) => left.sequence - right.sequence) };
     succeeded = true;
   } finally {
     for (const client of contentClients.values()) await client.close().catch(() => {});
@@ -334,8 +330,15 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
     options.record("cleanup", "manual-pause-cleanup", { vaults: cleanup });
     if (cleanupFailure !== undefined) throw cleanupFailure;
   }
-  if (!succeeded) throw new Error("Manual pause scene incomplete");
+  if (!succeeded || evidence === undefined || facts === undefined) throw new Error("Manual pause scene incomplete");
+  const source: ManualPauseSource = { runId: options.runId, candidateBundleSha256: options.candidate.identity.bundleSha256,
+    installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profile: options.profile.name,
+    wire, localReports, facts: structuredClone({ ...facts, cleanup: cleanup.map(report => ({ attempted: true as const, residualPaths: [...report.residualPaths] })) }) };
   const proof = manualPauseProofSchema.parse({ ...evidence, cleanup, cleanupSucceeded: true, verdict: "passed" });
+  consumeManualPauseProof(proof, { runId: options.runId, candidateBundleSha256: options.candidate.identity.bundleSha256,
+    installedMainSha256: options.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profile: options.profile.name,
+    source, sourceSha256: manualPauseSourceDigest(source) });
+  options.retainSource?.(structuredClone(source));
   options.record("assertion", "manual-pause-observed", proof);
   options.assertion("manual-pause/drain-and-fifo-retention:installed-observed");
   return proof;
