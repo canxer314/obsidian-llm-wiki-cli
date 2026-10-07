@@ -119,6 +119,28 @@ export function multiMarkdownCorpusProfile(): MutationCorpusProfile {
   };
 }
 
+export function multiFrontmatterOnlyCorpusProfile(): MutationCorpusProfile {
+  // Keep the historical body + Frontmatter profile unchanged. Installed crash
+  // acceptance needs two actual typed rewrites, including a BOM preimage.
+  const committed = new TextEncoder().encode("---\r\ntitle: \"Mi Nota\"\r\nstatus: \"published\"\r\n\"reviewer\": \"你好\"\r\n---\r\n\r\n# Cuerpo\r\n\r\nTexto intacto con 你好 y 🚀\r\n");
+  const withBom = (bytes: Uint8Array) => new Uint8Array([0xef, 0xbb, 0xbf, ...bytes]);
+  const files: readonly MutationCorpusFileFixture[] = [
+    { path: "Corpus/Multi/FrontmatterA.md", originalBytes: FRONTMATTER_ORIGINAL_BYTES, committedBytes: committed },
+    { path: "Corpus/Multi/FrontmatterB.md", originalBytes: withBom(FRONTMATTER_ORIGINAL_BYTES), committedBytes: withBom(committed) },
+  ];
+  return {
+    kind: "edit_multi_frontmatter", label: "edit-multi-frontmatter-only", files, primaryPath: files[0]!.path,
+    submissionKey: seed => `submission-${seed}`,
+    buildSubmitInput: seed => ({ submissionKey: `submission-${seed}`, operations: files.map((file, index) => ({
+      operationId: `multi-frontmatter-${index}-${seed}`, kind: "edit_frontmatter", path: file.path,
+      targetVersion: contentVersion(file.originalBytes!), changes: [...FRONTMATTER_FIXTURE.changes],
+    })) }),
+    crashPoints: multiFileEditCrashPoints(), rollbackLeadInPoint: EDIT_ROLLBACK_LEAD_IN,
+    expectedBoundary: point => editBoundaryFor(point.point, files), expectedProofState: point => editProofState(point.point),
+    timeoutMs: 60_000,
+  };
+}
+
 export function multiFrontmatterCorpusProfile(): MutationCorpusProfile {
   const first = multiFrontmatterFirst;
   const second = multiFrontmatterSecond;

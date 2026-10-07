@@ -12,18 +12,59 @@ import { brandVerifiedCandidateBundle, inspectCandidateBundle } from "../src/ins
 import { ObsidianProcessError } from "../src/installed-runtime/obsidian-process.js";
 import type { InstalledCrashRestorationSliceOptions } from "../src/installed-runtime/installed-crash-restoration-slice.js";
 
-it("admits every distinct installed create/exact/whole crash boundary but rejects unregistered execution programs", async () => {
+it("admits every distinct installed create/exact/whole/frontmatter/multi crash boundary but rejects unregistered execution programs", async () => {
   const { installedCrashScenarios } = await import("../src/installed-runtime/crash-restoration-protocol.js");
   const points = ["before_prepared", "after_prepared", "after_file_mutation:0", "after_raw_verification", "during_success_barrier", "after_snapshot", "before_committed", "after_committed", "before_rollback", "after_rollback_mutation:0", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back"];
-  for (const kind of ["create_note", "edit_body", "edit_body_whole"]) {
-    const expected = [...points, ...(kind === "create_note" ? ["after_mutation:0", "after_mutation:1", "after_rollback_mutation:1", "after_rollback_mutation:2"] : [])];
+  for (const kind of ["create_note", "edit_body", "edit_body_whole", "edit_frontmatter", "edit_multi_markdown", "edit_multi_frontmatter"]) {
+    const expected = [...points, ...(kind === "create_note" ? ["after_mutation:0", "after_mutation:1", "after_rollback_mutation:1", "after_rollback_mutation:2"] : kind.startsWith("edit_multi_") ? ["after_file_mutation:1", "after_rollback_mutation:1"] : [])];
     expect(installedCrashScenarios.filter(scenario => scenario.startsWith(`${kind}/`)).map(scenario => scenario.slice(kind.length + 1)).sort()).toEqual(expected.sort());
     for (const point of expected) {
       expect(parseCrashRestorationCommand({ sequence: 1, capabilityToken: "a".repeat(64), action: "run-crash-restoration-scenario", scenario: `${kind}/${point}`, expectedVaultId: "v", endpoint: "http://127.0.0.1:32123/mcp", submissionKey: "submission-test", input: {} })).not.toBeNull();
     }
   }
-  for (const scenario of ["create_note/after_mutation:2", "edit_body/after_mutation:0", "edit_body_whole/eval", "eval/after_prepared", "create_note/../baseline"]) {
+  for (const scenario of ["create_note/after_file_mutation:1", "edit_frontmatter/after_rollback_mutation:1", "edit_multi_markdown/after_rollback_mutation:2", "edit_multi_frontmatter/after_file_mutation:2", "create_note/after_mutation:2", "edit_body/after_mutation:0", "edit_body_whole/eval", "eval/after_prepared", "create_note/../baseline"]) {
     expect(parseCrashRestorationCommand({ sequence: 1, capabilityToken: "a".repeat(64), action: "run-crash-restoration-scenario", scenario, expectedVaultId: "v", endpoint: "http://127.0.0.1:32123/mcp", submissionKey: "submission-test", input: {} })).toBeNull();
+  }
+});
+
+it("uses two typed Frontmatter operations with independent literal byte expectations, including BOM and untouched representation", async () => {
+  const { crashProfile } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const profile = crashProfile("edit_multi_frontmatter");
+  expect(profile.buildSubmitInput("two-frontmatters").operations.map(operation => operation.kind)).toEqual(["edit_frontmatter", "edit_frontmatter"]);
+  const expected = "---\r\ntitle: \"Mi Nota\"\r\nstatus: \"published\"\r\n\"reviewer\": \"你好\"\r\n---\r\n\r\n# Cuerpo\r\n\r\nTexto intacto con 你好 y 🚀\r\n";
+  expect(Buffer.from(crashProfile("edit_frontmatter").files[0]!.committedBytes!)).toEqual(Buffer.from(expected));
+  expect(Buffer.from(profile.files[0]!.committedBytes!)).toEqual(Buffer.from(expected));
+  expect(Buffer.from(profile.files[1]!.committedBytes!)).toEqual(Buffer.from(`﻿${expected}`));
+  expect(Buffer.from(profile.files[1]!.originalBytes!)).toEqual(Buffer.from("﻿---\r\ntitle: \"Mi Nota\"\r\nstatus: draft\r\ncount: 1\r\n---\r\n\r\n# Cuerpo\r\n\r\nTexto intacto con 你好 y 🚀\r\n"));
+});
+
+it("rejects new-family boundary evidence reused across candidate, run, Vault, kind, installed bytes, capability or seed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-multi-marker-binding-"));
+  const binding = { reportDirectory: root, runId: "multi-run", vaultId: "multi-vault", candidateBundleSha256: "a".repeat(64), installedMainSha256: "b".repeat(64), capabilityToken: "c".repeat(64), endpoint: "http://127.0.0.1:32123/mcp", submissionKey: "submission-multi-seed", mutationKind: "edit_multi_frontmatter" as const, crashPoint: "after_file_mutation:1" as const };
+  const path = crashRestorationBoundaryPath(root, binding.crashPoint, binding.mutationKind, binding.submissionKey);
+  const report = { ...binding, schemaVersion: 1, scenario: "edit_multi_frontmatter/after_file_mutation:1", sequence: 1, point: binding.crashPoint, journalPhase: "PREPARED", frameSha256: "d".repeat(64), inventorySha256: "e".repeat(64) };
+  const { reportDirectory, mutationKind, crashPoint, ...privateReport } = report;
+  try {
+    for (const changed of [{ runId: "other-run" }, { vaultId: "other-vault" }, { candidateBundleSha256: "f".repeat(64) }, { installedMainSha256: "f".repeat(64) }, { capabilityToken: "f".repeat(64) }, { submissionKey: "submission-other-seed" }, { scenario: "edit_multi_markdown/after_file_mutation:1" }]) {
+      await writeFile(path, JSON.stringify({ ...privateReport, ...changed }));
+      await expect(loadCrashBoundaryReport(binding)).rejects.toThrow("not bound");
+    }
+    await rm(path);
+    await expect(loadCrashBoundaryReport(binding)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("never arms arbitrary multi-operation input, even with the generated capability and a matching journal hash", async () => {
+  const { crashProfile, crashDigest, validateInstalledCrashRecovery, validateInstalledCrashFixture } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  for (const kind of ["edit_frontmatter", "edit_multi_markdown", "edit_multi_frontmatter"] as const) {
+    const input = crashProfile(kind).buildSubmitInput("fixed");
+    const command = { sequence: 1, capabilityToken: "a".repeat(64), action: "run-crash-restoration-scenario" as const, scenario: `${kind}/after_prepared` as const, expectedVaultId: "v", endpoint: "http://127.0.0.1:1234/mcp", submissionKey: "submission-fixed", input };
+    expect(() => validateInstalledCrashFixture(command)).not.toThrow();
+    const operations = input.operations as Record<string, unknown>[];
+    for (const changed of [{ ...input, operations: operations.slice(0, 0) }, { ...input, operations: operations.map((operation, index) => index === operations.length - 1 ? { ...operation, path: "Notes/Arbitrary.md" } : operation) }, crashProfile(kind).buildSubmitInput("other-seed")]) {
+      const frame = { phase: "PREPARED", vaultId: "v", changeSetId: "id", input: changed };
+      await expect(async () => validateInstalledCrashRecovery({ ...command, scenario: `${kind}/after_rollback_mutation:0`, input: changed, recovery: { changeSetId: "id", frameSha256: crashDigest(frame) } }, frame, { vaultId: "v", port: 1234 })).rejects.toThrow("fixed mutation program");
+    }
   }
 });
 
@@ -124,6 +165,58 @@ it("binds candidate boundary inventory to the actual config directory without hi
     await parkInstalledCrashBoundary({ descriptor: created.descriptor, command, frame: { phase: "PREPARED", vaultId: "v", input }, before, configDirectoryName, park: async () => undefined });
     expect(await loadCrashBoundaryReport({ ...created.descriptor, vaultId: "v", endpoint: command.endpoint, submissionKey: command.submissionKey })).toMatchObject({ inventorySha256: crashDigest(before) });
     expect(before.map(entry => entry.path)).toEqual([".obsidian-backup", ".obsidian-backup/Public.md"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("observes both files at partial apply and reverse rollback, and refuses a missing restore, partial commit or untouched-byte damage before publishing", async () => {
+  const { parkInstalledCrashBoundary, crashProfile, crashInventory, crashDigest } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  for (const kind of ["edit_multi_markdown", "edit_multi_frontmatter"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "installed-multi-producer-"));
+    const vaultPath = join(root, "installed-runtime-vault-multi-producer");
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", "crash-plugin");
+    await mkdir(pluginDirectory, { recursive: true }); await writeFile(join(pluginDirectory, "main.js"), "candidate");
+    const created = await createInstalledRuntimeAcceptanceDescriptor({ runId: "multi-producer", vaultPath, pluginId: "crash-plugin", reportDirectory: join(root, "reports"), candidateBundleSha256: "a".repeat(64) });
+    await mkdir(created.descriptor.reportDirectory);
+    const profile = crashProfile(kind);
+    const input = profile.buildSubmitInput("multi-producer");
+    for (const file of profile.files) { await mkdir(join(vaultPath, file.path, ".."), { recursive: true }); await writeFile(join(vaultPath, file.path), file.originalBytes!); }
+    await mkdir(join(vaultPath, ".obsidian-empty"));
+    const before = await crashInventory(vaultPath);
+    const [first, second] = profile.files;
+    const set = async (a: Uint8Array, b: Uint8Array) => { await writeFile(join(vaultPath, first!.path), a); await writeFile(join(vaultPath, second!.path), b); };
+    try {
+      for (const point of ["after_file_mutation:0", "after_rollback_mutation:0"] as const) {
+        const command = { sequence: 1, capabilityToken: created.descriptor.capabilityToken, action: "run-crash-restoration-scenario" as const, scenario: `${kind}/${point}` as const, expectedVaultId: "v", endpoint: "http://127.0.0.1:1234/mcp", submissionKey: "submission-multi-producer", input };
+        const frame = { phase: "PREPARED", vaultId: "v", input };
+        await set(first!.committedBytes!, second!.originalBytes!);
+        await parkInstalledCrashBoundary({ descriptor: created.descriptor, command, frame, before, park: async () => undefined });
+        expect(await loadCrashBoundaryReport({ ...created.descriptor, vaultId: "v", endpoint: command.endpoint, submissionKey: command.submissionKey, mutationKind: kind, crashPoint: point })).toMatchObject({ inventorySha256: crashDigest(await crashInventory(vaultPath)) });
+      }
+      for (const [point, phase, a, b] of [
+        ["after_rolled_back", "ROLLED_BACK", first!.originalBytes!, second!.committedBytes!],
+        ["after_committed", "COMMITTED", first!.committedBytes!, second!.originalBytes!],
+        ["after_committed", "COMMITTED", first!.committedBytes!, Buffer.concat([Buffer.from(second!.committedBytes!), Buffer.from("WRONG BODY")])],
+      ] as const) {
+        const command = { sequence: 1, capabilityToken: created.descriptor.capabilityToken, action: "run-crash-restoration-scenario" as const, scenario: `${kind}/${point}` as const, expectedVaultId: "v", endpoint: "http://127.0.0.1:1234/mcp", submissionKey: "submission-multi-producer", input };
+        await set(a, b);
+        await expect(parkInstalledCrashBoundary({ descriptor: created.descriptor, command, frame: { phase, vaultId: "v", input }, before, park: async () => undefined })).rejects.toThrow("whole-state");
+        await expect(loadCrashBoundaryReport({ ...created.descriptor, vaultId: "v", endpoint: command.endpoint, submissionKey: command.submissionKey, mutationKind: kind, crashPoint: point })).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+it("reconstructs every interrupted preimage and gives each fixed family a distinct marker path", async () => {
+  const { crashOriginalInventory, crashProfile, crashInventory, installedCrashScenarios, crashScenarioParts } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const root = await mkdtemp(join(tmpdir(), "installed-multi-original-"));
+  try {
+    const profile = crashProfile("edit_multi_frontmatter");
+    for (const file of profile.files) { await mkdir(join(root, file.path, ".."), { recursive: true }); await writeFile(join(root, file.path), file.originalBytes!); }
+    const before = await crashInventory(root);
+    for (const file of profile.files) await writeFile(join(root, file.path), file.committedBytes!);
+    expect(crashOriginalInventory(await crashInventory(root), "edit_multi_frontmatter")).toEqual(before);
+    const paths = installedCrashScenarios.map(scenario => { const { kind, point } = crashScenarioParts(scenario); return crashRestorationBoundaryPath(root, point, kind, "same-submission"); });
+    expect(new Set(paths).size).toBe(92);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -488,8 +581,145 @@ it("rejects a private crash command against a dirty durable journal without armi
 });
 
 
+// Test adapter only: a real Node process + production Bridge, never Obsidian evidence.
+async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint) {
+  const { spawn } = await import("node:child_process");
+  const { readFile } = await import("node:fs/promises");
+  const { createServer } = await import("node:net");
+  const { buildOwningProcessBundle } = await import("../src/corpus/crash-corpus-runner.js");
+  const { createLoopbackMcpClient } = await import("../src/installed-runtime/loopback-client.js");
+  const { waitForCondition } = await import("../src/installed-runtime/obsidian-process.js");
+  const bundle = await buildOwningProcessBundle();
+  const candidateDirectory = join(root, "candidate");
+  await mkdir(candidateDirectory);
+  await writeFile(join(candidateDirectory, "manifest.json"), JSON.stringify({ id: "crash-plugin", version: "0.1.0", minAppVersion: "1.0.0" }));
+  await writeFile(join(candidateDirectory, "main.js"), "Node wire test candidate; NOT Obsidian");
+  const candidate = brandVerifiedCandidateBundle({ bundleDirectory: candidateDirectory, identity: await inspectCandidateBundle(candidateDirectory), tag: "v0.1.0", repository: "test/crash", workflowRef: "test", attestationSource: "local-candidate" });
+  const server = createServer();
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  let generation = 0;
+  const eventLogs: string[] = [];
+  const processes: import("node:child_process").ChildProcess[] = [];
+  const profile = { name: "node-wire-test-only", os: { platform: "linux", build: "test" }, versions: { obsidian: "NOT-INSTALLED", electron: "NOT-INSTALLED", node: process.versions.node }, capabilities: [], profileRequirement: "dedicated_candidate_only" };
+  const options = {
+    runId: "node-wire", mutationKind, crashPoint, workingDirectory: root, reportDirectory: join(root, "reports"), candidate, profile,
+    probe: { probeRunning: async () => ({ platform: "linux", osBuild: "test", obsidianVersion: "NOT-INSTALLED", electronVersion: "NOT-INSTALLED", nodeVersion: process.versions.node, capabilities: [] }) },
+    processControl: { start: async (request: { vaultPath: string }) => {
+      const control = join(root, `control-${++generation}`);
+      const child = spawn(process.execPath, [bundle], { env: { ...process.env, CORPUS_ROOT: request.vaultPath, CORPUS_VAULT_ID: "node-wire-vault", CORPUS_PORT: String(port), CORPUS_CONTROL_DIR: control, CORPUS_INSTALLED_CRASH_TEST: "1" }, stdio: ["ignore", "ignore", "pipe"] });
+      processes.push(child);
+      let stderr = ""; child.stderr?.on("data", chunk => { stderr += String(chunk); });
+      const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+      const descriptor = JSON.parse(await readFile(join(request.vaultPath, ".obsidian", "plugins", "crash-plugin", "installed-runtime-acceptance.json"), "utf8"));
+      await waitForCondition(async () => {
+        const failure = await readFile(join(control, "failed.json"), "utf8").catch(() => null);
+        if (failure !== null || child.exitCode !== null) throw new Error(`Node wire startup failed ${failure ?? stderr}`);
+        return await readFile(join(control, descriptor.command.recovery === undefined ? "ready.json" : "events.jsonl"), "utf8").then(() => true).catch(() => false);
+      }, { timeoutMs: 5_000, intervalMs: 10 });
+      return { pid: child.pid, stop: async () => { child.kill("SIGKILL"); await exited; eventLogs.push(await readFile(join(control, "events.jsonl"), "utf8")); } };
+    } },
+    client: createLoopbackMcpClient(), timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 5_000 }, boundaryTimeoutMs: 5_000,
+    prepareAcceptanceDriver: async (request: any) => { const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "node-wire", reportDirectory: join(root, "reports") }); return { ...created, cleanup: async () => rm(created.path, { force: true }) }; },
+    record: () => undefined, assertion: () => undefined,
+  } as InstalledCrashRestorationSliceOptions;
+  return { options, eventLogs, cleanup: async () => {
+    for (const child of processes) {
+      if (child.exitCode !== null || child.signalCode !== null) continue;
+      const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+      child.kill("SIGKILL");
+      await exited;
+    }
+  } };
+}
+
+it("drives the fixed multi-Frontmatter producer and whole-state consumer through real Node MCP wire and actual termination", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-node-wire-tracer-"));
+  const fixture = await arrangeNodeCrashWire(root, "edit_multi_frontmatter", "after_rollback_mutation:0");
+  try {
+    const result = await runInstalledCrashRestorationSlice(fixture.options);
+    expect(result.records[0]).toMatchObject({ mutationKind: "edit_multi_frontmatter", crashPoint: "after_rollback_mutation:0", proofState: "intent_not_applied", cleanupSucceeded: true });
+    expect(fixture.eventLogs).toHaveLength(3);
+    expect(fixture.eventLogs[0]).toContain('"point":"after_snapshot"');
+    expect(fixture.eventLogs[1]).toContain('"point":"after_rollback_mutation:0"');
+  } catch (error) { throw new Error(`${String(error)}\n${fixture.eventLogs.join("\n")}`); }
+  finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+it.each(["edit_frontmatter", "edit_multi_markdown", "edit_multi_frontmatter"] as const)("actually reaches every %s apply/rollback boundary in the production Node wire stack", async kind => {
+  // Independent closed list: enumerating the producer's registry cannot prove
+  // omitted or unreachable boundaries. This is Node evidence, not installed GUI.
+  const points = ["before_prepared", "after_prepared", "after_file_mutation:0", "after_raw_verification", "during_success_barrier", "after_snapshot", "before_committed", "after_committed", "before_rollback", "after_rollback_mutation:0", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back", ...(kind === "edit_frontmatter" ? [] : ["after_file_mutation:1", "after_rollback_mutation:1"])] as import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint[];
+  for (const point of points) {
+    const root = await mkdtemp(join(tmpdir(), "installed-node-wire-boundary-"));
+    const fixture = await arrangeNodeCrashWire(root, kind, point);
+    try {
+      const result = await runInstalledCrashRestorationSlice(fixture.options);
+      const record = result.records[0];
+      expect(record).toMatchObject({ mutationKind: kind, crashPoint: point, cleanupSucceeded: true, proofState: point === "before_prepared" || point === "after_committed" ? "intent_applied" : "intent_not_applied" });
+      const rollback = point.includes("rollback") || point.includes("rolled_back");
+      expect(fixture.eventLogs).toHaveLength(rollback ? 3 : 2);
+      expect(fixture.eventLogs[rollback ? 1 : 0]).toContain(`"point":"${point}"`);
+      // Replaying the retained result did not enter execution again; the only
+      // new execution in the final process is the independently submitted sentinel.
+      const finalLog = fixture.eventLogs.at(-1)!;
+      expect(finalLog.split('"point":"before_prepared"').length - 1).toBe(point === "before_prepared" ? 2 : 1);
+      expect(record.processGenerations.every(generation => generation.pid !== null && generation.stopped && generation.listenerClosed)).toBe(true);
+    } catch (error) { throw new Error(`${kind}/${point}: ${String(error)}\n${fixture.eventLogs.join("\n")}`); }
+    finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+  }
+}, 120_000);
+
+it.each([
+  { kind: "edit_multi_markdown", point: "after_snapshot", fault: "missed_second_restore" },
+  { kind: "edit_multi_frontmatter", point: "after_committed", fault: "partial_commit" },
+  { kind: "edit_frontmatter", point: "after_committed", fault: "untouched_body" },
+  { kind: "edit_multi_frontmatter", point: "after_snapshot", fault: "wrong_terminal_phase" },
+] as const)("refuses $fault observed after real Node recovery at $kind/$point", async ({ kind, point, fault }) => {
+  const { crashProfile } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const root = await mkdtemp(join(tmpdir(), "installed-node-wire-counterexample-"));
+  const fixture = await arrangeNodeCrashWire(root, kind, point);
+  const start = fixture.options.processControl.start;
+  let generation = 0;
+  try {
+    await expect(runInstalledCrashRestorationSlice({ ...fixture.options, processControl: { start: async request => {
+      const handle = await start(request);
+      if (++generation === 2) {
+        const files = crashProfile(kind).files;
+        const file = files.at(-1)!;
+        if (fault === "missed_second_restore") await writeFile(join(request.vaultPath, file.path), file.committedBytes!);
+        if (fault === "partial_commit") await writeFile(join(request.vaultPath, file.path), file.originalBytes!);
+        if (fault === "untouched_body") await writeFile(join(request.vaultPath, file.path), Buffer.concat([Buffer.from(file.committedBytes!), Buffer.from("\r\nUNREQUESTED BODY") ]));
+        if (fault === "wrong_terminal_phase") {
+          const path = join(request.vaultPath, ".llm-wiki", "recovery-journal.bin");
+          const journalHandle = await open(path, "r+");
+          try { const journal = await openRecoveryJournal(journalHandle); const prior = await journal.recover(); await journal.write({ phase: "COMMITTED", payload: { ...(prior!.payload as object), phase: "COMMITTED" } }); }
+          finally { await journalHandle.close(); }
+        }
+      }
+      return handle;
+    } } })).rejects.toThrow(fault === "wrong_terminal_phase" ? "durable terminal intent" : "whole-state inventory");
+    expect(fixture.eventLogs).toHaveLength(2);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+it("refuses loss of derived directories after real committed create restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-node-wire-derived-dir-"));
+  const fixture = await arrangeNodeCrashWire(root, "create_note", "after_committed");
+  const start = fixture.options.processControl.start;
+  let generation = 0;
+  try {
+    await expect(runInstalledCrashRestorationSlice({ ...fixture.options, processControl: { start: async request => {
+      const handle = await start(request);
+      if (++generation === 2) await rm(join(request.vaultPath, "Corpus"), { recursive: true });
+      return handle;
+    } } })).rejects.toThrow("whole-state inventory");
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
 // Orchestration-only fixture. This is deliberately not installed-Obsidian evidence.
-async function arrangeCrashOrchestration(root: string, replayId: string, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint = "after_prepared", mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind = "create_note", fault?: "missing_marker" | "wrong_marker" | "phase_disguise" | "partial_restore" | "early_listener" | "replay_mutation" | "dirty_stop", configDirectoryName = ".obsidian") {
+async function arrangeCrashOrchestration(root: string, replayId: string, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint = "after_prepared", mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind = "create_note", fault?: "missing_marker" | "wrong_marker" | "phase_disguise" | "partial_restore" | "early_listener" | "replay_mutation" | "replay_journal" | "dirty_stop", configDirectoryName = ".obsidian") {
   const { createServer } = await import("node:http");
   const { readFile } = await import("node:fs/promises");
   const { createHash } = await import("node:crypto");
@@ -512,9 +742,9 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
   const preview = (request = input) => {
     const kind = request.operations[0].kind;
     const operationId = request.operations[0].operationId;
-    const fixture = crashProfile(mutationKind).files[0]!;
+    const fixtures = crashProfile(mutationKind).files;
     const dirs = kind === "create_note" ? ["Corpus", "Corpus/Notes"] : [];
-    return { requestedEffects: [{ operationId, kind, projectedOutcome: "changed" }], derivedEffects: dirs.map(path => ({ operationId: `derived/${operationId}/directory/${path}`, causedByOperationId: operationId, kind: "create_directory", projectedOutcome: "changed" })), paths: [...dirs.map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })), { path: fixture.path, preState: fixture.originalBytes === null ? { kind: "absent" } : { kind: "markdown", contentVersion: `sha256:${sha(fixture.originalBytes)}` }, projectedFinalState: { kind: "markdown", contentVersion: `sha256:${sha(fixture.committedBytes!)}` }, projectedOutcome: "changed" }] };
+    return { requestedEffects: request.operations.map(({ operationId, kind }: { operationId: string; kind: string }) => ({ operationId, kind, projectedOutcome: "changed" })), derivedEffects: dirs.map(path => ({ operationId: `derived/${operationId}/directory/${path}`, causedByOperationId: operationId, kind: "create_directory", projectedOutcome: "changed" })), paths: [...dirs.map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })), ...fixtures.map(fixture => ({ path: fixture.path, preState: fixture.originalBytes === null ? { kind: "absent" } : { kind: "markdown", contentVersion: `sha256:${sha(fixture.originalBytes)}` }, projectedFinalState: { kind: "markdown", contentVersion: `sha256:${sha(fixture.committedBytes!)}` }, projectedOutcome: "changed" }))] };
   };
   const terminalRecord = () => {
     const p = preview();
@@ -534,6 +764,7 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
         const submitting = message.params.name === "vault_change_set_submit";
         const sentinel = submitting && message.params.arguments.submissionKey.startsWith("sentinel-");
         if (submitting && !sentinel && fault === "replay_mutation") await writeFile(join(vaultPath, "Notes", "Welcome.md"), "repeated execution damaged bytes");
+        if (submitting && !sentinel && fault === "replay_journal") await writeFrame(crashPoint === "after_committed" || crashPoint === "before_prepared" ? "COMMITTED" : "ROLLED_BACK");
         let changeSet: unknown;
         if (sentinel) {
           await writeFile(join(vaultPath, "Notes", "CrashSentinel.md"), "# Restore completed\n");
@@ -566,8 +797,13 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
       else if (["after_mutation:0", "after_rollback_mutation:1"].includes(point)) await mkdir(join(vaultPath, "Corpus"));
       if (present) await writeFile(join(vaultPath, fixture.path), fixture.committedBytes!);
     } else {
-      const original = ["before_prepared", "after_prepared", "after_rollback_mutation:0", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back"].includes(point);
-      await writeFile(join(vaultPath, fixture.path), original ? fixture.originalBytes! : fixture.committedBytes!);
+      const files = crashProfile(mutationKind).files;
+      for (const [index, fixture] of files.entries()) {
+        let original = ["before_prepared", "after_prepared", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back"].includes(point);
+        if (point.startsWith("after_file_mutation:")) original = index > Number(point.split(":")[1]);
+        if (point.startsWith("after_rollback_mutation:")) original = files.length - 1 - index <= Number(point.split(":")[1]);
+        await writeFile(join(vaultPath, fixture.path), original ? fixture.originalBytes! : fixture.committedBytes!);
+      }
     }
   };
   const publishBoundary = async (descriptor: any) => {
@@ -589,8 +825,10 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     runId: "orchestration", crashPoint, mutationKind, configDirectoryName, workingDirectory: root, reportDirectory: join(root, "reports"), candidate, profile,
     probe: { probeRunning: async () => ({ platform: "linux", osBuild: "test", obsidianVersion: "test", electronVersion: "test", nodeVersion: "test", capabilities: [] }) },
     processControl: { start: async (request: any) => {
-      vaultPath = request.vaultPath; stopped = false;
+      vaultPath = request.vaultPath;
       const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
+      terminal = descriptor.command.action !== "idle" && descriptor.command.recovery === undefined;
+      stopped = false;
       await writeFile(join(vaultPath, configDirectoryName, "plugins", "crash-plugin", "data.json"), JSON.stringify({ vaultId: "orchestration-vault", port }));
       if (descriptor.command.recovery !== undefined) { publishedSequence = descriptor.command.sequence; await publishBoundary(descriptor); if (fault === "early_listener") await new Promise<void>(resolve => server.listen(port, "127.0.0.1", resolve)); }
       else {
@@ -606,7 +844,7 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     } },
     client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "writable" } } }) },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 5_000 },
-    prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = request.vaultPath.includes("edit_body_whole-") ? "edit_body_whole" : request.vaultPath.includes("edit_body-") ? "edit_body" : "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
+    prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = (["edit_multi_frontmatter", "edit_multi_markdown", "edit_frontmatter", "edit_body_whole", "edit_body"] as const).find(kind => request.vaultPath.includes(`-crash-${kind}-`)) ?? "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
   } as InstalledCrashRestorationSliceOptions;
   const timer = setInterval(() => {
     if (stopped || terminal || descriptorPath === "") return;
@@ -692,11 +930,13 @@ it("rejects recovery damage to a public .obsidian-backup note at the runner boun
 });
 
 it("fails closed on missing trigger, wrong marker, disguised phase, early listener, partial restore or replay mutation", async () => {
+  for (const kind of ["create_note", "edit_multi_frontmatter"] as const) {
   for (const fault of ["missing_marker", "wrong_marker", "phase_disguise", "early_listener", "partial_restore", "replay_mutation", "dirty_stop"] as const) {
     const root = await mkdtemp(join(tmpdir(), "installed-crash-adversarial-"));
-    const fixture = await arrangeCrashOrchestration(root, "bound-change-set", fault === "early_listener" ? "before_rolled_back" : "after_prepared", "create_note", fault);
+    const fixture = await arrangeCrashOrchestration(root, "bound-change-set", fault === "early_listener" ? "before_rolled_back" : "after_prepared", kind, fault);
     try { await expect(runInstalledCrashRestorationSlice({ ...fixture.options, timeouts: { startupMs: 100, stopMs: 100, portClosedMs: 100 }, boundaryTimeoutMs: 100 })).rejects.toThrow(); }
     finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+  }
   }
 }, 30_000);
 
@@ -708,6 +948,27 @@ it("reports missing local recovery authority as blocked before submitting a sent
   } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
 });
 
+it("rejects repeat execution that rewrites the same terminal journal despite identical file bytes and replay proof", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-multi-repeat-execution-"));
+  const fixture = await arrangeCrashOrchestration(root, "bound-change-set", "after_committed", "edit_multi_frontmatter", "replay_journal");
+  try { await expect(runInstalledCrashRestorationSlice(fixture.options)).rejects.toThrow("replay changed the durable terminal frame"); }
+  finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
+
+it("closes full status and retained replay for both requested files rather than a primary-file proof", async () => {
+  for (const kind of ["edit_frontmatter", "edit_multi_markdown", "edit_multi_frontmatter"] as const) {
+    for (const point of ["after_prepared", "after_committed", "after_file_mutation:0", "after_rollback_mutation:0"] as const) {
+      const root = await mkdtemp(join(tmpdir(), "installed-multi-proof-"));
+      const fixture = await arrangeCrashOrchestration(root, "bound-change-set", point, kind);
+      try {
+        const outcome = await runInstalledCrashRestorationSlice(fixture.options);
+        expect(outcome.records[0]).toMatchObject({ mutationKind: kind, crashPoint: point, cleanupSucceeded: true });
+        expect(outcome.records[0].after.filter(entry => entry.kind === "file" && entry.path.startsWith("Corpus/"))).toHaveLength(kind === "edit_frontmatter" ? 1 : 2);
+      } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+    }
+  }
+}, 30_000);
+
 it("orchestrates all independently bound apply/rollback points including whole-body and repeated recovery crashes", async () => {
   const { installedCrashScenarios, crashScenarioParts } = await import("../src/installed-runtime/crash-restoration-protocol.js");
   for (const scenario of installedCrashScenarios) {
@@ -718,7 +979,8 @@ it("orchestrates all independently bound apply/rollback points including whole-b
       const outcome = await runInstalledCrashRestorationSlice(fixture.options);
       expect(outcome.records).toMatchObject([{ mutationKind: kind, crashPoint: point, cleanupSucceeded: true, wholeStateVerified: true, sentinelAppliedAfterRestore: true }]);
       expect(outcome.records[0]!.processGenerations).toHaveLength(point.includes("rollback") || point.includes("rolled_back") ? 3 : 2);
-    } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+    } catch (error) { throw new Error(`${scenario}: ${String(error)}`); }
+    finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
   }
 }, 120_000);
 
@@ -755,14 +1017,14 @@ it("keeps all wired create/exact/whole installed crash boundaries partial at the
       record: (_kind, name, detail) => { if (name.startsWith("installed-crash-")) records.push(detail); },
       assertion: () => undefined,
     })).rejects.toThrow("partial");
-    expect(records).toHaveLength(46);
+    expect(records).toHaveLength(92);
     expect(records).toEqual(expect.arrayContaining([
       expect.objectContaining({ scope: "single-after-prepared-installed-rollback-slice" }),
       expect.objectContaining({ scope: "single-after-committed-installed-replay-slice" }),
       expect.objectContaining({ records: [expect.objectContaining({ mutationKind: "edit_body_whole", crashPoint: "before_rolled_back" })] }),
     ]));
   } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 
 it("orchestrates edit_body PREPARED with exact original bytes and full retained status replay", async () => {

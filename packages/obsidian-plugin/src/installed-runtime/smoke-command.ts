@@ -425,7 +425,7 @@ export function createAuthoritativeInstalledRuntimeRunners(
         const partial = await runInstalledCrashRestorationSlice({ ...request.installed, crashPoint, mutationKind, reportDirectory: options.reportDirectory ?? request.installed.reportDirectory });
         request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
       }
-      throw new Error("Installed create/exact/whole complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
+      throw new Error("Installed create/exact/whole/frontmatter/multi complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
     },
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:
