@@ -27,6 +27,40 @@ it("admits every distinct installed create/exact/whole/frontmatter/multi crash b
   }
 });
 
+it("admits only reachable copy/move binary and derived-directory crash boundaries", async () => {
+  const { installedCrashScenarios } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const common = ["before_prepared", "after_prepared", "after_mutation:0", "after_mutation:1", "after_mutation:2", "after_raw_verification", "during_semantic_evidence", "after_semantic_evidence", "after_snapshot", "before_committed", "after_committed", "before_rollback", "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back"];
+  for (const kind of ["copy_attachment", "move_attachment"]) {
+    const points = [...common, ...(kind === "copy_attachment" ? ["after_rollback_mutation:3"] : [])];
+    expect(installedCrashScenarios.filter(scenario => scenario.startsWith(`${kind}/`)).map(scenario => scenario.slice(kind.length + 1)).sort()).toEqual(points.sort());
+    for (const point of ["after_file_mutation:0", "during_success_barrier", "after_mutation:3", ...(kind === "move_attachment" ? ["after_rollback_mutation:3"] : [])]) {
+      expect(parseCrashRestorationCommand({ sequence: 1, capabilityToken: "a".repeat(64), action: "run-crash-restoration-scenario", scenario: `${kind}/${point}`, expectedVaultId: "v", endpoint: "http://127.0.0.1:32123/mcp", submissionKey: "submission-test", input: {} })).toBeNull();
+    }
+  }
+});
+
+it("describes fixed binary source/destination fixtures without Markdown Content Versions", async () => {
+  const { crashProfile, validateInstalledCrashFixture } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const cases = [
+    ["copy_attachment", "Copy", "0328c64313d6d6f362d5ed1c3217c3c1d17472b1f63619351cf0a1061cb1597a"],
+    ["move_attachment", "Move", "bc787415a301ccb4a41bca4e691c49599ce98bc5cce743ee975845e15821626e"],
+  ] as const;
+  for (const [kind, name, hash] of cases) {
+    const profile = crashProfile(kind);
+    expect(profile.files.map(file => ({ path: file.path, kind: file.kind, before: file.originalBytes?.length ?? null, after: file.committedBytes?.length ?? null }))).toEqual([
+      { path: `Corpus/Attachments/${name}-source.bin`, kind: "attachment", before: 11, after: kind === "copy_attachment" ? 11 : null },
+      { path: `Corpus/Attachments/${name}-target/Nested/${name}-destination.bin`, kind: "attachment", before: null, after: 11 },
+    ]);
+    const input = profile.buildSubmitInput("binary-seed") as any;
+    const command = { sequence: 1, capabilityToken: "a".repeat(64), action: "run-crash-restoration-scenario" as const, scenario: `${kind}/after_prepared` as const, expectedVaultId: "v", endpoint: "http://127.0.0.1:1234/mcp", submissionKey: "submission-binary-seed", input };
+    expect(() => validateInstalledCrashFixture(command)).not.toThrow();
+    expect(input.operations[0].expectedSha256).toBe(hash);
+    for (const change of [{ expectedSha256: `sha256:${input.operations[0].expectedSha256}` }, { destinationPath: "anywhere.bin" }]) {
+      expect(() => validateInstalledCrashFixture({ ...command, input: { ...input, operations: [{ ...input.operations[0], ...change }] } })).toThrow("fixed mutation");
+    }
+  }
+});
+
 it("uses two typed Frontmatter operations with independent literal byte expectations, including BOM and untouched representation", async () => {
   const { crashProfile } = await import("../src/installed-runtime/crash-restoration-protocol.js");
   const profile = crashProfile("edit_multi_frontmatter");
@@ -66,6 +100,61 @@ it("never arms arbitrary multi-operation input, even with the generated capabili
       await expect(async () => validateInstalledCrashRecovery({ ...command, scenario: `${kind}/after_rollback_mutation:0`, input: changed, recovery: { changeSetId: "id", frameSha256: crashDigest(frame) } }, frame, { vaultId: "v", port: 1234 })).rejects.toThrow("fixed mutation program");
     }
   }
+});
+
+it("rejects truncated/corrupt binaries, source loss, leftover targets and extra copies in complete attachment inventories", async () => {
+  const { verifyCrashInventory } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const source = { path: "Corpus/Attachments/Copy-source.bin", kind: "file" as const, bytes: 11, sha256: "0328c64313d6d6f362d5ed1c3217c3c1d17472b1f63619351cf0a1061cb1597a" };
+  const before = [{ path: "Corpus", kind: "directory" as const }, { path: "Corpus/Attachments", kind: "directory" as const }, source];
+  const target = { ...source, path: "Corpus/Attachments/Copy-target/Nested/Copy-destination.bin" };
+  const dirs = [{ path: "Corpus/Attachments/Copy-target", kind: "directory" as const }, { path: "Corpus/Attachments/Copy-target/Nested", kind: "directory" as const }];
+  const after = [...before, ...dirs, target];
+  expect(() => verifyCrashInventory(before, after, "copy_attachment", "committed")).not.toThrow();
+  for (const broken of [
+    [...before, ...dirs, { ...target, bytes: 10 }],
+    [...before, ...dirs, { ...target, sha256: "a".repeat(64) }],
+    [...before.filter(entry => entry !== source), ...dirs, target],
+    [...after, { ...target, path: "Extra-copy.bin" }],
+    [...before, ...dirs, { ...target, sha256: `sha256:${target.sha256}` }],
+  ]) expect(() => verifyCrashInventory(before, broken, "copy_attachment", "committed")).toThrow("whole-state");
+  for (const partial of [[...before, target], [...before, dirs[0]!], [...before, { ...source, path: "Extra-copy.bin" }]]) {
+    expect(() => verifyCrashInventory(before, partial, "copy_attachment", "original")).toThrow("whole-state");
+  }
+  const moveSource = { ...source, path: "Corpus/Attachments/Move-source.bin", sha256: "bc787415a301ccb4a41bca4e691c49599ce98bc5cce743ee975845e15821626e" };
+  const moveBefore = [...before.filter(entry => entry !== source), moveSource];
+  const moveAfter = [...moveBefore.filter(entry => entry !== moveSource), ...dirs.map(entry => ({ ...entry, path: entry.path.replaceAll("Copy", "Move") })), { ...moveSource, path: target.path.replaceAll("Copy", "Move") }];
+  expect(() => verifyCrashInventory(moveBefore, moveAfter, "move_attachment", "committed")).not.toThrow();
+  expect(() => verifyCrashInventory(moveBefore, [...moveAfter, moveSource], "move_attachment", "committed")).toThrow("whole-state");
+  expect(() => verifyCrashInventory(moveBefore, moveAfter, "move_attachment", "original")).toThrow("whole-state");
+});
+
+it("requires bare attachment SHA-256 and both source/destination states in full public status and replay proof", async () => {
+  const { verifyCrashPublicProof } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const hash = "0328c64313d6d6f362d5ed1c3217c3c1d17472b1f63619351cf0a1061cb1597a";
+  const operationId = "copy-attachment-0-proof";
+  const directories = ["Corpus/Attachments/Copy-target", "Corpus/Attachments/Copy-target/Nested"];
+  const preview = {
+    requestedEffects: [{ operationId, kind: "copy_attachment", projectedOutcome: "changed" }],
+    derivedEffects: directories.map(path => ({ operationId: `derived/${operationId}/directory/${path}`, causedByOperationId: operationId, kind: "create_directory", projectedOutcome: "changed" })),
+    paths: [
+      { path: "Corpus/Attachments/Copy-source.bin", preState: { kind: "attachment", sha256: hash }, projectedFinalState: { kind: "attachment", sha256: hash }, projectedOutcome: "unchanged" },
+      ...directories.map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })),
+      { path: "Corpus/Attachments/Copy-target/Nested/Copy-destination.bin", preState: { kind: "absent" }, projectedFinalState: { kind: "attachment", sha256: hash }, projectedOutcome: "changed" },
+    ],
+  };
+  const before = { changeSetId: "id", state: "in_progress", preview };
+  const terminal = { changeSetId: "id", state: "intent_applied", preview,
+    requestedEffects: [{ operationId, kind: "copy_attachment", outcome: "changed" }],
+    derivedEffects: preview.derivedEffects.map(({ projectedOutcome, ...effect }) => ({ ...effect, outcome: projectedOutcome })),
+    paths: preview.paths.map(({ path, projectedFinalState, projectedOutcome }) => ({ path, finalState: projectedFinalState, outcome: projectedOutcome })),
+  };
+  expect(() => verifyCrashPublicProof(terminal, before, "copy_attachment", "intent_applied", { operations: [{ operationId }] })).not.toThrow();
+  const wrongHash = structuredClone(preview);
+  (wrongHash.paths[0]!.preState as any).sha256 = `sha256:${hash}`;
+  for (const invalid of [wrongHash, { ...preview, paths: preview.paths.slice(1) }, { ...preview, derivedEffects: [] }]) {
+    expect(() => verifyCrashPublicProof({ ...terminal, preview: invalid }, { ...before, preview: invalid }, "copy_attachment", "intent_applied")).toThrow("proof");
+  }
+  expect(() => verifyCrashPublicProof({ ...terminal, paths: terminal.paths.slice(1) }, before, "copy_attachment", "intent_applied")).toThrow("proof");
 });
 
 it("requires the actual absent/PREPARED/COMMITTED/ROLLED_BACK phase and binds marker sequence and frame", async () => {
@@ -216,7 +305,7 @@ it("reconstructs every interrupted preimage and gives each fixed family a distin
     for (const file of profile.files) await writeFile(join(root, file.path), file.committedBytes!);
     expect(crashOriginalInventory(await crashInventory(root), "edit_multi_frontmatter")).toEqual(before);
     const paths = installedCrashScenarios.map(scenario => { const { kind, point } = crashScenarioParts(scenario); return crashRestorationBoundaryPath(root, point, kind, "same-submission"); });
-    expect(new Set(paths).size).toBe(92);
+    expect(new Set(paths).size).toBe(131);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -799,6 +888,11 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     const kind = request.operations[0].kind;
     const operationId = request.operations[0].operationId;
     const fixtures = crashProfile(mutationKind).files;
+    if (kind === "copy_attachment" || kind === "move_attachment") {
+      const dirs = [`Corpus/Attachments/${kind === "copy_attachment" ? "Copy" : "Move"}-target`, `Corpus/Attachments/${kind === "copy_attachment" ? "Copy" : "Move"}-target/Nested`];
+      const typed = (bytes: Uint8Array | null) => bytes === null ? { kind: "absent" } : { kind: "attachment", sha256: sha(bytes) };
+      return { requestedEffects: [{ operationId, kind, projectedOutcome: "changed" }], derivedEffects: dirs.map(path => ({ operationId: `derived/${operationId}/directory/${path}`, causedByOperationId: operationId, kind: "create_directory", projectedOutcome: "changed" })), paths: [...dirs.map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })), ...crashProfile(mutationKind).files.map(file => ({ path: file.path, preState: typed(file.originalBytes), projectedFinalState: typed(file.committedBytes), projectedOutcome: file.originalBytes !== null && file.committedBytes !== null ? "unchanged" : "changed" }))].sort((a, b) => a.path.localeCompare(b.path, "en")) };
+    }
     const dirs = kind === "create_note" ? ["Corpus", "Corpus/Notes"] : [];
     return { requestedEffects: request.operations.map(({ operationId, kind }: { operationId: string; kind: string }) => ({ operationId, kind, projectedOutcome: "changed" })), derivedEffects: dirs.map(path => ({ operationId: `derived/${operationId}/directory/${path}`, causedByOperationId: operationId, kind: "create_directory", projectedOutcome: "changed" })), paths: [...dirs.map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })), ...fixtures.map(fixture => ({ path: fixture.path, preState: fixture.originalBytes === null ? { kind: "absent" } : { kind: "markdown", contentVersion: `sha256:${sha(fixture.originalBytes)}` }, projectedFinalState: { kind: "markdown", contentVersion: `sha256:${sha(fixture.committedBytes!)}` }, projectedOutcome: "changed" }))] };
   };
@@ -846,7 +940,21 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
   };
   const setBytes = async (point: string) => {
     const fixture = crashProfile(mutationKind).files[0]!;
-    if (mutationKind === "create_note") {
+    if (mutationKind === "copy_attachment" || mutationKind === "move_attachment") {
+      const name = mutationKind === "copy_attachment" ? "Copy" : "Move";
+      const parent = `Corpus/Attachments/${name}-target`;
+      await rm(join(vaultPath, parent), { recursive: true, force: true });
+      let applied = !["before_prepared", "after_prepared", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back"].includes(point);
+      let directoryCount = applied ? 2 : 0;
+      if (point.startsWith("after_mutation:")) { const index = Number(point.split(":")[1]); applied = index === 2; directoryCount = Math.min(2, index + 1); }
+      if (point.startsWith("after_rollback_mutation:")) { const index = Number(point.split(":")[1]); applied = false; directoryCount = Math.min(2, Math.max(0, (mutationKind === "copy_attachment" ? 3 : 2) - index)); }
+      if (directoryCount > 0) await mkdir(join(vaultPath, parent, ...(directoryCount === 2 ? ["Nested"] : [])), { recursive: true });
+      for (const file of crashProfile(mutationKind).files) {
+        const bytes = applied ? file.committedBytes : file.originalBytes;
+        if (bytes === null) await rm(join(vaultPath, file.path), { force: true });
+        else await writeFile(join(vaultPath, file.path), bytes);
+      }
+    } else if (mutationKind === "create_note") {
       await rm(join(vaultPath, "Corpus"), { recursive: true, force: true });
       const present = !["before_prepared", "after_prepared", "after_mutation:0", "after_mutation:1", "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back"].includes(point);
       if (present || ["after_mutation:1", "after_rollback_mutation:0"].includes(point)) await mkdir(join(vaultPath, "Corpus", "Notes"), { recursive: true });
@@ -900,7 +1008,7 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     } },
     client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "writable" } } }) },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 5_000 },
-    prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = (["edit_multi_frontmatter", "edit_multi_markdown", "edit_frontmatter", "edit_body_whole", "edit_body"] as const).find(kind => request.vaultPath.includes(`-crash-${kind}-`)) ?? "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
+    prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = (["copy_attachment", "move_attachment", "edit_multi_frontmatter", "edit_multi_markdown", "edit_frontmatter", "edit_body_whole", "edit_body"] as const).find(kind => request.vaultPath.includes(`-crash-${kind}-`)) ?? "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
   } as InstalledCrashRestorationSliceOptions;
   const timer = setInterval(() => {
     if (stopped || terminal || descriptorPath === "") return;
@@ -996,6 +1104,164 @@ it("fails closed on missing trigger, wrong marker, disguised phase, early listen
   }
 }, 30_000);
 
+it("fails closed on attachment truncation, missing source, leftover destination, extra copy and partial restore at the runner seam", async () => {
+  for (const fault of ["truncated", "corrupt", "source_lost", "target_left", "extra_copy", "partial_restore", "private_stage"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "installed-attachment-crash-adversarial-"));
+    const fixture = await arrangeCrashOrchestration(root, "bound-change-set", "after_prepared", "copy_attachment");
+    const originalStart = fixture.options.processControl.start;
+    let generation = 0;
+    try {
+      await expect(runInstalledCrashRestorationSlice({ ...fixture.options, processControl: { start: async request => {
+        const handle = await originalStart(request);
+        if (++generation === 2) {
+          const source = join(request.vaultPath, "Corpus/Attachments/Copy-source.bin");
+          if (fault === "truncated") await writeFile(source, Uint8Array.from([0, 255]));
+          if (fault === "corrupt") await writeFile(source, Uint8Array.from([0, 255, 16, 128, 66, 0, 195, 40, 127, 10, 0]));
+          if (fault === "source_lost") await rm(source);
+          if (fault === "target_left") { await mkdir(join(request.vaultPath, "Corpus/Attachments/Copy-target/Nested"), { recursive: true }); await writeFile(join(request.vaultPath, "Corpus/Attachments/Copy-target/Nested/Copy-destination.bin"), Uint8Array.from([0, 255])); }
+          if (fault === "extra_copy") await writeFile(join(request.vaultPath, "Extra-copy.bin"), Uint8Array.from([0, 255]));
+          if (fault === "partial_restore") await writeFile(join(request.vaultPath, "Notes/Welcome.md"), "untouched note damaged");
+          if (fault === "private_stage") { await mkdir(join(request.vaultPath, ".llm-wiki/staging/leaked"), { recursive: true }); await writeFile(join(request.vaultPath, ".llm-wiki/staging/leaked/copy"), Uint8Array.from([0, 255])); }
+        }
+        return handle;
+      } } })).rejects.toThrow(fault === "private_stage" ? "residue" : "whole-state");
+    } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+it("records attachment source/destination absence, sizes and bare hashes independently at the runner report seam", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-attachment-crash-report-"));
+  const fixture = await arrangeCrashOrchestration(root, "bound-change-set", "after_committed", "move_attachment");
+  try {
+    const result = await runInstalledCrashRestorationSlice(fixture.options);
+    expect(result.records[0]).toMatchObject({ attachmentPaths: [
+      { path: "Corpus/Attachments/Move-source.bin", before: { kind: "attachment", sizeBytes: 11, sha256: "bc787415a301ccb4a41bca4e691c49599ce98bc5cce743ee975845e15821626e" }, boundary: { kind: "absent" }, after: { kind: "absent" } },
+      { path: "Corpus/Attachments/Move-target/Nested/Move-destination.bin", before: { kind: "absent" }, boundary: { kind: "attachment", sizeBytes: 11, sha256: "bc787415a301ccb4a41bca4e691c49599ce98bc5cce743ee975845e15821626e" }, after: { kind: "attachment", sizeBytes: 11, sha256: "bc787415a301ccb4a41bca4e691c49599ce98bc5cce743ee975845e15821626e" } },
+    ], privateFootprint: { before: { stagingFiles: 0, trashFiles: 0 }, boundary: { stagingFiles: 0, trashFiles: 0 }, after: { stagingFiles: 0, trashFiles: 0 } } });
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
+
+it.each(["copy_attachment", "move_attachment"] as const)("actually reaches every %s binary and derived-directory boundary through the fixed production Node wire protocol", async kind => {
+  // Independent literal list. The registered GUI/runtime acceptance remains separate.
+  const points = ["before_prepared", "after_prepared", "after_mutation:0", "after_mutation:1", "after_mutation:2", "after_raw_verification", "during_semantic_evidence", "after_semantic_evidence", "after_snapshot", "before_committed", "after_committed", "before_rollback", "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back", ...(kind === "copy_attachment" ? ["after_rollback_mutation:3"] : [])] as import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint[];
+  for (const point of points) {
+    const root = await mkdtemp(join(tmpdir(), "attachment-fixed-node-wire-"));
+    const fixture = await arrangeNodeCrashWire(root, kind, point);
+    try {
+      const result = await runInstalledCrashRestorationSlice(fixture.options);
+      const record = result.records[0];
+      const applied = point === "before_prepared" || point === "after_committed";
+      expect(record).toMatchObject({ mutationKind: kind, crashPoint: point, cleanupSucceeded: true, proofState: applied ? "intent_applied" : "intent_not_applied", journalPhase: applied ? "COMMITTED" : "ROLLED_BACK" });
+      const rollback = point.includes("rollback") || point.includes("rolled_back");
+      expect(fixture.eventLogs).toHaveLength(rollback ? 3 : 2);
+      expect(fixture.eventLogs[rollback ? 1 : 0]).toContain(`"point":"${point}"`);
+      expect(record.processGenerations.every(generation => generation.pid !== null && generation.stopped && generation.listenerClosed)).toBe(true);
+      const hash = kind === "copy_attachment" ? "0328c64313d6d6f362d5ed1c3217c3c1d17472b1f63619351cf0a1061cb1597a" : "bc787415a301ccb4a41bca4e691c49599ce98bc5cce743ee975845e15821626e";
+      const bytes = { kind: "attachment", sizeBytes: 11, sha256: hash };
+      expect(record.attachmentPaths!.map(path => path.after)).toEqual([kind === "move_attachment" && applied ? { kind: "absent" } : bytes, applied ? bytes : { kind: "absent" }]);
+      expect(record.privateFootprint).toEqual({ before: { stagingFiles: 0, trashFiles: 0 }, boundary: { stagingFiles: 0, trashFiles: 0 }, after: { stagingFiles: 0, trashFiles: 0 } });
+      expect(fixture.eventLogs.at(-1)!.split('"point":"before_prepared"').length - 1).toBe(point === "before_prepared" ? 2 : 1);
+    } catch (error) { throw new Error(`${kind}/${point}: ${String(error)}\n${fixture.eventLogs.join("\n")}`); }
+    finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+  }
+}, 120_000);
+
+it.each(["copy_attachment", "move_attachment"] as const)("rejects real fixed-protocol %s byte and residue counterexamples after recovery", async kind => {
+  const { readFile } = await import("node:fs/promises");
+  const name = kind === "copy_attachment" ? "Copy" : "Move";
+  // Literal binary oracle includes invalid UTF-8, independent of fixture/projector code.
+  const bytes = Buffer.from(kind === "copy_attachment" ? [0, 255, 16, 128, 66, 0, 195, 40, 127, 10, 254] : [137, 80, 78, 71, 13, 10, 26, 10, 0, 255, 129]);
+  for (const fault of ["truncated", "corrupt", "source_lost", "target_left", "extra_copy", "partial_restore", "empty_directory", "private_stage", "private_trash", "wrong_hash_type"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "attachment-fixed-wire-counterexample-"));
+    const fixture = await arrangeNodeCrashWire(root, kind, "after_snapshot");
+    const start = fixture.options.processControl.start;
+    let generation = 0;
+    const proofs: unknown[] = [];
+    try {
+      await expect(runInstalledCrashRestorationSlice({ ...fixture.options,
+        record: (recordKind, recordName, detail) => { if (recordKind === "assertion" && recordName.endsWith("-proof")) proofs.push(detail); },
+        processControl: { start: async request => {
+          const current = ++generation;
+          if (current === 2 && fault === "wrong_hash_type") {
+            const path = join(request.vaultPath, ".llm-wiki/recovery-journal.bin");
+            const handle = await open(path, "r+");
+            try {
+              const journal = await openRecoveryJournal(handle);
+              const frame = (await journal.recover())!;
+              const malformed = JSON.parse(JSON.stringify(frame.payload), (key, value) => key === "sha256" ? `sha256:${value}` : value);
+              await journal.write({ phase: "PREPARED", payload: malformed });
+            } finally { await handle.close(); }
+          }
+          const handle = await start(request);
+          if (current === 2 && fault === "wrong_hash_type") {
+            const identity = JSON.parse(await readFile(join(request.vaultPath, ".obsidian/plugins/crash-plugin/data.json"), "utf8"));
+            const health = await fixture.options.client.observeHealth(new URL(`http://127.0.0.1:${identity.port}/mcp`), identity.vaultId);
+            expect(health.health.recovery.state).toBe("blocked");
+          }
+          if (current === 2 && fault !== "wrong_hash_type") {
+            const source = join(request.vaultPath, `Corpus/Attachments/${name}-source.bin`);
+            expect(await readFile(source)).toEqual(bytes);
+            if (fault === "truncated") await writeFile(source, bytes.subarray(0, 2));
+            if (fault === "corrupt") { const corrupt = Buffer.from(bytes); corrupt[10] = 0; await writeFile(source, corrupt); }
+            if (fault === "source_lost") await rm(source);
+            if (fault === "target_left") { await mkdir(join(request.vaultPath, `Corpus/Attachments/${name}-target/Nested`), { recursive: true }); await writeFile(join(request.vaultPath, `Corpus/Attachments/${name}-target/Nested/${name}-destination.bin`), bytes); }
+            if (fault === "extra_copy") await writeFile(join(request.vaultPath, "Extra-copy.bin"), bytes);
+            if (fault === "partial_restore") await writeFile(join(request.vaultPath, "Notes/Welcome.md"), "untouched note damaged");
+            if (fault === "empty_directory") await mkdir(join(request.vaultPath, `Corpus/Attachments/${name}-target`));
+            if (fault === "private_stage" || fault === "private_trash") { const directory = join(request.vaultPath, `.llm-wiki/${fault === "private_stage" ? "staging" : "trash"}/leaked`); await mkdir(directory, { recursive: true }); await writeFile(join(directory, "copy"), bytes); }
+          }
+          return handle;
+        } },
+      })).rejects.toThrow(fault === "wrong_hash_type" ? "readiness deadline" : fault === "private_stage" || fault === "private_trash" ? "residue" : "whole-state inventory");
+      expect(proofs).toEqual([]);
+      expect(fixture.eventLogs[0]).toContain('"point":"after_snapshot"');
+      expect(fixture.eventLogs).toHaveLength(2);
+    } catch (error) { throw new Error(`${kind}/${fault}: ${String(error)}\n${fixture.eventLogs.join("\n")}`); }
+    finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+  }
+}, 60_000);
+
+it.each([
+  { kind: "copy_attachment", point: "after_mutation:2" },
+  { kind: "copy_attachment", point: "after_rollback_mutation:0" },
+  { kind: "move_attachment", point: "after_mutation:2" },
+  { kind: "move_attachment", point: "after_rollback_mutation:0" },
+] as const)("independently reads parked binary bytes and path absence at $kind/$point", async ({ kind, point }) => {
+  const { readFile, stat } = await import("node:fs/promises");
+  const name = kind === "copy_attachment" ? "Copy" : "Move";
+  const bytes = Buffer.from(kind === "copy_attachment" ? [0, 255, 16, 128, 66, 0, 195, 40, 127, 10, 254] : [137, 80, 78, 71, 13, 10, 26, 10, 0, 255, 129]);
+  const rollback = point === "after_rollback_mutation:0";
+  const root = await mkdtemp(join(tmpdir(), "attachment-fixed-wire-independent-bytes-"));
+  const fixture = await arrangeNodeCrashWire(root, kind, point);
+  const start = fixture.options.processControl.start;
+  let generation = 0;
+  let observed = false;
+  try {
+    const result = await runInstalledCrashRestorationSlice({ ...fixture.options, processControl: { start: async request => {
+      const handle = await start(request);
+      const current = ++generation;
+      return { ...handle, stop: async () => {
+        try {
+          if (current === (rollback ? 2 : 1)) {
+            const source = join(request.vaultPath, `Corpus/Attachments/${name}-source.bin`);
+            const destination = join(request.vaultPath, `Corpus/Attachments/${name}-target/Nested/${name}-destination.bin`);
+            if (kind === "move_attachment" && !rollback) await expect(stat(source)).rejects.toMatchObject({ code: "ENOENT" });
+            else expect(await readFile(source)).toEqual(bytes);
+            if (rollback) await expect(stat(destination)).rejects.toMatchObject({ code: "ENOENT" });
+            else expect(await readFile(destination)).toEqual(bytes);
+            expect((await stat(join(request.vaultPath, `Corpus/Attachments/${name}-target/Nested`))).isDirectory()).toBe(true);
+            expect((await readInstalledCrashJournal(join(request.vaultPath, ".llm-wiki/recovery-journal.bin"))).phase).toBe("PREPARED");
+            observed = true;
+          }
+        } finally { await handle.stop(); }
+      } };
+    } } });
+    expect(observed).toBe(true);
+    expect(result.records[0]).toMatchObject({ proofState: "intent_not_applied", cleanupSucceeded: true });
+    expect(fixture.eventLogs[rollback ? 1 : 0]).toContain(`"point":"${point}"`);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
 it("reports missing local recovery authority as blocked before submitting a sentinel", async () => {
   const root = await mkdtemp(join(tmpdir(), "installed-crash-local-authority-"));
   const fixture = await arrangeCrashOrchestration(root, "bound-change-set");
@@ -1073,7 +1339,7 @@ it("keeps all wired create/exact/whole installed crash boundaries partial at the
       record: (_kind, name, detail) => { if (name.startsWith("installed-crash-")) records.push(detail); },
       assertion: () => undefined,
     })).rejects.toThrow("partial");
-    expect(records).toHaveLength(92);
+    expect(records).toHaveLength(131);
     expect(records).toEqual(expect.arrayContaining([
       expect.objectContaining({ scope: "single-after-prepared-installed-rollback-slice" }),
       expect.objectContaining({ scope: "single-after-committed-installed-replay-slice" }),
