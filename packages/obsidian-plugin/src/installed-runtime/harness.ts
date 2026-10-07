@@ -141,6 +141,7 @@ export type HarnessStage =
   | "change_set_replay"
   | "gate_isolation_corpus"
   | "registered_reference_rewrite_corpus"
+  | "plugin_event_observer_corpus"
   | "semantic_evidence_search_snapshot_corpus"
   | "privacy_recovery_authority_corpus"
   | "release_lifecycle_corpus"
@@ -195,6 +196,7 @@ export type HarnessFailureCode =
   | "change_set_replay_failed"
   | "gate_isolation_corpus_failed"
   | "registered_reference_rewrite_corpus_failed"
+  | "plugin_event_observer_corpus_failed"
   | "semantic_evidence_search_snapshot_corpus_failed"
   | "privacy_recovery_authority_corpus_failed"
   | "release_lifecycle_corpus_failed"
@@ -383,6 +385,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<CrashRestorationRetainedAuthorityCorpusOutcome>;
+  readonly runPluginEventObserverCorpus?: (options: Omit<import("./plugin-event-observer-corpus.js").PluginEventObserverCorpusOptions, "prepareAcceptanceDriver" | "semanticEvidenceScenarioRunner" | "reportDirectory">) => Promise<unknown>;
   readonly profiles?: ReadonlyMap<string, RegisteredRuntimeProfile>;
   readonly timeouts?: HarnessTimeouts;
   readonly runId?: string;
@@ -477,6 +480,7 @@ export async function runInstalledRuntimeHarness(
   const now = options.now ?? (() => new Date().toISOString());
   const runId = options.runId ?? randomUUID();
   const startedAt = now();
+  let pluginEventObserverCorpus: import("./plugin-event-observer-evidence.js").PluginEventObserverCorpusEvidence | null = null;
   const client = options.client ?? createLoopbackMcpClient();
   const configDirectoryName = options.configDirectoryName ?? ".obsidian";
   const timeouts = {
@@ -1197,6 +1201,20 @@ export async function runInstalledRuntimeHarness(
           }
         }
   }
+  // Separate generated correctness runtimes enable the independent plugin; the
+  // registered candidate-only baseline Vault/profile is never modified.
+  if (state.failure === null) {
+    try {
+      if (options.runPluginEventObserverCorpus === undefined || state.candidate === null || profile === null) throw new Error("Real enabled plugin observer corpus runner is required");
+      const { pluginEventObserverCorpusEvidenceSchema } = await import("./plugin-event-observer-evidence.js");
+      pluginEventObserverCorpus = pluginEventObserverCorpusEvidenceSchema.parse(await options.runPluginEventObserverCorpus({
+        runId, workingDirectory: options.workingDirectory, candidate: state.candidate, processControl: options.processControl,
+        client, profile: profile!, probe: options.probe, configDirectoryName, timeouts,
+      }));
+    } catch (error) {
+      fail("plugin_event_observer_corpus", "plugin_event_observer_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
+    }
+  }
   // The registered-reference rewrite corpus (issue #178) runs between the
   // initial window and the controlled restart, alongside the gate-isolation
   // corpus: when the caller does not wire the seam, the stage is skipped and the
@@ -1618,6 +1636,7 @@ export async function runInstalledRuntimeHarness(
     privacyRecoveryAuthorityCorpus,
     releaseLifecycleCorpus,
     crashRestorationRetainedAuthorityCorpus,
+    pluginEventObserverCorpus,
     acceptanceMatrix: null,
     verdict,
     failure:

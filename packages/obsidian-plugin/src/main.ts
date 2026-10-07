@@ -145,6 +145,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const activateAcceptanceDriver = adapter instanceof FileSystemAdapter;
+    if (activateAcceptanceDriver) {
+      const { awaitPluginEventObserverBeforeStartup } = await import("./installed-runtime/plugin-event-observer-plugin.js");
+      await awaitPluginEventObserverBeforeStartup({ vaultPath: basePath, pluginId: this.manifest.id, configDirectoryName: this.app.vault.configDir });
+    }
     let installedSemanticEvidence:
       | ReturnType<typeof createInstalledSemanticEvidenceScenarioControl>
       | undefined;
@@ -368,7 +372,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       crashInjector: async (point) => {
         const armed = armedCrashBoundary;
         if (armed === undefined || !armed.command.scenario.endsWith(`/${point}`)) return;
-        const expectedPhase = point === "after_prepared" ? "PREPARED" : "COMMITTED";
+        const expectedPhase = point === "after_committed" ? "COMMITTED" : "PREPARED";
         const frame = await changeSetExecution?.loadRecoveryFrame();
         if (frame?.phase !== expectedPhase || frame.vaultId !== armed.command.expectedVaultId ||
             JSON.stringify(frame.input) !== JSON.stringify(armed.command.input)) {
@@ -880,7 +884,9 @@ export default class VaultOperationBridgePlugin extends Plugin {
               expectedVaultId: parsed.expectedVaultId, input })
               .finally(() => { armedCrashBoundary = undefined; })
               .catch(() => undefined);
-            return parsed.scenario.endsWith("/after_prepared")
+            return parsed.scenario.endsWith("/after_mutation:0")
+              ? { boundary: "after_mutation:0", journalPhase: "PREPARED" }
+              : parsed.scenario.endsWith("/after_prepared")
               ? { boundary: "after_prepared", journalPhase: "PREPARED" }
               : { boundary: "after_committed", journalPhase: "COMMITTED" };
           },

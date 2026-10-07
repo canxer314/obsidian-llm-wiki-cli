@@ -14,6 +14,7 @@ import {
   type InstalledRuntimeEvidence,
 } from "../src/index.js";
 
+import { observerReportFixture } from "./helpers/plugin-event-observer-fixture.js";
 const DIGEST = "a".repeat(64);
 
 function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
@@ -641,6 +642,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
       ],
       verdict: "passed",
     },
+    pluginEventObserverCorpus: observerReportFixture({ runId: "run-evidence", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "candidate-bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }),
     gateIsolationCorpus: gateIsolationEvidence(),
     registeredReferenceRewriteCorpus: registeredReferenceRewriteEvidence(),
     semanticEvidenceSearchSnapshotCorpus: semanticEvidenceSearchSnapshotEvidence(),

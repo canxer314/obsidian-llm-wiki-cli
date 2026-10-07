@@ -51,7 +51,7 @@ export interface InstalledRuntimeAcceptanceDriverOptions {
   readonly executeCrashRestorationScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly command: import("./crash-restoration-protocol.js").CrashRestorationCommand;
-  }) => Promise<{ readonly boundary: "after_prepared" | "after_committed"; readonly journalPhase: "PREPARED" | "COMMITTED" }>;
+  }) => Promise<{ readonly boundary: "after_prepared" | "after_committed" | "after_mutation:0"; readonly journalPhase: "PREPARED" | "COMMITTED" }>;
   readonly executeSemanticEvidenceScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly scenario: string;

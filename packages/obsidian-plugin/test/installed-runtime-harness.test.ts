@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as crashCorpus from "../src/installed-runtime/crash-restoration-retained-authority-corpus.js";
+import { observerReportFixture } from "./helpers/plugin-event-observer-fixture.js";
 
 import {
   createBridgeInstance,
@@ -422,6 +423,7 @@ async function arrangeRun(
       ]) assertion(name);
       return stubGateIsolationOutcome();
     },
+    runPluginEventObserverCorpus: async request => observerReportFixture({ runId: request.runId, candidateBundleSha256: request.candidate.identity.bundleSha256, installedMainSha256: request.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: request.profile.name, pluginId: request.candidate.identity.pluginId, runtime: MATCHING_OBSERVED }),
     runRegisteredReferenceRewriteCorpus: async ({ record, assertion }) => {
       record("assertion", "stubbed-registered-reference-rewrite", {});
       record("cleanup", "stubbed-registered-reference-rewrite-cleanup", {});
@@ -856,6 +858,13 @@ describe("installed-runtime harness orchestration", () => {
     for (const path of starts) await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
   }, 30_000);
 
+  it("fails closed when the real plugin observer runner is missing instead of accepting a second MCP client", async () => {
+    const { options } = await arrangeRun("run-missing-event-observer", { runPluginEventObserverCorpus: undefined });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure?.code).toBe("plugin_event_observer_corpus_failed");
+    expect(result.evidence.pluginEventObserverCorpus).toBeNull();
+  });
   it("checks running versions before executing any acceptance corpus", async () => {
     let corpusCalls = 0;
     const { options } = await arrangeRun("run-live-version-mismatch", {

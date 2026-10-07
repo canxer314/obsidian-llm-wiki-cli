@@ -7,6 +7,7 @@ import {
   type InstalledRuntimeEvidence,
 } from "../src/index.js";
 
+import { observerReportFixture } from "./helpers/plugin-event-observer-fixture.js";
 const DIGEST = "a".repeat(64);
 
 function corpus(
@@ -118,7 +119,7 @@ function evidence(): InstalledRuntimeEvidence {
       observed: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] },
       mismatches: [],
     },
-    candidate: { pluginId: "bridge", pluginVersion: "1.0.0", minAppVersion: "1.13.4", bundleSha256: DIGEST, files: [] },
+    candidate: { pluginId: "bridge", pluginVersion: "1.0.0", minAppVersion: "1.13.4", bundleSha256: DIGEST, files: [{ path: "main.js", sha256: DIGEST, sizeBytes: 17 }] },
     bridgeIdentity: { vaultId: "vault", listener: { address: "127.0.0.1", port: 32123 }, versions: { bridge: "1", plugin: "1", protocol: "1", persistentStateSchema: 1, recoveryJournalSchema: 1 } },
     inputHashes: { candidateBundleSha256: DIGEST, vaultSeedManifestSha256: DIGEST },
     beforeInventory: [],
@@ -136,6 +137,7 @@ function evidence(): InstalledRuntimeEvidence {
     privacyRecoveryAuthorityCorpus: privacy as NonNullable<InstalledRuntimeEvidence["privacyRecoveryAuthorityCorpus"]>,
     releaseLifecycleCorpus: { ...corpus(ASSERTIONS.lifecycle), cleanup: { residualPaths: [] } } as NonNullable<InstalledRuntimeEvidence["releaseLifecycleCorpus"]>,
     crashRestorationRetainedAuthorityCorpus: { ...corpus(ASSERTIONS.crash), cleanup: { fixtureResidue: 0 } } as NonNullable<InstalledRuntimeEvidence["crashRestorationRetainedAuthorityCorpus"]>,
+    pluginEventObserverCorpus: observerReportFixture({ runId: "acceptance-run", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }),
     acceptanceMatrix: null,
     verdict: "passed",
     failure: null,
@@ -144,12 +146,22 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("refuses A37 from the old second-client assertion without real plugin windows", () => {
+    const report = evidence(); report.pluginEventObserverCorpus = null;
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/real enabled plugin/);
+  });
+  it("rejects unconfirmed observer cleanup and borrowed candidate/run evidence", () => {
+    const unclean = evidence(); unclean.pluginEventObserverCorpus!.scenarios[0]!.cleanup.residualPaths.push("fixture");
+    expect(() => createAcceptanceMatrixReport(unclean)).toThrow();
+    const borrowed = evidence(); borrowed.pluginEventObserverCorpus!.scenarios[0]!.runId = "another-run";
+    expect(() => createAcceptanceMatrixReport(borrowed)).toThrow(/binding/);
+  });
   it("covers every acceptance ID and every child corpus exactly once", () => {
     const report = createAcceptanceMatrixReport(evidence());
     expect(report.scenarios).toHaveLength(44);
     expect(new Set(report.scenarios.map((scenario) => scenario.id))).toHaveLength(44);
-    expect(report.childManifests).toHaveLength(8);
-    expect(new Set(report.childManifests.map((child) => child.corpusId))).toHaveLength(8);
+    expect(report.childManifests).toHaveLength(9);
+    expect(new Set(report.childManifests.map((child) => child.corpusId))).toHaveLength(9);
     expect(validateAcceptanceMatrixReport(report)).toEqual(report);
   });
 
@@ -178,8 +190,8 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
       assertion: "continuation/quota-exhaustion:rejects-without-evicting-live-state",
     });
     expect(report.scenarios.find(({ id }) => id === "A-37")).toMatchObject({
-      corpusId: "registered-reference-rewrite",
-      assertion: "observer:no-half-written-markdown",
+      corpusId: "plugin-event-observer",
+      assertion: "observer:real-enabled-plugin-complete-before-after-success-rollback-startup-recovery",
     });
     expect(report.scenarios.find(({ id }) => id === "A-42")).toMatchObject({
       corpusId: "public-wire",

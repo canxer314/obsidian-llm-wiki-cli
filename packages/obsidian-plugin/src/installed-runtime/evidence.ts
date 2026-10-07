@@ -2,6 +2,7 @@ import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { z } from "zod";
+import { pluginEventObserverCorpusEvidenceSchema } from "./plugin-event-observer-evidence.js";
 
 import {
   createAcceptanceMatrixReport,
@@ -1103,6 +1104,7 @@ export const installedRuntimeEvidenceSchema = z
     releaseLifecycleCorpus: releaseLifecycleCorpusEvidenceSchema.nullable().optional(),
     crashRestorationRetainedAuthorityCorpus:
       crashRestorationRetainedAuthorityCorpusEvidenceSchema.nullable().optional(),
+    pluginEventObserverCorpus: pluginEventObserverCorpusEvidenceSchema.nullable().optional(),
     acceptanceMatrix: z.custom<AcceptanceMatrixReport>().nullable().optional(),
     verdict: z.enum(["passed", "failed", "invalid"]),
     failure: z

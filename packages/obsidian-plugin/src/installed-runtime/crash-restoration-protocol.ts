@@ -15,7 +15,7 @@ export const crashRestorationCommandSchema = z.object({
   sequence: z.number().int().positive(),
   capabilityToken: digestSchema,
   action: z.literal("run-crash-restoration-scenario"),
-  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed", "edit_body/after_prepared", "edit_body/after_committed"]),
+  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed", "edit_body/after_prepared", "edit_body/after_committed", "edit_body/after_mutation:0"]),
   expectedVaultId: z.string().min(1),
   endpoint: z.string().url(),
   submissionKey: z.string().min(1),
@@ -26,22 +26,22 @@ const crashRestorationBoundarySchema = z.object({
   runId: z.string().min(1),
   vaultId: z.string().min(1),
   endpoint: z.string().url(),
-  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed", "edit_body/after_prepared", "edit_body/after_committed"]),
+  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed", "edit_body/after_prepared", "edit_body/after_committed", "edit_body/after_mutation:0"]),
   candidateBundleSha256: digestSchema,
   installedMainSha256: digestSchema,
   capabilityToken: digestSchema,
   submissionKey: z.string().min(1),
-  point: z.enum(["after_prepared", "after_committed"]),
+  point: z.enum(["after_prepared", "after_committed", "after_mutation:0"]),
   journalPhase: z.enum(["PREPARED", "COMMITTED"]),
 }).strict().refine(report =>
   report.scenario.endsWith(`/${report.point}`) &&
-  report.journalPhase === (report.point === "after_prepared" ? "PREPARED" : "COMMITTED"),
+  report.journalPhase === (report.point === "after_committed" ? "COMMITTED" : "PREPARED"),
   "Crash boundary scenario, point and durable phase must agree");
 
 export type CrashRestorationCommand = z.infer<typeof crashRestorationCommandSchema>;
 export type CrashRestorationBoundaryReport = z.infer<typeof crashRestorationBoundarySchema>;
 
-export function crashRestorationBoundaryPath(reportDirectory: string, crashPoint: "after_prepared" | "after_committed" = "after_prepared", mutationKind: "create_note" | "edit_body" = "create_note"): string {
+export function crashRestorationBoundaryPath(reportDirectory: string, crashPoint: "after_prepared" | "after_committed" | "after_mutation:0" = "after_prepared", mutationKind: "create_note" | "edit_body" = "create_note"): string {
   return join(reportDirectory, `crash-restoration-${mutationKind === "create_note" ? "" : "edit-body-"}${crashPoint.replace("_", "-")}-boundary.json`);
 }
 
@@ -51,7 +51,7 @@ export async function requestInstalledCrashRestorationScenario(options: {
   readonly expectedVaultId: string;
   readonly endpoint: URL;
   readonly input: unknown;
-  readonly crashPoint: "after_prepared" | "after_committed";
+  readonly crashPoint: "after_prepared" | "after_committed" | "after_mutation:0";
   readonly mutationKind?: "create_note" | "edit_body";
 }): Promise<void> {
   if (options.endpoint.protocol !== "http:" || options.endpoint.hostname !== "127.0.0.1") {
@@ -100,7 +100,7 @@ export async function writeCrashRestorationBoundaryReport(options: {
     installedMainSha256: options.descriptor.installedMainSha256,
     capabilityToken: options.descriptor.capabilityToken,
     submissionKey: options.command.submissionKey,
-    point: options.command.scenario.endsWith("/after_prepared") ? "after_prepared" : "after_committed",
+    point: options.command.scenario.endsWith("/after_mutation:0") ? "after_mutation:0" : options.command.scenario.endsWith("/after_prepared") ? "after_prepared" : "after_committed",
     journalPhase: options.journalPhase,
   });
   const workspaceRealPath = await realpath(dirname(options.descriptor.vaultPath));
@@ -124,7 +124,7 @@ export async function loadCrashBoundaryReport(options: {
   readonly capabilityToken: string;
   readonly endpoint: string;
   readonly submissionKey: string;
-  readonly crashPoint?: "after_prepared" | "after_committed";
+  readonly crashPoint?: "after_prepared" | "after_committed" | "after_mutation:0";
   readonly mutationKind?: "create_note" | "edit_body";
 }): Promise<CrashRestorationBoundaryReport> {
   const report = crashRestorationBoundarySchema.parse(

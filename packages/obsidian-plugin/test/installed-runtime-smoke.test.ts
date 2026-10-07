@@ -142,6 +142,13 @@ describe("installed-runtime authoritative command", () => {
     })).rejects.toThrow();
   });
 
+  it("accepts only the fixed edit-body after-mutation observer crash fixture", async () => {
+    const { parseCrashRestorationCommand } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+    const command = { sequence: 1, capabilityToken: "a".repeat(64), action: "run-crash-restoration-scenario", scenario: "edit_body/after_mutation:0", expectedVaultId: "vault", endpoint: "http://127.0.0.1:27123/mcp", submissionKey: "submission-fixed", input: {} };
+    expect(parseCrashRestorationCommand(command)).not.toBeNull();
+    expect(parseCrashRestorationCommand({ ...command, scenario: "edit_body/after_mutation:1" })).toBeNull();
+    expect(parseCrashRestorationCommand({ ...command, scenario: "create_note/after_mutation:0" })).toBeNull();
+  });
   it("composes every required release-blocking runner in the installed command", () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
     expect(Object.keys(runners).sort()).toEqual([
@@ -149,6 +156,7 @@ describe("installed-runtime authoritative command", () => {
       "prepareInstalledRuntimeAcceptanceDriver",
       "runCrashRestorationRetainedAuthorityCorpus",
       "runGateIsolationCorpus",
+      "runPluginEventObserverCorpus",
       "runPrivacyRecoveryAuthorityCorpus",
       "runRegisteredReferenceRewriteCorpus",
       "runReleaseLifecycleCorpus",

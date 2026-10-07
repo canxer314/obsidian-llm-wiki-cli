@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import type { InstalledRuntimeEvidence } from "./evidence.js";
+import { pluginEventObserverCorpusEvidenceSchema, PLUGIN_EVENT_OBSERVER_ASSERTION } from "./plugin-event-observer-evidence.js";
 
 /**
  * The complete #44 acceptance matrix. Each criterion is bound once to concrete
@@ -25,6 +26,7 @@ export const ACCEPTANCE_CORPUS_IDS = [
   "privacy-recovery-authority",
   "release-lifecycle",
   "crash-restoration-retained-authority",
+  "plugin-event-observer",
 ] as const;
 
 export type AcceptanceCorpusId = (typeof ACCEPTANCE_CORPUS_IDS)[number];
@@ -125,7 +127,7 @@ const matrixPlan = [
   ["A-34", "change-set-submission", "recovery/missing-response:recovered-through-original-key"],
   ["A-35", "crash-restoration-retained-authority", "retention:seven-day-records-queryable-across-crash-and-reconnect"],
   ["A-36", "gate-isolation", "incompatible/registry-never-inspected:no-key-bound"],
-  ["A-37", "registered-reference-rewrite", "observer:no-half-written-markdown"],
+  ["A-37", "plugin-event-observer", PLUGIN_EVENT_OBSERVER_ASSERTION],
   ["A-38", "semantic-evidence-search-snapshot", "scenario:trash_note/delayed_probes_converge:closed"],
   ["A-39", "public-wire", "six-tool-invocation"],
   ["A-40", "gate-isolation", "gates/recovery-blocked-precedence:single-effective-gate"],
@@ -176,7 +178,14 @@ function childManifests(evidence: InstalledRuntimeEvidence): AcceptanceMatrixChi
   const privacy = requireCorpus(evidence.privacyRecoveryAuthorityCorpus, "privacy/recovery authority corpus");
   const lifecycle = requireCorpus(evidence.releaseLifecycleCorpus, "release-lifecycle corpus");
   const crash = requireCorpus(evidence.crashRestorationRetainedAuthorityCorpus, "crash-restoration corpus");
+  const observer = pluginEventObserverCorpusEvidenceSchema.parse(requireCorpus(evidence.pluginEventObserverCorpus, "real enabled plugin event observer corpus"));
+  if (observer.runId !== evidence.runId || observer.candidateBundleSha256 !== evidence.candidate?.bundleSha256 || observer.profileName !== evidence.profile.name) throw new AcceptanceMatrixError("Plugin observer candidate/run/profile binding changed");
+  for (const scenario of observer.scenarios) {
+    const runtime = scenario.runtime;
+    if (runtime.platform !== evidence.profile.registered.os.platform || runtime.osBuild !== evidence.profile.registered.os.build || runtime.obsidianVersion !== evidence.profile.registered.versions.obsidian || runtime.electronVersion !== evidence.profile.registered.versions.electron || runtime.nodeVersion !== evidence.profile.registered.versions.node || evidence.profile.registered.capabilities.some(capability => !runtime.capabilities.includes(capability)) || scenario.installedMainSha256 !== evidence.candidate?.files.find(file => file.path === "main.js")?.sha256 || scenario.windows.some(window => !window.enabledPlugins.includes(evidence.candidate!.pluginId))) throw new AcceptanceMatrixError("Plugin observer runtime/candidate/plugin inventory mismatch");
+  }
   const all = [
+    corpusManifest("plugin-event-observer", observer, observer.scenarioManifestSha256, observer.assertions),
     corpusManifest("public-wire", publicWire, publicWire.canonicalManifestSha256, publicWire.assertions),
     corpusManifest("change-set-submission", changeSet, changeSet.scenarioManifestSha256, changeSet.assertions),
     corpusManifest("gate-isolation", gate, gate.scenarioManifestSha256, gate.assertions),
