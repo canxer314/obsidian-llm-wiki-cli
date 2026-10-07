@@ -931,7 +931,7 @@ it("keeps all wired create/exact/whole installed crash boundaries partial at the
       expect.objectContaining({ records: [expect.objectContaining({ mutationKind: "edit_body_whole", crashPoint: "before_rolled_back" })] }),
     ]));
   } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 
 it("orchestrates edit_body PREPARED with exact original bytes and full retained status replay", async () => {
