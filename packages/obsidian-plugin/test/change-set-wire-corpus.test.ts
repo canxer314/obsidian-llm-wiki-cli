@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -230,7 +230,7 @@ async function createCorpusBridge(host: ArrangedVault): Promise<BridgeHost> {
   };
   const bridge = createBridgeInstance({
     port: 0,
-    health: healthState(),
+    health: { ...healthState(), vault: { ...healthState().vault, path: host.vaultPath } },
     readDataSource,
     discoverService: new VaultDiscoverService(host.snapshots),
     searchSnapshotReadiness: () => host.snapshots.readiness,
@@ -273,6 +273,12 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
       endpoint: first.endpoint,
       expectedVaultId: EXPECTED_VAULT_ID,
       seedNotes: host.seedNotes,
+      inventoryContext: {
+        vaultPath: host.vaultPath,
+        runId: "corpus-run",
+        runtimeProfileId: "linux-test",
+        candidateBundleSha256: "a".repeat(64),
+      },
       record: (kind, name, detail) => {
         events.push({ kind, name, detail });
       },
@@ -284,6 +290,18 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
     expect(admission.seedInventoryDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(admission.beforeInventory).toEqual(admission.afterInventory);
     expect(admission.submissions.some((record) => record.executed)).toBe(true);
+    expect(admission.rejectionClasses[0]).toMatchObject({
+      beforeInventory: { entries: expect.arrayContaining([{ path: "Notes", kind: "directory" }]) },
+      afterInventory: { entries: expect.arrayContaining([{ path: "Notes", kind: "directory" }]) },
+      proof: { state: "intent_not_applied", failureCode: "stale_observation" },
+      status: { state: "intent_not_applied", failureCode: "stale_observation" },
+    });
+    const attachmentRejection = admission.rejectionClasses.find(({ name }) => name === "rejection/attachment-evidence-mismatch")!;
+    expect(attachmentRejection.beforeInventory.entries).toContainEqual({
+      path: "ChangeSetProof/Evidence.bin", kind: "file", sizeBytes: 5,
+      sha256: createHash("sha256").update(new Uint8Array([0, 255, 128, 13, 10])).digest("hex"),
+    });
+    expect(attachmentRejection.beforeInventory.entries).toContainEqual({ path: "ChangeSetProof/copy.bin", kind: "absent" });
     expect(admission.rejectionClasses.map(({ name }) => name)).toEqual(
       expect.arrayContaining([
         "rejection/stale-direct-target",
@@ -370,6 +388,131 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
     expect(events.filter(({ kind }) => kind === "tool").length).toBeGreaterThan(10);
   }, 60_000);
 
+  it("refuses a legal intent_not_applied rejection that creates an untracked file", async () => {
+    const host = await arrangeVault();
+    const readBinary = host.dataSource.readBinary!;
+    let injected = false;
+    host.dataSource = {
+      ...host.dataSource,
+      readBinary: async (path) => {
+        const bytes = await readBinary(path);
+        if (!injected && path === `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md` && bytes !== null) {
+          injected = true;
+          await writeFile(join(host.vaultPath, "untracked.bin"), new Uint8Array([0, 255, 128]));
+        }
+        return bytes;
+      },
+    };
+    const bridge = await createCorpusBridge(host);
+    await expect(runChangeSetSubmissionCorpusAtEndpoint({
+      endpoint: bridge.endpoint,
+      expectedVaultId: EXPECTED_VAULT_ID,
+      seedNotes: host.seedNotes,
+      inventoryContext: {
+        vaultPath: host.vaultPath,
+        runId: "corpus-run",
+        runtimeProfileId: "linux-test",
+        candidateBundleSha256: "a".repeat(64),
+      },
+      record: () => undefined,
+      assertion: () => undefined,
+    })).rejects.toThrow("rejection/stale-direct-target mutated the Vault");
+    expect(injected).toBe(true);
+  }, 60_000);
+
+  it.each(["attachment bytes", "empty directory"])("refuses a legal rejection that changes %s", async (sideEffect) => {
+    const host = await arrangeVault();
+    await writeFile(join(host.vaultPath, "evidence.bin"), new Uint8Array([0, 255, 128]));
+    const readBinary = host.dataSource.readBinary!;
+    let injected = false;
+    host.dataSource = {
+      ...host.dataSource,
+      readBinary: async (path) => {
+        const bytes = await readBinary(path);
+        if (!injected && path === `${CHANGE_SET_CORPUS_DIRECTORY}/AdmissionProof.md` && bytes !== null) {
+          injected = true;
+          if (sideEffect === "attachment bytes") await writeFile(join(host.vaultPath, "evidence.bin"), new Uint8Array([0, 254, 128]));
+          else await mkdir(join(host.vaultPath, "untracked-empty"));
+        }
+        return bytes;
+      },
+    };
+    const bridge = await createCorpusBridge(host);
+    await expect(runChangeSetSubmissionCorpusAtEndpoint({
+      endpoint: bridge.endpoint, expectedVaultId: EXPECTED_VAULT_ID, seedNotes: host.seedNotes,
+      inventoryContext: { vaultPath: host.vaultPath, runId: "corpus-run", runtimeProfileId: "linux-test", candidateBundleSha256: "a".repeat(64) },
+      record: () => undefined, assertion: () => undefined,
+    })).rejects.toThrow("rejection/stale-direct-target mutated the Vault");
+    expect(injected).toBe(true);
+  }, 60_000);
+
+  it("refuses inventories from a different generated Vault", async () => {
+    const host = await arrangeVault();
+    const other = await arrangeVault();
+    const bridge = await createCorpusBridge(host);
+    await expect(runChangeSetSubmissionCorpusAtEndpoint({
+      endpoint: bridge.endpoint, expectedVaultId: EXPECTED_VAULT_ID, seedNotes: host.seedNotes,
+      inventoryContext: { vaultPath: other.vaultPath, runId: "corpus-run", runtimeProfileId: "linux-test", candidateBundleSha256: "a".repeat(64) },
+      record: () => undefined, assertion: () => undefined,
+    })).rejects.toThrow("same Managed Vault");
+    expect(await fsKind(host.vaultPath, CHANGE_SET_CORPUS_DIRECTORY)).toBeNull();
+  }, 60_000);
+
+  it("runs one selected rejection without claiming complete acceptance", async () => {
+    const host = await arrangeVault();
+    const bridge = await createCorpusBridge(host);
+    const events: Array<{ kind: "transport" | "tool" | "assertion" | "cleanup"; name: string; detail: unknown }> = [];
+    const admission = await runChangeSetSubmissionCorpusAtEndpoint({
+      endpoint: bridge.endpoint, expectedVaultId: EXPECTED_VAULT_ID, seedNotes: host.seedNotes,
+      rejectionScenario: "rejection/occupied-destination",
+      inventoryContext: { vaultPath: host.vaultPath, runId: "corpus-run", runtimeProfileId: "linux-test", candidateBundleSha256: "a".repeat(64) },
+      record: (kind, name, detail) => events.push({ kind, name, detail }), assertion: () => undefined,
+    });
+    expect(admission.rejectionClasses.map(({ name }) => name)).toEqual(["rejection/occupied-destination"]);
+    expect(() => composeChangeSetCorpusEvidence({
+      admission, events, assertions: admission.assertions,
+      replay: { replayReport: { keysReplayed: 1, identitiesPreserved: 1, recordsUnchanged: 1, conflictingReusesRejected: 1 }, assertions: ["replay"] },
+    })).toThrow("complete preflight rejection coverage");
+  }, 60_000);
+
+  it.each(["before-inventory", "inventory-hash", "event-order", "status", "binding", "inventory-path", "submit-event", "blocked-terminal", "wrong-key"])("refuses fabricated rejection evidence: %s", async (corruption) => {
+    const host = await arrangeVault();
+    const bridge = await createCorpusBridge(host);
+    const events: Array<{ kind: "transport" | "tool" | "assertion" | "cleanup"; name: string; detail: unknown }> = [];
+    const admission = await runChangeSetSubmissionCorpusAtEndpoint({
+      endpoint: bridge.endpoint, expectedVaultId: EXPECTED_VAULT_ID, seedNotes: host.seedNotes,
+      inventoryContext: { vaultPath: host.vaultPath, runId: "corpus-run", runtimeProfileId: "linux-test", candidateBundleSha256: "a".repeat(64) },
+      record: (kind, name, detail) => events.push({ kind, name, detail }), assertion: () => undefined,
+    });
+    const tampered = structuredClone(admission);
+    const evidence = tampered.rejectionClasses[0]!;
+    if (corruption === "before-inventory") delete (evidence as unknown as Record<string, unknown>).beforeInventory;
+    if (corruption === "inventory-hash") evidence.beforeInventory.digest = "b".repeat(64);
+    if (corruption === "event-order") evidence.eventOrder.after = evidence.eventOrder.before;
+    if (corruption === "status") evidence.status.state = "intent_applied";
+    if (corruption === "binding") evidence.binding.runId = "other-run";
+    if (corruption === "wrong-key") evidence.proof.submissionKeySha256 = evidence.status.submissionKeySha256 = "d".repeat(64);
+    if (corruption === "blocked-terminal") {
+      const offset = events.findIndex(({ name }) => name === "change-set-corpus-began");
+      const event = events[evidence.eventOrder.terminal + offset - 1]!;
+      const health = structuredClone(event.detail) as { recovery: { state: string }; queue: { length: number } };
+      health.recovery.state = "blocked";
+      health.queue.length = 1;
+      event.detail = health;
+    }
+    if (corruption === "submit-event") evidence.proof.changeSetId = evidence.status.changeSetId = "fabricated-identity";
+    if (corruption === "inventory-path") {
+      evidence.beforeInventory.entries[0]!.path = evidence.afterInventory.entries[0]!.path = "fabricated-path";
+      const hash = createHash("sha256").update(JSON.stringify(evidence.beforeInventory.entries.map((entry) => Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))))).digest("hex");
+      evidence.beforeInventory.digest = evidence.afterInventory.digest = hash;
+    }
+    expect(() => composeChangeSetCorpusEvidence({
+      admission: tampered,
+      replay: { replayReport: { keysReplayed: 1, identitiesPreserved: 1, recordsUnchanged: 1, conflictingReusesRejected: 1 }, assertions: ["replay"] },
+      events, assertions: admission.assertions,
+    })).toThrow();
+  }, 60_000);
+
   it("derives the same deterministic corpus identity across fresh runs", async () => {
     const firstHost = await arrangeVault();
     const secondHost = await arrangeVault();
@@ -379,6 +522,12 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
         endpoint: bridgeHost.endpoint,
         expectedVaultId: EXPECTED_VAULT_ID,
         seedNotes: host.seedNotes,
+      inventoryContext: {
+        vaultPath: host.vaultPath,
+        runId: "corpus-run",
+        runtimeProfileId: "linux-test",
+        candidateBundleSha256: "a".repeat(64),
+      },
         record: () => undefined,
         assertion: () => undefined,
       });
@@ -393,7 +542,9 @@ describe("change-set submission corpus over a real loopback Bridge", () => {
     expect(admissionA.seedInventoryDigest).toBe(admissionB.seedInventoryDigest);
     expect(admissionA.beforeInventory).toEqual(admissionB.beforeInventory);
     expect(admissionA.afterInventory).toEqual(admissionB.afterInventory);
-    expect(admissionA.rejectionClasses).toEqual(admissionB.rejectionClasses);
+    expect(admissionA.rejectionClasses.map(({ name, failureCode, beforeInventory, afterInventory }) => ({ name, failureCode, beforeInventory, afterInventory }))).toEqual(
+      admissionB.rejectionClasses.map(({ name, failureCode, beforeInventory, afterInventory }) => ({ name, failureCode, beforeInventory, afterInventory })),
+    );
     expect(admissionA.fifoReport).toEqual(admissionB.fifoReport);
     expect(admissionA.recoveryClasses.map(({ name }) => name)).toEqual(
       admissionB.recoveryClasses.map(({ name }) => name),

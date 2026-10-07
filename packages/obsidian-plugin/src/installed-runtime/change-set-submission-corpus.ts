@@ -1,5 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -17,7 +19,7 @@ import {
 
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 
-import type { ChangeSetCorpusEvidence } from "./evidence.js";
+import { changeSetCorpusEvidenceSchema, type ChangeSetCorpusEvidence } from "./evidence.js";
 
 /**
  * Deterministic Change Set submission corpus (issue #175). Runs the write side
@@ -63,6 +65,7 @@ export const CHANGE_SET_SCENARIO_PLAN = [
 ] as const;
 
 export type ChangeSetScenarioName = (typeof CHANGE_SET_SCENARIO_PLAN)[number];
+export type RejectionScenarioName = Extract<ChangeSetScenarioName, `rejection/${string}`>;
 
 export class ChangeSetSubmissionCorpusError extends Error {
   constructor(message: string) {
@@ -285,6 +288,64 @@ export interface ChangeSetSubmissionKeyRecord {
   readonly executed: boolean;
 }
 
+export interface RejectionInventoryContext {
+  readonly vaultPath: string;
+  readonly runId: string;
+  readonly runtimeProfileId: string;
+  readonly candidateBundleSha256: string;
+  readonly configDirectoryName?: string;
+}
+
+interface RejectionInventoryEntry {
+  readonly path: string;
+  readonly kind: "file" | "directory" | "absent";
+  readonly sha256?: string;
+  readonly sizeBytes?: number;
+}
+
+function rejectionInventoryDigest(entries: readonly RejectionInventoryEntry[]): string {
+  return sha256Hex(canonicalJson(entries));
+}
+
+async function rejectionInventory(
+  context: RejectionInventoryContext,
+  input: ChangeSetSubmitInput,
+): Promise<readonly RejectionInventoryEntry[]> {
+  const entries = new Map<string, RejectionInventoryEntry>();
+  const walk = async (directory: string, prefix = ""): Promise<void> => {
+    for (const child of await readdir(directory, { withFileTypes: true })) {
+      if (prefix === "" && [context.configDirectoryName ?? ".obsidian", ".llm-wiki"].includes(child.name)) continue;
+      const path = `${prefix}${child.name}`;
+      const absolute = join(directory, child.name);
+      if (child.isDirectory()) {
+        entries.set(path, { path, kind: "directory" });
+        await walk(absolute, `${path}/`);
+      } else if (child.isFile()) {
+        const bytes = await readFile(absolute);
+        entries.set(path, {
+          path, kind: "file",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          sizeBytes: bytes.byteLength,
+        });
+      } else {
+        throw new ChangeSetSubmissionCorpusError("Rejection inventory contains an unsupported path kind");
+      }
+    }
+  };
+  await walk(context.vaultPath);
+  const paths = input.operations.flatMap((operation) =>
+    "path" in operation ? [operation.path] : [operation.sourcePath, operation.destinationPath]);
+  paths.push(...(input.readDependencies ?? []).map(({ path }) => path));
+  for (const path of paths) {
+    const parts = path.split("/");
+    for (let length = 1; length <= parts.length; length += 1) {
+      const observed = parts.slice(0, length).join("/");
+      if (!entries.has(observed)) entries.set(observed, { path: observed, kind: "absent" });
+    }
+  }
+  return [...entries.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
 export interface ChangeSetAdmissionOutcome {
   readonly scenarioManifestSha256: string;
   readonly seedInventoryDigest: string;
@@ -292,10 +353,7 @@ export interface ChangeSetAdmissionOutcome {
   readonly afterInventory: readonly ChangeSetCorpusInventoryEntry[];
   readonly replayKeys: readonly { submissionKey: string; input: ChangeSetSubmitInput }[];
   readonly submissions: readonly ChangeSetSubmissionKeyRecord[];
-  readonly rejectionClasses: readonly {
-    name: string;
-    failureCode: "stale_observation" | "path_conflict" | "exact_match_count_mismatch";
-  }[];
+  readonly rejectionClasses: ChangeSetCorpusEvidence["admission"]["rejectionClasses"];
   readonly fifoReport: ChangeSetCorpusEvidence["admission"]["fifo"];
   readonly recoveryClasses: readonly { name: string }[];
   readonly immutableRecords: ChangeSetCorpusEvidence["admission"]["immutableRecords"];
@@ -342,11 +400,27 @@ function digestOfContentVersion(contentVersion: string): string {
  * seed `Notes/` inventory is observed before and after and must stay unchanged.
  */
 export async function runChangeSetSubmissionCorpus(options: {
+  readonly expectedVaultId: string;
   readonly callTool: (tool: WireToolName, arguments_: Record<string, unknown>) => Promise<McpToolResult>;
+  readonly rejectionScenario?: RejectionScenarioName;
+  readonly inventoryContext?: RejectionInventoryContext;
   readonly seedNotes: readonly { path: string; content: string }[];
   readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
   readonly assertion: (name: string) => void;
 }): Promise<ChangeSetAdmissionOutcome> {
+  if (options.rejectionScenario !== undefined &&
+      !CHANGE_SET_SCENARIO_PLAN.includes(options.rejectionScenario)) {
+    throw new ChangeSetSubmissionCorpusError("Unknown preflight rejection scenario");
+  }
+  const inventoryContext = options.inventoryContext;
+  if (inventoryContext === undefined ||
+      basename(inventoryContext.vaultPath) !== `installed-runtime-vault-${inventoryContext.runId}` ||
+      !/^[A-Za-z0-9_-]+$/u.test(inventoryContext.runId) ||
+      inventoryContext.runtimeProfileId.length === 0 ||
+      !/^[a-f0-9]{64}$/u.test(inventoryContext.candidateBundleSha256) ||
+      !(await lstat(inventoryContext.vaultPath)).isDirectory()) {
+    throw new ChangeSetSubmissionCorpusError("Rejection inventory requires a bound generated Vault context");
+  }
   const seedNotes = [...options.seedNotes].sort((left, right) =>
     left.path.localeCompare(right.path),
   );
@@ -357,13 +431,18 @@ export async function runChangeSetSubmissionCorpus(options: {
     .sort((left, right) => left.path.localeCompare(right.path));
   const seedInventoryDigest = digestCorpusInventory(expectedSeedInventory);
 
+  let eventSequence = 0;
+  const recordEvent: typeof options.record = (kind, name, detail) => {
+    eventSequence += 1;
+    options.record(kind, name, detail);
+  };
   const assertions: string[] = [];
   const assertion = (name: string): void => {
     assertions.push(name);
     options.assertion(name);
   };
 
-  options.record("assertion", "change-set-corpus-began", {
+  recordEvent("assertion", "change-set-corpus-began", {
     corpusId: CHANGE_SET_SUBMISSION_CORPUS_ID,
     seedPaths: expectedSeedInventory.map(({ path }) => path),
     seedInventoryDigest,
@@ -401,9 +480,20 @@ export async function runChangeSetSubmissionCorpus(options: {
         `${stepId} compatibility text diverged from structured content`,
       );
     }
-    options.record("tool", tool, result.structuredContent);
+    recordEvent("tool", tool, stepId.startsWith("rejection/") && typeof arguments_.submissionKey === "string"
+      ? { submissionKeySha256: submissionKeyDigest(arguments_.submissionKey), result: result.structuredContent }
+      : result.structuredContent);
     return result.structuredContent;
   };
+
+  const initialHealth = parseHealthResult(await call(
+    "rejection/inventory-binding", "vault_health", {},
+    (value) => serializeCompatibilityText(parseHealthResult(value)),
+  ));
+  if (initialHealth.outcome !== "observed" || initialHealth.vault.id !== options.expectedVaultId ||
+      resolve(initialHealth.vault.path) !== resolve(inventoryContext.vaultPath)) {
+    throw new ChangeSetSubmissionCorpusError("Rejection inventory and loopback must observe the same Managed Vault");
+  }
 
   const callSubmit = async (
     stepId: string,
@@ -591,7 +681,7 @@ export async function runChangeSetSubmissionCorpus(options: {
       executed: true,
     });
     replayKeys.push({ submissionKey: VALID_CREATE_KEY, input: validCreate });
-    options.record("tool", "vault_change_set_submit", value);
+    recordEvent("tool", "vault_change_set_submit", value);
     assertion("submission/valid-create:no-validate-apply-handshake");
     assertion("submission/valid-create:derived-directory-causation");
 
@@ -721,21 +811,60 @@ export async function runChangeSetSubmissionCorpus(options: {
     input: ChangeSetSubmitInput,
     expectedFailure: "stale_observation" | "path_conflict" | "exact_match_count_mismatch",
   ): Promise<void> => {
-    await observeNoMutation(name);
+    if (options.rejectionScenario !== undefined && options.rejectionScenario !== name) return;
+    const before = await rejectionInventory(inventoryContext, input);
+    recordEvent("assertion", `${name}:inventory-before`, {
+      scope: "all-public-vault-files-directories-and-affected-absence", entries: before, digest: rejectionInventoryDigest(before),
+    });
+    const beforeSequence = eventSequence;
     const proof = await callSubmit(name, input, true);
+    const submitSequence = eventSequence;
     if (proof.failureCode !== expectedFailure || proof.executed) {
       throw new ChangeSetSubmissionCorpusError(
         `${name} did not return the specified stable rejection evidence`,
       );
     }
     const status = await callStatusByKey(`${name}:status`, input.submissionKey, false);
-    if (status.changeSet.changeSetId !== proof.changeSetId) {
+    if (canonicalJson(status.changeSet) !== canonicalJson(proof) || proof.state !== "intent_not_applied") {
       throw new ChangeSetSubmissionCorpusError(
         `${name} status identity diverged from the rejection proof`,
       );
     }
+    const statusSequence = eventSequence;
+    const health = parseHealthResult(await call(
+      `${name}:terminal`, "vault_health", {}, (value) => serializeCompatibilityText(parseHealthResult(value)),
+    ));
+    if (health.outcome !== "observed" || health.vault.id !== options.expectedVaultId ||
+        health.recovery.state !== "none" || health.queue.length !== 0 ||
+        health.queue.currentExecutionId !== null || health.write.gate !== "open") {
+      throw new ChangeSetSubmissionCorpusError(`${name} has no observable idle terminal state`);
+    }
+    const terminalSequence = eventSequence;
+    const terminal = {
+      recoveryState: "none" as const, queueLength: 0 as const,
+      currentExecutionId: null, writeGate: "open" as const,
+    };
+    const after = await rejectionInventory(inventoryContext, input);
+    recordEvent("assertion", `${name}:inventory-after`, {
+      scope: "all-public-vault-files-directories-and-affected-absence", entries: after, digest: rejectionInventoryDigest(after),
+    });
+    if (rejectionInventoryDigest(before) !== rejectionInventoryDigest(after)) {
+      throw new ChangeSetSubmissionCorpusError(`${name} mutated the Vault`);
+    }
+    assertion(`${name}:no-mutation-inventory`);
     submissions.push(proof);
-    rejectionClasses.push({ name, failureCode: expectedFailure });
+    rejectionClasses.push({
+      name, failureCode: expectedFailure, noMutationDigestUnchanged: true,
+      binding: {
+        runId: inventoryContext.runId, runtimeProfileId: inventoryContext.runtimeProfileId,
+        candidateBundleSha256: inventoryContext.candidateBundleSha256,
+        vaultIdSha256: sha256Hex(options.expectedVaultId),
+      },
+      beforeInventory: { scope: "all-public-vault-files-directories-and-affected-absence", entries: before as ChangeSetCorpusEvidence["admission"]["rejectionClasses"][number]["beforeInventory"]["entries"], digest: rejectionInventoryDigest(before) },
+      afterInventory: { scope: "all-public-vault-files-directories-and-affected-absence", entries: after as ChangeSetCorpusEvidence["admission"]["rejectionClasses"][number]["afterInventory"]["entries"], digest: rejectionInventoryDigest(after) },
+      proof, status: status.changeSet, terminal,
+      eventOrder: { before: beforeSequence, submit: submitSequence, status: statusSequence, terminal: terminalSequence, after: eventSequence },
+    });
     assertion(`${name}:${expectedFailure}`);
   };
 
@@ -785,6 +914,10 @@ export async function runChangeSetSubmissionCorpus(options: {
     if (welcome === undefined) {
       throw new ChangeSetSubmissionCorpusError("Seed note fixture is missing");
     }
+    // A binary fixture is setup, not a mutation route exposed to the Agent.
+    // Exclusive creation refuses an occupied fixture, even with matching bytes.
+    await writeFile(join(inventoryContext.vaultPath, CHANGE_SET_CORPUS_DIRECTORY, "Evidence.bin"),
+      new Uint8Array([0, 255, 128, 13, 10]), { flag: "wx" });
     await rejection(
       "rejection/attachment-evidence-mismatch",
       {
@@ -793,7 +926,7 @@ export async function runChangeSetSubmissionCorpus(options: {
           {
             operationId: "copy-stale",
             kind: "copy_attachment",
-            sourcePath: READ_DEPENDENCY_TARGET,
+            sourcePath: `${CHANGE_SET_CORPUS_DIRECTORY}/Evidence.bin`,
             destinationPath: `${CHANGE_SET_CORPUS_DIRECTORY}/copy.bin`,
             expectedSha256: "0".repeat(64),
           },
@@ -914,7 +1047,7 @@ export async function runChangeSetSubmissionCorpus(options: {
           `concurrency/independent-batch item ${index} did not reach intent_applied`,
         );
       }
-      options.record("tool", "vault_change_set_submit", result.structuredContent);
+      recordEvent("tool", "vault_change_set_submit", result.structuredContent);
       return {
         submissionKeySha256: submissionKeyDigest(item.submissionKey),
         changeSetId: parsed.changeSet.changeSetId,
@@ -969,7 +1102,7 @@ export async function runChangeSetSubmissionCorpus(options: {
         );
       }
       const parsed = parseChangeSetSubmitResult(result.structuredContent);
-      options.record("tool", "vault_change_set_submit", result.structuredContent);
+      recordEvent("tool", "vault_change_set_submit", result.structuredContent);
       if (parsed.outcome !== "registered") {
         throw new ChangeSetSubmissionCorpusError(
           "concurrency/contended-target returned a non-registered outcome",
@@ -1017,7 +1150,7 @@ export async function runChangeSetSubmissionCorpus(options: {
       noPartialMutation: true,
     },
   };
-  options.record("cleanup", "concurrency-report", fifoReport);
+  recordEvent("cleanup", "concurrency-report", fifoReport);
 
   // Recovery: a submit whose product response was lost or corrupted in transit
   // is recovered only through the original Submission Key or the identical
@@ -1178,7 +1311,7 @@ export async function runChangeSetSubmissionCorpus(options: {
     currentExecutionId: null,
     writeGate: "open",
   };
-  options.record("cleanup", "change-set-idle-state", residualCleanup);
+  recordEvent("cleanup", "change-set-idle-state", residualCleanup);
 
   return {
     scenarioManifestSha256: scenarioManifestSha256(),
@@ -1358,6 +1491,8 @@ function asMcpResult(result: unknown): McpToolResult {
 export async function runChangeSetSubmissionCorpusAtEndpoint(options: {
   readonly endpoint: URL;
   readonly expectedVaultId: string;
+  readonly rejectionScenario?: RejectionScenarioName;
+  readonly inventoryContext?: RejectionInventoryContext;
   readonly seedNotes: readonly { path: string; content: string }[];
   readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
   readonly assertion: (name: string) => void;
@@ -1373,7 +1508,10 @@ export async function runChangeSetSubmissionCorpusAtEndpoint(options: {
       endpoint: options.endpoint.pathname,
     });
     return await runChangeSetSubmissionCorpus({
+      expectedVaultId: options.expectedVaultId,
       callTool: async (tool, arguments_) => asMcpResult(await client.callTool({ name: tool, arguments: arguments_ })),
+      rejectionScenario: options.rejectionScenario,
+      inventoryContext: options.inventoryContext,
       seedNotes: options.seedNotes,
       record: options.record,
       assertion: options.assertion,
@@ -1439,7 +1577,37 @@ export function composeChangeSetCorpusEvidence(options: {
       "Change-set corpus evidence requires admission assertions",
     );
   }
-  return {
+  const offset = options.events.findIndex((event) => event.name === "change-set-corpus-began");
+  if (offset < 0) throw new ChangeSetSubmissionCorpusError("Change-set corpus event anchor is missing");
+  for (const rejection of admission.rejectionClasses) {
+    const terminalEvent = options.events[rejection.eventOrder.terminal + offset - 1];
+    const health = parseHealthResult(terminalEvent?.detail);
+    if (terminalEvent?.name !== "vault_health" || health.outcome !== "observed" ||
+        sha256Hex(health.vault.id) !== rejection.binding.vaultIdSha256 ||
+        health.recovery.state !== rejection.terminal.recoveryState ||
+        health.queue.length !== rejection.terminal.queueLength ||
+        health.queue.currentExecutionId !== rejection.terminal.currentExecutionId ||
+        health.write.gate !== rejection.terminal.writeGate) {
+      throw new ChangeSetSubmissionCorpusError("Rejection terminal does not match observed idle health");
+    }
+    for (const [sequence, tool, proof] of [
+      [rejection.eventOrder.submit, "vault_change_set_submit", rejection.proof],
+      [rejection.eventOrder.status, "vault_change_set_status", rejection.status],
+    ] as const) {
+      const event = options.events[sequence + offset - 1];
+      const detail = event?.detail as { submissionKeySha256?: unknown; result?: unknown } | undefined;
+      const raw = tool === "vault_change_set_submit"
+        ? parseChangeSetSubmitResult(detail?.result)
+        : parseChangeSetStatusResult(detail?.result);
+      const record = "changeSet" in raw ? raw.changeSet : undefined;
+      if (event?.name !== tool || detail?.submissionKeySha256 !== proof.submissionKeySha256 ||
+          record?.changeSetId !== proof.changeSetId || record.state !== proof.state ||
+          !("failure" in record) || record.failure?.code !== proof.failureCode) {
+        throw new ChangeSetSubmissionCorpusError("Rejection proof does not match the observed submit/status event");
+      }
+    }
+  }
+  return changeSetCorpusEvidenceSchema.parse({
     corpusId: CHANGE_SET_SUBMISSION_CORPUS_ID,
     seedManifestSha256: admission.seedInventoryDigest,
     scenarioManifestSha256: admission.scenarioManifestSha256,
@@ -1457,6 +1625,8 @@ export function composeChangeSetCorpusEvidence(options: {
       submissions: admission.submissions.map((record) => ({ ...record })),
       rejectionClasses: admission.rejectionClasses.map((record) => ({
         ...record,
+        eventOrder: Object.fromEntries(Object.entries(record.eventOrder).map(([key, sequence]) =>
+          [key, sequence + offset])) as typeof record.eventOrder,
         noMutationDigestUnchanged: true,
       })),
       fifo: { ...admission.fifoReport },
@@ -1470,13 +1640,20 @@ export function composeChangeSetCorpusEvidence(options: {
     },
     replay: { ...replay.replayReport },
     residualCleanup: { ...admission.residualCleanup },
-    eventLog: options.events.map((event, index) => ({
-      sequence: index + 1,
-      kind: event.kind,
-      name: event.name,
-      detailSha256: eventSha256(event.detail),
-    })),
+    eventLog: options.events.map((event, index) => {
+      const rejection = admission.rejectionClasses.find((entry) =>
+        [entry.eventOrder.submit, entry.eventOrder.status, entry.eventOrder.terminal].includes(index + 1 - offset));
+      const detail = rejection === undefined ? event.detail
+        : rejection.eventOrder.terminal + offset === index + 1 ? { ...rejection.terminal, vaultIdSha256: rejection.binding.vaultIdSha256 }
+        : rejection.eventOrder.submit + offset === index + 1 ? rejection.proof : rejection.status;
+      return {
+        sequence: index + 1,
+        kind: event.kind,
+        name: event.name,
+        detailSha256: eventSha256(detail),
+      };
+    }),
     assertions: [...options.assertions],
     verdict: "passed",
-  };
+  });
 }

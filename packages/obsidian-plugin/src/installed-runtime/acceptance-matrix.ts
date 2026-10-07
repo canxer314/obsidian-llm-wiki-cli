@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { z } from "zod";
 
-import type { InstalledRuntimeEvidence } from "./evidence.js";
+import { changeSetCorpusEvidenceSchema, type InstalledRuntimeEvidence } from "./evidence.js";
 import { pluginEventObserverCorpusEvidenceSchema, PLUGIN_EVENT_OBSERVER_ASSERTION } from "./plugin-event-observer-evidence.js";
 
 /**
@@ -261,6 +261,10 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence)
   }
   if (evidence.beforeInventory === null || evidence.afterInventory === null || evidence.cleanup === null) {
     throw new AcceptanceMatrixError("Acceptance matrix requires inventories and cleanup evidence");
+  }
+  if (evidence.changeSetCorpus !== null) {
+    // A-15 is a raw-byte observation, never a string assertion alone.
+    changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);
   }
   const children = childManifests(evidence);
   const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
