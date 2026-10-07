@@ -172,7 +172,7 @@ describe("installed-runtime authoritative command", () => {
     } as never)).rejects.toThrow("Previous release directory and immutable tag are required");
   });
 
-  it("runs installed lifecycle provisioning before requiring the external previous release", async () => {
+  it("uses the six-state observer and refuses unverified lifecycle provenance before provisioning", async () => {
     const { MVP_PERF_REF_LINUX_1 } = await import("../src/installed-runtime/runtime-profile.js");
     let provisions = 0;
     const records: unknown[] = [];
@@ -183,9 +183,9 @@ describe("installed-runtime authoritative command", () => {
       provisionVault: async () => { provisions += 1; throw new Error("Provision refused"); },
       record: (_kind: unknown, _name: unknown, detail: unknown) => records.push(detail),
       assertion: () => { throw new Error("Failed slice must not assert success"); },
-    } as never)).rejects.toThrow("Installed lifecycle install/repair slice failed");
-    expect(provisions).toBe(1);
-    expect(records).toContainEqual(expect.objectContaining({ scope: "installed-install-repair", verdict: "failed" }));
+    } as never)).rejects.toThrow("verified release");
+    expect(provisions).toBe(0);
+    expect(records).toEqual([]);
   });
 
   it("invokes the built-in installed gate runner and fails closed without a running-runtime probe", async () => {

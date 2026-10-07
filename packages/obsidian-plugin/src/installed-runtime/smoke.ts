@@ -152,6 +152,12 @@ async function main(): Promise<number> {
     reportDirectory: join(workdir, `installed-runtime-acceptance-${runId}`),
     releaseArguments: args,
     obsidianVersion: registration.obsidianVersion,
+    lifecycleOperatorObservation: async request => {
+      // Local terminal only: paths and the command never enter public evidence.
+      process.stderr.write(request.action === "enable-plugin"
+        ? `Primary Operator: enable ${request.pluginId} in the generated Vault ${request.vaultPath}; acceptance is waiting for the actual enabled inventory.\n`
+        : `Primary Operator: from ${request.vaultPath}, use only CLAUDE_CONFIG_DIR=${request.configDirectory} for this isolated local registration. Execute ${request.registrationCommand}; acceptance independently reads local config and runs claude mcp get. Do not modify your daily client.\n`);
+    },
   });
   const result = await runInstalledRuntimeHarness({
     profileName: args.profile,
