@@ -1102,6 +1102,13 @@ export async function runInstalledRuntimeHarness(
               endpoint: new URL(`http://127.0.0.1:${identity.port}/mcp`),
               expectedVaultId: identity.vaultId,
               seedNotes: vault.seedNotes.map(({ path, content }) => ({ path, content })),
+              inventoryContext: {
+                vaultPath: vault.vaultPath,
+                runId,
+                runtimeProfileId: options.profileName,
+                candidateBundleSha256: state.candidate!.identity.bundleSha256,
+                configDirectoryName,
+              },
               record: recordChangeSetEvent,
               assertion: recordChangeSetAssertion,
             });

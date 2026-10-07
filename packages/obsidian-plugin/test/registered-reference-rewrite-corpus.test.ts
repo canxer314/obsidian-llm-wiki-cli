@@ -35,6 +35,8 @@ import {
   type WireToolName,
 } from "../src/index.js";
 
+import * as singleSpan from "../src/installed-runtime/registered-reference-single-span.js";
+
 const EXPECTED_VAULT_ID = "vault-registered-reference-corpus";
 
 /** Matches the production Bridge state directory (never indexed or discovered). */
@@ -613,6 +615,52 @@ function makeSession(
   };
 }
 
+describe("A-26 independent second verified span", () => {
+  const before = "﻿# 参考\r\n第一 [[One|别名]]  \t\r\n中文 😀 第二 [[One|别名]]  \t尾行\r\n";
+  const after = "﻿# 参考\r\n第一 [[One|别名]]  \t\r\n中文 😀 第二 [[One Moved|别名]]  \t尾行\r\n";
+
+  it.each([
+    ["global replacement", before.replaceAll("[[One|别名]]", "[[One Moved|别名]]")],
+    ["first span", before.replace("[[One|别名]]", "[[One Moved|别名]]")],
+    ["UTF-16 offset used as byte offset", Buffer.concat([Buffer.from(before).subarray(0, before.lastIndexOf("[[One")), Buffer.from("[[One Moved|别名]]"), Buffer.from(before).subarray(before.lastIndexOf("[[One") + "[[One|别名]]".length)]).toString("utf8")],
+    ["newline normalization", after.replaceAll("\r\n", "\n")],
+  ])("rejects %s even when the Change Set reports success", async (_label, corrupt) => {
+    const host = await arrangeSession(singleSpan.singleSpanFixtures());
+    const bridge = await createRewriteBridge(host);
+    const client = await connectClient(bridge.endpoint, EXPECTED_VAULT_ID);
+    let corrupted = false;
+    try {
+      await expect(singleSpan.executeReferenceSingleSpanScenario({
+        callTool: async (tool, args) => {
+          const result = await callToolOf(client)(tool, args);
+          if (tool === "vault_change_set_submit") {
+            corrupted = true;
+            await fsWrite(host.vaultPath, singleSpan.SINGLE_SPAN_PATH, Buffer.from(corrupt));
+          }
+          return result;
+        },
+        readBinary: host.readBinary,
+      })).rejects.toThrow(/second verified span|untouched bytes/u);
+      expect(corrupted).toBe(true);
+    } finally { await client.close(); }
+  });
+
+  it("uses registered host spans and real durable bytes to change only the second spelling", async () => {
+    const host = await arrangeSession(singleSpan.singleSpanFixtures());
+    const bridge = await createRewriteBridge(host);
+    const client = await connectClient(bridge.endpoint, EXPECTED_VAULT_ID);
+    try {
+      const proof = await singleSpan.executeReferenceSingleSpanScenario({ callTool: callToolOf(client), readBinary: host.readBinary });
+      expect(Buffer.from((await host.readBinary(singleSpan.SINGLE_SPAN_PATH))!)).toEqual(Buffer.from(after));
+      expect(proof.selectedOrdinal).toBe(2);
+      expect(proof.referencesLocated).toBe(2);
+      expect(proof.selectedSpan).toEqual({ startByte: 58, endByteExclusive: 72 });
+      expect(proof.untouchedPrefixExact).toBe(true);
+      expect(proof.untouchedSuffixExact).toBe(true);
+    } finally { await client.close(); }
+  });
+});
+
 const FIXTURES = registeredReferenceRewriteFixtures();
 
 describe("registered-reference rewrite corpus over a real loopback Bridge", () => {
@@ -711,6 +759,7 @@ describe("registered-reference rewrite corpus over a real loopback Bridge", () =
           "markdown_embed",
         ]),
       );
+      expect(outcome.assertions).toContain("span/second-equal-spelling-only:untouched-bytes-exact");
       expect(outcome.rawBytes.duplicateEqualSpellingsRewritten).toBe(2);
       expect(outcome.rawBytes.fixtures[0]?.hostModes).toEqual(
         expect.arrayContaining(["bom", "crlf", "cjk", "astral"]),
@@ -757,6 +806,23 @@ describe("registered-reference rewrite corpus over a real loopback Bridge", () =
       await client.close();
     }
   }, 120_000);
+
+  it("does not accept a valid private report when durable A-26 bytes were never changed", async () => {
+    const proofHost = await arrangeSession(singleSpan.singleSpanFixtures());
+    const proofBridge = await createRewriteBridge(proofHost);
+    const proofClient = await connectClient(proofBridge.endpoint, EXPECTED_VAULT_ID);
+    const host = await arrangeSession(FIXTURES);
+    const bridge = await createRewriteBridge(host);
+    const client = await connectClient(bridge.endpoint, EXPECTED_VAULT_ID);
+    const observer = await connectClient(bridge.endpoint, EXPECTED_VAULT_ID);
+    try {
+      const foreignProof = await singleSpan.executeReferenceSingleSpanScenario({ callTool: callToolOf(proofClient), readBinary: proofHost.readBinary });
+      await expect(runRegisteredReferenceRewriteCorpus({
+        session: { ...makeSession(host, callToolOf(client), [], { callTool: callToolOf(observer) }), executeSingleSpan: async () => foreignProof },
+        record: () => undefined, assertion: () => undefined,
+      })).rejects.toThrow("second verified span changed untouched bytes");
+    } finally { await proofClient.close(); await observer.close(); await client.close(); }
+  });
 
   it("stops the observer before rejecting a failed move scenario", async () => {
     const host = await arrangeSession(FIXTURES);

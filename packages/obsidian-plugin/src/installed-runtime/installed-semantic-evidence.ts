@@ -326,7 +326,7 @@ function requireTerminalProofState(
   return state;
 }
 
-const installedLoopbackFetch: typeof fetch = async (input, init) => {
+export const installedLoopbackFetch: typeof fetch = async (input, init) => {
   const request = new Request(input, init);
   const url = new URL(request.url);
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") {
