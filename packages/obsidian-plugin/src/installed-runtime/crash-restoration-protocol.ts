@@ -20,6 +20,7 @@ import {
 } from "./acceptance-driver-protocol.js";
 import { createNoteCorpusProfile } from "../corpus/create-note-corpus.js";
 import { replaceExactCorpusProfile, replaceWholeCorpusProfile } from "../corpus/edit-body-corpus.js";
+import { copyAttachmentCorpusProfile, moveAttachmentCorpusProfile } from "../corpus/attachment-corpus.js";
 import { editFrontmatterCorpusProfile } from "../corpus/frontmatter-corpus.js";
 import { multiMarkdownCorpusProfile, multiFrontmatterOnlyCorpusProfile } from "../corpus/multi-operation-corpus.js";
 export { crashRestorationCommandSchema, installedCrashScenarios };
@@ -32,6 +33,15 @@ export function crashBoundaryPhase(point: InstalledCrashPoint): "PREPARED" | "CO
   return "PREPARED";
 }
 export function crashProfile(kind: InstalledCrashKind) {
+  if (kind === "copy_attachment" || kind === "move_attachment") {
+    const base = kind === "copy_attachment" ? copyAttachmentCorpusProfile() : moveAttachmentCorpusProfile();
+    const target = kind === "copy_attachment" ? "Copy" : "Move";
+    const destinationPath = `Corpus/Attachments/${target}-target/Nested/${target}-destination.bin`;
+    return { ...base, files: base.files.map(file => file.originalBytes === null ? { ...file, path: destinationPath } : file), buildSubmitInput: (seed: string) => {
+      const input = base.buildSubmitInput(seed);
+      return { ...input, operations: (input.operations as Record<string, unknown>[]).map(operation => ({ ...operation, destinationPath })) };
+    } };
+  }
   switch (kind) {
     case "create_note": return createNoteCorpusProfile();
     case "edit_body": return replaceExactCorpusProfile();
@@ -96,8 +106,37 @@ export async function crashInventory(vaultPath: string, configDirectoryName = ".
 }
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)])) : value;
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+export function crashAttachmentDirectories(kind: InstalledCrashKind): readonly string[] {
+  if (kind !== "copy_attachment" && kind !== "move_attachment") return [];
+  const target = kind === "copy_attachment" ? "Copy" : "Move";
+  return [`Corpus/Attachments/${target}-target`, `Corpus/Attachments/${target}-target/Nested`];
+}
+
 export function verifyCrashInventory(before: readonly CrashInventoryEntry[], actual: readonly CrashInventoryEntry[], kind: InstalledCrashKind, state: "original" | "committed", point?: InstalledCrashPoint): void {
   const profile = crashProfile(kind);
+  if (kind === "copy_attachment" || kind === "move_attachment") {
+    let applied = state === "committed";
+    let directories = applied ? [...crashAttachmentDirectories(kind)] : [];
+    if (point?.startsWith("after_mutation:")) {
+      const index = Number(point.split(":")[1]);
+      applied = index === 2;
+      directories = crashAttachmentDirectories(kind).slice(0, index + 1);
+    }
+    if (point?.startsWith("after_rollback_mutation:")) {
+      const index = Number(point.split(":")[1]);
+      applied = false;
+      directories = crashAttachmentDirectories(kind).slice(0, Math.max(0, (kind === "copy_attachment" ? 3 : 2) - index));
+    }
+    const expected = before.filter(entry => !profile.files.some(file => file.path === entry.path));
+    for (const fixture of profile.files) {
+      const bytes = applied ? fixture.committedBytes : fixture.originalBytes;
+      if (bytes !== null) expected.push({ path: fixture.path, kind: "file", bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+    }
+    expected.push(...directories.map(path => ({ path, kind: "directory" as const })));
+    const sorted = (entries: readonly CrashInventoryEntry[]) => [...entries].sort((a, b) => a.path.localeCompare(b.path, "en"));
+    if (!same(sorted(expected), sorted(actual))) throw new Error("Installed crash whole-state inventory mismatch");
+    return;
+  }
   let expected = [...before];
   let committed = state === "committed";
   let directories: string[] = committed && kind === "create_note" ? ["Corpus", "Corpus/Notes"] : [];
@@ -134,6 +173,19 @@ export function verifyCrashPublicProof(record: unknown, beforeRecord: unknown, k
   const effects = preview?.requestedEffects as { operationId?: string; kind?: string; projectedOutcome?: string }[] | undefined;
   if (input !== undefined && !same(effects?.map(effect => effect.operationId), input.operations.map(operation => operation.operationId))) throw new Error("Installed crash public proof targets another operation");
   const effect = effects?.[0];
+  if (kind === "copy_attachment" || kind === "move_attachment") {
+    const typed = (bytes: Uint8Array | null) => bytes === null ? { kind: "absent" } : { kind: "attachment", sha256: createHash("sha256").update(bytes).digest("hex") };
+    const directories = crashAttachmentDirectories(kind);
+    const paths = [...directories.map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })), ...profile.files.map(file => ({ path: file.path, preState: typed(file.originalBytes), projectedFinalState: typed(file.committedBytes), projectedOutcome: same(typed(file.originalBytes), typed(file.committedBytes)) ? "unchanged" : "changed" }))].sort((a, b) => a.path.localeCompare(b.path, "en"));
+    const derived = directories.map(path => ({ operationId: `derived/${effect?.operationId}/directory/${path}`, causedByOperationId: effect?.operationId, kind: "create_directory", projectedOutcome: "changed" }));
+    if (effect?.kind !== kind || effect.projectedOutcome !== "changed" || typeof effect.operationId !== "string" || !same(preview?.paths, paths) || !same(preview?.derivedEffects, derived) || preview?.requestedEffects.length !== 1 || actual.changeSetId !== before.changeSetId || actual.state !== state || !same(actual.preview, preview)) throw new Error("Installed crash fixed fixture public proof mismatch");
+    if (state === "intent_applied") {
+      const effects = (items: readonly unknown[]) => items.map(raw => { const { projectedOutcome, ...rest } = raw as Record<string, unknown>; return { ...rest, outcome: projectedOutcome }; });
+      const finalPaths = paths.map(({ path, projectedOutcome, projectedFinalState }) => ({ path, outcome: projectedOutcome, finalState: projectedFinalState }));
+      if (!same(actual.requestedEffects, effects(preview.requestedEffects)) || !same(actual.derivedEffects, effects(derived)) || !same(actual.paths, finalPaths)) throw new Error("Installed crash complete public proof mismatch");
+    }
+    return;
+  }
   const paths = [...(kind === "create_note" ? ["Corpus", "Corpus/Notes"].map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })) : []), ...profile.files.map(fixture => ({ path: fixture.path, preState: fixture.originalBytes === null ? { kind: "absent" } : { kind: "markdown", contentVersion: version(fixture.originalBytes) }, projectedFinalState: { kind: "markdown", contentVersion: version(fixture.committedBytes!) }, projectedOutcome: "changed" }))];
   const derived = kind === "create_note" ? ["Corpus", "Corpus/Notes"].map(path => ({ operationId: `derived/${effect?.operationId}/directory/${path}`, causedByOperationId: effect?.operationId, kind: "create_directory", projectedOutcome: "changed" })) : [];
   if (!same(effects?.map(effect => effect.kind), expectedOperations.map(operation => operation.kind)) || effects?.some(effect => effect.projectedOutcome !== "changed" || typeof effect.operationId !== "string") || !same(preview?.paths, paths) || !same(preview?.derivedEffects, derived)) throw new Error("Installed crash fixed fixture public proof mismatch");
@@ -270,11 +322,10 @@ export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingF
 }
 
 export function crashOriginalInventory(current: readonly CrashInventoryEntry[], kind: InstalledCrashKind): CrashInventoryEntry[] {
-  const fixtures = crashProfile(kind).files;
-  const original = current.filter(entry => !fixtures.some(file => entry.path === file.path) && (kind !== "create_note" || entry.path !== "Corpus" && entry.path !== "Corpus/Notes"));
-  for (const fixture of fixtures) {
-    if (fixture.originalBytes !== null) original.push({ path: fixture.path, kind: "file", bytes: fixture.originalBytes.length, sha256: createHash("sha256").update(fixture.originalBytes).digest("hex") });
-  }
+  const profile = crashProfile(kind);
+  const directories = kind === "create_note" ? ["Corpus", "Corpus/Notes"] : crashAttachmentDirectories(kind);
+  const original = current.filter(entry => !profile.files.some(file => file.path === entry.path) && !directories.includes(entry.path));
+  for (const fixture of profile.files) if (fixture.originalBytes !== null) original.push({ path: fixture.path, kind: "file", bytes: fixture.originalBytes.length, sha256: createHash("sha256").update(fixture.originalBytes).digest("hex") });
   return original.sort((a, b) => a.path.localeCompare(b.path, "en"));
 }
 
