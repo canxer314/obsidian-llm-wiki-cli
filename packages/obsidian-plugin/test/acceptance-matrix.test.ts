@@ -144,6 +144,9 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("does not treat six handwritten tool calls as the A-39 version contract proof", () => {
+    expect(() => createAcceptanceMatrixReport(evidence())).toThrow(/version-contract-package.*absent/i);
+  });
   it("covers every acceptance ID and every child corpus exactly once", () => {
     const report = createAcceptanceMatrixReport(evidence());
     expect(report.scenarios).toHaveLength(44);

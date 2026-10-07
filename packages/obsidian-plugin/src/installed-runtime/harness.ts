@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { loadVersionContractPackage, runContractFixtureWireCorpus, completeContractPackageCorpus, contractDigest, type ContractFixtureWireEvidence, type VersionContractPackage } from "./contract-package-corpus.js";
+import { runContractCrossCallScenario, type ContractCrossCallEvidence } from "./contract-cross-call.js";
 import { connect } from "node:net";
 import { dirname } from "node:path";
 
@@ -260,6 +263,8 @@ export interface InstalledRuntimeHarnessOptions {
   }>;
   readonly client?: LoopbackMcpClient;
   readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
+  readonly contractPackageRoot?: string;
+  readonly contractContinuationTiming?: "full-real-time" | "binding-only";
   /**
    * Write-side corpus seams (issue #175). The admission phase runs in the
    * initial Obsidian window; the replay phase reconnects after the controlled
@@ -569,6 +574,9 @@ export async function runInstalledRuntimeHarness(
     }
   };
 
+  let contractAuthority: VersionContractPackage | null = null;
+  let contractWire: ContractFixtureWireEvidence | null = null;
+  const contractCrossCalls: ContractCrossCallEvidence[] = [];
   let handle: ObsidianProcessHandle | null = null;
   let startupShutdownUnconfirmed = false;
   let acceptanceDriver: {
@@ -1073,6 +1081,18 @@ export async function runInstalledRuntimeHarness(
             });
           } catch (error) {
             failFromError("public_wire_corpus", error);
+          }
+        }
+        if (state.failure === null && state.publicWireCorpus !== null) {
+          try {
+            contractAuthority = await loadVersionContractPackage(options.contractPackageRoot ?? fileURLToPath(new URL("../../../contracts/", import.meta.url)));
+            const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
+            contractWire = await runContractFixtureWireCorpus({ authority: contractAuthority, endpoint, expectedVaultId: identity.vaultId });
+            for (const scenario of contractAuthority.scenarios) {
+              contractCrossCalls.push(await runContractCrossCallScenario({ authority: contractAuthority, scenarioId: scenario.id, endpoint, expectedVaultId: identity.vaultId, seedNotes: vault.seedNotes, continuationTiming: options.contractContinuationTiming }));
+            }
+          } catch (error) {
+            fail("public_wire_corpus", "public_wire_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
           }
         }
         if (state.failure === null && state.publicWireCorpus !== null) {
@@ -1610,6 +1630,7 @@ export async function runInstalledRuntimeHarness(
             };
           })(),
     observations: state.observations.map((observation) => toObservationEvidence(observation)),
+    contractPackageCorpus: null,
     publicWireCorpus: state.publicWireCorpus?.evidence ?? null,
     changeSetCorpus,
     gateIsolationCorpus,
@@ -1634,6 +1655,8 @@ export async function runInstalledRuntimeHarness(
 
   if (evidence.verdict === "passed") {
     try {
+      if (contractAuthority === null || contractWire === null || state.vault === null || state.candidate === null || firstIdentity === null || state.beforeInventory === null || state.afterInventory === null || state.cleanup === null) throw new Error("Version contract package execution evidence is absent");
+      evidence.contractPackageCorpus = completeContractPackageCorpus({ authority: contractAuthority, wire: contractWire, crossCalls: contractCrossCalls, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, beforeInventorySha256: contractDigest(state.beforeInventory), afterInventorySha256: contractDigest(state.afterInventory), cleanup: state.cleanup });
       state.acceptanceMatrix = createAcceptanceMatrixReport(evidence);
       (evidence as InstalledRuntimeEvidence & { acceptanceMatrix: AcceptanceMatrixReport }).acceptanceMatrix =
         state.acceptanceMatrix;

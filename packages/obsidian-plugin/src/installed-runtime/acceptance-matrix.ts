@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import type { InstalledRuntimeEvidence } from "./evidence.js";
+import { contractPackageCorpusEvidenceSchema, CONTRACT_PACKAGE_ASSERTION } from "./contract-package-corpus.js";
 
 /**
  * The complete #44 acceptance matrix. Each criterion is bound once to concrete
@@ -18,6 +19,7 @@ export const ACCEPTANCE_IDS = Array.from(
 
 export const ACCEPTANCE_CORPUS_IDS = [
   "public-wire",
+  "version-contract-package",
   "change-set-submission",
   "gate-isolation",
   "registered-reference-rewrite",
@@ -127,7 +129,7 @@ const matrixPlan = [
   ["A-36", "gate-isolation", "incompatible/registry-never-inspected:no-key-bound"],
   ["A-37", "registered-reference-rewrite", "observer:no-half-written-markdown"],
   ["A-38", "semantic-evidence-search-snapshot", "scenario:trash_note/delayed_probes_converge:closed"],
-  ["A-39", "public-wire", "six-tool-invocation"],
+  ["A-39", "version-contract-package", CONTRACT_PACKAGE_ASSERTION],
   ["A-40", "gate-isolation", "gates/recovery-blocked-precedence:single-effective-gate"],
   ["A-41", "change-set-submission", "submission/valid-create:no-validate-apply-handshake"],
   ["A-42", "public-wire", "content-version:canonical-markdown-sha256-and-attachment-distinction"],
@@ -168,6 +170,8 @@ function requireCorpus<T>(value: T | null | undefined, name: string): T {
 }
 
 function childManifests(evidence: InstalledRuntimeEvidence): AcceptanceMatrixChildManifest[] {
+  const contract = contractPackageCorpusEvidenceSchema.parse(requireCorpus(evidence.contractPackageCorpus, "version-contract-package corpus"));
+  if (contract.binding.runId !== evidence.runId || contract.binding.profileName !== evidence.profile.name || contract.binding.candidateBundleSha256 !== evidence.candidate?.bundleSha256 || contract.binding.seedManifestSha256 !== evidence.inputHashes.vaultSeedManifestSha256 || contract.binding.vaultIdSha256 !== sha256(evidence.bridgeIdentity?.vaultId)) throw new AcceptanceMatrixError("Version contract package proof binding does not match this installed run");
   const publicWire = requireCorpus(evidence.publicWireCorpus, "public-wire corpus");
   const changeSet = requireCorpus(evidence.changeSetCorpus, "change-set corpus");
   const gate = requireCorpus(evidence.gateIsolationCorpus, "gate-isolation corpus");
@@ -177,6 +181,7 @@ function childManifests(evidence: InstalledRuntimeEvidence): AcceptanceMatrixChi
   const lifecycle = requireCorpus(evidence.releaseLifecycleCorpus, "release-lifecycle corpus");
   const crash = requireCorpus(evidence.crashRestorationRetainedAuthorityCorpus, "crash-restoration corpus");
   const all = [
+    corpusManifest("version-contract-package", contract, contract.authoritySha256, contract.assertions),
     corpusManifest("public-wire", publicWire, publicWire.canonicalManifestSha256, publicWire.assertions),
     corpusManifest("change-set-submission", changeSet, changeSet.scenarioManifestSha256, changeSet.assertions),
     corpusManifest("gate-isolation", gate, gate.scenarioManifestSha256, gate.assertions),

@@ -1,0 +1,1006 @@
+{
+  "contractVersion": "1.0.0",
+  "roots": [
+    {
+      "path": "schema/v1/vault-change-set-status.input.schema.json",
+      "tool": "vault_change_set_status",
+      "direction": "input",
+      "sha256": "033c483d575f515c6ba4cc520ebf13789b700040380b0b0a5a6703a58038031c"
+    },
+    {
+      "path": "schema/v1/vault-change-set-status.output.schema.json",
+      "tool": "vault_change_set_status",
+      "direction": "output",
+      "sha256": "e9d13e6436736bd90646896a633b8a33a0f84d49d14dbc8867931f2fc5220706"
+    },
+    {
+      "path": "schema/v1/vault-change-set-submit.input.schema.json",
+      "tool": "vault_change_set_submit",
+      "direction": "input",
+      "sha256": "5816a5af9c203ad63af56c7f0ee4a42a8f19a9f0f9d41fbf93c1cf8b232630e2"
+    },
+    {
+      "path": "schema/v1/vault-change-set-submit.output.schema.json",
+      "tool": "vault_change_set_submit",
+      "direction": "output",
+      "sha256": "141b201701fc0e9604380dab87246359686ff72286ac915bf4b330d7ce73b59f"
+    },
+    {
+      "path": "schema/v1/vault-continue.input.schema.json",
+      "tool": "vault_continue",
+      "direction": "input",
+      "sha256": "1814e2ac0fdf62e1944d0ee3be9597c486ba643a5d05d961e8f07d8177f867f2"
+    },
+    {
+      "path": "schema/v1/vault-continue.output.schema.json",
+      "tool": "vault_continue",
+      "direction": "output",
+      "sha256": "41db1c47b23834d76db450d726ed45adeeba46cb965c9df2ff677fbaa62ee346"
+    },
+    {
+      "path": "schema/v1/vault-discover.input.schema.json",
+      "tool": "vault_discover",
+      "direction": "input",
+      "sha256": "c013a141c127765034484209bd4d12df0df468f4a1ec38c9c39436a50d940dc2"
+    },
+    {
+      "path": "schema/v1/vault-discover.output.schema.json",
+      "tool": "vault_discover",
+      "direction": "output",
+      "sha256": "5976162d8086701506ab7f12e63fcbb43cc12e24daa717d07f7660cf57482c90"
+    },
+    {
+      "path": "schema/v1/vault-health.input.schema.json",
+      "tool": "vault_health",
+      "direction": "input",
+      "sha256": "07afa75e907e920f15c9c0e8818d7a18fb7997a5a2b3b932ab6ca9b3072c1925"
+    },
+    {
+      "path": "schema/v1/vault-health.output.schema.json",
+      "tool": "vault_health",
+      "direction": "output",
+      "sha256": "74a92e5dfdc9eef52c72b36d1b251a096f888dfb9a102c2783a52802cde78d94"
+    },
+    {
+      "path": "schema/v1/vault-read.input.schema.json",
+      "tool": "vault_read",
+      "direction": "input",
+      "sha256": "1bd92a622636a40835e8eafd76f3da74b550c735981e768e849355a3df6779c1"
+    },
+    {
+      "path": "schema/v1/vault-read.output.schema.json",
+      "tool": "vault_read",
+      "direction": "output",
+      "sha256": "6b928ba3ab7134e25992bf11ebae5c0c44d28fc4d1c5409333fcc99edaa937cf"
+    }
+  ],
+  "sharedDefinitions": [
+    {
+      "root": "schema/v1/vault-change-set-status.output.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-change-set-status.output.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-change-set-status.output.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-change-set-status.output.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-change-set-status.output.schema.json",
+      "pointer": "#/$defs/__schema4"
+    },
+    {
+      "root": "schema/v1/vault-change-set-status.output.schema.json",
+      "pointer": "#/$defs/__schema5"
+    },
+    {
+      "root": "schema/v1/vault-change-set-status.output.schema.json",
+      "pointer": "#/$defs/__schema6"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema4"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema5"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema6"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema7"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema8"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema9"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema10"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.input.schema.json",
+      "pointer": "#/$defs/__schema11"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.output.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.output.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.output.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.output.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.output.schema.json",
+      "pointer": "#/$defs/__schema4"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.output.schema.json",
+      "pointer": "#/$defs/__schema5"
+    },
+    {
+      "root": "schema/v1/vault-change-set-submit.output.schema.json",
+      "pointer": "#/$defs/__schema6"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema4"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema5"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema6"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema7"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema8"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema9"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema10"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema11"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema12"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema13"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema14"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema15"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema16"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema17"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema18"
+    },
+    {
+      "root": "schema/v1/vault-continue.output.schema.json",
+      "pointer": "#/$defs/__schema19"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema4"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema5"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema6"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema7"
+    },
+    {
+      "root": "schema/v1/vault-discover.input.schema.json",
+      "pointer": "#/$defs/__schema8"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema4"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema5"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema6"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema7"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema8"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema9"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema10"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema11"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema12"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema13"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema14"
+    },
+    {
+      "root": "schema/v1/vault-discover.output.schema.json",
+      "pointer": "#/$defs/__schema15"
+    },
+    {
+      "root": "schema/v1/vault-health.output.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-health.output.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-health.output.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-health.output.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-read.input.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-read.input.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-read.input.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema0"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema1"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema2"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema3"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema4"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema5"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema6"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema7"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema8"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema9"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema10"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema11"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema12"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema13"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema14"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema15"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema16"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema17"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema18"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema19"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema20"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema21"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema22"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema23"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema24"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema25"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema26"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema27"
+    },
+    {
+      "root": "schema/v1/vault-read.output.schema.json",
+      "pointer": "#/$defs/__schema28"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "fixtures/v1/invalid/incompatible-leaks-vault.json",
+      "valid": false,
+      "sha256": "31fe68b1859af60aa7bf8bb34a3904d6d4e171b7d329ee607f4c2910d496b5d9",
+      "fields": [
+        {
+          "pointer": "",
+          "tool": "vault_health",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/invalid/unknown-root-field.json",
+      "valid": false,
+      "sha256": "8110f0a9f247cc43e33180c1fc73210688caa7793a81e692432e9015ae14e48c",
+      "fields": [
+        {
+          "pointer": "",
+          "tool": "vault_health",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/valid/incompatible.json",
+      "valid": true,
+      "sha256": "6485104343a06b729e9e1faab410cf53862d3a7fb2e549d6a7f80983a160b88c",
+      "fields": [
+        {
+          "pointer": "",
+          "tool": "vault_health",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/valid/observed.json",
+      "valid": true,
+      "sha256": "653c31485f693a7c12b42419c564a75586c4e0b4c6fc6402aafa1e4b0eba631a",
+      "fields": [
+        {
+          "pointer": "",
+          "tool": "vault_health",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-change-set/invalid/dependency-overlap.json",
+      "valid": false,
+      "sha256": "3e26800cd46148decc0ca6b9cbbe4f06932cf8b968776421d5c21d9a09b2a48a",
+      "fields": [
+        {
+          "pointer": "/submitInput",
+          "tool": "vault_change_set_submit",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-change-set/invalid/dual-status-selector.json",
+      "valid": false,
+      "sha256": "985109cc3bba073d965aefdcfe0fff75be347ad55d88de446852aab1336e3c68",
+      "fields": [
+        {
+          "pointer": "/statusInput",
+          "tool": "vault_change_set_status",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-change-set/invalid/generic-message.json",
+      "valid": false,
+      "sha256": "c91e102be442fa837ae59894306b1abb13d283e0c3b13f5f7e6f1e29cf461b14",
+      "fields": [
+        {
+          "pointer": "/submitResult",
+          "tool": "vault_change_set_submit",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-change-set/valid/found-rejection.json",
+      "valid": true,
+      "sha256": "354f6bfd9f366ae76c70fce7bbeb8c12edf1f8aca777855e3081791687d4163d",
+      "fields": [
+        {
+          "pointer": "/statusInput",
+          "tool": "vault_change_set_status",
+          "direction": "input"
+        },
+        {
+          "pointer": "/statusResult",
+          "tool": "vault_change_set_status",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-change-set/valid/registered.json",
+      "valid": true,
+      "sha256": "1288d2bf426e3784c3f06c12300400e3c151086f47e0d2358dce117d0b349542",
+      "fields": [
+        {
+          "pointer": "/submitInput",
+          "tool": "vault_change_set_submit",
+          "direction": "input"
+        },
+        {
+          "pointer": "/submitResult",
+          "tool": "vault_change_set_submit",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/invalid/complete-with-token.json",
+      "valid": false,
+      "sha256": "0108479c0d18062e6020920a4dd4ed98ed06f9228126f549fe26c8f927dec4d0",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/invalid/input-with-query-change.json",
+      "valid": false,
+      "sha256": "61fc316fd56fa8128847421b6c067cc944ef3834c59b3db6db9d171c7f92be65",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_continue",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/invalid/item-complete-before-end.json",
+      "valid": false,
+      "sha256": "a5c59ed1a29926f76f16d6ae0ac66c4ed64c06dc45b3dec8e6abcee1fdef98d0",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/invalid/wrong-byte-length.json",
+      "valid": false,
+      "sha256": "0cce4b359c891e4c9e773791757c0d95d2c70fc4ab929377e85541ae4c3aea80",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/valid/final-page.json",
+      "valid": true,
+      "sha256": "6366a5739400acdc336c80acd23d2dbcc1ab05da9f382d13c9e4030b969cfdc9",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/valid/item-chunk.json",
+      "valid": true,
+      "sha256": "6eef4a67e5ab81b22682cfc8e6f0327bf4b6d752fafe5c9f6e973c7e34e7599c",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/valid/operationally-blocked.json",
+      "valid": true,
+      "sha256": "049926bf8a196c46026ae42fe8cafd10bf6aa91a13801ffc63c2c3709b11fa55",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/valid/unavailable.json",
+      "valid": true,
+      "sha256": "7851ef8d77d4d501dde9d6e7d70d46fc7588a5c5bc8414fbe7db7942bc6ba86e",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-continue/valid/utf8-page.json",
+      "valid": true,
+      "sha256": "4969f1b5b758855e086ee3dfe81960ca4d82e692b93d5f29cc875790b53e010d",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_continue",
+          "direction": "input"
+        },
+        {
+          "pointer": "/result",
+          "tool": "vault_continue",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/invalid/ambiguous-frontmatter-operator.json",
+      "valid": false,
+      "sha256": "f818fa22dd787a94ab5f30e78945290bbefd328ef1da454475afb27ccef6ff48",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/invalid/disabled-reference-profile.json",
+      "valid": false,
+      "sha256": "4deb5240abd1fd8f9cb1c05bd5c7ce7d28a8d317d48401e997dc12f288f6fba9",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/invalid/invalid-regex.json",
+      "valid": false,
+      "sha256": "68ee77daa1bb24a88ae5e824b51ccf78b9817c573c2a678bf45360836502f6b8",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/invalid/mixed-path-operators.json",
+      "valid": false,
+      "sha256": "6bf6849c56a59f3adbeb640505a01befa559cd14c17e7e7c21225ff2798ea078",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/invalid/public-snapshot-handle.json",
+      "valid": false,
+      "sha256": "84552be7367ecd9169c3d2d943fad3438220d33f75004cd7d8ee4c55ad66cec2",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_discover",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/invalid/uppercase-content-version.json",
+      "valid": false,
+      "sha256": "303d668d2fc365dd9e010f33ae761475bfb8eaa60e0d885931f8b1be937486c7",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_discover",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/valid/literal-result.json",
+      "valid": true,
+      "sha256": "7fa27c918ace1ba5c0ad3a2cefcd19865b29cdac01b4b7b8c018ec3181daad1a",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        },
+        {
+          "pointer": "/result",
+          "tool": "vault_discover",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/valid/no-match.json",
+      "valid": true,
+      "sha256": "a71113050167fd5347e428988d15736bda91544fbec37143a79af7a2210b7f00",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        },
+        {
+          "pointer": "/result",
+          "tool": "vault_discover",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/valid/regex-descending-page.json",
+      "valid": true,
+      "sha256": "a314d40c610208f896045da73455217a1709dca527f587e27f8bf12afa3d3074",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        },
+        {
+          "pointer": "/result",
+          "tool": "vault_discover",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-discover/valid/structured-graph-projection.json",
+      "valid": true,
+      "sha256": "6532e55090c94890362eaf730ea26d68b324af07a8738c1c7c930e0a17bee3d5",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_discover",
+          "direction": "input"
+        },
+        {
+          "pointer": "/result",
+          "tool": "vault_discover",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/invalid/non-canonical-path.json",
+      "valid": false,
+      "sha256": "6a808439ef4c107ceb0ece9b2463f862dcea8ae4bb42126d246991a77e67e41d",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_read",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/invalid/non-contiguous-groups.json",
+      "valid": false,
+      "sha256": "e183df5588e5d4e6a92d0f814ec57e64aad797517f07707e88d15c4408ba7a0d",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_read",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/invalid/section-without-occurrence.json",
+      "valid": false,
+      "sha256": "3012c3e41a6c25ead872d348c357c755710263fbb6a1cd2241249a77224e00a6",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_read",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/invalid/uppercase-content-version.json",
+      "valid": false,
+      "sha256": "349838c67940bdf109b250100c3a70c69a8a28216da1aee30d6b6ce0dc54305e",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_read",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/valid/continued-heterogeneous.json",
+      "valid": true,
+      "sha256": "4a9ceaa3981576e1b20fcf309aa92d0104530c8307dbad1543290cbe3b466ff4",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_read",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/valid/grouping-required.json",
+      "valid": true,
+      "sha256": "9f9e0af83ae80002681e90b7dbd4379fecda07530d0884301d86559cdcfecb73",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_read",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/valid/operationally-blocked.json",
+      "valid": true,
+      "sha256": "20cbd2ed7f5fd503f22b4cddd039e419718f046151ce553b0756772688f5211d",
+      "fields": [
+        {
+          "pointer": "/result",
+          "tool": "vault_read",
+          "direction": "output"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/v1/vault-read/valid/ordered-mixed.json",
+      "valid": true,
+      "sha256": "436a528ebd9553aaebddbc0f6b3bdbd658200eed544bccd75bbc7984c1933566",
+      "fields": [
+        {
+          "pointer": "/input",
+          "tool": "vault_read",
+          "direction": "input"
+        },
+        {
+          "pointer": "/result",
+          "tool": "vault_read",
+          "direction": "output"
+        }
+      ]
+    }
+  ],
+  "scenarios": [
+    { "id": "matching-identity-observed-health", "authority": "runtime", "execution": "identity-health" },
+    { "id": "missing-identity-rejected", "authority": "runtime", "execution": "missing-identity" },
+    { "id": "mismatched-identity-rejected", "authority": "runtime", "execution": "wrong-identity" },
+    { "id": "schema-compatible-incompatible-health", "authority": "contract-and-runtime", "execution": "dependent-corpus", "requiredCorpus": "installed-incompatible" },
+    { "id": "two-vault-coexistence", "authority": "installed-runtime", "execution": "dependent-corpus", "requiredCorpus": "gate-isolation" },
+    { "id": "structured-compatibility-identity", "authority": "contract-and-runtime", "execution": "structured-text" },
+    { "id": "byte-exact-ordered-mixed-read", "authority": "contract-and-runtime", "execution": "mixed-read" },
+    { "id": "section-occurrence-no-fallback", "authority": "contract-and-runtime", "execution": "section-no-fallback" },
+    { "id": "exact-read-limit-and-grouping", "authority": "contract-and-runtime", "execution": "limit-grouping" },
+    { "id": "content-read-operational-block", "authority": "runtime", "execution": "dependent-corpus", "requiredCorpus": "installed-gates" },
+    { "id": "invalid-utf8-no-trusted-result", "authority": "runtime", "execution": "invalid-utf8" },
+    { "id": "change-set-same-key-replay", "authority": "contract-and-runtime", "execution": "change-set-program" },
+    { "id": "change-set-key-conflict", "authority": "contract-and-runtime", "execution": "change-set-program" },
+    { "id": "change-set-preflight-rejection", "authority": "contract-and-runtime", "execution": "change-set-program" },
+    { "id": "change-set-uncertain-response-recovery", "authority": "runtime", "execution": "uncertain-response" },
+    { "id": "change-set-seven-day-retention", "authority": "runtime", "execution": "dependent-corpus", "requiredCorpus": "installed-retention" },
+    { "id": "frozen-byte-exact-continuation", "authority": "contract-and-runtime", "execution": "frozen-continuation" },
+    { "id": "single-use-client-bound-sliding-continuation", "authority": "runtime", "execution": "client-bound-sliding" },
+    { "id": "continuation-quota-and-lifecycle-cleanup", "authority": "runtime", "execution": "quota-cleanup" },
+    { "id": "continuation-operational-gate-precedence", "authority": "contract-and-runtime", "execution": "dependent-corpus", "requiredCorpus": "installed-gates" },
+    { "id": "structured-graph-discovery-composition", "authority": "contract-and-installed-runtime", "execution": "structured-graph" },
+    { "id": "registered-reference-byte-verification", "authority": "installed-runtime", "execution": "dependent-corpus", "requiredCorpus": "registered-reference-rewrite" },
+    { "id": "successor-search-snapshot-graph-evidence", "authority": "installed-runtime", "execution": "dependent-corpus", "requiredCorpus": "semantic-evidence-search-snapshot" }
+  ]
+}

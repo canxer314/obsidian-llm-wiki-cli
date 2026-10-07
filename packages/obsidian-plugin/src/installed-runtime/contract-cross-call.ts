@@ -1,0 +1,269 @@
+import { createHash } from "node:crypto";
+import { request } from "node:http";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import * as contract from "@llm-wiki/vault-contracts";
+
+import { ContractPackageCorpusError, contractDigest, type ContractToolName, type VersionContractPackage } from "./contract-package-corpus.js";
+
+export interface ContractCrossCallEvidence {
+  readonly scenarioId: string;
+  readonly authoritySha256: string;
+  readonly observations: readonly { sequence: number; name: string; requestSha256: string; responseSha256: string; facts: Readonly<Record<string, string | number | boolean>> }[];
+  readonly cleanup: { readonly sessionsClosed: boolean };
+  readonly verdict: "passed" | "blocked";
+  readonly requiredCorpus: string | null;
+}
+const executedCrossCalls = new WeakMap<object, { endpoint: string; vaultIdSha256: string; snapshotSha256: string }>();
+export const isExecutedContractCrossCallEvidence = (value: unknown, endpoint: string, vaultIdSha256: string): value is ContractCrossCallEvidence => {
+  if (typeof value !== "object" || value === null) return false;
+  const binding = executedCrossCalls.get(value);
+  return binding?.endpoint === endpoint && binding.vaultIdSha256 === vaultIdSha256 && binding.snapshotSha256 === contractDigest(value);
+};
+const contractDigestBytes = (content: string): string => createHash("sha256").update(Buffer.from(content, "utf8")).digest("hex");
+const results = {
+  vault_health: contract.parseHealthResult,
+  vault_discover: contract.parseDiscoverResult,
+  vault_read: contract.parseReadToolResult,
+  vault_continue: contract.parseContinueResult,
+  vault_change_set_submit: contract.parseChangeSetSubmitResult,
+  vault_change_set_status: contract.parseChangeSetStatusResult,
+};
+
+/** A standalone scenario executor: no local authority actions, no manufactured installed proofs. */
+export async function runContractCrossCallScenario(options: {
+  readonly authority: VersionContractPackage;
+  readonly scenarioId: string;
+  readonly endpoint: URL;
+  readonly expectedVaultId: string;
+  readonly seedNotes?: readonly { path: string; content: string }[];
+  readonly invalidUtf8Path?: string;
+  readonly readFixtureBytes?: (path: string) => Promise<Uint8Array | null>;
+  readonly continuationTiming?: "full-real-time" | "binding-only";
+}): Promise<ContractCrossCallEvidence> {
+  const scenario = options.authority.scenarios.find(s => s.id === options.scenarioId);
+  if (scenario === undefined) throw new ContractPackageCorpusError("Unknown cross-call scenario");
+  if (options.endpoint.protocol !== "http:" || options.endpoint.hostname !== "127.0.0.1" || options.endpoint.pathname !== "/mcp" || options.expectedVaultId.length === 0) throw new ContractPackageCorpusError("Cross-call requires identity-bound loopback MCP");
+  const observations: ContractCrossCallEvidence["observations"][number][] = [];
+  const clients: Client[] = [];
+  const observe = (name: string, input: unknown, output: unknown, facts: Record<string, string | number | boolean>): void => { observations.push({ sequence: observations.length + 1, name, requestSha256: contractDigest(input), responseSha256: contractDigest(output), facts }); };
+  const connect = async (): Promise<Client> => {
+    const client = new Client({ name: "contract-cross-call", version: options.authority.contractVersion }); clients.push(client);
+    await client.connect(new StreamableHTTPClientTransport(options.endpoint, { requestInit: { headers: { "X-Expected-Vault-ID": options.expectedVaultId } } }));
+    return client;
+  };
+  const call = async (client: Client, tool: ContractToolName, arguments_: Record<string, unknown>): Promise<unknown> => {
+    const raw = await client.callTool({ name: tool, arguments: arguments_ });
+    const parsed = results[tool](raw.structuredContent);
+    const text = Array.isArray(raw.content) ? raw.content.filter(item => item.type === "text") : [];
+    if (text.length !== 1 || text[0]?.text !== JSON.stringify(parsed) || contractDigest(parsed) !== contractDigest(raw.structuredContent)) throw new ContractPackageCorpusError("Cross-call representation mismatch");
+    observe(tool, arguments_, parsed, { schemaValid: true, structuredTextIdentical: true, isError: raw.isError === true });
+    return parsed;
+  };
+  let requiredCorpus: string | null = null;
+  try {
+    switch (scenario.execution) {
+      case "identity-health": {
+        const value = contract.parseHealthResult(await call(await connect(), "vault_health", {}));
+        if (value.outcome !== "observed" || value.vault.id !== options.expectedVaultId || value.listener.port !== Number(options.endpoint.port)) throw new ContractPackageCorpusError("Cross-call health identity mismatch");
+        observe("identity-bound-health", {}, value, { identityMatched: true, listenerMatched: true }); break;
+      }
+      case "missing-identity":
+      case "wrong-identity": {
+        const headers = scenario.execution === "missing-identity" ? {} : { "X-Expected-Vault-ID": options.expectedVaultId + "-wrong" };
+        const requests = [{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, ...options.authority.roots.filter(root => root.direction === "input").map(root => ({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: root.tool, arguments: {} } }))];
+        for (const message of requests) {
+          const status = await new Promise<number>((resolve, reject) => {
+            const req = request(options.endpoint, { method: "POST", headers: { "Content-Type": "application/json", ...headers } }, response => { response.resume(); response.once("end", () => resolve(response.statusCode ?? 0)); response.once("error", reject); });
+            req.setTimeout(10_000, () => req.destroy(new Error("Identity probe timeout"))); req.once("error", reject); req.end(JSON.stringify(message));
+          });
+          if (status !== 403) throw new ContractPackageCorpusError("Identity mismatch did not reject before dispatch");
+          observe(message.method, message, { status }, { status, rejectedBeforeDispatch: true });
+        }
+        break;
+      }
+      case "structured-text": {
+        await call(await connect(), "vault_health", {}); break;
+      }
+      case "section-no-fallback": {
+        const args = { items: [{ kind: "section", path: "Notes/Welcome.md", hierarchy: ["Installed Runtime Harness"], occurrence: 999 }] };
+        const result = contract.parseReadToolResult(await call(await connect(), "vault_read", args));
+        if (!("outcome" in result) || result.outcome !== "items" || result.items.length !== 1 || result.items[0]?.outcome !== "not_satisfied") throw new ContractPackageCorpusError("Section occurrence fell back");
+        observe("no-section-fallback", args, result, { noFallback: true }); break;
+      }
+      case "change-set-program": {
+        const manifest = JSON.parse(await readFile(join(options.authority.packageRoot, "fixtures/v1/scenarios.json"), "utf8")) as { scenarios: { id: string; fixture?: string }[] };
+        const fixture = manifest.scenarios.find(s => s.id === scenario.id)?.fixture;
+        if (fixture === undefined) throw new ContractPackageCorpusError("Cross-call program missing");
+        const program = JSON.parse(await readFile(join(options.authority.packageRoot, "fixtures/v1", fixture), "utf8")) as { steps: { call: string; arguments: Record<string, unknown>; capture?: string; expect: { outcome?: string; state?: string; sameChangeSetAs?: string; code?: string } }[] };
+        const captured = new Map<string, string>(); const client = await connect();
+        for (const step of program.steps) {
+          const tool = step.call === "submit" ? "vault_change_set_submit" : "vault_change_set_status";
+          const value = await call(client, tool, step.arguments) as { outcome?: string; lookup?: string; code?: string; changeSet?: { changeSetId: string; state: string } };
+          if (step.expect.outcome !== undefined && value.outcome !== step.expect.outcome || step.expect.code !== undefined && value.code !== step.expect.code || step.expect.sameChangeSetAs !== undefined && value.changeSet?.changeSetId !== captured.get(step.expect.sameChangeSetAs)) throw new ContractPackageCorpusError("Cross-call program behavior mismatch");
+          // Installed execution can terminalize before the response; never demand a synthetic in_progress state.
+          if (step.capture !== undefined && value.changeSet !== undefined) captured.set(step.capture, value.changeSet.changeSetId);
+          observe("program-expectation", step.expect, value, { expectationMatched: true });
+        }
+        break;
+      }
+      case "frozen-continuation": {
+        const source = options.seedNotes?.find(note => note.path === "Notes/Transport.md");
+        if (source === undefined) throw new ContractPackageCorpusError("Frozen scenario needs deterministic source bytes");
+        const client = await connect();
+        const first = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: source.path }] }));
+        if (!("outcome" in first) || first.outcome !== "page" || first.continuation === null) throw new ContractPackageCorpusError("Frozen scenario did not issue transport pages");
+        const changed = source.content + "\ncontract-frozen-successor\n";
+        const args = { submissionKey: "contract-frozen-" + options.authority.manifestSha256.slice(0, 12), operations: [{ operationId: "change-source", kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(source.content), edit: { kind: "replace_whole", replacement: changed } }] };
+        const submit = contract.parseChangeSetSubmitResult(await call(client, "vault_change_set_submit", args));
+        if (submit.outcome !== "registered" || submit.changeSet.state === "intent_not_applied") { requiredCorpus = "mutation-executor"; break; }
+        let terminal: string = submit.changeSet.state;
+        const deadline = Date.now() + 30_000;
+        while (terminal === "in_progress" && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+          const status = contract.parseChangeSetStatusResult(await call(client, "vault_change_set_status", { submissionKey: args.submissionKey }));
+          if (status.lookup === "found") terminal = status.changeSet.state;
+        }
+        if (terminal !== "intent_applied") throw new ContractPackageCorpusError("Frozen source mutation did not apply");
+        const successor = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "metadata", path: source.path }] }));
+        if (!("outcome" in successor) || successor.outcome !== "items" || successor.items[0]?.outcome !== "satisfied" || successor.items[0].result.contentVersion !== "sha256:" + contractDigestBytes(changed)) throw new ContractPackageCorpusError("Frozen source bytes were not changed");
+        const pages = [first]; let token: string | null = first.continuation;
+        while (token !== null) {
+          const page = contract.parseContinueResult(await call(client, "vault_continue", { continuation: token }));
+          if (!("outcome" in page) || page.outcome !== "page") throw new ContractPackageCorpusError("Frozen chain lost after mutation");
+          pages.push(page); token = page.continuation;
+        }
+        let offset = 0; let reconstructed = "";
+        for (const page of pages) for (const item of page.items) {
+          if (!("content" in item) || !("start" in item) || item.start !== offset || Buffer.byteLength(item.content, "utf8") !== item.end - item.start || Buffer.byteLength(JSON.stringify({ structuredContent: page, content: [{ type: "text", text: JSON.stringify(page) }], isError: false })) > 262_144) throw new ContractPackageCorpusError("Frozen continuation byte ranges or page bound invalid");
+          offset = item.end; reconstructed += item.content;
+        }
+        if (reconstructed !== source.content) throw new ContractPackageCorpusError("Frozen continuation changed with source bytes");
+        observe("frozen-after-source-change", { beforeSha256: contractDigestBytes(source.content) }, { afterSha256: contractDigestBytes(changed), reconstructedSha256: contractDigestBytes(reconstructed) }, { sourceChanged: true, exactFrozenBytes: true, pageCount: pages.length, sizeBytes: offset });
+        const restore = { submissionKey: args.submissionKey + "-restore", operations: [{ operationId: "restore-source", kind: "edit_body", path: source.path, targetVersion: "sha256:" + contractDigestBytes(changed), edit: { kind: "replace_whole", replacement: source.content } }] };
+        await call(client, "vault_change_set_submit", restore);
+        const restoreDeadline = Date.now() + 30_000;
+        while (true) {
+          const status = contract.parseChangeSetStatusResult(await call(client, "vault_change_set_status", { submissionKey: restore.submissionKey }));
+          if (status.lookup === "found" && status.changeSet.state === "intent_applied") break;
+          if (Date.now() >= restoreDeadline) throw new ContractPackageCorpusError("Frozen source cleanup unconfirmed");
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        break;
+      }
+      case "client-bound-sliding": {
+        const client = await connect(); const other = await connect();
+        const start = Date.now();
+        const source = options.seedNotes?.find(note => note.path === "Notes/GroupLarge.md");
+        if (source === undefined) throw new ContractPackageCorpusError("Sliding scenario requires a multi-page seed");
+        const first = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: source.path }] }));
+        if (!("outcome" in first) || first.outcome !== "page" || first.continuation === null) throw new ContractPackageCorpusError("Client-bound scenario did not issue a token");
+        const token = first.continuation;
+        const wrong = contract.parseContinueResult(await call(other, "vault_continue", { continuation: token }));
+        if (!("code" in wrong) || wrong.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Wrong client consumed another session's token");
+        observe("wrong-client-token-rejected", { tokenSha256: contractDigest(token) }, wrong, { wrongClientRejected: true });
+        if (options.continuationTiming !== "binding-only") await new Promise(resolve => setTimeout(resolve, 600_000));
+        const replacementIssuedAt = Date.now();
+        const second = contract.parseContinueResult(await call(client, "vault_continue", { continuation: token }));
+        if (!("outcome" in second) || second.outcome !== "page" || second.continuation === null) throw new ContractPackageCorpusError("Wrong-client request destroyed owner token or multi-page fixture incomplete");
+        observe("original-client-token-preserved", { tokenSha256: contractDigest(token) }, second, { ownerTokenPreserved: true, elapsedMs: replacementIssuedAt - start });
+        const replay = contract.parseContinueResult(await call(client, "vault_continue", { continuation: token }));
+        if (!("code" in replay) || replay.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Consumed token replay accepted");
+        let next: string | null = second.continuation;
+        if (options.continuationTiming === "binding-only") requiredCorpus = "continuation-expiry-sliding-time";
+        else {
+          // Beyond the first token's real 15-minute lifetime, but within the replacement's lifetime.
+          await new Promise(resolve => setTimeout(resolve, 310_000));
+          const sliding = contract.parseContinueResult(await call(client, "vault_continue", { continuation: next }));
+          if (!("outcome" in sliding) || sliding.outcome !== "page" || Date.now() - start < 900_000 || Date.now() - replacementIssuedAt >= 900_000) throw new ContractPackageCorpusError("Replacement did not receive an independent sliding lifetime");
+          observe("real-time-sliding-lifetime", {}, sliding, { originalAgeMs: Date.now() - start, replacementAgeMs: Date.now() - replacementIssuedAt, replacementSurvivesOriginalExpiry: true });
+          next = sliding.continuation;
+          const expiring = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: source.path }] }));
+          if (!("outcome" in expiring) || expiring.outcome !== "page" || expiring.continuation === null) throw new ContractPackageCorpusError("Expiry token not issued");
+          const expiryStart = Date.now(); await new Promise(resolve => setTimeout(resolve, 901_000));
+          const expired = contract.parseContinueResult(await call(client, "vault_continue", { continuation: expiring.continuation }));
+          if (!("code" in expired) || expired.code !== "continuation_unavailable" || Date.now() - expiryStart < 900_000) throw new ContractPackageCorpusError("Real-time expired token accepted");
+          observe("real-time-token-expiry", {}, expired, { elapsedMs: Date.now() - expiryStart, expiredRejected: true });
+          // Any earlier residual chain also expired during this wait; session close releases remaining retained bytes.
+          next = null;
+        }
+        while (next !== null) {
+          const page = contract.parseContinueResult(await call(client, "vault_continue", { continuation: next }));
+          if (!("outcome" in page) || page.outcome !== "page") throw new ContractPackageCorpusError("Client-bound cleanup did not drain token");
+          next = page.continuation;
+        }
+        break;
+      }
+      case "mixed-read": {
+        const paths = ["Notes/Bom.md", "Notes/CjkAstral.md", "Notes/Bom.md"];
+        const expected = paths.map(path => options.seedNotes?.find(note => note.path === path)?.content);
+        if (expected.some(content => content === undefined)) throw new ContractPackageCorpusError("Mixed-read requires byte-exact seed");
+        const args = { items: [{ kind: "metadata", path: paths[0] }, ...paths.map(path => ({ kind: "exact", path }))] };
+        const value = contract.parseReadToolResult(await call(await connect(), "vault_read", args));
+        if (!("outcome" in value) || value.outcome !== "items" || value.items.length !== 4) throw new ContractPackageCorpusError("Mixed read index lost");
+        for (let index = 0; index < paths.length; index++) {
+          const item = value.items[index + 1]; const content = expected[index]!;
+          if (item?.outcome !== "satisfied" || item.result.kind !== "exact" || item.result.index !== index + 1 || item.result.path !== paths[index] || item.result.content !== content || item.result.sizeBytes !== Buffer.byteLength(content) || item.result.contentVersion !== "sha256:" + contractDigestBytes(content)) throw new ContractPackageCorpusError("Mixed read bytes/index/version mismatch");
+        }
+        observe("ordered-duplicate-exact-bytes", args, value, { duplicatePreserved: true, exactBytes: true, canonicalContentVersions: true }); break;
+      }
+      case "limit-grouping": {
+        const client = await connect();
+        const single = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/OverLimit.md" }] }));
+        if (!("outcome" in single) || single.outcome !== "items" || single.items[0]?.outcome !== "note_exceeds_exact_read_limit") throw new ContractPackageCorpusError("Exact-read limit not enforced");
+        const grouping = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }, { kind: "exact", path: "Notes/GroupLarge.md" }, { kind: "metadata", path: "Notes/Transport.md" }] }));
+        if (!("outcome" in grouping) || grouping.outcome !== "grouping_required" || grouping.suggestedGroups.length < 2 || grouping.suggestedGroups[0]?.startIndex !== 0 || grouping.suggestedGroups.at(-1)?.endIndexExclusive !== 3 || grouping.suggestedGroups.some((group, index) => group.exactReadBytes > 1_048_576 || index > 0 && grouping.suggestedGroups[index - 1]?.endIndexExclusive !== group.startIndex) || JSON.stringify(grouping).includes('"content"')) throw new ContractPackageCorpusError("Deterministic contiguous grouping not enforced");
+        observe("limit-and-contiguous-grouping", {}, grouping, { singleNoteRefused: true, noPartialContent: true, contiguousOrderedGroups: true }); break;
+      }
+      case "quota-cleanup": {
+        const client = await connect(); const tokens: string[] = [];
+        for (let index = 0; index < 8; index++) {
+          const page = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }] }));
+          if (!("outcome" in page) || page.outcome !== "page" || page.continuation === null) throw new ContractPackageCorpusError("Quota setup failed");
+          tokens.push(page.continuation);
+        }
+        const refused = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }] }));
+        if (!("code" in refused) || refused.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Ninth live chain accepted");
+        for (const initial of tokens) {
+          let token: string | null = initial;
+          while (token !== null) {
+            const page = contract.parseContinueResult(await call(client, "vault_continue", { continuation: token }));
+            if (!("outcome" in page) || page.outcome !== "page") throw new ContractPackageCorpusError("Quota refusal evicted live chain");
+            token = page.continuation;
+          }
+          const replay = contract.parseContinueResult(await call(client, "vault_continue", { continuation: initial }));
+          if (!("code" in replay) || replay.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Quota consumed token still live");
+        }
+        const next = contract.parseReadToolResult(await call(client, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }] }));
+        if (!("outcome" in next) || next.outcome !== "page" || next.continuation === null) throw new ContractPackageCorpusError("Completion did not release capacity");
+        await client.close();
+        const reopened = await connect();
+        const abandoned = contract.parseContinueResult(await call(reopened, "vault_continue", { continuation: next.continuation }));
+        if (!("code" in abandoned) || abandoned.code !== "continuation_unavailable") throw new ContractPackageCorpusError("Session teardown retained token authority");
+        const fresh = contract.parseReadToolResult(await call(reopened, "vault_read", { items: [{ kind: "exact", path: "Notes/Transport.md" }] }));
+        if (!("outcome" in fresh) || fresh.outcome !== "page") throw new ContractPackageCorpusError("New session lacks freed capacity");
+        observe("quota-preserved-and-session-capacity-released", {}, fresh, { eightChainsSurvived: true, ninthRejected: true, consumedReplayRejected: true, completionReleasedCapacity: true, closedSessionTokenRejected: true });
+        // Bridge teardown/8MiB/expiry/rejection cleanup require their own lifecycle proof.
+        requiredCorpus = "continuation-full-lifecycle-cleanup"; break;
+      }
+      case "invalid-utf8": {
+        if (options.invalidUtf8Path === undefined || options.readFixtureBytes === undefined) { requiredCorpus = "invalid-utf8-generated-fixture"; break; }
+        const bytes = await options.readFixtureBytes(options.invalidUtf8Path);
+        if (bytes === null) throw new ContractPackageCorpusError("Invalid UTF-8 fixture absent");
+        try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); throw new ContractPackageCorpusError("Invalid UTF-8 fixture is actually valid"); }
+        catch (error) { if (error instanceof ContractPackageCorpusError) throw error; }
+        const client = await connect(); const args = { items: [{ kind: "exact", path: options.invalidUtf8Path }] };
+        const raw = await client.callTool({ name: "vault_read", arguments: args });
+        if (raw.isError !== true || raw.structuredContent !== undefined) throw new ContractPackageCorpusError("Invalid UTF-8 became a trustworthy product result");
+        observe("invalid-utf8-untrusted-rejection", args, raw, { fixtureInvalidUtf8: true, noTrustedResult: true, notSatisfiedNotSubstituted: true }); break;
+      }
+      default: requiredCorpus = scenario.execution; break;
+      case "dependent-corpus": requiredCorpus = scenario.requiredCorpus; break;
+    }
+  } finally { await Promise.all(clients.map(client => client.close())); }
+  const evidence: ContractCrossCallEvidence = { scenarioId: scenario.id, authoritySha256: options.authority.manifestSha256, observations, cleanup: { sessionsClosed: true }, verdict: requiredCorpus === null ? "passed" : "blocked", requiredCorpus };
+  executedCrossCalls.set(evidence, { endpoint: options.endpoint.toString(), vaultIdSha256: contractDigest(options.expectedVaultId), snapshotSha256: contractDigest(evidence) });
+  return evidence;
+}
