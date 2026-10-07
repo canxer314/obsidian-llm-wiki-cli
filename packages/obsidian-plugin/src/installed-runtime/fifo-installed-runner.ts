@@ -16,7 +16,9 @@ import { appendFifoEvent, loadFifoEvents, fifoDigest, fifoReportSchema } from ".
 import { fifoCommandSchema, persistentFifoProofSchema, verifyFifoObservations, type FifoEntryIdentity } from "./fifo-observation.js";
 import type { InstalledCrashRestorationSliceOptions } from "./installed-crash-restoration-slice.js";
 
-export type InstalledFifoOptions = Omit<InstalledCrashRestorationSliceOptions, "crashPoint" | "mutationKind">;
+export type InstalledFifoOptions = Omit<InstalledCrashRestorationSliceOptions, "crashPoint" | "mutationKind" | "prepareAcceptanceDriver"> & {
+  readonly prepareAcceptanceDriver: (request: Parameters<InstalledCrashRestorationSliceOptions["prepareAcceptanceDriver"]>[0] & { readonly reportDirectory: string }) => ReturnType<InstalledCrashRestorationSliceOptions["prepareAcceptanceDriver"]>;
+};
 const targetPath = "FifoProof/Target.md";
 const dependencyPath = "FifoProof/Dependency.md";
 const derivedPath = "FifoProof/Derived.md";
@@ -52,7 +54,7 @@ export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOpt
     }
     await installCandidateBundle(options.candidate, vault.vaultPath, options.configDirectoryName);
     const driver = await options.prepareAcceptanceDriver({ vaultPath: vault.vaultPath, pluginId: options.candidate.identity.pluginId,
-      candidateBundleSha256: options.candidate.identity.bundleSha256, configDirectoryName: options.configDirectoryName ?? ".obsidian" });
+      candidateBundleSha256: options.candidate.identity.bundleSha256, configDirectoryName: options.configDirectoryName ?? ".obsidian", reportDirectory: options.reportDirectory });
     driverCleanup = driver.cleanup;
     let descriptor = driver.descriptor;
     if (descriptor.runId !== options.runId || descriptor.vaultPath !== resolve(vault.vaultPath) || descriptor.reportDirectory !== resolve(options.reportDirectory) ||
