@@ -130,6 +130,21 @@ export async function loadInstalledLocalOperatorReport(options: {
       throw new Error("Local operator rejected baseline changed journal facts");
     }
   }
+  if (report.action === "accept-recovery-baseline" && report.outcome === "accepted") {
+    if ([before, after].some(bundle => bundle.queueTimeline.some(queue => queue.currentExecutionAlias !== null) ||
+        bundle.changeSetOutcomes.some(entry => entry.executionPhase === "executing" || entry.state === "in_progress" && entry.executionPhase !== "queued"))) {
+      throw new Error("Local operator baseline cannot prove absence of in-flight execution");
+    }
+    const unproven = before.changeSetOutcomes.filter(entry => entry.state === "result_unproven");
+    type ValidFrame = Extract<StandardDiagnosticBundle["journal"]["frames"][number], { state: "valid" }>;
+    const frames: ValidFrame[] = [...before.journal.frames].filter((frame): frame is ValidFrame => frame.state === "valid");
+    const latest = frames.reduce<typeof frames[number] | undefined>((result, frame) =>
+      result === undefined || frame.sequence > result.sequence ? frame : result, undefined);
+    if (unproven.length !== 1 || unproven[0]!.executionPhase !== "terminal" ||
+        latest === undefined || latest.phase !== "FAILED" || latest.changeSetAlias !== unproven[0]!.changeSetAlias) {
+      throw new Error("Local operator baseline requires a unique associated terminal result_unproven and FAILED Journal");
+    }
+  }
   if (report.action === "accept-recovery-baseline" && report.outcome === "accepted" &&
       (before.health.recovery !== "blocked" || before.health.effectiveGate !== "recovery_blocked" ||
        before.journal.availability !== "available" ||
@@ -144,6 +159,19 @@ export async function loadInstalledLocalOperatorReport(options: {
       (after.health.write.state !== "paused" || after.health.write.pauseSource !== "manual" ||
        after.queueTimeline.some(queue => queue.currentExecutionAlias !== null))) {
     throw new Error("Local operator pause transition did not prove a drained manual pause");
+  }
+  if (report.action === "resume-writes" && report.outcome === "rejected" &&
+      (JSON.stringify(before.health) !== JSON.stringify(after.health))) {
+    throw new Error("Local operator rejected resume changed live recovery or write state");
+  }
+  if (report.action === "resume-writes" && report.outcome === "rejected") {
+    const journal = (bundle: StandardDiagnosticBundle) => ({ ...bundle.journal, frames: bundle.journal.frames.map(frame =>
+      frame.state === "valid" ? { slot: frame.slot, state: frame.state, checksum: frame.checksum, sequence: frame.sequence,
+        phase: frame.phase, frameSchemaVersion: frame.frameSchemaVersion } : frame) });
+    if (JSON.stringify(journal(before)) !== JSON.stringify(journal(after))) throw new Error("Local operator rejected resume changed journal facts");
+    const terminal = (bundle: StandardDiagnosticBundle) => bundle.changeSetOutcomes.map(entry => ({ enqueueSeq: entry.enqueueSeq,
+      state: entry.state, executionPhase: entry.executionPhase })).sort((a, b) => a.enqueueSeq - b.enqueueSeq);
+    if (JSON.stringify(terminal(before)) !== JSON.stringify(terminal(after))) throw new Error("Local operator rejected resume changed historical outcomes");
   }
   if (report.action === "resume-writes" && report.outcome === "accepted" &&
       (before.health.recovery !== "none" || before.health.effectiveGate === "upgrade_in_progress" ||
@@ -189,12 +217,15 @@ export async function waitForNextInstalledLocalControlReport(options: {
   readonly action: "pause-writes" | "accept-recovery-baseline" | "resume-writes";
   readonly consumedInvocationIds: readonly string[];
   readonly timeoutMs: number;
+  /** Read-only live invariants are checked even while a Primary Operator report is absent. */
+  readonly observeWhileWaiting?: () => Promise<void>;
 }): Promise<z.infer<typeof controlReportSchema> & { readonly before: StandardDiagnosticBundle; readonly after: StandardDiagnosticBundle }> {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
     throw new Error("Local Primary Operator report timeout must be a positive integer");
   }
   const deadline = Date.now() + options.timeoutMs;
   while (true) {
+    await options.observeWhileWaiting?.();
     const root = await validateLocalReportBinding(options);
     const candidates: Awaited<ReturnType<typeof waitForNextInstalledLocalControlReport>>[] = [];
     for (const filename of (await readdir(root)).filter(name => name.startsWith("local-write-control-") && name.endsWith(".json")).sort()) {
