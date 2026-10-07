@@ -20,6 +20,7 @@ import {
 } from "./acceptance-driver-protocol.js";
 import { createNoteCorpusProfile } from "../corpus/create-note-corpus.js";
 import { replaceExactCorpusProfile, replaceWholeCorpusProfile } from "../corpus/edit-body-corpus.js";
+import { copyAttachmentCorpusProfile, moveAttachmentCorpusProfile } from "../corpus/attachment-corpus.js";
 export { crashRestorationCommandSchema, installedCrashScenarios };
 export type { InstalledCrashPoint, InstalledCrashKind };
 
@@ -30,6 +31,15 @@ export function crashBoundaryPhase(point: InstalledCrashPoint): "PREPARED" | "CO
   return "PREPARED";
 }
 export function crashProfile(kind: InstalledCrashKind) {
+  if (kind === "copy_attachment" || kind === "move_attachment") {
+    const base = kind === "copy_attachment" ? copyAttachmentCorpusProfile() : moveAttachmentCorpusProfile();
+    const target = kind === "copy_attachment" ? "Copy" : "Move";
+    const destinationPath = `Corpus/Attachments/${target}-target/Nested/${target}-destination.bin`;
+    return { ...base, files: base.files.map(file => file.originalBytes === null ? { ...file, path: destinationPath } : file), buildSubmitInput: (seed: string) => {
+      const input = base.buildSubmitInput(seed);
+      return { ...input, operations: (input.operations as Record<string, unknown>[]).map(operation => ({ ...operation, destinationPath })) };
+    } };
+  }
   return kind === "create_note" ? createNoteCorpusProfile() : kind === "edit_body" ? replaceExactCorpusProfile() : replaceWholeCorpusProfile();
 }
 export function crashScenarioParts(scenario: CrashRestorationCommand["scenario"]): { kind: InstalledCrashKind; point: InstalledCrashPoint } {
@@ -87,8 +97,37 @@ export async function crashInventory(vaultPath: string, configDirectoryName = ".
 }
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)])) : value;
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+export function crashAttachmentDirectories(kind: InstalledCrashKind): readonly string[] {
+  if (kind !== "copy_attachment" && kind !== "move_attachment") return [];
+  const target = kind === "copy_attachment" ? "Copy" : "Move";
+  return [`Corpus/Attachments/${target}-target`, `Corpus/Attachments/${target}-target/Nested`];
+}
+
 export function verifyCrashInventory(before: readonly CrashInventoryEntry[], actual: readonly CrashInventoryEntry[], kind: InstalledCrashKind, state: "original" | "committed", point?: InstalledCrashPoint): void {
   const profile = crashProfile(kind);
+  if (kind === "copy_attachment" || kind === "move_attachment") {
+    let applied = state === "committed";
+    let directories = applied ? [...crashAttachmentDirectories(kind)] : [];
+    if (point?.startsWith("after_mutation:")) {
+      const index = Number(point.split(":")[1]);
+      applied = index === 2;
+      directories = crashAttachmentDirectories(kind).slice(0, index + 1);
+    }
+    if (point?.startsWith("after_rollback_mutation:")) {
+      const index = Number(point.split(":")[1]);
+      applied = false;
+      directories = crashAttachmentDirectories(kind).slice(0, Math.max(0, (kind === "copy_attachment" ? 3 : 2) - index));
+    }
+    const expected = before.filter(entry => !profile.files.some(file => file.path === entry.path));
+    for (const fixture of profile.files) {
+      const bytes = applied ? fixture.committedBytes : fixture.originalBytes;
+      if (bytes !== null) expected.push({ path: fixture.path, kind: "file", bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+    }
+    expected.push(...directories.map(path => ({ path, kind: "directory" as const })));
+    const sorted = (entries: readonly CrashInventoryEntry[]) => [...entries].sort((a, b) => a.path.localeCompare(b.path, "en"));
+    if (!same(sorted(expected), sorted(actual))) throw new Error("Installed crash whole-state inventory mismatch");
+    return;
+  }
   let expected = [...before];
   const fixture = profile.files[0]!;
   let committed = state === "committed";
@@ -118,6 +157,19 @@ export function verifyCrashPublicProof(record: unknown, beforeRecord: unknown, k
   const version = (bytes: Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   const effect = preview?.requestedEffects[0] as { operationId?: string; kind?: string; projectedOutcome?: string } | undefined;
   if (input !== undefined && effect?.operationId !== input.operations[0]?.operationId) throw new Error("Installed crash public proof targets another operation");
+  if (kind === "copy_attachment" || kind === "move_attachment") {
+    const typed = (bytes: Uint8Array | null) => bytes === null ? { kind: "absent" } : { kind: "attachment", sha256: createHash("sha256").update(bytes).digest("hex") };
+    const directories = crashAttachmentDirectories(kind);
+    const paths = [...directories.map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })), ...profile.files.map(file => ({ path: file.path, preState: typed(file.originalBytes), projectedFinalState: typed(file.committedBytes), projectedOutcome: same(typed(file.originalBytes), typed(file.committedBytes)) ? "unchanged" : "changed" }))].sort((a, b) => a.path.localeCompare(b.path, "en"));
+    const derived = directories.map(path => ({ operationId: `derived/${effect?.operationId}/directory/${path}`, causedByOperationId: effect?.operationId, kind: "create_directory", projectedOutcome: "changed" }));
+    if (effect?.kind !== kind || effect.projectedOutcome !== "changed" || typeof effect.operationId !== "string" || !same(preview?.paths, paths) || !same(preview?.derivedEffects, derived) || preview?.requestedEffects.length !== 1 || actual.changeSetId !== before.changeSetId || actual.state !== state || !same(actual.preview, preview)) throw new Error("Installed crash fixed fixture public proof mismatch");
+    if (state === "intent_applied") {
+      const effects = (items: readonly unknown[]) => items.map(raw => { const { projectedOutcome, ...rest } = raw as Record<string, unknown>; return { ...rest, outcome: projectedOutcome }; });
+      const finalPaths = paths.map(({ path, projectedOutcome, projectedFinalState }) => ({ path, outcome: projectedOutcome, finalState: projectedFinalState }));
+      if (!same(actual.requestedEffects, effects(preview.requestedEffects)) || !same(actual.derivedEffects, effects(derived)) || !same(actual.paths, finalPaths)) throw new Error("Installed crash complete public proof mismatch");
+    }
+    return;
+  }
   const paths = [...(kind === "create_note" ? ["Corpus", "Corpus/Notes"].map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })) : []), { path: fixture.path, preState: fixture.originalBytes === null ? { kind: "absent" } : { kind: "markdown", contentVersion: version(fixture.originalBytes) }, projectedFinalState: { kind: "markdown", contentVersion: version(fixture.committedBytes!) }, projectedOutcome: "changed" }];
   const derived = kind === "create_note" ? ["Corpus", "Corpus/Notes"].map(path => ({ operationId: `derived/${effect?.operationId}/directory/${path}`, causedByOperationId: effect?.operationId, kind: "create_directory", projectedOutcome: "changed" })) : [];
   if (effect?.kind !== (kind === "create_note" ? "create_note" : "edit_body") || effect.projectedOutcome !== "changed" || typeof effect.operationId !== "string" || !same(preview?.paths, paths) || !same(preview?.derivedEffects, derived)) throw new Error("Installed crash fixed fixture public proof mismatch");
@@ -130,7 +182,7 @@ export function verifyCrashPublicProof(record: unknown, beforeRecord: unknown, k
 }
 
 export function crashRestorationBoundaryPath(reportDirectory: string, crashPoint: InstalledCrashPoint = "after_prepared", mutationKind: InstalledCrashKind = "create_note", submissionKey?: string): string {
-  const prefix = mutationKind === "create_note" ? "" : mutationKind === "edit_body" ? "edit-body-" : "edit-body-whole-";
+  const prefix = mutationKind === "create_note" ? "" : `${mutationKind.replaceAll("_", "-")}-`;
   const suffix = submissionKey === undefined ? "" : `-${crashDigest(submissionKey).slice(0, 24)}`;
   return join(reportDirectory, `crash-restoration-${prefix}${crashPoint.replace(/[^A-Za-z0-9-]/gu, "-")}${suffix}-boundary.json`);
 }
@@ -254,9 +306,10 @@ export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingF
 }
 
 export function crashOriginalInventory(current: readonly CrashInventoryEntry[], kind: InstalledCrashKind): CrashInventoryEntry[] {
-  const fixture = crashProfile(kind).files[0]!;
-  const original = current.filter(entry => entry.path !== fixture.path && (kind !== "create_note" || entry.path !== "Corpus" && entry.path !== "Corpus/Notes"));
-  if (fixture.originalBytes !== null) original.push({ path: fixture.path, kind: "file", bytes: fixture.originalBytes.length, sha256: createHash("sha256").update(fixture.originalBytes).digest("hex") });
+  const profile = crashProfile(kind);
+  const directories = kind === "create_note" ? ["Corpus", "Corpus/Notes"] : crashAttachmentDirectories(kind);
+  const original = current.filter(entry => !profile.files.some(file => file.path === entry.path) && !directories.includes(entry.path));
+  for (const fixture of profile.files) if (fixture.originalBytes !== null) original.push({ path: fixture.path, kind: "file", bytes: fixture.originalBytes.length, sha256: createHash("sha256").update(fixture.originalBytes).digest("hex") });
   return original.sort((a, b) => a.path.localeCompare(b.path, "en"));
 }
 

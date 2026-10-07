@@ -15,6 +15,7 @@ import { HealthObservationError, type LoopbackMcpClient } from "./loopback-clien
 import { crashBoundaryPhase, crashPrivateResidue, crashDigest, crashInventory, crashProfile, loadCrashBoundaryReport, requestInstalledCrashRestorationScenario, verifyCrashInventory, verifyCrashPublicProof, type CrashInventoryEntry, type InstalledCrashKind, type InstalledCrashPoint } from "./crash-restoration-protocol.js";
 import type { InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 
+export type CrashAttachmentPathState = { readonly kind: "absent" } | { readonly kind: "attachment"; readonly sizeBytes: number; readonly sha256: string };
 export interface InstalledCrashRestorationSliceRecord {
   readonly source: "installed-obsidian";
   readonly mutationKind: InstalledCrashKind;
@@ -34,6 +35,8 @@ export interface InstalledCrashRestorationSliceRecord {
   readonly before: readonly CrashInventoryEntry[];
   readonly boundary: readonly CrashInventoryEntry[];
   readonly after: readonly CrashInventoryEntry[];
+  readonly attachmentPaths?: readonly { readonly path: string; readonly before: CrashAttachmentPathState; readonly boundary: CrashAttachmentPathState; readonly after: CrashAttachmentPathState }[];
+  readonly privateFootprint?: { readonly before: { readonly stagingFiles: 0; readonly trashFiles: 0 }; readonly boundary: { readonly stagingFiles: 0; readonly trashFiles: 0 }; readonly after: { readonly stagingFiles: 0; readonly trashFiles: 0 } };
   readonly markerSha256: string;
   readonly durableFrameSha256: string | null;
   readonly terminalProofSha256: string;
@@ -131,6 +134,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       await writeFile(path, fixture.originalBytes, { flag: "wx" });
     }
     const before = await crashInventory(vault.vaultPath, configDirectoryName);
+    const privateBefore = await crashPrivateResidue(vault.vaultPath);
     await installCandidateBundle(options.candidate, vault.vaultPath, configDirectoryName);
     const driver = await options.prepareAcceptanceDriver({ vaultPath: vault.vaultPath, pluginId: options.candidate.identity.pluginId, candidateBundleSha256: options.candidate.identity.bundleSha256, configDirectoryName });
     acceptanceCleanup = driver.cleanup;
@@ -169,6 +173,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       }, { timeoutMs: options.boundaryTimeoutMs ?? MAX_SLICE_MS, intervalMs: POLL_MS });
       const frame = await readInstalledCrashJournalOrNull(journalPath);
       const inventory = await crashInventory(vault.vaultPath, configDirectoryName);
+      const privateFootprint = mutationKind === "copy_attachment" || mutationKind === "move_attachment" ? await crashPrivateResidue(vault.vaultPath) : undefined;
       const phase = crashBoundaryPhase(point);
       const original = point === "before_prepared" || point === "after_prepared" || point.startsWith("after_mutation:") || point.startsWith("after_rollback") || point === "before_rolled_back" || point === "after_rolled_back";
       verifyCrashInventory(before, inventory, mutationKind, original ? "original" : "committed", point);
@@ -178,7 +183,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
         if (payload.vaultId !== identity!.vaultId || JSON.stringify(payload.input) !== JSON.stringify(input)) throw new Error("Installed crash did not observe its bound durable frame");
       }
       eventOrder.push(`bound-marker-durable-phase-and-whole-bytes:${point}`);
-      return { marker, frame, inventory };
+      return { marker, frame, inventory, privateFootprint };
     };
     const initialPoint = rollback ? "after_snapshot" : crashPoint;
     const sequence = await requestInstalledCrashRestorationScenario({ descriptorPath: driver.path, descriptor: installed, expectedVaultId: identity.vaultId, endpoint, input, crashPoint: initialPoint, mutationKind });
@@ -213,7 +218,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
       await waitForCondition(async () => { recovered = await status(); return recovered.lookup === "found" && recovered.changeSet.state !== "in_progress"; }, { timeoutMs: options.timeouts.startupMs, intervalMs: POLL_MS });
     }
     const after = await crashInventory(vault.vaultPath, configDirectoryName);
-    await crashPrivateResidue(vault.vaultPath);
+    const privateAfter = await crashPrivateResidue(vault.vaultPath);
     verifyCrashInventory(before, after, mutationKind, committed ? "committed" : "original");
     if (recovered.lookup !== "found") throw new Error("Installed recovered status missing");
     verifyCrashPublicProof(recovered.changeSet, beforeRecord, mutationKind, terminalState, input);
@@ -229,7 +234,14 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     if (sentinel.outcome !== "registered" || sentinel.changeSet.state !== "intent_applied" || !(await readFile(join(vault.vaultPath, sentinelPath))).equals(Buffer.from("# Restore completed\n"))) throw new Error("Installed recovery did not complete before new write");
     eventOrder.push("sentinel-new-write-applied-after-whole-restore");
     const terminalDigest = crashDigest(recovered.changeSet);
-    proof = { source: "installed-obsidian", mutationKind, runId: options.runId, vaultId: identity.vaultId, candidateBundleSha256: installed.candidateBundleSha256, installedMainSha256: installed.installedMainSha256, runtimeProfile: options.profile.name, seed, manifestSha256: crashDigest({ seedManifest: vault.seedManifestSha256, input, before }), crashPoint, processStoppedBeforeRestart: true, processGenerations: generations, preparedJournalPhase: boundary.frame?.phase as "PREPARED" | "COMMITTED" | "ROLLED_BACK" | undefined ?? null, journalPhase: terminalPhase, proofState: terminalState, before, boundary: boundary.inventory, after, markerSha256: crashDigest(boundary.marker), durableFrameSha256: boundary.frame === null ? null : crashDigest(boundary.frame.payload), terminalProofSha256: terminalDigest, eventOrder, wholeStateVerified: true, sentinelAppliedAfterRestore: true, originalFileAbsentAfterRecovery: !committed && mutationKind === "create_note", ...(!committed && mutationKind !== "create_note" ? { originalFileBytesPreservedAfterRecovery: true as const } : {}), ...(committed ? { committedFileBytesPreservedAfterRecovery: true as const } : {}), healthRecoveryState: "none" };
+    const attachmentState = (inventory: readonly CrashInventoryEntry[], path: string): CrashAttachmentPathState => {
+      const entry = inventory.find(entry => entry.path === path);
+      if (entry === undefined) return { kind: "absent" };
+      if (entry.kind !== "file" || entry.bytes === undefined || entry.sha256 === undefined || !/^[a-f0-9]{64}$/u.test(entry.sha256)) throw new Error("Installed attachment report has invalid byte evidence");
+      return { kind: "attachment", sizeBytes: entry.bytes, sha256: entry.sha256 };
+    };
+    const attachmentPaths = profile.files.filter(file => file.kind === "attachment").map(file => ({ path: file.path, before: attachmentState(before, file.path), boundary: attachmentState(boundary.inventory, file.path), after: attachmentState(after, file.path) }));
+    proof = { source: "installed-obsidian", mutationKind, runId: options.runId, vaultId: identity.vaultId, candidateBundleSha256: installed.candidateBundleSha256, installedMainSha256: installed.installedMainSha256, runtimeProfile: options.profile.name, seed, manifestSha256: crashDigest({ seedManifest: vault.seedManifestSha256, input, before }), crashPoint, processStoppedBeforeRestart: true, processGenerations: generations, preparedJournalPhase: boundary.frame?.phase as "PREPARED" | "COMMITTED" | "ROLLED_BACK" | undefined ?? null, journalPhase: terminalPhase, proofState: terminalState, before, boundary: boundary.inventory, after, ...(attachmentPaths.length === 0 ? {} : { attachmentPaths, privateFootprint: { before: privateBefore, boundary: boundary.privateFootprint!, after: privateAfter } }), markerSha256: crashDigest(boundary.marker), durableFrameSha256: boundary.frame === null ? null : crashDigest(boundary.frame.payload), terminalProofSha256: terminalDigest, eventOrder, wholeStateVerified: true, sentinelAppliedAfterRestore: true, originalFileAbsentAfterRecovery: !after.some(entry => entry.path === profile.primaryPath), ...(!committed && mutationKind !== "create_note" ? { originalFileBytesPreservedAfterRecovery: true as const } : {}), ...(committed ? { committedFileBytesPreservedAfterRecovery: true as const } : {}), healthRecoveryState: "none" };
     options.assertion(`crash-${label}:whole-state-proof-status-replay-before-new-write`);
   } catch (error) {
     if (error instanceof ObsidianProcessError && error.code === "obsidian_stop_failed") shutdownUnconfirmed = true;

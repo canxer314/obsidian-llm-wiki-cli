@@ -12,7 +12,7 @@ export const INSTALLED_RUNTIME_VAULT_DIRECTORY_PREFIX =
   "installed-runtime-vault-";
 
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-export const installedCrashKinds = ["create_note", "edit_body", "edit_body_whole"] as const;
+export const installedCrashKinds = ["create_note", "edit_body", "edit_body_whole", "copy_attachment", "move_attachment"] as const;
 export type InstalledCrashKind = typeof installedCrashKinds[number];
 export const installedCrashPoints = [
   "before_prepared", "after_prepared", "after_mutation:0", "after_mutation:1",
@@ -20,10 +20,15 @@ export const installedCrashPoints = [
   "after_snapshot", "before_committed", "after_committed", "before_rollback",
   "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2",
   "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back",
+  "after_mutation:2", "after_rollback_mutation:3", "during_semantic_evidence", "after_semantic_evidence",
 ] as const;
 export type InstalledCrashPoint = typeof installedCrashPoints[number];
 export const installedCrashScenarios = installedCrashKinds.flatMap(kind => installedCrashPoints
-  .filter(point => kind === "create_note" || !["after_mutation:0", "after_mutation:1", "after_rollback_mutation:1", "after_rollback_mutation:2"].includes(point))
+  .filter(point => {
+    if (kind === "copy_attachment" || kind === "move_attachment") return !["after_file_mutation:0", "during_success_barrier"].includes(point) && (kind === "copy_attachment" || point !== "after_rollback_mutation:3");
+    if (["after_mutation:2", "after_rollback_mutation:3", "during_semantic_evidence", "after_semantic_evidence"].includes(point)) return false;
+    return kind === "create_note" || !["after_mutation:0", "after_mutation:1", "after_rollback_mutation:1", "after_rollback_mutation:2"].includes(point);
+  })
   .map(point => `${kind}/${point}` as const));
 export const installedCrashScenarioSchema = z.enum([installedCrashScenarios[0]!, ...installedCrashScenarios.slice(1)]);
 export const crashRestorationCommandSchema = z.object({
