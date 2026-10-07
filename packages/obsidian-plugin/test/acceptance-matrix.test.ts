@@ -278,6 +278,19 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     row.proof.graphTransitions = []; row.evidenceSha256 = contractDigest(row.proof);
     expect(() => createAcceptanceMatrixReport(forged)).toThrow(/graph.*(wire|transition).*proof/i);
   });
+  it("rejects raw continuation authority inside persisted graph output", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;
+    const output = row.proof.graphTransitions![0]!.after;
+    if (output.outcome !== "results") throw new Error("fixture must be results");
+    const oldHash = contractDigest(output);
+    output.complete = false; output.continuation = "private-token-must-not-be-persisted";
+    for (const entry of row.observations) if (entry.name === "vault_discover" && entry.responseSha256 === oldHash) entry.responseSha256 = contractDigest(output);
+    const old = row.observations.find(entry => entry.facts.transition === "unresolved-link")!;
+    old.facts.afterGraphSha256 = contractDigest(output);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/continuation authority/i);
+  });
   it("rejects Semantic successor summaries missing one actual graph transition", () => {
     const forged = evidence();
     const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "successor-search-snapshot-graph-evidence")!;

@@ -493,7 +493,7 @@ export async function runContractCrossCallScenario(options: {
               await mutate(name, operations);
               const after = contract.parseDiscoverResult(await call(client, "vault_discover", graphQuery(target, unresolved)));
               const successorBytes = await sourceBytes();
-              if (before.outcome !== "results" || after.outcome !== "results" || before.items.length !== 0 || after.items.length !== 1 || after.items[0]?.path !== source.path || after.items[0].contentVersion !== "sha256:" + contractDigestBytes(successorBytes) || !after.items[0].references?.some(reference => unresolved ? reference.target === target && reference.resolvedPath === null : reference.resolvedPath === target)) throw new ContractPackageCorpusError("Successor transition graph is not coherent with raw bytes");
+              if (before.outcome !== "results" || after.outcome !== "results" || !before.complete || before.continuation !== null || !after.complete || after.continuation !== null || before.items.length !== 0 || after.items.length !== 1 || after.items[0]?.path !== source.path || after.items[0].contentVersion !== "sha256:" + contractDigestBytes(successorBytes) || !after.items[0].references?.some(reference => unresolved ? reference.target === target && reference.resolvedPath === null : reference.resolvedPath === target)) throw new ContractPackageCorpusError("Successor transition graph is not coherent with raw bytes");
               let page = frozen; let reconstructed = ""; let offset = 0;
               while (true) {
                 for (const item of page.items) {
