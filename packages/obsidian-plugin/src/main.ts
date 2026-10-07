@@ -154,6 +154,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const activateAcceptanceDriver = adapter instanceof FileSystemAdapter;
+    if (activateAcceptanceDriver) {
+      const { awaitPluginEventObserverBeforeStartup } = await import("./installed-runtime/plugin-event-observer-plugin.js");
+      await awaitPluginEventObserverBeforeStartup({ vaultPath: basePath, pluginId: this.manifest.id, configDirectoryName: this.app.vault.configDir });
+    }
     const fifoObserver = activateAcceptanceDriver ? await createInstalledFifoObserver({
       vaultPath: basePath, pluginId: this.manifest.id,
       configDirectoryName: this.app.vault.configDir,
