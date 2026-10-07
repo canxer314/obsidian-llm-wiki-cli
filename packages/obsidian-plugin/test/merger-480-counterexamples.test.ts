@@ -27,13 +27,15 @@ async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/i
               const observerConfig = JSON.parse(require("node:fs").readFileSync(require("node:path").join(root, ".obsidian", "plugins", "llm-wiki-event-observer", "event-observer.json"), "utf8"));
               if (observerConfig.binding.generation > 1) {
               globalThis.__mergerDelayedRewriteArmed = true;
-              const timer = setInterval(async () => {
-                const command = await require("node:fs/promises").readFile(require("node:path").join(root, ".obsidian", "plugins", "llm-wiki-event-observer", "window-command.json"), "utf8").then(JSON.parse).catch(() => null);
-                if (command?.action !== "end") return;
-                clearInterval(timer);
-                await require("node:fs/promises").writeFile(require("node:path").join(root, path), await require("node:fs/promises").readFile(require("node:path").join(root, path)));
+              const state = globalThis[Symbol.for("llm-wiki.correctness-event-observer.v1")].get(root);
+              const end = state.end;
+              state.end = () => {
+                const fs = require("node:fs");
+                const target = require("node:path").join(root, path);
+                fs.writeFileSync(target, fs.readFileSync(target));
                 emitTestCallback("modify", path);
-              }, 1);
+                end();
+              };
               }
             }`;
   if (before === undefined) throw Error("Pinned Node adapter replay fault hook changed");
