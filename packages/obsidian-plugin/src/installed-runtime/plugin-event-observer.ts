@@ -102,5 +102,6 @@ export function verifyPluginEventObserverWindow(options: {
     generation: options.binding.generation, pid: options.expectedPid, eventCount, indexingCount, enabledPlugins: plugins,
     readyBeforeCandidateStartup: true as const, callbacksRegisteredInCandidateProcess: true as const,
     observationWindow: { firstSequence: 1, lastSequence: events.length, startedAt: events[0]!.payload.at, endedAt: previousAt },
+    protocolOrder: events.filter(event => ["ready", "candidate-start", "window-begin", "window-end"].includes(event.payload.kind)).map(event => ({ kind: event.payload.kind, sequence: event.payload.sequence, at: event.payload.at })),
     observations, transcriptSha256: hash(JSON.stringify(events)), verdict: "passed" as const };
 }

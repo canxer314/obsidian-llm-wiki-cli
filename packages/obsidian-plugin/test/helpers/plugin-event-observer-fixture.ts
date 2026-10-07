@@ -18,6 +18,7 @@ export function observerReportFixture(options: { runId: string; candidateBundleS
         readyBeforeCandidateStartup: true, callbacksRegisteredInCandidateProcess: true,
         observerId: "llm-wiki-event-observer", observerMainSha256: digest, generation, pid: 4321 + generation, eventCount: 2, indexingCount: 1,
         enabledPlugins: ["llm-wiki-event-observer", options.pluginId], observationWindow: { firstSequence: 1, lastSequence: 6, startedAt: 1000, endedAt: 1050 },
+        protocolOrder: [{ kind: "ready", sequence: 1, at: 1000 }, { kind: "candidate-start", sequence: 2, at: 1010 }, { kind: "window-begin", sequence: 3, at: 1020 }, { kind: "window-end", sequence: 6, at: 1050 }],
         observations: [{ sequence: 4, kind: "modify", pathSha256: digest, bytesSha256: digest, sizeBytes: 100 }, { sequence: 5, kind: "changed", pathSha256: digest, bytesSha256: digest, sizeBytes: 100 }], transcriptSha256: digest, verdict: "passed",
       })), cleanup: { attempted: true, residualPaths: [] }, verdict: "passed",
     })),

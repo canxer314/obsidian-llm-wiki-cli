@@ -9,6 +9,7 @@ const windowSchema = z.object({
   eventCount: z.number().int().positive(), indexingCount: z.number().int().positive(), enabledPlugins: z.array(z.string()).length(2),
   observationWindow: z.object({ firstSequence: z.literal(1), lastSequence: z.number().int().positive(), startedAt: z.number(), endedAt: z.number() }).strict(),
   observations: z.array(z.object({ sequence: z.number().int().positive(), kind: z.string(), pathSha256: digest, bytesSha256: digest.nullable(), sizeBytes: z.number().int().nonnegative() }).strict()).nonempty(),
+  protocolOrder: z.array(z.object({ kind: z.enum(["ready", "candidate-start", "window-begin", "window-end"]), sequence: z.number().int().positive(), at: z.number() }).strict()).length(4),
   transcriptSha256: digest, verdict: z.literal("passed"),
 }).strict();
 export const pluginEventObserverCorpusEvidenceSchema = z.object({
@@ -29,6 +30,7 @@ export const pluginEventObserverCorpusEvidenceSchema = z.object({
     const generations = scenario.windows.map(w => w.generation);
     if (JSON.stringify(generations) !== JSON.stringify(scenario.scenario === "startup-recovery" ? [1, 2] : [1])) context.addIssue({ code: "custom", message: "Observer lacks complete process generation windows" });
     for (const window of scenario.windows) {
+      if (JSON.stringify(window.protocolOrder.map(event => event.kind)) !== JSON.stringify(["ready", "candidate-start", "window-begin", "window-end"]) || window.protocolOrder.some((event, index, all) => index > 0 && (event.sequence <= all[index - 1]!.sequence || event.at < all[index - 1]!.at))) context.addIssue({ code: "custom", message: "Observer lacks ordered active-before-startup protocol facts" });
       if (!window.enabledPlugins.includes(EVENT_OBSERVER_ID) || new Set(window.enabledPlugins).size !== 2 || window.observationWindow.endedAt < window.observationWindow.startedAt) context.addIssue({ code: "custom", message: "Observer enabled inventory or observation window invalid" });
     }
   }

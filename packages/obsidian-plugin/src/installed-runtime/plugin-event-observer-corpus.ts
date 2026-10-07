@@ -35,6 +35,8 @@ export interface PluginEventObserverCorpusOptions {
 
 /** Independently runnable generated correctness scenario. Never a performance measurement. */
 export async function runPluginEventObserverScenario(options: PluginEventObserverCorpusOptions & { scenario: PluginEventObserverScenario }) {
+  if (!/^[A-Za-z0-9_-]+$/u.test(options.runId) || !(PLUGIN_EVENT_OBSERVER_SCENARIOS as readonly string[]).includes(options.scenario)) throw new Error("Observer scenario or run identity is invalid");
+  if (options.configDirectoryName !== undefined && (options.configDirectoryName.includes("/") || options.configDirectoryName.includes("\\") || options.configDirectoryName === "." || options.configDirectoryName === "..")) throw new Error("Observer configuration directory is unsafe");
   if (options.probe.probeRunning === undefined) throw new Error("Correctness observer requires installed runtime observation");
   const runId = `${options.runId}-observer-${options.scenario}`;
   const vault = await provisionTestVault({ workingDirectory: options.workingDirectory, runId, configDirectoryName: options.configDirectoryName });
@@ -188,7 +190,10 @@ export async function runPluginEventObserverScenario(options: PluginEventObserve
       profileName: options.profile.name, runtime, purpose: "isolated-correctness-not-performance", seed: runId, seedManifestSha256: vault.seedManifestSha256,
       inventory: { beforeDigest: comparison.beforeDigest, afterDigest: comparison.afterDigest,
         addedPaths: comparison.addedPaths.map(hash), removedPaths: comparison.removedPaths.map(hash), changedPaths: comparison.changedPaths.map(hash) }, windows };
-  } catch (error) { failure = error; }
+  } catch (error) {
+    if ((error as { code?: string }).code === "obsidian_stop_failed") stopUnconfirmed = true;
+    failure = error;
+  }
   finally {
     try {
       await (handle as ObsidianProcessHandle | null)?.stop(); handle = null;
