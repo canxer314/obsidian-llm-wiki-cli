@@ -11,8 +11,11 @@ import { parseChangeSetStatusResult, parseHealthResult } from "@llm-wiki/vault-c
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { HealthObservationError } from "./loopback-client.js";
 import { observeInstalledBlockedGate } from "./installed-blocked-gate-observation.js";
+import { observeInstalledBaselinePreconditions, bindInstalledBlockedRecoveryIntent, observeInstalledRecoveryHistory,
+  observeInstalledRecoveryTransition, observeInstalledRecoveryContinuation, observeInstalledRecoveryRegistry, observeInstalledRecoveryDiagnosticSources, recoveryObservationDigest,
+  type InstalledBaselinePreconditions, type InstalledBlockedRecoveryIntent } from "./installed-baseline-resume-observation.js";
 import { PUBLIC_WIRE_TOOL_NAMES } from "./public-wire-corpus.js";
-import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport } from "./local-operator-report.js";
+import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport, verifyInstalledLocalControlSources } from "./local-operator-report.js";
 import { requestInstalledSemanticEvidenceScenario } from "./smoke-command.js";
 import { readInstalledCrashJournal } from "./installed-crash-restoration-slice.js";
 import { preflightRuntimeProfile } from "./runtime-profile.js";
@@ -27,7 +30,7 @@ import {
   type ObsidianProcessHandle,
   type PersistedBridgeIdentity,
 } from "./obsidian-process.js";
-import { cleanupTestVault, provisionTestVault, snapshotInventory, type ProvisionedTestVault } from "./test-vault.js";
+import { cleanupTestVault, provisionTestVault, snapshotInventory, compareInventories, type ProvisionedTestVault } from "./test-vault.js";
 import { diagnosticSha256, diagnosticCanonicalJson, prepareInstalledDiagnosticPrivacyFixture, observeInstalledDiagnosticPrivacySources,
   verifyInstalledDiagnosticPrivacyBundle, validateInstalledDiagnosticPrivacyProof, INSTALLED_DIAGNOSTIC_PRIVACY_COVERAGE, DIAGNOSTIC_PRIVATE_MARKER_CATEGORIES,
   type InstalledDiagnosticPrivacyFixture, type InstalledDiagnosticTrustedObservation, type InstalledDiagnosticTrustedContext, type InstalledDiagnosticSourcePin } from "./installed-diagnostic-privacy.js";
@@ -122,6 +125,16 @@ export interface InstalledPrivacyAuthorityBoundarySliceResult {
     readonly bundleVersion?: "1.0";
     readonly checksumVerified?: true;
   }[];
+  readonly baselineResumeEvidence?: {
+    readonly runId: string;
+    readonly scenarioManifestSha256: string;
+    readonly seed: "installed-baseline-resume-v1";
+    readonly seedManifestSha256s: Readonly<Record<"vault-a" | "vault-b", string>>;
+    readonly inventories: readonly { readonly label: "vault-a" | "vault-b"; readonly beforeSha256: string; readonly afterSha256: string }[];
+    readonly orderedObservations: readonly { readonly sequence: number; readonly name: string; readonly detailSha256: string }[];
+    readonly cleanup: { readonly confirmed: true; readonly residualCount: 0 };
+    readonly verdict: "observed";
+  };
   readonly humanRequired: readonly ["diagnostic-bundles", "recovery-baseline", "resume-writes"];
   readonly diagnosticProof?: InstalledDiagnosticPrivacyProof;
 }
@@ -407,13 +420,19 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     throw new Error("Privacy/recovery boundary slice requires a registered profile and running-runtime probe");
   }
   if (rawOptions.diagnosticPrivacy === true && rawOptions.retainDiagnosticObservation === undefined) throw new Error("Installed diagnostic composable proof requires external source retention");
+  const orderedObservations: { sequence: number; name: string; detailSha256: string }[] = [];
   const proofEvents: { sequence: number; name: string; detailSha256: string }[] = [];
   const options: SliceOptions = { ...rawOptions,
     ...(rawOptions.diagnosticPrivacy === true ? { recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes" as const } : {}),
-    record: (kind, name, detail) => { proofEvents.push({ sequence: proofEvents.length + 1, name, detailSha256: diagnosticSha256(diagnosticCanonicalJson(detail)) }); rawOptions.record(kind, name, detail); },
+    record: (kind, name, detail) => {
+      if (name.startsWith("baseline-") || name.endsWith("local-control-report-required")) orderedObservations.push({ sequence: orderedObservations.length + 1, name, detailSha256: digest(detail) });
+      proofEvents.push({ sequence: proofEvents.length + 1, name, detailSha256: diagnosticSha256(diagnosticCanonicalJson(detail)) });
+      rawOptions.record(kind, name, detail);
+    },
     probe: { ...rawOptions.probe, probeRunning: rawOptions.probe.probeRunning } };
   const runtimes: LiveVault[] = [];
   let cleaned = false;
+  let baselineResumeEvidence: InstalledPrivacyAuthorityBoundarySliceResult["baselineResumeEvidence"];
   try {
     for (const label of ["vault-a", "vault-b"] as const) {
       const runtime = await startVault(options, label);
@@ -442,6 +461,9 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       ...(options.diagnosticPrivacy === true ? ["vault_download_diagnostic", "vault_download_diagnostic_bundle"] : []),
     ];
     const statusBefore = await Promise.all(runtimes.map((runtime) => observeStatus(runtime)));
+    const secondInventoryBefore = options.recoveryControls === true ? await snapshotInventory(runtimes[1]!.vault.vaultPath) : undefined;
+    const secondRegistryBefore = options.recoveryControls === true ? recoveryObservationDigest(await observeInstalledRecoveryRegistry({
+      vaultPath: runtimes[1]!.vault.vaultPath, vaultId: runtimes[1]!.identity.vaultId })) : undefined;
     const before = await Promise.all(runtimes.map(observeHealth));
     for (const runtime of runtimes) {
         const tools = await runtime.client.listTools();
@@ -471,6 +493,14 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     options.record("assertion", "agent-authority-attempts-observations-unchanged", { attempts: authorityNames.length * 2, statusObservations: 2 });
     options.assertion("authority:agent-attempts-rejected-without-observed-health-or-status-change");
     let terminalProof: { readonly submissionKey: string; readonly statusSha256: string } | undefined;
+    let baselinePreconditions: InstalledBaselinePreconditions | undefined;
+    let blockedIntent: InstalledBlockedRecoveryIntent | undefined;
+    const recoveryObservation = (runtime: LiveVault) => ({ vaultPath: runtime.vault.vaultPath, vaultId: runtime.identity.vaultId,
+      session: { callTool: async (name: string, arguments_: Record<string, unknown>) => {
+        const result = await runtime.client.callTool({ name, arguments: arguments_ });
+        return { isError: result.isError === true, structuredContent: result.structuredContent,
+          ...(Array.isArray(result.content) ? { content: result.content } : {}) };
+      } } });
     const recoveryControlObservations: InstalledPrivacyAuthorityBoundarySliceResult["recoveryControlObservations"][number][] = [];
     const recoveryHandoff: InstalledPrivacyAuthorityBoundarySliceResult["recoveryHandoff"][number][] = [];
     const standardDiagnostics: InstalledPrivacyAuthorityBoundarySliceResult["standardDiagnostics"][number][] = [];
@@ -529,6 +559,14 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         options.record("assertion", `${runtime.label}-recovery-blocked-gate-row-observed`, blockedGate);
         for (const assertion of blockedGate.assertions) options.assertion(assertion);
         terminalProof = { submissionKey, statusSha256: digest(status.changeSet) };
+        if (options.recoveryControls === true) {
+          baselinePreconditions = await observeInstalledBaselinePreconditions(recoveryObservation(runtime));
+          blockedIntent = await bindInstalledBlockedRecoveryIntent({ ...recoveryObservation(runtime), runId: options.runId });
+          const history = await observeInstalledRecoveryHistory({ ...recoveryObservation(runtime), terminal: baselinePreconditions, blocked: blockedIntent });
+          options.record("assertion", "baseline-independent-preconditions-and-blocked-history", {
+            journalSha256: baselinePreconditions.journalSha256, registrySha256: baselinePreconditions.registrySha256, ...history,
+          });
+        }
         recoveryHandoff.push({ label: runtime.label, journalPhase: "FAILED", proofState: "result_unproven",
           recovery: "blocked", effectiveGate: "recovery_blocked", submissionKeySha256: digest(submissionKey) });
       }
@@ -627,22 +665,67 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
     if (options.recoveryControls === true) {
       const affected = runtimes[0]!;
       const unaffected = runtimes[1]!;
-      if (terminalProof === undefined) throw new Error("Recovery controls require the observed blocked terminal proof");
+      if (terminalProof === undefined || baselinePreconditions === undefined || blockedIntent === undefined) throw new Error("Recovery controls require independent blocked terminal and Journal preconditions");
+      const originalTerminal = baselinePreconditions;
+      const historicalBlocked = blockedIntent;
+      const affectedObservation = recoveryObservation(affected);
+      const assertHistory = async () => {
+        const facts = await observeInstalledRecoveryHistory({ ...affectedObservation, terminal: originalTerminal, blocked: historicalBlocked });
+        options.record("assertion", "baseline-full-terminal-and-blocked-key-history", facts);
+      };
       const consumedInvocationIds: string[] = [];
+      const recoveryInventories = await Promise.all(runtimes.map(runtime => snapshotInventory(runtime.vault.vaultPath)));
+      const secondInventory = secondInventoryBefore!;
+      const secondState = secondRegistryBefore!;
+      const assertSecondVault = async () => {
+        const comparison = compareInventories(secondInventory, await snapshotInventory(unaffected.vault.vaultPath));
+        if (comparison.beforeDigest !== comparison.afterDigest) throw new Error("Vault B inventory changed during local recovery");
+        if (recoveryObservationDigest(await observeInstalledRecoveryRegistry(recoveryObservation(unaffected))) !== secondState) {
+          throw new Error("Vault B registry or recovery progress changed during local recovery");
+        }
+        if ((await observeHealth(unaffected)).digest !== before[1]!.digest || await observeStatus(unaffected) !== statusBefore[1]) {
+          throw new Error("Vault B health or status changed during local recovery");
+        }
+      };
       const consume = async (runtime: LiveVault, action: "accept-recovery-baseline" | "resume-writes") => {
+        const actualBefore = await observeInstalledRecoveryDiagnosticSources(recoveryObservation(runtime));
+        const pending = (await readdir(runtime.descriptor.reportDirectory)).filter(filename => filename.startsWith("local-write-control-") && filename.endsWith(".json"));
+        const consumedFiles = new Set(consumedInvocationIds.map(id => `local-write-control-${createHash("sha256").update(id).digest("hex")}.json`));
+        if (pending.some(filename => !consumedFiles.has(filename))) throw new Error("Local control report predates independent before source observation");
         options.record("transport", `${runtime.label}-${action}-local-control-report-required`, { label: runtime.label, action });
         const report = await waitForNextInstalledLocalControlReport({ descriptor: runtime.descriptor, vaultId: runtime.identity.vaultId,
           endpoint: runtime.endpoint, configDirectoryName: options.configDirectoryName,
-          action, consumedInvocationIds, timeoutMs: options.operatorReportTimeoutMs });
+          action, consumedInvocationIds, timeoutMs: options.operatorReportTimeoutMs, observeWhileWaiting: assertSecondVault });
+        const actualAfter = await observeInstalledRecoveryDiagnosticSources(recoveryObservation(runtime));
+        verifyInstalledLocalControlSources(report, { before: actualBefore, after: actualAfter });
         consumedInvocationIds.push(report.invocationId);
+        await assertSecondVault();
+        await assertHistory();
+        options.record("assertion", `baseline-${runtime.label}-${action}-${report.outcome}-observed`, {
+          invocationIdSha256: digest(report.invocationId), outcome: report.outcome,
+          beforeDiagnosticSha256: report.before.checksum.canonicalPayload, afterDiagnosticSha256: report.after.checksum.canonicalPayload,
+        });
         return report;
       };
+      const blockedHealth = (await observeHealth(affected)).digest;
+      const invalidResume = await consume(affected, "resume-writes");
+      if (invalidResume.outcome !== "rejected" || (await observeHealth(affected)).digest !== blockedHealth) {
+        throw new Error("Invalid resume requires an explicit local rejection without live state changes");
+      }
+      recoveryControlObservations.push({ label: "vault-a", action: "resume-writes", outcome: "rejected",
+        invocationIdSha256: digest(invalidResume.invocationId), liveHealthUnchanged: true });
+      const rejectedPreconditions = await observeInstalledBaselinePreconditions(affectedObservation);
+      if (rejectedPreconditions.journalSha256 !== originalTerminal.journalSha256) throw new Error("Rejected resume changed FAILED Journal bytes");
+      options.record("assertion", "baseline-invalid-resume-explicitly-rejected", { invocationIdSha256: digest(invalidResume.invocationId), journalUnchanged: true });
       const report = await consume(unaffected, "accept-recovery-baseline");
       if (report.outcome !== "rejected" || (await observeHealth(unaffected)).digest !== before[1]!.digest ||
           await observeStatus(unaffected) !== statusBefore[1]) throw new Error("Vault B baseline rejection changed live health or status");
       recoveryControlObservations.push({ label: "vault-b", action: "accept-recovery-baseline", outcome: "rejected",
         invocationIdSha256: digest(report.invocationId), liveHealthUnchanged: true });
+      await observeInstalledBaselinePreconditions(affectedObservation);
       const accepted = await consume(affected, "accept-recovery-baseline");
+      const pausedTransition = await observeInstalledRecoveryTransition({ ...affectedObservation, terminal: originalTerminal, state: "paused" });
+      options.record("assertion", "baseline-independent-cleared-journal-paused-progress", pausedTransition);
       const health = (await observeHealth(affected)).state;
       const handle = await open(join(affected.vault.vaultPath, ".llm-wiki", "recovery-journal.bin"), "r");
       let journalCleared: boolean;
@@ -660,6 +743,8 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       recoveryControlObservations.push({ label: "vault-a", action: "accept-recovery-baseline", outcome: "accepted",
         invocationIdSha256: digest(accepted.invocationId), liveWriteState: "paused", journalCleared: true, terminalStatusUnchanged: true });
       const resumed = await consume(affected, "resume-writes");
+      const writableTransition = await observeInstalledRecoveryTransition({ ...affectedObservation, terminal: originalTerminal, state: "writable" });
+      options.record("assertion", "baseline-independent-explicit-resume", writableTransition);
       const resumedHealth = (await observeHealth(affected)).state;
       const resumedResult = await affected.client.callTool({ name: "vault_change_set_status", arguments: { submissionKey: terminalProof.submissionKey } });
       const resumedStatus = parseChangeSetStatusResult(resumedResult.structuredContent);
@@ -673,6 +758,23 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       }
       recoveryControlObservations.push({ label: "vault-a", action: "resume-writes", outcome: "accepted",
         invocationIdSha256: digest(resumed.invocationId), liveWriteState: "writable", terminalStatusUnchanged: true });
+      const continuation = await observeInstalledRecoveryContinuation({ ...affectedObservation, blocked: historicalBlocked,
+        submissionKey: `${options.runId}-baseline-continuation`, timeoutMs: options.timeouts.startupMs });
+      await assertHistory();
+      await assertSecondVault();
+      options.record("assertion", "baseline-new-key-continuation-and-vault-b-isolation", { ...continuation, secondRegistrySha256: secondState,
+        secondInventorySha256: compareInventories(secondInventory, await snapshotInventory(unaffected.vault.vaultPath)).afterDigest });
+      options.assertion("recovery:baseline-paused-explicit-resume-history-preserved-new-key-only");
+      const inventories = await Promise.all(runtimes.map(async (runtime, index) => {
+        const sourceInventory = index === 1 ? secondInventory : recoveryInventories[index]!;
+        const compared = compareInventories(sourceInventory, await snapshotInventory(runtime.vault.vaultPath));
+        return { label: runtime.label, beforeSha256: compared.beforeDigest, afterSha256: compared.afterDigest };
+      }));
+      baselineResumeEvidence = { runId: options.runId, seed: "installed-baseline-resume-v1", scenarioManifestSha256: digest({
+        corpusId: "installed-baseline-resume-v1", scenarios: ["failed-journal-terminal-preconditions", "blocked-key-binding", "invalid-resume-rejection",
+          "invalid-baseline-rejection", "baseline-accept-paused", "independent-resume", "historical-key-replay", "new-key-continuation", "second-vault-isolation", "confirmed-cleanup"],
+      }), seedManifestSha256s: { "vault-a": affected.vault.seedManifestSha256, "vault-b": unaffected.vault.seedManifestSha256 },
+        inventories, orderedObservations, cleanup: { confirmed: true, residualCount: 0 }, verdict: "observed" };
     }
     let diagnosticProof: InstalledDiagnosticPrivacyProof | undefined;
     if (options.diagnosticPrivacy === true) {
@@ -699,6 +801,10 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       await options.retainDiagnosticObservation?.(trustedContext, sourcePin);
       options.assertion("diagnostics:installed-A33-complete");
     }
+    if (!cleaned) {
+      await stopAndClean(options, runtimes);
+      cleaned = true;
+    }
     return {
       scope: "two-vault-agent-authority-boundary",
       verdict: "partial",
@@ -712,6 +818,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       observedHealthUnchanged: true,
       standardDiagnostics,
       recoveryHandoff,
+      ...(baselineResumeEvidence === undefined ? {} : { baselineResumeEvidence }),
       recoveryControlObservations,
       contentConfirmationObservations,
       provenance: runtimes.map((runtime, index) => ({

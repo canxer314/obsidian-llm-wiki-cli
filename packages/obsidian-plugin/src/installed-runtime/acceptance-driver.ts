@@ -43,6 +43,8 @@ export interface InstalledRuntimeAcceptanceActivation {
     readonly outcome: "accepted" | "rejected";
     readonly before: StandardDiagnosticBundle;
     readonly after: StandardDiagnosticBundle;
+    /** Private generated-run correlation material; never copied into a diagnostic or public proof. */
+    readonly diagnosticCorrelationSalts?: { readonly before: string; readonly after: string };
   }): Promise<void>;
   dispose(): void;
 }
@@ -382,6 +384,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         vaultId: request.vaultId, endpoint: request.endpoint.toString(),
         invocationId: request.invocationId, action: request.action, outcome: request.outcome,
         before: request.before, after: request.after,
+        ...(request.diagnosticCorrelationSalts === undefined ? {} : { diagnosticCorrelationSalts: request.diagnosticCorrelationSalts }),
       })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
       try {
         await requireBoundReportRoot();
