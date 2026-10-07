@@ -891,7 +891,20 @@ export default class VaultOperationBridgePlugin extends Plugin {
             const before = await changeSetExecution.loadRecoveryFrame();
             if (before !== null) throw new Error("Crash slice requires a clean Recovery Journal");
             const input = parseChangeSetSubmitInput(parsed.input);
-            if (kind !== "create_note") {
+            if (kind === "copy_attachment" || kind === "move_attachment") {
+              // Binary sources have no Markdown metadata callback or Content Version.
+              // Prove both exact bytes and Obsidian path visibility; destination and
+              // derived-directory absence remain part of the locked fixed preflight.
+              for (const fixture of profile.files) {
+                const exists = await adapter.exists(fixture.path);
+                const file = this.app.vault.getFileByPath(fixture.path);
+                if (fixture.originalBytes === null) {
+                  if (exists || file !== null) throw new Error("Installed attachment destination is occupied");
+                } else if (!exists || file === null || !(await readFile(join(basePath, ...fixture.path.split("/")))).equals(fixture.originalBytes)) {
+                  throw new Error("Installed attachment seed bytes or visibility changed");
+                }
+              }
+            } else if (kind !== "create_note") {
               for (const fixture of profile.files) {
                 const bytes = await readFile(join(basePath, ...fixture.path.split("/")));
                 if (!bytes.equals(fixture.originalBytes!)) throw new Error("Installed crash seed bytes changed");
