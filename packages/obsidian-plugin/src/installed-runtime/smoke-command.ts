@@ -210,6 +210,7 @@ export const AUTHORITATIVE_INSTALLED_RUNTIME_RUNNER_NAMES = [
   "runPrivacyRecoveryAuthorityCorpus",
   "runReleaseLifecycleCorpus",
   "runCrashRestorationRetainedAuthorityCorpus",
+  "runPluginEventObserverCorpus",
   "semanticEvidenceScenarioRunner",
 ] as const;
 
@@ -222,6 +223,7 @@ type HarnessAuthoritativeInstalledRuntimeRunners = Required<
     | "runPrivacyRecoveryAuthorityCorpus"
     | "runReleaseLifecycleCorpus"
     | "runCrashRestorationRetainedAuthorityCorpus"
+    | "runPluginEventObserverCorpus"
     | "semanticEvidenceScenarioRunner"
   >
 >;
@@ -426,6 +428,24 @@ export function createAuthoritativeInstalledRuntimeRunners(
         request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
       }
       throw new Error("Installed create/exact/whole/frontmatter/multi complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
+    },
+    runPluginEventObserverCorpus: async request => {
+      if (options.runId === undefined || options.reportDirectory === undefined) return unavailableRunner("Enabled plugin observer corpus");
+      const { runPluginEventObserverCorpus } = await import("./plugin-event-observer-corpus.js");
+      let binding: InstalledRuntimeAcceptanceDescriptor | undefined;
+      return runPluginEventObserverCorpus({ ...request,
+        reportDirectory: join(options.reportDirectory, "enabled-plugin-correctness"),
+        prepareAcceptanceDriver: async input => {
+          const created = await createInstalledRuntimeAcceptanceDescriptor({ ...input, runId: request.runId });
+          binding = created.descriptor;
+          return { ...created,
+            requestSemanticEvidenceScenario: input => requestInstalledSemanticEvidenceScenario({ ...input, descriptorPath: created.path, descriptor: created.descriptor }),
+            cleanup: async () => { await rm(created.path, { force: true }); },
+          };
+        },
+        semanticEvidenceScenarioRunner: createInstalledSemanticEvidenceScenarioRunner({ runId: request.runId,
+          get reportDirectory() { return binding?.reportDirectory; }, binding: () => binding }),
+      });
     },
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:
