@@ -14,6 +14,10 @@ import {
   type InstalledRuntimeEvidence,
 } from "../src/index.js";
 
+import { registeredReferenceRewriteCorpusEvidenceSchema } from "../src/installed-runtime/evidence.js";
+import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
+import { createHash } from "node:crypto";
+const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const DIGEST = "a".repeat(64);
 
 function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
@@ -314,6 +318,13 @@ function registeredReferenceRewriteEvidence(): NonNullable<
         },
       ],
       duplicateEqualSpellings: { referencesRewritten: 2, untouchedBytesExact: true },
+      secondEqualSpellingOnly: {
+        scenario: "span/second-equal-spelling-only", fixturePath: "ReferenceProof/Single/Ref.md",
+        fixtureSha256: a26Digest(SINGLE_SPAN_BEFORE), beforeSha256: a26Digest(SINGLE_SPAN_BEFORE), afterSha256: a26Digest(SINGLE_SPAN_AFTER),
+        referencesLocated: 2, selectedOrdinal: 2, selectedSpan: { startByte: 58, endByteExclusive: 72 },
+        beforeSizeBytes: 83, afterSizeBytes: 89, untouchedPrefixSha256: a26Digest(Buffer.from(SINGLE_SPAN_BEFORE).subarray(0, 58)), untouchedSuffixSha256: a26Digest(Buffer.from(SINGLE_SPAN_BEFORE).subarray(72)),
+        untouchedPrefixExact: true, untouchedSuffixExact: true, firstReferenceExact: true, fullBytesExact: true, finalBytesHashReread: true,
+      },
     },
     rejections: [
       {
@@ -353,11 +364,24 @@ function registeredReferenceRewriteEvidence(): NonNullable<
       "span/bom-crlf-cjk-astral:single-verified-span",
       "reject/stale-closure:no-mutation",
       "span/duplicate-equal-spellings:untouched-bytes-exact",
+      "span/second-equal-spelling-only:untouched-bytes-exact",
       "observer:no-half-written-markdown",
     ],
     verdict: "passed",
   };
 }
+
+describe("A-26 public evidence", () => {
+  it("rejects syntactically valid forged A-26 byte evidence", () => {
+    const value = registeredReferenceRewriteEvidence();
+    expect(registeredReferenceRewriteCorpusEvidenceSchema.safeParse({ ...value, rawBytes: { ...value.rawBytes, secondEqualSpellingOnly: { ...value.rawBytes.secondEqualSpellingOnly, afterSha256: "f".repeat(64) } } }).success).toBe(false);
+  });
+  it("rejects rename-all evidence without the independent second-span block", () => {
+    const value = registeredReferenceRewriteEvidence();
+    const { secondEqualSpellingOnly: _removed, ...rawBytes } = value.rawBytes as typeof value.rawBytes & { secondEqualSpellingOnly?: unknown };
+    expect(registeredReferenceRewriteCorpusEvidenceSchema.safeParse({ ...value, rawBytes }).success).toBe(false);
+  });
+});
 
 function crashRestorationRetainedAuthorityEvidence(): NonNullable<
   InstalledRuntimeEvidence["crashRestorationRetainedAuthorityCorpus"]

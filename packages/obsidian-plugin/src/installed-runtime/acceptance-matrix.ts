@@ -114,7 +114,7 @@ const matrixPlan = [
   ["A-23", "gate-isolation", "recovery-blocked/atomic-bind-and-history:bound-intent-not-applied"],
   ["A-24", "registered-reference-rewrite", "span/bom-crlf-cjk-astral:single-verified-span"],
   ["A-25", "registered-reference-rewrite", "reject/stale-closure:no-mutation"],
-  ["A-26", "registered-reference-rewrite", "span/duplicate-equal-spellings:untouched-bytes-exact"],
+  ["A-26", "registered-reference-rewrite", "span/second-equal-spelling-only:untouched-bytes-exact"],
   ["A-27", "semantic-evidence-search-snapshot", "scenario:edit_body/stale_version_callback_after_newer_bytes:closed"],
   ["A-28", "semantic-evidence-search-snapshot", "scenario:create_note/clean_convergence:closed"],
   ["A-29", "semantic-evidence-search-snapshot", "scenario:edit_body/missing_observation_deadline:closed"],

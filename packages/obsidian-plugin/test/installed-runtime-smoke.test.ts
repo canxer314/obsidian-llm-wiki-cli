@@ -317,6 +317,17 @@ describe("installed-runtime authoritative command", () => {
     expect(observations).toBe(0);
     expect(stopped).toBe(true);
     expect(cleaned).toBe(true);
+    await expect(createAuthoritativeInstalledRuntimeRunners().runRegisteredReferenceRewriteCorpus({
+      ...referenceProfileFixture,
+      runId: "unconfirmed-cleanup", workingDirectory: root, candidate, configDirectoryName: ".obsidian",
+      timeouts: { startupMs: 30, stopMs: 30, portClosedMs: 30 },
+      processControl: { start: async request => {
+        await writeFile(join(request.vaultPath, ".obsidian", "plugins", candidate.identity.pluginId, "data.json"), JSON.stringify({ vaultId: "reference-vault", port: 1 }));
+        return { pid: 1, stop: async () => undefined };
+      } },
+      client: { observeHealth: async () => { throw foreign; } }, provisionVault: provisionTestVault,
+      cleanupVault: async () => ({ attempted: false, residualPaths: [] }), record: () => undefined, assertion: () => undefined,
+    })).rejects.toThrow(/cleanup.*confirmed/u);
   });
 
   it("preserves the generated Vault when registered-reference process shutdown fails", async () => {

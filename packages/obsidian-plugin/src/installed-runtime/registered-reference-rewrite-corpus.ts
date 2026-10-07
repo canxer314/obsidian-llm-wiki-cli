@@ -13,6 +13,7 @@ import {
   type ChangeSetSubmitInput,
 } from "@llm-wiki/vault-contracts";
 
+import { SINGLE_SPAN_SCENARIO, SINGLE_SPAN_PATH, SINGLE_SPAN_AFTER, singleSpanFixtures, executeReferenceSingleSpanScenario, validateReferenceSingleSpanBytes, type ReferenceSingleSpanProof } from "./registered-reference-single-span.js";
 import type { RegisteredReferenceRewriteCorpusEvidence } from "./evidence.js";
 
 /**
@@ -45,6 +46,7 @@ export const REGISTERED_REFERENCE_REWRITE_SCENARIO_PLAN = [
   "move/markdown-embed-destination-only",
   "span/bom-crlf-cjk-astral-exact",
   "span/duplicate-equal-spellings",
+  SINGLE_SPAN_SCENARIO,
   "reject/stale-closure",
   "reject/literal-hash-destination",
   "reject/duplicate-basename-ambiguous",
@@ -137,6 +139,8 @@ export interface RegisteredReferenceRewriteSession {
   readonly seedNotes: readonly RegisteredReferenceRewriteFixture[];
   readonly fixtures: readonly RegisteredReferenceRewriteFixture[];
   readonly rejectionSessions: readonly RegisteredReferenceRewriteRejectionSession[];
+  /** Installed driver executes the fixed splice inside the verified candidate. */
+  readonly executeSingleSpan?: () => Promise<ReferenceSingleSpanProof>;
 }
 
 const utf8Encoder = new TextEncoder();
@@ -224,6 +228,7 @@ export function registeredReferenceRewriteFixtures(): readonly RegisteredReferen
     // Duplicate equal link spellings in one referrer.
     { path: "ReferenceProof/Dup/Dup.md", content: "# Dup\n" },
     { path: "ReferenceProof/Dup/DupRef.md", content: "Alpha: [[Dup]] and omega: [[Dup]].\n" },
+    ...singleSpanFixtures(),
     // Stale-closure pair (its referrer is drifted out-of-band during the run).
     { path: "ReferenceProof/Stale/Stale.md", content: "# Stale\n" },
     { path: "ReferenceProof/Stale/StaleRef.md", content: "Link: [[Stale]].\n" },
@@ -250,6 +255,8 @@ export function expectedRewrittenReferrer(path: string): string | null {
       );
     case "ReferenceProof/Dup/DupRef.md":
       return "Alpha: [[Dup Moved]] and omega: [[Dup Moved]].\n";
+    case SINGLE_SPAN_PATH:
+      return SINGLE_SPAN_AFTER;
     default:
       return null;
   }
@@ -352,6 +359,7 @@ export interface RegisteredReferenceRewriteOutcome {
   readonly rawBytes: {
     readonly fixtures: readonly RegisteredReferenceRewriteRawByteFixture[];
     readonly duplicateEqualSpellingsRewritten: number;
+    readonly secondEqualSpellingOnly: ReferenceSingleSpanProof;
   };
   readonly rejections: readonly RegisteredReferenceRewriteRejectionRecord[];
   readonly observer: RegisteredReferenceRewriteObserverEvidence;
@@ -759,6 +767,15 @@ export async function runRegisteredReferenceRewriteCorpus(options: {
   }
 
   // ---------------------------------------------------------------------------
+  // Independent A-26 splice, distinct from rename's correct all-reference rewrite.
+  const singleSpanBefore = await session.arrange.readBinary(SINGLE_SPAN_PATH);
+  const secondEqualSpellingOnly = await (session.executeSingleSpan?.() ?? executeReferenceSingleSpanScenario({
+    callTool: session.callTool, readBinary: session.arrange.readBinary.bind(session.arrange),
+  }));
+  validateReferenceSingleSpanBytes(secondEqualSpellingOnly, singleSpanBefore, await session.arrange.readBinary(SINGLE_SPAN_PATH));
+  options.record("assertion", SINGLE_SPAN_SCENARIO, secondEqualSpellingOnly);
+  assertion(`${SINGLE_SPAN_SCENARIO}:untouched-bytes-exact`);
+
   // 4. Rejections on the primary session: stale closure and literal-# destination
   //    reject the complete Change Set with no guessing and no mutation.
   // ---------------------------------------------------------------------------
@@ -969,6 +986,7 @@ export async function runRegisteredReferenceRewriteCorpus(options: {
         },
       ],
       duplicateEqualSpellingsRewritten,
+      secondEqualSpellingOnly,
     },
     rejections,
     observer: {
@@ -1053,6 +1071,7 @@ export function composeRegisteredReferenceRewriteCorpusEvidence(options: {
         everyUntouchedByteExact: true,
         finalBytesHashReread: true,
       })),
+      secondEqualSpellingOnly: options.outcome.rawBytes.secondEqualSpellingOnly,
       duplicateEqualSpellings: {
         referencesRewritten: options.outcome.rawBytes.duplicateEqualSpellingsRewritten,
         untouchedBytesExact: true,

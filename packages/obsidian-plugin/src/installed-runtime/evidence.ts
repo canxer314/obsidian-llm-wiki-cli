@@ -2,6 +2,7 @@ import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { z } from "zod";
+import { referenceSingleSpanProofSchema } from "./registered-reference-single-span.js";
 
 import {
   createAcceptanceMatrixReport,
@@ -623,6 +624,7 @@ export const registeredReferenceRewriteCorpusEvidenceSchema = z
       .object({
         fixtures: z.array(rawByteFixtureProofSchema).min(1),
         duplicateEqualSpellings: duplicateSpellingProofSchema,
+        secondEqualSpellingOnly: referenceSingleSpanProofSchema,
       })
       .strict(),
     rejections: z.array(rewriteRejectionProofSchema).min(1),

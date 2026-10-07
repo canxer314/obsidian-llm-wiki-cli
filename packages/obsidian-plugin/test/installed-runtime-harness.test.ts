@@ -5,6 +5,8 @@ import { basename, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as crashCorpus from "../src/installed-runtime/crash-restoration-retained-authority-corpus.js";
+import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
+const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 import {
   createBridgeInstance,
@@ -429,6 +431,7 @@ async function arrangeRun(
         "span/bom-crlf-cjk-astral:single-verified-span",
         "reject/stale-closure:no-mutation",
         "span/duplicate-equal-spellings:untouched-bytes-exact",
+        "span/second-equal-spelling-only:untouched-bytes-exact",
         "observer:no-half-written-markdown",
       ]) assertion(name);
       return stubRegisteredReferenceRewriteOutcome();
@@ -668,6 +671,13 @@ function stubRegisteredReferenceRewriteOutcome(): RegisteredReferenceRewriteOutc
     rawBytes: {
       fixtures: [{ scenario: "span/exact", hostModes: ["bom"], locatedReferences: 1, everyReferenceExactlyOneVerifiedSpan: true, everyUntouchedByteExact: true, finalBytesHashReread: true }],
       duplicateEqualSpellingsRewritten: 1,
+      secondEqualSpellingOnly: {
+        scenario: "span/second-equal-spelling-only", fixturePath: "ReferenceProof/Single/Ref.md",
+        fixtureSha256: a26Digest(SINGLE_SPAN_BEFORE), beforeSha256: a26Digest(SINGLE_SPAN_BEFORE), afterSha256: a26Digest(SINGLE_SPAN_AFTER),
+        referencesLocated: 2, selectedOrdinal: 2, selectedSpan: { startByte: 58, endByteExclusive: 72 },
+        beforeSizeBytes: 83, afterSizeBytes: 89, untouchedPrefixSha256: a26Digest(Buffer.from(SINGLE_SPAN_BEFORE).subarray(0, 58)), untouchedSuffixSha256: a26Digest(Buffer.from(SINGLE_SPAN_BEFORE).subarray(72)),
+        untouchedPrefixExact: true, untouchedSuffixExact: true, firstReferenceExact: true, fullBytesExact: true, finalBytesHashReread: true,
+      },
     },
     rejections: [{ scenario: "reject/stale", failureCode: "stale_observation", registered: true, noMutationDigestUnchanged: true }],
     observer: { enabledSecondObserver: true, discoversIssued: 1, privateStagingPathsObserved: 0, halfWrittenMarkdownObserved: 0 },

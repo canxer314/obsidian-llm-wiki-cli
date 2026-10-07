@@ -54,6 +54,7 @@ const ASSERTIONS = {
     "span/bom-crlf-cjk-astral:single-verified-span",
     "reject/stale-closure:no-mutation",
     "span/duplicate-equal-spellings:untouched-bytes-exact",
+    "span/second-equal-spelling-only:untouched-bytes-exact",
     "observer:no-half-written-markdown",
   ],
   semantic: [
@@ -144,6 +145,11 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("maps A-26 to the independent second verified span, not rename-all", () => {
+    expect(createAcceptanceMatrixReport(evidence()).scenarios.find(({ id }) => id === "A-26")?.assertion)
+      .toBe("span/second-equal-spelling-only:untouched-bytes-exact");
+  });
+
   it("covers every acceptance ID and every child corpus exactly once", () => {
     const report = createAcceptanceMatrixReport(evidence());
     expect(report.scenarios).toHaveLength(44);
