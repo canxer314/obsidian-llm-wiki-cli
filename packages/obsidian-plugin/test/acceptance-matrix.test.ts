@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { syntheticManualPauseProof } from "./helpers/manual-pause-proof.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -155,6 +156,7 @@ function evidence(): InstalledRuntimeEvidence {
   };
   const gate = {
     ...corpus(ASSERTIONS.gate),
+    manualPause: { installedObservation: syntheticManualPauseProof("acceptance-run", "MVP-PERF-REF-1", DIGEST) },
     residualCleanup: {
       "vault-a": { writeGate: "open" },
       "vault-b": { writeGate: "open" },
@@ -284,6 +286,30 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
     expect(() => createAcceptanceMatrixReport(unclean)).toThrow();
     const borrowed = evidence(); borrowed.pluginEventObserverCorpus!.scenarios[0]!.runId = "another-run";
     expect(() => createAcceptanceMatrixReport(borrowed)).toThrow(/binding/);
+  });
+  it("independently refuses A-30 promotion after coordinated wire and local report digest substitution", () => {
+    const report = evidence();
+    expect(createAcceptanceMatrixReport(report).scenarios.find(s => s.id === "A-30")?.verdict).toBe("passed");
+    const proof = report.gateIsolationCorpus!.manualPause.installedObservation!;
+    const substituted = "0".repeat(64);
+    for (const row of proof.toolRows) {
+      row.requestSha256 = substituted;
+      row.structuredSha256 = substituted;
+      row.textSha256 = substituted;
+      if (row.continuationInSha256 !== null) row.continuationInSha256 = substituted;
+      if (row.continuationOutSha256 !== null) row.continuationOutSha256 = substituted;
+    }
+    for (const action of proof.localActions) {
+      action.beforeSha256 = substituted;
+      action.afterSha256 = substituted;
+    }
+    // The A-37 independent source context remains unchanged and valid.
+    expect(createAcceptanceMatrixReport(report).scenarios.find(s => s.id === "A-30")?.verdict).not.toBe("passed");
+  });
+  it("refuses boolean-only manual pause claims without bound installed drain and local actions", () => {
+    const missing = evidence();
+    delete missing.gateIsolationCorpus!.manualPause.installedObservation;
+    expect(() => createAcceptanceMatrixReport(missing)).toThrow(/A-30.*pause/u);
   });
   it("maps A-26 to the independent second verified span, not rename-all", () => {
     expect(createAcceptanceMatrixReport(evidence()).scenarios.find(({ id }) => id === "A-26")?.assertion)

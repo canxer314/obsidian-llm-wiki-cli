@@ -10,6 +10,8 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 export const fifoCommandSchema = z.object({
   action: z.literal("observe-persistent-fifo"), sequence: z.number().int().positive(), capabilityToken: digest,
   expectedVaultId: z.string().min(1), endpoint: z.string().url(),
+  // Releases a generated execution fixture only; never invokes local controls.
+  holdUntil: z.literal("observed-manual-pausing").optional(),
   keys: z.tuple([z.string().min(1), z.string().min(1), z.string().min(1), z.string().min(1)]).refine(keys => new Set(keys).size === 4),
 }).strict();
 export const fifoEventSchema = z.discriminatedUnion("kind", [
