@@ -397,7 +397,6 @@ async function stopAndClean(options: RunnerOptions, runtimes: readonly LiveVault
 
 /** Proves only the installed Agent authority boundary; local diagnostics and recovery transitions remain human-required. */
 export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: RunnerOptions): Promise<InstalledPrivacyAuthorityBoundarySliceResult> => {
-  if (rawOptions.diagnosticPrivacy === true && rawOptions.retainDiagnosticObservation === undefined) throw new Error("Installed diagnostic composable proof requires external source retention");
   if (!Number.isSafeInteger(rawOptions.operatorReportTimeoutMs) || rawOptions.operatorReportTimeoutMs < 1) {
     throw new Error("Local Primary Operator report timeout must be a positive integer");
   }
@@ -407,6 +406,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
   if (rawOptions.profileName !== rawOptions.profile.name || rawOptions.probe.probeRunning === undefined) {
     throw new Error("Privacy/recovery boundary slice requires a registered profile and running-runtime probe");
   }
+  if (rawOptions.diagnosticPrivacy === true && rawOptions.retainDiagnosticObservation === undefined) throw new Error("Installed diagnostic composable proof requires external source retention");
   const proofEvents: { sequence: number; name: string; detailSha256: string }[] = [];
   const options: SliceOptions = { ...rawOptions,
     ...(rawOptions.diagnosticPrivacy === true ? { recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes" as const } : {}),
