@@ -117,6 +117,7 @@ export async function installPluginEventObserver(options: {
 
 /** Gate only explicitly armed generated correctness runs. Default startup unchanged. */
 export async function awaitPluginEventObserverBeforeStartup(options: { vaultPath: string; pluginId: string; configDirectoryName?: string }): Promise<void> {
+  if (!basename(resolve(options.vaultPath)).startsWith("installed-runtime-vault-")) return;
   let loaded: Awaited<ReturnType<typeof loadInstalledRuntimeAcceptanceDescriptor>>;
   try { loaded = await loadInstalledRuntimeAcceptanceDescriptor(options); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }

@@ -15,6 +15,10 @@ async function arrange() {
   } };
 }
 describe("plugin observer generated runner lifecycle boundary", () => {
+  it("leaves ordinary Vault candidate startup unchanged without an armed correctness descriptor", async () => {
+    const { awaitPluginEventObserverBeforeStartup } = await import("../src/installed-runtime/plugin-event-observer-plugin.js");
+    await expect(awaitPluginEventObserverBeforeStartup({ vaultPath: "/ordinary-vault", pluginId: "candidate" })).resolves.toBeUndefined();
+  });
   it("rejects ThinkFlywheel or a caller-selected ordinary Vault as a correctness scenario", async () => {
     const { options } = await arrange();
     await expect(runPluginEventObserverScenario({ ...options, scenario: "../../ThinkFlywheelVault" } as never)).rejects.toThrow(/scenario/);
