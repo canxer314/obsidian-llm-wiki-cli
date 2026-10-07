@@ -1,5 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { hasBoundInstalledCrashRecoveryPark } from "./crash-restoration-protocol.js";
+import type { ObservedRuntimeEnvironment } from "./runtime-profile.js";
+
+export function createSupervisedInstalledRuntimeProbe(probeHost: () => Promise<ObservedRuntimeEnvironment>) {
+  return { probe: probeHost, probeRunning: async (request: { vaultPath: string; profileDirectory: string }): Promise<ObservedRuntimeEnvironment> => ({ ...await probeHost(), ...await confirmGeneratedVaultTrust({ ...request, timeoutMs: 30_000 }) }) };
+}
 
 export interface SupervisedRuntimeVersions {
   readonly obsidianVersion: string;
@@ -31,6 +37,8 @@ export async function confirmGeneratedVaultTrust(options: {
     throw new Error("GUI supervision requires exactly one enabled candidate plugin");
   }
   const pluginId = enabled[0];
+  const recoveryParked = await hasBoundInstalledCrashRecoveryPark(vaultPath, pluginId);
+  const runtimeVersionsExpression = "({obsidianVersion:JSON.parse(require('fs').readFileSync(require('path').join(process.resourcesPath,'obsidian.asar','package.json'),'utf8')).version,electronVersion:process.versions.electron,nodeVersion:process.versions.node})";
   const deadline = Date.now() + options.timeoutMs;
   while (Date.now() < deadline) {
     let port: number;
@@ -72,7 +80,9 @@ export async function confirmGeneratedVaultTrust(options: {
           };
           socket.addEventListener("message", onMessage);
           socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
-            expression: `(()=>{if(typeof app==='undefined'||!app.vault?.adapter)return 'waiting';if(app.vault.adapter.getBasePath()!==${JSON.stringify(vaultPath)})throw Error('Wrong acceptance Vault');const button=[...document.querySelectorAll('.modal button')].find(b=>b.textContent==='Trust author and enable plugins');if(button){button.click();return 'waiting';}if(!app.plugins?.plugins)return 'waiting';return Object.keys(app.plugins.plugins).length===1&&app.plugins.plugins[${JSON.stringify(pluginId)}]&&app.vault.getMarkdownFiles().every(f=>app.metadataCache.getFileCache(f)!==null)?{obsidianVersion:JSON.parse(require('fs').readFileSync(require('path').join(process.resourcesPath,'obsidian.asar','package.json'),'utf8')).version,electronVersion:process.versions.electron,nodeVersion:process.versions.node}:'waiting';})()`,
+            expression: recoveryParked
+              ? `(()=>{if(typeof app==='undefined'||!app.vault?.adapter)return 'waiting';if(app.vault.adapter.getBasePath()!==${JSON.stringify(vaultPath)})throw Error('Wrong acceptance Vault');return ${runtimeVersionsExpression};})()`
+              : `(()=>{if(typeof app==='undefined'||!app.vault?.adapter)return 'waiting';if(app.vault.adapter.getBasePath()!==${JSON.stringify(vaultPath)})throw Error('Wrong acceptance Vault');const button=[...document.querySelectorAll('.modal button')].find(b=>b.textContent==='Trust author and enable plugins');if(button){button.click();return 'waiting';}if(!app.plugins?.plugins)return 'waiting';return Object.keys(app.plugins.plugins).length===1&&app.plugins.plugins[${JSON.stringify(pluginId)}]&&app.vault.getMarkdownFiles().every(f=>app.metadataCache.getFileCache(f)!==null)?${runtimeVersionsExpression}:'waiting';})()`,
             returnByValue: true,
           } }));
         });

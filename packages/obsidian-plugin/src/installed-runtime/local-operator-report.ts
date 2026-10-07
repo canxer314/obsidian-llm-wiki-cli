@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
+import { verifyContentInclusiveDiagnosticBundle, type ContentInclusiveDiagnosticBundle } from "../content-inclusive-diagnostic-bundle.js";
+import { diagnosticCanonicalJson, diagnosticSha256 } from "./installed-diagnostic-privacy.js";
 import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
 import { isPathInside, loadInstalledRuntimeAcceptanceDescriptor, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 import { BRIDGE_VERSION, PLUGIN_VERSION, PROTOCOL_VERSION } from "../version.js";
@@ -14,20 +16,24 @@ const standardReportSchema = z.object({
   installedMainSha256: z.string().regex(/^[a-f0-9]{64}$/u),
   capabilityToken: z.string().regex(/^[a-f0-9]{64}$/u),
   vaultId: z.string().min(1), endpoint: z.string().url(),
+  diagnosticPrivacySources: z.object({ environment: z.object({
+    LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER: z.string(), LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_CREDENTIAL: z.string(),
+  }).strict(), username: z.string().min(1) }).strict().optional(),
   action: z.literal("standard-diagnostic-copy"), checksumVerified: z.literal(true), bundle: z.unknown(),
 }).strict();
 
-const contentReportSchema = standardReportSchema.omit({ action: true, checksumVerified: true, bundle: true }).extend({
+const contentReportSchema = standardReportSchema.omit({ action: true, checksumVerified: true, bundle: true, diagnosticPrivacySources: true }).extend({
   action: z.literal("content-inclusive-diagnostic-copy"), confirmationId: z.string().min(1),
   selectionSha256: z.string().regex(/^[a-f0-9]{64}$/u),
   outcome: z.enum(["cancelled", "copied"]), generated: z.boolean(), copied: z.boolean(),
   checksumVerified: z.literal(true).optional(), bundleChecksum: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
   bundleVersion: z.literal("1.0").optional(),
+  copiedTextSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(), bundle: z.unknown().optional(),
   versions: z.object({ bridge: z.string(), plugin: z.string(), protocol: z.string(),
     persistentStateSchema: z.number().int(), recoveryJournalSchema: z.number().int() }).strict().optional(),
 }).strict();
 
-const controlReportSchema = standardReportSchema.omit({ action: true, checksumVerified: true, bundle: true }).extend({
+const controlReportSchema = standardReportSchema.omit({ action: true, checksumVerified: true, bundle: true, diagnosticPrivacySources: true }).extend({
   action: z.enum(["pause-writes", "accept-recovery-baseline", "resume-writes"]),
   invocationId: z.string().min(1), outcome: z.enum(["accepted", "rejected"]),
   before: z.unknown(), after: z.unknown(),
@@ -87,7 +93,21 @@ export async function loadInstalledLocalOperatorReport(options: {
          report.bundleVersion !== undefined || report.versions !== undefined)) {
       throw new Error("Local operator content diagnostic generation and copy facts contradict the outcome");
     }
-    return report;
+    if (report.outcome === "cancelled" && (report.bundle !== undefined || report.copiedTextSha256 !== undefined)) throw new Error("Cancelled content diagnostic generated copied bytes");
+    if (report.copiedTextSha256 !== undefined || report.bundle !== undefined) {
+      if (!verifyContentInclusiveDiagnosticBundle(report.bundle)) throw new Error("Local content diagnostic copied bytes bundle is invalid");
+      const bundle = report.bundle as ContentInclusiveDiagnosticBundle;
+      const { checksum, ...payload } = bundle;
+      if (report.copiedTextSha256 !== diagnosticSha256(JSON.stringify(bundle)) || report.bundleChecksum !== checksum.canonicalPayload ||
+          checksum.canonicalPayload !== `sha256:${diagnosticSha256(diagnosticCanonicalJson(payload))}` ||
+          diagnosticSha256(bundle.selection.content) !== options.expectedSelectionSha256 || report.bundleVersion !== bundle.bundleVersion ||
+          diagnosticCanonicalJson(report.versions) !== diagnosticCanonicalJson(bundle.trace.versions)) {
+        throw new Error("Local content diagnostic copied bytes checksum or exact selection does not match");
+      }
+    }
+    // Never expose the raw selected content to public runner records.
+    const { bundle: _privateBundle, ...redacted } = report;
+    return redacted;
   }
   const diagnostics = report.action === "standard-diagnostic-copy" ? [report.bundle] : [report.before, report.after];
   if (!diagnostics.every(verifyStandardDiagnosticBundle)) throw new Error("Local operator diagnostic checksum is invalid");

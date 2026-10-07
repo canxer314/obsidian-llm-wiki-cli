@@ -1,3 +1,4 @@
+import { userInfo } from "node:os";
 import { watch, type FSWatcher } from "node:fs";
 import { openRecoveryJournal } from "../recovery-journal.js";
 import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
@@ -31,6 +32,8 @@ export interface InstalledRuntimeAcceptanceActivation {
   } & ({ readonly outcome: "cancelled" } | {
     readonly outcome: "copied";
     readonly bundle: ContentInclusiveDiagnosticBundle;
+    /** Digest of the exact serialized bytes after the clipboard write resolved. */
+    readonly copiedTextSha256?: string;
   })): Promise<void>;
   recordLocalWriteControl(options: {
     readonly vaultId: string;
@@ -51,7 +54,7 @@ export interface InstalledRuntimeAcceptanceDriverOptions {
   readonly executeCrashRestorationScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly command: import("./crash-restoration-protocol.js").CrashRestorationCommand;
-  }) => Promise<{ readonly boundary: "after_prepared" | "after_committed"; readonly journalPhase: "PREPARED" | "COMMITTED" }>;
+  }) => Promise<unknown>;
   readonly executeReferenceSingleSpanScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly expectedVaultId: string;
@@ -165,9 +168,11 @@ export async function activateInstalledRuntimeAcceptanceDriver(
       }
       const crashCommand = parseCrashRestorationCommand(command);
       if (crashCommand !== null) {
-        if (executeCrashRestorationScenario === undefined) return;
+        if (executeCrashRestorationScenario === undefined || crashCommand.recovery !== undefined) return;
         lastSequence = command.sequence;
         try {
+          const current = await loadInstalledRuntimeAcceptanceDescriptor(options);
+          if (current.descriptor.installedMainSha256 !== parsed.installedMainSha256) throw new Error("Installed crash entry point changed");
           // Reject before entering the installed handler: rejection must not arm
           // a future Change Set's crash injector.
           const handle = await open(join(parsed.vaultPath, ".llm-wiki", "recovery-journal.bin"), "r")
@@ -279,6 +284,13 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         endpoint: endpoint.toString(),
         action: "standard-diagnostic-copy",
         checksumVerified: true,
+        ...(process.env.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER === undefined ? {} : {
+          diagnosticPrivacySources: {
+            environment: { LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER: process.env.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER,
+              LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_CREDENTIAL: process.env.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_CREDENTIAL },
+            username: userInfo().username,
+          },
+        }),
         bundle: request.bundle,
       })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
       try {
@@ -292,6 +304,10 @@ export async function activateInstalledRuntimeAcceptanceDriver(
       if (request.outcome === "copied" && (!verifyContentInclusiveDiagnosticBundle(request.bundle) ||
           request.bundle.selection.content !== request.selection)) {
         throw new Error("Local acceptance requires a valid selection-bound content diagnostic bundle");
+      }
+      if (request.outcome === "copied" && request.copiedTextSha256 !== undefined &&
+          request.copiedTextSha256 !== createHash("sha256").update(JSON.stringify(request.bundle)).digest("hex")) {
+        throw new Error("Local content diagnostic copied bytes do not match the bundle");
       }
       if (disposed) throw new Error("Installed acceptance activation is disposed");
       const current = (await loadInstalledRuntimeAcceptanceDescriptor(options)).descriptor;
@@ -322,6 +338,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
         ...(request.outcome === "copied" ? {
           checksumVerified: true, bundleChecksum: request.bundle.checksum.canonicalPayload,
           bundleVersion: request.bundle.bundleVersion, versions: request.bundle.trace.versions,
+          ...(request.copiedTextSha256 === undefined ? {} : { copiedTextSha256: request.copiedTextSha256, bundle: request.bundle }),
         } : {}),
         selectionSha256: createHash("sha256").update(request.selection).digest("hex"),
       })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
