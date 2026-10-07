@@ -8,6 +8,35 @@ import { persistentFifoProofSchema } from "../src/installed-runtime/fifo-observa
 import type { InstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/acceptance-driver-protocol.js";
 
 describe("private installed FIFO report boundary", () => {
+  it("rejects an applied tail without its durable COMMITTED observation", () => {
+    const proof = syntheticFifoProof("run", "profile", "a".repeat(64));
+    proof.events = proof.events.filter(e => !(e.kind === "committed" && e.submissionKey === proof.enqueue[3]!.submissionKey));
+    expect(persistentFifoProofSchema.safeParse(proof).success).toBe(false);
+  });
+  it("rejects a stale preflight rejection that also has a COMMITTED observation", () => {
+    const proof = syntheticFifoProof("run", "profile", "a".repeat(64));
+    const index = proof.events.findIndex(e => e.kind === "terminal" && e.submissionKey === proof.staleKeys[0]);
+    proof.events.splice(index, 0, { kind: "committed", ...proof.enqueue[1]! });
+    expect(persistentFifoProofSchema.safeParse(proof).success).toBe(false);
+  });
+  it("rejects contradictory duplicate terminal observations for a stale key", () => {
+    const proof = syntheticFifoProof("run", "profile", "a".repeat(64));
+    const terminal = proof.events.find(e => e.kind === "terminal" && e.submissionKey === proof.staleKeys[0])!;
+    if (terminal.kind !== "terminal") throw new Error("fixture omitted terminal");
+    terminal.state = "intent_applied";
+    proof.events.push({ kind: "terminal", ...proof.enqueue[1]!, state: "intent_not_applied" });
+    expect(persistentFifoProofSchema.safeParse(proof).success).toBe(false);
+  });
+  it("rejects final byte observations that contradict the queued fixture drift", () => {
+    const proof = syntheticFifoProof("run", "profile", "a".repeat(64));
+    expect(persistentFifoProofSchema.safeParse({ ...proof, targetAfterSha256: "e".repeat(64), dependencyAfterSha256: "f".repeat(64) }).success).toBe(false);
+  });
+  it("rejects a second fixture drift observation rather than ignoring its contradictory bytes", () => {
+    const proof = syntheticFifoProof("run", "profile", "a".repeat(64));
+    const drift = proof.events.find(e => e.kind === "fixtures-changed")!;
+    proof.events.push({ ...drift, kind: "fixtures-changed", targetBefore: "5".repeat(64), targetAfter: "6".repeat(64), dependencyBefore: "7".repeat(64), dependencyAfter: "8".repeat(64) });
+    expect(persistentFifoProofSchema.safeParse(proof).success).toBe(false);
+  });
   it("refuses missing, torn and cross-run reports; does not activate on an ordinary Vault", async () => {
     const root = await mkdtemp(join(tmpdir(), "fifo-report-"));
     try {

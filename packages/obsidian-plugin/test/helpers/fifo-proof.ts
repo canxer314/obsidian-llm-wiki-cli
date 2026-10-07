@@ -8,7 +8,7 @@ export function syntheticFifoProof(runId: string, profile: string, candidateBund
   return {
     scope: "persistent-fifo-and-pre-mutation-repreflight", source: "installed-obsidian", runId, profile,
     candidateBundleSha256, installedMainSha256: digest, vaultIdSha256: digest, seed: digest, canonicalManifestSha256: digest,
-    beforeInventorySha256: digest, afterInventorySha256: digest, targetAfterSha256: digest, dependencyAfterSha256: digest, derivedAfterSha256: digest,
+    beforeInventorySha256: digest, afterInventorySha256: digest, targetAfterSha256: "2".repeat(64), dependencyAfterSha256: "4".repeat(64), derivedAfterSha256: digest,
     replay: { keysReplayed: 4, identitiesPreserved: 4, recordsUnchanged: 4, noAdditionalExecutionEvents: true },
     enqueue: entries, staleKeys: [entries[1]!.submissionKey, entries[2]!.submissionKey], cleanupSucceeded: true, verdict: "passed",
     events: [event("enqueued", 0), event("started", 0, { writeLease: true }), event("preflight", 0, { accepted: true, writeLease: true }), event("first-mutation", 0), event("committed", 0),

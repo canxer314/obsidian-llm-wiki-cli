@@ -34,6 +34,10 @@ export const persistentFifoProofSchema = z.object({
   cleanupSucceeded: z.literal(true), verdict: z.literal("passed"),
   replay: z.object({ keysReplayed: z.literal(4), identitiesPreserved: z.literal(4), recordsUnchanged: z.literal(4), noAdditionalExecutionEvents: z.literal(true) }).strict(),
 }).strict().superRefine((proof, context) => {
+  const drift = proof.events.find(e => e.kind === "fixtures-changed");
+  if (drift?.kind !== "fixtures-changed" || proof.targetAfterSha256 !== drift.targetAfter || proof.dependencyAfterSha256 !== drift.dependencyAfter) {
+    context.addIssue({ code: "custom", message: "FIFO final bytes contradict observed queued fixture drift" });
+  }
   if (proof.enqueue.some(e => !digest.safeParse(e.submissionKey).success || !digest.safeParse(e.changeSetId).success) ||
       proof.events.some(e => "submissionKey" in e && (!digest.safeParse(e.submissionKey).success || !digest.safeParse(e.changeSetId).success))) context.addIssue({ code: "custom", message: "FIFO public identities must be redacted digests" });
   try { verifyFifoObservations({ events: proof.events, expected: proof.enqueue, staleKeys: proof.staleKeys }); }
@@ -61,7 +65,7 @@ export function verifyFifoObservations(options: {
   }
   const restarts = events.flatMap((e, i) => e.kind === "restart" ? [i] : []);
   const changed = events.findIndex(e => e.kind === "fixtures-changed");
-  if (restarts.length !== 1 || changed < 0 || restarts[0]! <= changed) throw new Error("FIFO missing controlled restart");
+  if (restarts.length !== 1 || events.filter(e => e.kind === "fixtures-changed").length !== 1 || changed < 0 || restarts[0]! <= changed) throw new Error("FIFO missing or duplicate controlled restart/fixture drift");
   const restart = restarts[0]!;
   const drift = events[changed]!;
   if (drift.kind !== "fixtures-changed" || drift.targetBefore === drift.targetAfter || drift.dependencyBefore === drift.dependencyAfter) throw new Error("FIFO missing fixture drift");
@@ -82,6 +86,12 @@ export function verifyFifoObservations(options: {
     const previousEnd = previous === undefined ? -1 : events.findIndex(e =>
       (e.kind === (index === 1 ? "recovered" : "terminal")) && e.submissionKey === previous.submissionKey);
     if (index > 0 && (previousEnd < 0 || previousEnd >= start)) throw new Error("FIFO executions were not serial");
+    const terminals = events.flatMap((e, i) => e.kind === "terminal" && e.submissionKey === entry.submissionKey ? [{ e, i }] : []);
+    const recovered = events.flatMap((e, i) => e.kind === "recovered" && e.submissionKey === entry.submissionKey ? [{ e, i }] : []);
+    if (index === 0 ? terminals.length !== 0 || recovered.length !== 1 || recovered[0]!.e.state !== "intent_applied" || recovered[0]!.i <= restart
+      : recovered.length !== 0 || terminals.length !== 1 || terminals[0]!.e.state !== (options.staleKeys.includes(entry.submissionKey) ? "intent_not_applied" : "intent_applied")) {
+      throw new Error("FIFO requires one consistent terminal/recovery observation per bound key");
+    }
     const end = events.findIndex(e => (e.kind === (index === 0 ? "committed" : "terminal")) && e.submissionKey === entry.submissionKey);
     const enqueue = events.findIndex(e => e.kind === "enqueued" && e.submissionKey === entry.submissionKey);
     if (enqueue >= start || end <= start) throw new Error("FIFO incomplete serial execution lifecycle");
@@ -90,12 +100,15 @@ export function verifyFifoObservations(options: {
     const checks = events.flatMap((e, i) => e.kind === "preflight" && e.submissionKey === entry.submissionKey ? [{ e, i }] : []);
     const mutations = events.flatMap((e, i) => e.kind === "first-mutation" && e.submissionKey === entry.submissionKey ? [i] : []);
     const mutation = mutations[0] ?? -1;
+    const commits = events.flatMap((e, i) => e.kind === "committed" && e.submissionKey === entry.submissionKey ? [i] : []);
+    if (!options.staleKeys.includes(entry.submissionKey) && (commits.length !== 1 || commits[0]! <= mutation ||
+        (index === 0 ? commits[0] !== end : commits[0]! >= end))) throw new Error("FIFO applied result requires exactly one preceding durable COMMITTED observation");
     if (mutations.length > 1 || (!options.staleKeys.includes(entry.submissionKey) && (mutation < 0 || end <= mutation))) throw new Error("FIFO mutation was missing, duplicated or outside execution");
     if (checks.length !== 1 || checks[0]!.i <= start || checks[0]!.i >= end || (mutation !== -1 && checks[0]!.i >= mutation) ||
         (!options.staleKeys.includes(entry.submissionKey) && !checks[0]!.e.accepted)) {
       throw new Error("FIFO missing in-lease preflight before first mutation");
     }
-    if (options.staleKeys.includes(entry.submissionKey) && (checks[0]!.e.accepted || mutation !== -1 ||
+    if (options.staleKeys.includes(entry.submissionKey) && (checks[0]!.e.accepted || mutation !== -1 || commits.length !== 0 ||
         !events.some(e => e.kind === "terminal" && e.submissionKey === entry.submissionKey && e.state === "intent_not_applied"))) {
       throw new Error("FIFO stale target or Read Dependency was not rejected before mutation");
     }
