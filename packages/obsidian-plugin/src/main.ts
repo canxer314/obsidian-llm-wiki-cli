@@ -1042,7 +1042,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
               if (outcome.outcome === "cancelled") {
                 await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "cancelled" });
               } else if (outcome.outcome === "copied" && generatedBundle !== undefined) {
-                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "copied", bundle: generatedBundle });
+                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "copied", bundle: generatedBundle, copiedTextSha256: outcome.copiedTextSha256 });
               }
             }
             if (outcome.outcome === "copied") {

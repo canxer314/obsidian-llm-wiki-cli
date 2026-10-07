@@ -69,6 +69,16 @@ describe("content-inclusive diagnostic copy flow", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it("binds the successful copy to the exact bytes delivered to the clipboard", async () => {
+    let copied = "";
+    const outcome = await performContentInclusiveDiagnosticCopy({
+      selection: "selected", confirm: () => true, generate: () => ({ exact: "bytes" }),
+      write: text => { copied = text; },
+    });
+    expect(copied).toBe('{"exact":"bytes"}');
+    expect(outcome).toEqual({ outcome: "copied", copiedTextSha256: "f958a565aaf08dcff6722c2c9e17f7f387932f6ea8f5b2afd82cabb22d1a4305" });
+  });
+
   it("copies the serialized bundle only after a fresh confirmation", async () => {
     const selected = "exactly selected content";
     const bundle: ContentInclusiveDiagnosticBundle = {
@@ -104,7 +114,7 @@ describe("content-inclusive diagnostic copy flow", () => {
       generate,
       write,
     });
-    expect(outcome).toEqual({ outcome: "copied" });
+    expect(outcome).toMatchObject({ outcome: "copied", copiedTextSha256: expect.stringMatching(/^[a-f0-9]{64}$/u) });
     expect(confirm).toHaveBeenCalledOnce();
     expect(generate).toHaveBeenCalledWith(selected);
     expect(write).toHaveBeenCalledOnce();

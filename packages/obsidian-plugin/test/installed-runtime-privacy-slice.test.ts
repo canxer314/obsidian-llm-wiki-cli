@@ -1,3 +1,8 @@
+import { runInstalledDiagnosticPrivacyAcceptance } from "../src/installed-runtime/privacy-recovery-installed-runner.js";
+import { validateInstalledDiagnosticPrivacyProof } from "../src/installed-runtime/installed-diagnostic-privacy.js";
+import { userInfo } from "node:os";
+import { readInstalledCrashJournal } from "../src/installed-runtime/installed-crash-restoration-slice.js";
+import { prepareInstalledDiagnosticPrivacyFixture } from "../src/installed-runtime/installed-diagnostic-privacy.js";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -46,13 +51,14 @@ it("rejects a foreign privacy descriptor before starting the generated runtime",
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" = "missing", blockedSnapshotUnavailable = false, content: "missing" | "real" | "cancel-only" = "missing") {
+async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" = "missing", blockedSnapshotUnavailable = false, content: "missing" | "real" | "cancel-only" = "missing", diagnosticSources = false, mutateSecondVaultPrivateState = false) {
   const root = await mkdtemp(join(tmpdir(), "privacy-report-"));
   const candidateDirectory = join(root, "candidate");
   await mkdir(candidateDirectory);
   await writeFile(join(candidateDirectory, "manifest.json"), JSON.stringify({ id: "privacy-plugin", version: "0.1.0", minAppVersion: "1.0.0" }));
   await writeFile(join(candidateDirectory, "main.js"), "candidate");
   const candidate = brandVerifiedCandidateBundle({ bundleDirectory: candidateDirectory, identity: await inspectCandidateBundle(candidateDirectory), tag: "v0.1.0", repository: "test/privacy", workflowRef: "test", attestationSource: "local-candidate" });
+  const environments = new Map<string, Record<string, string>>();
   const bridges = new Map<string, ReturnType<typeof createBridgeInstance>>();
   const descriptors = new Map<string, Awaited<ReturnType<typeof createInstalledRuntimeAcceptanceDescriptor>>>();
   const executions = new Map<string, Awaited<ReturnType<typeof createFileSystemChangeSetExecutionAdapter>>>();
@@ -67,7 +73,8 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
     ...(mode === "blocked" ? { recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes" } : {}),
     profileName: profile.name, profile, probe: { probeRunning: async () => ({ platform: profile.os.platform, osBuild: profile.os.build,
       obsidianVersion: profile.versions.obsidian, electronVersion: profile.versions.electron, nodeVersion: profile.versions.node, capabilities: profile.capabilities }) },
-    client: createLoopbackMcpClient(), processControl: { start: async ({ vaultPath }: { vaultPath: string }) => {
+    client: createLoopbackMcpClient(), processControl: { start: async ({ vaultPath, diagnosticPrivacyEnvironment }: { vaultPath: string; diagnosticPrivacyEnvironment?: Record<string, string> }) => {
+      if (diagnosticPrivacyEnvironment !== undefined) environments.set(vaultPath, diagnosticPrivacyEnvironment);
       const unused = async (): Promise<never> => { throw new Error("Not exercised by the privacy report seam"); };
       let execution: Awaited<ReturnType<typeof createFileSystemChangeSetExecutionAdapter>> | undefined;
       const dataSource = { readBinary: async (path: string) => readFile(join(vaultPath, path)).catch(() => null),
@@ -103,12 +110,14 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
           if (current.command.action !== "run-semantic-evidence-scenario") return;
           dispatched = true;
           expect(current.command.scenario).toBe("trash_note/restore_evidence_deadline_blocks_writes");
-          const bytes = Buffer.from("# Private blocked fixture\n");
+          const suffix = environments.get(vaultPath)?.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER.slice("privacy_environment_".length);
+          const bytes = Buffer.from(diagnosticSources ? `# Private blocked fixture\nprivacy_before_image_${suffix}\n` : "# Private blocked fixture\n");
+          const submissionKey = diagnosticSources ? `installed-semantic-privacy_request_${suffix}` : "real-blocked-fixture";
           await writeFile(join(vaultPath, "blocked.md"), bytes);
           const client = new Client({ name: "fixture", version: "1.0.0" });
           await client.connect(new StreamableHTTPClientTransport(bridge.endpoint, { requestInit: { headers: { "X-Expected-Vault-ID": vaultPath } } }));
           try {
-            const result = await client.callTool({ name: "vault_change_set_submit", arguments: { submissionKey: "real-blocked-fixture",
+            const result = await client.callTool({ name: "vault_change_set_submit", arguments: { submissionKey,
               operations: [{ operationId: "trash", kind: "trash", path: "blocked.md", targetVersion: contentVersion(bytes) }] } });
             if (result.structuredContent === undefined) throw new Error(JSON.stringify(result));
             const submitted = parseChangeSetSubmitResult(result.structuredContent);
@@ -176,16 +185,22 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
           expect(events).not.toContain("stop");
           const observed = (await createLoopbackMcpClient().observeHealth(bridge.endpoint, vaultPath)).health;
           if (observed.outcome !== "observed") throw new Error("Missing content fixture health");
-          const selection = "private explicit selection";
+          const selection = diagnosticSources ? (await readFile(join(vaultPath, "diagnostic-privacy", "selection.md"), "utf8")).split("\n").at(-2)! : "private explicit selection";
           const evidence = { vaultId: vaultPath, versions: observed.versions,
             health: { readiness: observed.readiness, recovery: observed.recovery.state, write: observed.write,
               effectiveGate: observed.effectiveGate?.code ?? null, overall: observed.overall, reasonCodes: observed.reasonCodes, operatorAction: observed.operatorAction },
             listener: observed.listener, queue: observed.queue, lifecycle: observed.lifecycle,
             journal: { availability: "unavailable", frames: [] }, changeSets: [], machineEvents: [] };
           const activation = await activateInstalledRuntimeAcceptanceDriver({ vaultPath, pluginId: "privacy-plugin" });
+          if (outcome === "copied" && mutateSecondVaultPrivateState) {
+            const second = [...bridges.keys()].find(path => path.includes("vault-b"))!;
+            await writeFile(join(second, ".llm-wiki", "foreign-private-state.bin"), "side effect");
+          }
+          const contentBundle = outcome === "copied" ? createContentInclusiveDiagnosticBundle(evidence, selection) : undefined;
           try { await activation!.recordContentInclusiveDiagnosticCopy({ vaultId: vaultPath, endpoint: bridge.endpoint,
             confirmationId: randomUUID(), outcome, selection,
-            ...(outcome === "copied" ? { bundle: createContentInclusiveDiagnosticBundle(evidence, selection) } : {}) }); }
+            ...(contentBundle === undefined ? {} : { bundle: contentBundle,
+              ...(diagnosticSources ? { copiedTextSha256: createHash("sha256").update(JSON.stringify(contentBundle)).digest("hex") } : {}) }) }); }
           finally { activation?.dispose(); }
         })());
       }
@@ -202,21 +217,89 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
         expect(events).not.toContain("stop");
         const observed = (await createLoopbackMcpClient().observeHealth(bridge.endpoint, vaultPath)).health;
         if (observed.outcome !== "observed") throw new Error("Missing live health");
+        const frame = diagnosticSources && vaultPath.includes("vault-a") ? await readInstalledCrashJournal(join(vaultPath, ".llm-wiki", "recovery-journal.bin")) : undefined;
+        const payload = frame?.payload as any;
+        const statusResponse = payload === undefined ? undefined : await (async () => {
+          const client = new Client({ name: "privacy-status-fixture", version: "1.0.0" });
+          await client.connect(new StreamableHTTPClientTransport(bridge.endpoint, { requestInit: { headers: { "X-Expected-Vault-ID": vaultPath } } }));
+          try { return await client.callTool({ name: "vault_change_set_status", arguments: { submissionKey: payload.input.submissionKey } }); } finally { await client.close(); }
+        })();
+        const outcomeFacts = (statusResponse?.structuredContent as any)?.changeSet;
         const currentBundle = mode === "blocked" ? createStandardDiagnosticBundle({ vaultId: vaultPath,
           versions: observed.versions, health: { readiness: observed.readiness, recovery: observed.recovery.state,
             write: observed.write, effectiveGate: observed.effectiveGate?.code ?? null, overall: observed.overall,
             reasonCodes: observed.reasonCodes, operatorAction: observed.operatorAction }, listener: observed.listener,
           queue: observed.queue, lifecycle: observed.lifecycle, journal: await executions.get(vaultPath)!.diagnosticJournalFacts(),
-          changeSets: [], machineEvents: [] }) : bundle;
+          changeSets: outcomeFacts === undefined ? [] : [{ changeSetId: payload.changeSetId, submissionKey: payload.input.submissionKey,
+            enqueueSeq: payload.enqueueSeq, state: outcomeFacts.state, executionPhase: outcomeFacts.executionPhase ?? (outcomeFacts.state !== "in_progress" ? "terminal" : null) }], machineEvents: [] }) : bundle;
         await writeFile(join(descriptor.reportDirectory, "local-standard-diagnostic-copy.json"), JSON.stringify({ schemaVersion: 1,
           runId: descriptor.runId, candidateBundleSha256: descriptor.candidateBundleSha256, installedMainSha256: descriptor.installedMainSha256,
           capabilityToken: descriptor.capabilityToken, vaultId: mode === "foreign" ? "foreign" : vaultPath, endpoint: bridge.endpoint.toString(),
+          ...(diagnosticSources ? { diagnosticPrivacySources: { environment: environments.get(vaultPath), username: userInfo().username } } : {}),
           action: "standard-diagnostic-copy", checksumVerified: true, bundle: currentBundle }), { mode: 0o600 });
       }));
     }, assertion: () => undefined,
   } as unknown as InstalledPrivacyBoundaryOptions;
   return { root, options, events, cleanup: async () => { for (const timer of scenarioTimers) clearInterval(timer); await Promise.all(writes); for (const bridge of bridges.values()) await bridge.stop(); for (const execution of executions.values()) await execution.close?.(); await rm(root, { recursive: true, force: true }); } };
 }
+
+it("runs standalone A33 without invoking or requesting recovery baseline/resume (inner seam only)", async () => {
+  const fixture = await reportFixture("blocked", "missing", false, "real", true);
+  try {
+    const proof = await runInstalledDiagnosticPrivacyAcceptance(fixture.options);
+    expect(proof.scope).toBe("installed-diagnostic-privacy-A33");
+    expect(proof.verdict).toBe("passed");
+    expect(fixture.events.some(event => event.includes("local-control-report-required"))).toBe(false);
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects second Vault private-state mutation even when public health/status and note inventory are unchanged", async () => {
+  const fixture = await reportFixture("blocked", "missing", false, "real", true, true);
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true })).rejects.toThrow("second Vault");
+  } finally { await fixture.cleanup(); }
+});
+
+it("composes a redacted A33 proof only after all live report observations and cleanup (inner seam, not installed acceptance)", async () => {
+  const fixture = await reportFixture("blocked", "missing", false, "real", true);
+  try {
+    const result = await runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true });
+    expect(result.verdict).toBe("partial");
+    expect(result.diagnosticProof).toMatchObject({ scope: "installed-diagnostic-privacy-A33", verdict: "passed", wireRejections: 16,
+      cleanup: { verified: true, vaultCount: 2, residualCount: 0 } });
+    const binding = { runId: fixture.options.runId, candidateBundleSha256: fixture.options.candidate.identity.bundleSha256, profileName: profile.name, installedMainSha256: fixture.options.candidate.identity.files.find(file => file.path === "main.js")!.sha256 };
+    expect(validateInstalledDiagnosticPrivacyProof(result.diagnosticProof, binding)).toEqual(result.diagnosticProof);
+    for (const invalid of [
+      { ...result.diagnosticProof, runId: "foreign" },
+      { ...result.diagnosticProof, vaults: result.diagnosticProof!.vaults.map(vault => ({ ...vault, installedMainSha256: "0".repeat(64) })) },
+      { ...result.diagnosticProof, cleanup: { verified: false, vaultCount: 2, residualCount: 0 } },
+      { ...result.diagnosticProof, coverage: [] },
+      { ...result.diagnosticProof, vaults: [result.diagnosticProof!.vaults[0], result.diagnosticProof!.vaults[0]] },
+      { ...result.diagnosticProof, capabilityToken: "private" },
+      { ...result.diagnosticProof, confirmations: [result.diagnosticProof!.confirmations[0], { ...result.diagnosticProof!.confirmations[1], selectionSha256: "0".repeat(64) }] },
+    ]) expect(() => validateInstalledDiagnosticPrivacyProof(invalid, binding)).toThrow();
+    expect(result.diagnosticProof!.vaults).toHaveLength(2);
+    expect(result.diagnosticProof!.vaults[0]!.markerCategories).toHaveLength(12);
+    expect(result.diagnosticProof!.confirmations.map(item => item.outcome)).toEqual(["cancelled", "copied"]);
+    expect(JSON.stringify(result)).not.toContain("privacy_body_");
+    expect(JSON.stringify(result)).not.toContain(fixture.root);
+    expect(fixture.events.filter(event => event === "stop")).toHaveLength(2);
+  } finally { await fixture.cleanup(); }
+});
+
+it("requires installed process source evidence instead of upgrading a standard report to A33 passed", async () => {
+  const fixture = await reportFixture("blocked");
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, diagnosticPrivacy: true })).rejects.toThrow("process environment source");
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects claimed empty cleanup when generated roots still exist", async () => {
+  const fixture = await reportFixture("standard");
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, cleanupVault: async () => ({ attempted: true, residualPaths: [] }) })).rejects.toThrow("cleanup left");
+  } finally { await fixture.cleanup(); }
+});
 
 it("rejects an invalid operator report timeout before provisioning generated runtimes", async () => {
   const fixture = await reportFixture("missing");

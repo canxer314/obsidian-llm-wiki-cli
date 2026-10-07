@@ -391,9 +391,9 @@ export function createAuthoritativeInstalledRuntimeRunners(
       ...request,
       operatorReportTimeoutMs: request.operatorReportTimeoutMs ?? 180_000,
       recoveryFixture: "trash_note/restore_evidence_deadline_blocks_writes",
+      diagnosticPrivacy: true,
       recoveryControls: true,
-      // Exact Notes/Welcome.md seed selection; no Vault content enters reports.
-      contentConfirmation: { expectedSelectionSha256: "8c683128e39b84e2261c09b4417d294ad8e0278cfd8203c3a618007c5cf74697" },
+      // A33 uses the exact deterministic generated selection; no raw selection enters public proof.
     }),
     runReleaseLifecycleCorpus: async (request) => {
       if (request.profile !== undefined && request.profileName !== undefined && request.probe !== undefined) {
