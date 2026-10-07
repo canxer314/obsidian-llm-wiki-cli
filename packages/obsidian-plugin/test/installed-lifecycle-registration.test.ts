@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -117,9 +117,13 @@ it.runIf(process.env.LIFECYCLE_REAL_CLI_REGRESSION === "1")("observes the real C
     await writeFile(options.configPath, JSON.stringify({ projects: { [options.vaultPath]: { mcpServers: {
       [`vault-${vaultId}`]: { type: "http", url: `http://127.0.0.1:${address.port}/mcp`, headers: { "X-Expected-Vault-ID": vaultId } },
     } } } }));
-    // First read-only CLI invocation initializes its own isolated metadata.
-    // Observe only after that, retaining the production byte-stability check.
-    await inspectRealAgentRegistration({ args: ["mcp", "get", `vault-${vaultId}`], cwd: options.vaultPath, configDirectory: options.configDirectory });
+    // Independent checkpoint: a fresh CLI metadata write must fail closed.
+    // The resulting fixture metadata is only used to validate CLI format;
+    // production never warms configuration or retries this rejection.
+    const before = await readFile(options.configPath, "utf8");
+    await expect(observeIsolatedMcpRegistration({ ...options, port: address.port })).rejects.toThrow("config changed");
+    const initialized = await readFile(options.configPath, "utf8");
+    expect(initialized).not.toBe(before);
     const result = await observeIsolatedMcpRegistration({ ...options, port: address.port, runAgentCommand: async request => {
       const observed = await inspectRealAgentRegistration(request);
       expect(observed.exitCode).toBe(0);
@@ -127,6 +131,7 @@ it.runIf(process.env.LIFECYCLE_REAL_CLI_REGRESSION === "1")("observes the real C
       return observed;
     } });
     expect(result).toMatchObject({ state: "registered", agentConnected: true });
-    expect(boundRequests).toBeGreaterThan(0);
+    expect(await readFile(options.configPath, "utf8")).toBe(initialized);
+    expect(boundRequests).toBeGreaterThanOrEqual(4);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
