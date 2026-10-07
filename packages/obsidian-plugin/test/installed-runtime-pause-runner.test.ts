@@ -151,6 +151,8 @@ it("observes real-wire pausing/drain, retained FIFO, independent resume and Vaul
     expect(manualPauseProofSchema.safeParse(proof).success).toBe(true);
     expect(manualPauseProofSchema.safeParse({ ...proof, cleanupSucceeded: false }).success).toBe(false);
     expect(manualPauseProofSchema.safeParse({ ...proof, capabilityToken: "c".repeat(64) }).success).toBe(false);
+    expect(proof.toolRows.map(row => row.tool)).toEqual(expect.arrayContaining(["vault_health", "vault_discover", "vault_read", "vault_continue", "vault_change_set_submit", "vault_change_set_status"]));
+    expect(proof.toolRows.every(row => row.structuredSha256 === row.textSha256)).toBe(true);
     expect(fixture.records.filter(e => e.name === "manual-pause-observed")).toHaveLength(1);
   } finally { await fixture.cleanup(); }
 }, 20000);

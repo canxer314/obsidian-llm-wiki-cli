@@ -14,6 +14,18 @@ export function syntheticManualPauseProof(runId: string, profile: string, candid
   const afterA = [...before, ...["Head", "First", "Second", "Third"].map((name, index) => ({ path: `ManualPauseProof/${name}.md`, sha256: digest(`# Pause ${index}\n`), sizeBytes: 10 }))];
   const afterB = [...before, { path: "ManualPauseProof/Independent.md", sha256: digest("# Independent\n"), sizeBytes: 14 }];
   const write = { gate: "open", pauseSource: "manual" };
+  const row = (tool: string, phase: string, extra = {}) => ({ source: "loopback-mcp", phase, tool, contract: `${tool}:v1`,
+    vaultIdSha256: digest("vault-a"), requestSha256: digest("request"), structuredSha256: digest("response"), textSha256: digest("response"),
+    schemaValid: true, textIdentical: true, isError: false, branch: "observed", gate: null, submissionKeySha256: null, changeSetIdSha256: null,
+    state: null, continuationInSha256: null, continuationOutSha256: null, contentVersion: null, start: null, end: null, pageBytes: null, ...extra });
+  const toolRows = [row("vault_health", "pausing"), row("vault_health", "paused"),
+    ...enqueue.map((entry, index) => row("vault_change_set_status", "paused", { submissionKeySha256: entry.submissionKey, changeSetIdSha256: entry.changeSetId, branch: "found", state: index === 0 ? "intent_applied" : "in_progress" })),
+    row("vault_change_set_submit", "paused", { submissionKeySha256: digest("unbound"), branch: "operationally_blocked", gate: "writes_paused", isError: true }),
+    row("vault_change_set_status", "paused", { submissionKeySha256: digest("unbound"), branch: "unknown" }), row("vault_discover", "paused", { branch: "results" }),
+    row("vault_read", "paused", { branch: "page", continuationOutSha256: digest("token"), contentVersion: digest("content"), start: 0, end: 3, pageBytes: 3 }),
+    row("vault_continue", "paused", { branch: "page", continuationInSha256: digest("token"), contentVersion: digest("content"), start: 3, end: 7, pageBytes: 4 }),
+    row("vault_change_set_status", "paused", { vaultIdSha256: digest("vault-b"), changeSetIdSha256: digest("b-progress"), branch: "found", state: "intent_applied" }),
+    row("vault_health", "resumed"), ...enqueue.map(entry => row("vault_change_set_status", "resumed", { submissionKeySha256: entry.submissionKey, changeSetIdSha256: entry.changeSetId, branch: "found", state: "intent_applied" }))].map((entry, index) => ({ ...entry, sequence: index + 1 }));
   return manualPauseProofSchema.parse({ scope: "manual-pause-drain-and-fifo", source: "installed-obsidian", runId, profile,
     candidateBundleSha256, installedMainSha256: digest("main"), canonicalManifestSha256: digest("manifest"),
     vaults: ["vault-a", "vault-b"].map((label, index) => ({ label, vaultIdSha256: digest(label), seed: digest("seed"),
@@ -27,6 +39,7 @@ export function syntheticManualPauseProof(runId: string, profile: string, candid
       paused: { write: { ...write, state: "paused" }, recovery: "none", effectiveGate: "writes_paused", queue: { currentExecutionId: null, length: 3, headChangeSetId: enqueue[1]!.changeSetId } },
       resumed: { write: { gate: "open", state: "writable", pauseSource: null }, recovery: "none", effectiveGate: null, queue: { currentExecutionId: null, length: 0, headChangeSetId: null } } },
     localActions: ["pause-writes", "resume-writes"].map(action => ({ action, invocationIdSha256: digest(action), beforeSha256: digest(`${action}-before`), afterSha256: digest(`${action}-after`) })),
+    toolRows,
     unboundKeySha256: digest("unbound"), contentSha256: digest("content"), independentProgressChangeSetIdSha256: digest("b-progress"),
     cleanup: [{ attempted: true, residualPaths: [] }, { attempted: true, residualPaths: [] }], cleanupSucceeded: true, verdict: "passed" });
 }

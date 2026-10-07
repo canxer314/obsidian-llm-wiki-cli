@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { parseChangeSetSubmitResult, parseChangeSetStatusResult, parseDiscoverResult, parseReadToolResult, parseContinueResult, type ChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
+import { parseHealthResult, parseChangeSetSubmitResult, parseChangeSetStatusResult, parseDiscoverResult, parseReadToolResult, parseContinueResult, type ChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
 import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { parseChangeSetRegistryState, type ChangeSetRegistryState } from "../change-set.js";
 import type { StandardDiagnosticBundle } from "../diagnostic-bundle.js";
@@ -61,6 +61,9 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
   const live: LiveVault[] = [];
   const cleanup: CleanupReport[] = [];
   const contentClients = new Map<LiveVault, Client>();
+  const toolRows: ManualPauseProof["toolRows"] = [];
+  let phase: ManualPauseProof["toolRows"][number]["phase"] = "setup";
+  let requestSequence = 0;
   let evidence: Omit<ManualPauseProof, "cleanup" | "cleanupSucceeded" | "verdict"> | undefined;
   let succeeded = false;
   const prepare = async (label: "vault-a" | "vault-b") => {
@@ -75,7 +78,7 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
     await mkdir(reportDirectory, { recursive: false });
     item.reportDirectory = reportDirectory;
     const reportIdentity = await lstat(reportDirectory);
-    if (!reportIdentity.isDirectory() || reportIdentity.isSymbolicLink()) throw new Error("Manual pause report root ownership unconfirmed");
+    if (!reportIdentity.isDirectory() || reportIdentity.isSymbolicLink() || !Number.isSafeInteger(reportIdentity.ino) || reportIdentity.ino <= 0 || !Number.isSafeInteger(reportIdentity.dev) || reportIdentity.dev < 0) throw new Error("Manual pause report root ownership unconfirmed");
     item.reportIdentity = { dev: reportIdentity.dev, ino: reportIdentity.ino };
     const driver = await options.prepareAcceptanceDriver({ vaultPath: vault.vaultPath, pluginId: options.candidate.identity.pluginId,
       candidateBundleSha256: options.candidate.identity.bundleSha256, configDirectoryName: options.configDirectoryName ?? ".obsidian", reportDirectory });
@@ -112,8 +115,13 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
     item.stopped = true; item.handle = null;
   };
   const registry = async (item: LiveVault) => parseChangeSetRegistryState(JSON.parse(await readFile(join(item.vault.vaultPath, ".llm-wiki/bridge-state.json"), "utf8")).changeSets);
-  const health = async (item: LiveVault) => (await options.client.observeHealth(item.endpoint!, item.vaultId!)).health;
+  const health = async (item: LiveVault): Promise<ObservedHealth> => {
+    const value = await call(item, "vault_health", {}, parseHealthResult);
+    if (value.outcome !== "observed" || value.vault.id !== item.vaultId || value.listener.address !== "127.0.0.1" || value.listener.port !== item.port) throw new Error("Manual pause live health identity mismatch");
+    return value;
+  };
   const call = async (item: LiveVault, name: string, arguments_: Record<string, unknown>, parse: (value: unknown) => any, expectedError = false) => {
+    const sequence = ++requestSequence; const requestPhase = phase;
     const persistent = name === "vault_read" || name === "vault_continue";
     let client = persistent ? contentClients.get(item) : undefined;
     const connected = client !== undefined;
@@ -125,7 +133,20 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
       const value = parse(result.structuredContent);
       if ((result.isError === true) !== expectedError || !Array.isArray(result.content) || result.content.length !== 1 ||
           result.content[0]?.type !== "text" || result.content[0].text !== JSON.stringify(value)) throw new Error("Manual pause wire representation/error mismatch");
-      options.record("tool", `manual-pause/${name}`, { vaultIdSha256: fifoDigest(item.vaultId!), resultSha256: fifoDigest(JSON.stringify(value)), isError: expectedError });
+      const fragments = value.outcome === "page" ? value.items.filter((fragment: any) => "content" in fragment) : [];
+      toolRows.push({ sequence, source: "loopback-mcp", phase: requestPhase, tool: name as ManualPauseProof["toolRows"][number]["tool"], contract: `${name}:v1`,
+        vaultIdSha256: fifoDigest(item.vaultId!), requestSha256: fifoDigest(JSON.stringify({ name, arguments: arguments_ })),
+        structuredSha256: fifoDigest(JSON.stringify(result.structuredContent)), textSha256: fifoDigest(result.content[0].text),
+        schemaValid: true, textIdentical: true, isError: result.isError === true, branch: value.outcome ?? value.lookup,
+        gate: value.gate?.code === "writes_paused" ? "writes_paused" : null,
+        submissionKeySha256: typeof arguments_.submissionKey === "string" ? fifoDigest(arguments_.submissionKey) : null,
+        changeSetIdSha256: value.changeSet ? fifoDigest(value.changeSet.changeSetId) : null, state: value.changeSet?.state ?? null,
+        continuationInSha256: typeof arguments_.continuation === "string" ? fifoDigest(arguments_.continuation) : null,
+        continuationOutSha256: typeof value.continuation === "string" ? fifoDigest(value.continuation) : null,
+        contentVersion: fragments.length ? fragments[0].contentVersion.slice(7) : null,
+        start: fragments.length ? fragments[0].start : null, end: fragments.length ? fragments.at(-1).end : null,
+        pageBytes: fragments.length ? fragments.reduce((sum: number, fragment: any) => sum + Buffer.byteLength(fragment.content), 0) : null });
+      options.record("tool", `manual-pause/${name}`, toolRows.at(-1));
       return value;
     } finally { if (!persistent) await client.close().catch(() => {}); }
   };
@@ -180,6 +201,7 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
     }
     const parkedRegistry = registrySummary(await registry(a));
     if (parkedRegistry.length !== 4 || parkedRegistry.some((entry, index) => entry.state !== "in_progress" || entry.executionPhase !== (index === 0 ? "executing" : "queued"))) throw new Error("Manual pause fixture did not retain a durable in-flight FIFO");
+    phase = "pausing";
     options.record("transport", "manual-pause/pause-local-control-report-required", { vaultIdSha256: fifoDigest(a.vaultId!), action: "pause-writes" });
     let pausing!: ObservedHealth;
     await waitForCondition(async () => {
@@ -198,6 +220,7 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
     const pause = await waitForNextInstalledLocalControlReport({ descriptor: a.descriptor, vaultId: a.vaultId!, endpoint: a.endpoint!, configDirectoryName: options.configDirectoryName,
       action: "pause-writes", consumedInvocationIds: [], timeoutMs: operatorTimeout });
     if (pause.action !== "pause-writes" || pause.outcome !== "accepted") throw new Error("Manual pause requires an accepted local Primary Operator pause");
+    phase = "paused";
     const paused = await health(a); assertPaused(paused, entries);
     const pausedRegistry = registrySummary(await registry(a));
     verifyReport(pause.before, parkedRegistry); verifyReport(pause.after, pausedRegistry, paused);
@@ -248,6 +271,7 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
     const resume = await waitForNextInstalledLocalControlReport({ descriptor: a.descriptor, vaultId: a.vaultId!, endpoint: a.endpoint!, configDirectoryName: options.configDirectoryName,
       action: "resume-writes", consumedInvocationIds: [pause.invocationId], timeoutMs: operatorTimeout });
     if (resume.action !== "resume-writes" || resume.outcome !== "accepted" || resume.invocationId === pause.invocationId || resume.before.health.write.state !== "paused" || resume.before.health.write.pauseSource !== "manual") throw new Error("Manual pause requires a fresh independent local resume");
+    phase = "resumed";
     const resumed = await health(a); assertOpen(resumed);
     if (resumed.queue.length !== 0 || resumed.queue.currentExecutionId !== null) throw new Error("Manual pause resume did not finish retained work");
     const finalRegistry = registrySummary(await registry(a));
@@ -279,6 +303,7 @@ export async function runInstalledManualPauseCorpus(options: InstalledManualPaus
       pausingEventCount, pausedEventCount, resumeEventCount, health: { pausing: healthSummary(pausing), paused: healthSummary(paused), resumed: healthSummary(resumed) },
       localActions: [{ action: pause.action, invocationIdSha256: fifoDigest(pause.invocationId), beforeSha256: fifoDigest(JSON.stringify(pause.before)), afterSha256: fifoDigest(JSON.stringify(pause.after)) },
         { action: resume.action, invocationIdSha256: fifoDigest(resume.invocationId), beforeSha256: fifoDigest(JSON.stringify(resume.before)), afterSha256: fifoDigest(JSON.stringify(resume.after)) }],
+      toolRows: toolRows.sort((left, right) => left.sequence - right.sequence),
       unboundKeySha256: fifoDigest(unbound), contentSha256: fifoDigest(content), independentProgressChangeSetIdSha256: fifoDigest(progress.changeSet.changeSetId) };
     succeeded = true;
   } finally {

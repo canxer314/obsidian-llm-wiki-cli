@@ -63,6 +63,21 @@ describe("manual pause execution observation seam", () => {
     Object.assign(proof.vaults[1]!.inventory, compareInventories(proof.vaults[1]!.inventory.before, proof.vaults[1]!.inventory.after));
     expect(manualPauseProofSchema.safeParse(proof).success).toBe(false);
   });
+  it("rejects a proof without closed request/response tool rows", () => {
+    const proof = syntheticManualPauseProof("run", "profile", "a".repeat(64)) as Record<string, unknown>;
+    delete proof.toolRows;
+    expect(manualPauseProofSchema.safeParse(proof).success).toBe(false);
+  });
+  it("rejects missing paused key observations and discontinuous continuation associations", () => {
+    const proof = syntheticManualPauseProof("run", "profile", "a".repeat(64));
+    proof.toolRows = proof.toolRows.filter(row => row.tool !== "vault_change_set_status");
+    expect(manualPauseProofSchema.safeParse(proof).success).toBe(false);
+  });
+  it("rejects discontinuous continuation request/response token associations", () => {
+    const proof = syntheticManualPauseProof("run", "profile", "a".repeat(64));
+    proof.toolRows.find(row => row.tool === "vault_continue")!.continuationInSha256 = "e".repeat(64);
+    expect(manualPauseProofSchema.safeParse(proof).success).toBe(false);
+  });
   it("accepts serial leased FIFO with independent pausing, paused and resume observations", () => {
     expect(() => verifyManualPauseObservations(normal())).not.toThrow();
   });
