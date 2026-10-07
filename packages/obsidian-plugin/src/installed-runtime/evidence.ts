@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 import { z } from "zod";
 import { pluginEventObserverCorpusEvidenceSchema } from "./plugin-event-observer-evidence.js";
+import { referenceSingleSpanProofSchema } from "./registered-reference-single-span.js";
 
 import {
   createAcceptanceMatrixReport,
@@ -624,6 +625,7 @@ export const registeredReferenceRewriteCorpusEvidenceSchema = z
       .object({
         fixtures: z.array(rawByteFixtureProofSchema).min(1),
         duplicateEqualSpellings: duplicateSpellingProofSchema,
+        secondEqualSpellingOnly: referenceSingleSpanProofSchema,
       })
       .strict(),
     rejections: z.array(rewriteRejectionProofSchema).min(1),

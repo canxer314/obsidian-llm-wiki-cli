@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { connect } from "node:net";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -27,6 +27,9 @@ import {
   type RegisteredReferenceRewriteRejectionSession,
   type WireClient,
 } from "./registered-reference-rewrite-corpus.js";
+import { createInstalledRuntimeAcceptanceDescriptor } from "./smoke-command.js";
+import { runInstalledReferenceSingleSpan } from "./reference-single-span-installed-runner.js";
+import { isPathInside, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 import type { ProvisionedTestVault } from "./test-vault.js";
 
 type RegisteredReferenceRunner = NonNullable<
@@ -88,6 +91,7 @@ interface LiveRegisteredReferenceRuntime {
   readonly process: ObsidianProcessHandle;
   readonly clients: Client[];
   readonly arrange: RegisteredReferenceRewriteArrange;
+  readonly acceptance: { readonly path: string; readonly descriptor: InstalledRuntimeAcceptanceDescriptor };
   connectClient(): Promise<Client>;
   callTool(client: Client, tool: WireToolName, arguments_: Record<string, unknown>): Promise<McpToolResult>;
 }
@@ -108,7 +112,7 @@ async function writeFixtures(
   for (const fixture of fixtures) {
     const destination = fixturePath(vaultPath, fixture.path);
     await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, fixture.content, "utf8");
+    await writeFile(destination, fixture.content, { encoding: "utf8", flag: "wx" });
   }
 }
 
@@ -146,6 +150,11 @@ async function startRuntime(
     runId: `${options.runId}-registered-reference-${label}`,
     configDirectoryName: options.configDirectoryName,
   });
+  if (!isPathInside(options.workingDirectory, vault.vaultPath) || !relative(resolve(options.workingDirectory), resolve(vault.vaultPath)).split(/[\\/]/u).at(-1)?.startsWith("installed-runtime-vault-")) {
+    throw new Error("Registered-reference fixtures require a generated installed-runtime Vault");
+  }
+  const privateReportDirectory = join(options.workingDirectory, `${options.runId}-reference-${label}-reports`);
+  await mkdir(privateReportDirectory);
   let process: ObsidianProcessHandle | undefined;
   const clients: Client[] = [];
   try {
@@ -155,6 +164,11 @@ async function startRuntime(
       vault.vaultPath,
       options.configDirectoryName,
     );
+    const acceptance = await createInstalledRuntimeAcceptanceDescriptor({
+      runId: `${options.runId}-reference-${label}`, vaultPath: vault.vaultPath,
+      pluginId: options.candidate.identity.pluginId, candidateBundleSha256: options.candidate.identity.bundleSha256,
+      reportDirectory: privateReportDirectory, configDirectoryName: options.configDirectoryName,
+    });
     process = await options.processControl.start({
       vaultPath: vault.vaultPath,
       profileDirectory: vault.profileDirectory,
@@ -310,6 +324,7 @@ async function startRuntime(
       process,
       clients,
       arrange,
+      acceptance,
       connectClient,
       callTool,
     };
@@ -325,7 +340,9 @@ async function startRuntime(
       );
       if (identity !== null) await requireListenerClosed(identity.port, options.timeouts.portClosedMs);
     }
+    await rm(privateReportDirectory, { recursive: true, force: true });
     const cleanup = await options.cleanupVault(vault);
+    if (!cleanup.attempted) throw new Error("Registered-reference cleanup was not confirmed");
     if (cleanup.residualPaths.length > 0) {
       throw new Error(
         `Registered-reference setup failed and cleanup left residual paths: ${cleanup.residualPaths.join(", ")}`,
@@ -358,7 +375,15 @@ async function cleanupRuntimes(
       continue;
     }
     try {
+      const reports = runtime.acceptance.descriptor.reportDirectory;
+      await rm(reports, { recursive: true, force: true });
+      if (await stat(reports).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      })) throw new Error("Registered-reference private reports survived cleanup");
+      options.record("cleanup", "registered-reference-private-reports-removed", { label: runtime.acceptance.descriptor.runId });
       const cleanup = await options.cleanupVault(runtime.vault);
+      if (!cleanup.attempted) throw new Error("Registered-reference cleanup was not confirmed");
       if (cleanup.residualPaths.length > 0) {
         firstError ??= new Error(
           `Registered-reference cleanup left residual paths: ${cleanup.residualPaths.join(", ")}`,
@@ -423,6 +448,11 @@ export const runInstalledRegisteredReferenceRewriteCorpus: RegisteredReferenceRu
             callTool: (tool, arguments_) =>
               primary.callTool(observerClient, tool, arguments_),
           },
+          executeSingleSpan: () => runInstalledReferenceSingleSpan({
+            descriptorPath: primary.acceptance.path, descriptor: primary.acceptance.descriptor,
+            vaultId: primary.identity.vaultId, endpoint: primary.endpoint,
+            configDirectoryName: options.configDirectoryName, timeoutMs: options.timeouts.startupMs,
+          }),
           seedNotes: primary.vault.seedNotes,
           fixtures,
           rejectionSessions,

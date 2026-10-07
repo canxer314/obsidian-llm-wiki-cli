@@ -52,6 +52,11 @@ export interface InstalledRuntimeAcceptanceDriverOptions {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly command: import("./crash-restoration-protocol.js").CrashRestorationCommand;
   }) => Promise<{ readonly boundary: "after_prepared" | "after_committed" | "after_mutation:0"; readonly journalPhase: "PREPARED" | "COMMITTED" }>;
+  readonly executeReferenceSingleSpanScenario?: (options: {
+    readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
+    readonly expectedVaultId: string;
+    readonly endpoint: URL;
+  }) => Promise<import("./registered-reference-single-span.js").ReferenceSingleSpanProof>;
   readonly executeSemanticEvidenceScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly scenario: string;
@@ -101,7 +106,7 @@ export async function activateInstalledRuntimeAcceptanceDriver(
   let commandTail: Promise<void> = Promise.resolve();
   const executeSemanticEvidenceScenario = options.executeSemanticEvidenceScenario;
   const executeCrashRestorationScenario = options.executeCrashRestorationScenario;
-  if (executeSemanticEvidenceScenario !== undefined || executeCrashRestorationScenario !== undefined) {
+  if (executeSemanticEvidenceScenario !== undefined || executeCrashRestorationScenario !== undefined || options.executeReferenceSingleSpanScenario !== undefined) {
     const inspectCommand = async (): Promise<void> => {
       if (disposed) return;
       const parsed = installedRuntimeAcceptanceDescriptorSchema.parse(
@@ -134,6 +139,29 @@ export async function activateInstalledRuntimeAcceptanceDriver(
             endpoint.username !== "" || endpoint.password !== "") {
           throw new Error("Installed acceptance commands require a credential-free loopback endpoint");
         }
+      }
+      if (command.action === "run-reference-single-span-scenario") {
+        if (options.executeReferenceSingleSpanScenario === undefined) return;
+        lastSequence = command.sequence;
+        const current = await loadInstalledRuntimeAcceptanceDescriptor(options);
+        if (current.descriptor.installedMainSha256 !== parsed.installedMainSha256) throw new Error("Installed single-span entry point changed");
+        const identity = await readPersistedBridgeIdentity(parsed.vaultPath, parsed.pluginId, options.configDirectoryName);
+        if (identity === null || identity.vaultId !== command.expectedVaultId || command.endpoint !== `http://127.0.0.1:${identity.port}/mcp`) throw new Error("Installed single-span command targets another runtime");
+        let result: unknown;
+        try {
+          result = { summary: await options.executeReferenceSingleSpanScenario({ descriptor: parsed, expectedVaultId: command.expectedVaultId, endpoint: new URL(command.endpoint) }) };
+        } catch { result = { failure: { code: "scenario_execution_failed" } }; }
+        await requireBoundReportRoot();
+        const reportPath = join(parsed.reportDirectory, "reference-single-span.json");
+        const temporaryPath = `${reportPath}.${randomBytes(16).toString("hex")}.next`;
+        await writeFile(temporaryPath, `${JSON.stringify({
+          schemaVersion: 1, runId: parsed.runId, vaultId: command.expectedVaultId, endpoint: command.endpoint,
+          candidateBundleSha256: parsed.candidateBundleSha256, installedMainSha256: parsed.installedMainSha256,
+          capabilityToken: parsed.capabilityToken, sequence: command.sequence, ...(result as object),
+        })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        try { await requireBoundReportRoot(); await link(temporaryPath, reportPath); }
+        finally { await rm(temporaryPath, { force: true }); }
+        return;
       }
       const crashCommand = parseCrashRestorationCommand(command);
       if (crashCommand !== null) {

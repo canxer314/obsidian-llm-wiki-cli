@@ -43,6 +43,12 @@ export const installedRuntimeAcceptanceCommandSchema = z.discriminatedUnion(
       })
       .strict(),
     crashRestorationCommandSchema,
+    z.object({
+      sequence: z.number().int().positive(), capabilityToken: digestSchema,
+      action: z.literal("run-reference-single-span-scenario"),
+      scenario: z.literal("span/second-equal-spelling-only"),
+      expectedVaultId: z.string().min(1), endpoint: z.string().url(),
+    }).strict(),
   ],
 );
 
