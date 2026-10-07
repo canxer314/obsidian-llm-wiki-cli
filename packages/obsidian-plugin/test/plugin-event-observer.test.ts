@@ -25,6 +25,21 @@ function verify(events: unknown) {
 }
 
 describe("enabled plugin event/indexing report boundary", () => {
+  it("checks half-written move referrers even when only the destination callback is required", () => {
+    expect(() => verifyPluginEventObserverWindow({ binding, events: transcript(before.slice(0, 9)), candidatePluginId: "candidate", expectedPid: 1234,
+      files: [{ path: "Notes/Target.md", before, after }], maxSilenceMs: 1000, requiredCallbackPaths: [],
+    })).toThrow(/complete before\/after/);
+  });
+  it("accepts a registered sealed no-mutation crash window without inventing callbacks", () => {
+    const events = transcript(before).filter(event => !["modify", "changed"].includes(event.payload.kind));
+    for (const [index, event] of events.entries()) {
+      event.payload.sequence = index + 1;
+      event.mac = createHmac("sha256", binding.capabilityToken).update(JSON.stringify(event.payload)).digest("hex");
+    }
+    expect(verifyPluginEventObserverWindow({ binding, events, candidatePluginId: "candidate", expectedPid: 1234,
+      files: [{ path: "Notes/Target.md", before, after }], maxSilenceMs: 1000, requiredCallbackPaths: [],
+    })).toMatchObject({ eventCount: 0, indexingCount: 0 });
+  });
   it("rejects event-time partial bytes even when the last indexed bytes are complete", () => {
     expect(() => verify(transcript(before.slice(0, 9)))).toThrow(/complete before\/after/);
   });

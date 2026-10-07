@@ -305,7 +305,7 @@ it("reconstructs every interrupted preimage and gives each fixed family a distin
     for (const file of profile.files) await writeFile(join(root, file.path), file.committedBytes!);
     expect(crashOriginalInventory(await crashInventory(root), "edit_multi_frontmatter")).toEqual(before);
     const paths = installedCrashScenarios.map(scenario => { const { kind, point } = crashScenarioParts(scenario); return crashRestorationBoundaryPath(root, point, kind, "same-submission"); });
-    expect(new Set(paths).size).toBe(131);
+    expect(new Set(paths).size).toBe(150);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -401,25 +401,38 @@ it("rejects a crash descriptor for a foreign Vault, plugin, or installed entry p
     tag: "v0.1.0", repository: "test/crash", workflowRef: "test", attestationSource: "local-candidate",
   });
   let starts = 0;
-  try {
-    for (const changed of [
-      { vaultPath: join(root, "foreign-vault") },
-      { pluginId: "foreign-plugin" },
-      { installedMainSha256: "f".repeat(64) },
-    ]) {
-      await expect(runInstalledCrashRestorationSlice({
-        runId: "binding", workingDirectory: root, reportDirectory: join(root, "reports"), candidate,
-        processControl: { start: async () => { starts += 1; throw new Error("Unexpected runtime startup"); } },
-        client: {}, profile: {}, probe: {}, timeouts: { startupMs: 10, stopMs: 10, portClosedMs: 10 },
-        prepareAcceptanceDriver: async (request) => {
-          const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "binding", reportDirectory: join(root, "reports") });
-          return { ...created, descriptor: { ...created.descriptor, ...changed }, cleanup: async () => undefined };
-        },
-        record: () => undefined, assertion: () => undefined,
-      } as InstalledCrashRestorationSliceOptions)).rejects.toThrow("descriptor is not candidate/run bound");
-    }
-    expect(starts).toBe(0);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  const retainedDescriptors: string[] = [];
+  for (const [index, changed] of [
+    { vaultPath: join(root, "foreign-vault") },
+    { pluginId: "foreign-plugin" },
+    { installedMainSha256: "f".repeat(64) },
+  ].entries()) {
+    const caseRoot = join(root, `case-${index}`);
+    const runId = `binding-${index}`;
+    const reportDirectory = join(caseRoot, "reports");
+    await mkdir(caseRoot);
+    await expect(runInstalledCrashRestorationSlice({
+      runId, workingDirectory: caseRoot, reportDirectory, candidate,
+      processControl: { start: async () => { starts += 1; throw new Error("Unexpected runtime startup"); } },
+      client: {}, profile: {}, probe: {}, timeouts: { startupMs: 10, stopMs: 10, portClosedMs: 10 },
+      prepareAcceptanceDriver: async (request) => {
+        const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId, reportDirectory });
+        retainedDescriptors.push(created.path);
+        return { ...created, descriptor: { ...created.descriptor, ...changed }, cleanup: async () => undefined };
+      },
+      record: () => undefined, assertion: () => undefined,
+    } as InstalledCrashRestorationSliceOptions)).rejects.toThrow("descriptor is not candidate/run bound");
+  }
+  expect(starts).toBe(0);
+  expect(retainedDescriptors).toHaveLength(3);
+  const { readFile } = await import("node:fs/promises");
+  for (const [index, path] of retainedDescriptors.entries()) {
+    const descriptor = JSON.parse(await readFile(path, "utf8"));
+    expect(descriptor.runId).toBe(`binding-${index}`);
+    expect(await readdir(descriptor.vaultPath)).toContain(".obsidian");
+  }
+  // Rejected runs retain their independent generated recovery inputs; do not
+  // delete one failed root to make the next counterexample reach its target.
 });
 
 it("rejects an installed crash command targeting a remote endpoint even with the correct capability", async () => {
@@ -671,7 +684,7 @@ it("rejects a private crash command against a dirty durable journal without armi
 
 
 // Test adapter only: a real Node process + production Bridge, never Obsidian evidence.
-async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint) {
+async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashKind, crashPoint: import("../src/installed-runtime/crash-restoration-protocol.js").InstalledCrashPoint, observerFault?: "halfwrite-event" | "replay-second-rewrite") {
   const { spawn } = await import("node:child_process");
   const { readFile } = await import("node:fs/promises");
   const { createServer } = await import("node:net");
@@ -697,7 +710,7 @@ async function arrangeNodeCrashWire(root: string, mutationKind: import("../src/i
     probe: { probeRunning: async () => ({ platform: "linux", osBuild: "test", obsidianVersion: "NOT-INSTALLED", electronVersion: "NOT-INSTALLED", nodeVersion: process.versions.node, capabilities: [] }) },
     processControl: { start: async (request: { vaultPath: string }) => {
       const control = join(root, `control-${++generation}`);
-      const child = spawn(process.execPath, [bundle], { env: { ...process.env, CORPUS_ROOT: request.vaultPath, CORPUS_VAULT_ID: "node-wire-vault", CORPUS_PORT: String(port), CORPUS_CONTROL_DIR: control, CORPUS_INSTALLED_CRASH_TEST: "1" }, stdio: ["ignore", "ignore", "pipe"] });
+      const child = spawn(process.execPath, [bundle], { env: { ...process.env, CORPUS_ROOT: request.vaultPath, CORPUS_VAULT_ID: "node-wire-vault", CORPUS_PORT: String(port), CORPUS_CONTROL_DIR: control, CORPUS_INSTALLED_CRASH_TEST: "1", ...(observerFault === undefined ? {} : { CORPUS_INSTALLED_MOVE_OBSERVER_FAULT: observerFault }) }, stdio: ["ignore", "ignore", "pipe"] });
       processes.push(child);
       let stderr = ""; child.stderr?.on("data", chunk => { stderr += String(chunk); });
       const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
@@ -1008,7 +1021,7 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
     } },
     client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "writable" } } }) },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 5_000 },
-    prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = (["copy_attachment", "move_attachment", "edit_multi_frontmatter", "edit_multi_markdown", "edit_frontmatter", "edit_body_whole", "edit_body"] as const).find(kind => request.vaultPath.includes(`-crash-${kind}-`)) ?? "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
+    prepareAcceptanceDriver: async (request: any) => { if (request.vaultPath.includes("-crash-move_note-")) throw new Error("Historical orchestration fixture lacks enabled observer source"); terminal = false; publishedSequence = 0; mutationKind = (["copy_attachment", "move_attachment", "edit_multi_frontmatter", "edit_multi_markdown", "edit_frontmatter", "edit_body_whole", "edit_body"] as const).find(kind => request.vaultPath.includes(`-crash-${kind}-`)) ?? "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
   } as InstalledCrashRestorationSliceOptions;
   const timer = setInterval(() => {
     if (stopped || terminal || descriptorPath === "") return;
@@ -1293,7 +1306,9 @@ it("closes full status and retained replay for both requested files rather than 
 
 it("orchestrates all independently bound apply/rollback points including whole-body and repeated recovery crashes", async () => {
   const { installedCrashScenarios, crashScenarioParts } = await import("../src/installed-runtime/crash-restoration-protocol.js");
-  for (const scenario of installedCrashScenarios) {
+  for (const scenario of installedCrashScenarios.filter(scenario => !scenario.startsWith("move_note/"))) {
+    // Move's independently sealed observer is exercised by the real Node wire
+    // matrix below, not fabricated by this historical orchestration-only fixture.
     const root = await mkdtemp(join(tmpdir(), "installed-crash-complete-orchestration-"));
     const { kind, point } = crashScenarioParts(scenario);
     const fixture = await arrangeCrashOrchestration(root, "bound-change-set", point, kind);
@@ -1328,7 +1343,7 @@ it("orchestrates COMMITTED process stop, restart and retained replay without pro
 });
 
 
-it("keeps all wired create/exact/whole installed crash boundaries partial at the authoritative corpus run boundary", async () => {
+it("refuses to promote historical orchestration fixtures once the move enabled-observer source is required", async () => {
   const root = await mkdtemp(join(tmpdir(), "installed-crash-partial-orchestration-"));
   const fixture = await arrangeCrashOrchestration(root, "bound-change-set");
   const { createAuthoritativeInstalledRuntimeRunners } = await import("../src/installed-runtime/smoke-command.js");
@@ -1338,7 +1353,7 @@ it("keeps all wired create/exact/whole installed crash boundaries partial at the
       installed: fixture.options, workingDirectory: root,
       record: (_kind, name, detail) => { if (name.startsWith("installed-crash-")) records.push(detail); },
       assertion: () => undefined,
-    })).rejects.toThrow("partial");
+    })).rejects.toThrow("Historical orchestration fixture lacks enabled observer source");
     expect(records).toHaveLength(131);
     expect(records).toEqual(expect.arrayContaining([
       expect.objectContaining({ scope: "single-after-prepared-installed-rollback-slice" }),
@@ -1370,3 +1385,163 @@ it("orchestrates edit_body COMMITTED with exact intended bytes and full retained
       committedFileBytesPreservedAfterRecovery: true }]);
   } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
 });
+
+
+it("rejects invalid installed move fragments and binds the fixed embed to the unique literal source heading through host reference evidence", async () => {
+  const { createObsidianSearchDataSource, isRegisteredSubpathResult } = await import("../src/obsidian-search-data-source.js");
+  const { SearchSnapshotManager } = await import("../src/search-snapshot.js");
+  const { crashProfile } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const files = crashProfile("move_note").files.filter(file => file.originalBytes !== null);
+  const target = files.find(file => file.path === "Corpus/Move/Alpha.md")!;
+  const referrer = files.find(file => file.path === "Corpus/Move/Derived-B.md")!;
+  const text = Buffer.from(referrer.originalBytes!).toString("utf8");
+  const original = text.split("\n")[1]!;
+  const fragment = original.slice(original.indexOf("#"), original.indexOf("|"));
+  expect(fragment).toBe("#Alpha");
+  const sourceHeadings = Buffer.from(target.originalBytes!).toString("utf8").split(/\r?\n/u).filter(line => line.startsWith("# ")).map(line => line.slice(2));
+  expect(isRegisteredSubpathResult(fragment, { type: "heading", heading: fragment.slice(1) }, sourceHeadings)).toBe(true);
+  const snapshots = (heading: string) => new SearchSnapshotManager(createObsidianSearchDataSource({
+    markdownFiles: () => [target, referrer].map(file => ({ path: file.path })),
+    readBinary: async path => files.find(file => file.path === path)!.originalBytes!,
+    fileCache: path => path === target.path ? { headings: [{ heading: "Alpha", level: 1 }] } : { embeds: [{ original, link: `Alpha${fragment}`, position: { start: { line: 1, col: 0, offset: text.indexOf(original) }, end: { line: 1, col: original.length, offset: text.indexOf(original) + original.length } } }] },
+    semanticContentMatches: () => true,
+    resolveLink: () => target.path, candidatePaths: () => [target.path],
+    validSubpath: () => isRegisteredSubpathResult(fragment, { type: "heading", heading }, sourceHeadings),
+    resolvedLinks: () => ({ [referrer.path]: { [target.path]: 1 } }), unresolvedLinks: () => ({}), parseFrontmatter: () => null, allTags: () => [],
+  }));
+  await expect(snapshots("missing").rebuild()).rejects.toThrow(/fragment/);
+  const valid = snapshots("Alpha"); await valid.rebuild();
+  expect(valid.current()!.notes.find(note => note.path === referrer.path)!.references).toMatchObject([{ profile: "embed", original: "![[Alpha#Alpha|保留 embed 🌍]]", resolvedPath: target.path }]);
+});
+
+it.each(["halfwrite-event", "replay-second-rewrite"] as const)("rejects %s from the live owning process observer even with identical terminal inventory", async fault => {
+  const root = await mkdtemp(join(tmpdir(), "move-480-event-fault-"));
+  const fixture = await arrangeNodeCrashWire(root, "move_note", fault === "halfwrite-event" ? "after_file_mutation:0" : "after_committed", fault);
+  const context: import("../src/installed-runtime/installed-crash-restoration-slice.js").InstalledMoveObserverContext = { runId: fixture.options.runId, candidateBundleSha256: fixture.options.candidate.identity.bundleSha256, installedMainSha256: fixture.options.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: fixture.options.profile.name, observations: [] };
+  try {
+    await expect(runInstalledCrashRestorationSlice({ ...fixture.options, moveObserverContext: context })).rejects.toThrow(fault === "halfwrite-event" ? /complete before\/after/ : /duplicate closure rewrite/);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+it("closes every reachable move apply/rollback boundary through real termination, literal closure bytes and retained observer source (Node adapter, not GUI)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { verifyInstalledMoveObserverSource } = await import("../src/installed-runtime/installed-crash-restoration-slice.js");
+  const points = ["before_prepared", "after_prepared", "after_file_mutation:0", "after_file_mutation:1", "after_mutation:0", "after_raw_verification", "during_semantic_evidence", "after_semantic_evidence", "after_snapshot", "before_committed", "after_committed", "before_rollback", "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2", "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back"] as const;
+  const paths = ["Corpus/Move/Alpha.md", "Corpus/Move/Beta.md", "Corpus/Move/Derived-A.md", "Corpus/Move/Derived-B.md"];
+  const source = "# Alpha\r\n\r\nSource note body 你好 🚀.\r\nSecond body line.\r\n";
+  const a = '﻿# Derived A\r\n你好 🚀 [[Alpha|保留 alias]] and [标题](Alpha.md "untouched title")\r\n';
+  const aAfter = '﻿# Derived A\r\n你好 🚀 [[Beta|保留 alias]] and [标题](Beta.md "untouched title")\r\n';
+  const b = '# Derived B\n![[Alpha#Alpha|保留 embed 🌍]]\n尾部不改\n';
+  const bAfter = '# Derived B\n![[Beta#Alpha|保留 embed 🌍]]\n尾部不改\n';
+  for (const point of points) {
+    const root = await mkdtemp(join(tmpdir(), "move-480-all-boundaries-"));
+    const fixture = await arrangeNodeCrashWire(root, "move_note", point);
+    const context: import("../src/installed-runtime/installed-crash-restoration-slice.js").InstalledMoveObserverContext = { runId: fixture.options.runId, candidateBundleSha256: fixture.options.candidate.identity.bundleSha256, installedMainSha256: fixture.options.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: fixture.options.profile.name, observations: [] };
+    const start = fixture.options.processControl.start;
+    const rollback = point.includes("rollback") || point.includes("rolled_back");
+    let generation = 0;
+    let boundaryRead = false;
+    try {
+      const outcome = await runInstalledCrashRestorationSlice({ ...fixture.options, moveObserverContext: context, processControl: { start: async request => {
+        const handle = await start(request); const current = ++generation;
+        return { ...handle, stop: async () => {
+          try {
+            const terminal = current === (rollback ? 3 : 2);
+            const boundary = current === (rollback ? 2 : 1);
+            if (boundary || terminal) {
+              let moved = terminal ? point === "after_committed" || point === "before_prepared" : !["before_prepared", "after_prepared", "after_file_mutation:0", "after_file_mutation:1"].includes(point) && !point.startsWith("after_rollback") && !["before_rolled_back", "after_rolled_back"].includes(point);
+              let publishedA = moved, publishedB = moved;
+              if (boundary && point === "after_file_mutation:0") { publishedA = true; publishedB = false; }
+              if (boundary && point === "after_file_mutation:1") { publishedA = true; publishedB = true; }
+              if (boundary && point === "after_rollback_mutation:0") { moved = false; publishedA = true; publishedB = true; }
+              if (boundary && point === "after_rollback_mutation:1") { moved = false; publishedA = true; publishedB = false; }
+              const expected = [moved ? null : source, moved ? source : null, publishedA ? aAfter : a, publishedB ? bAfter : b];
+              for (const [index, path] of paths.entries()) {
+                const bytes = await readFile(join(request.vaultPath, path)).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+                expect(bytes).toEqual(expected[index] === null ? null : Buffer.from(expected[index]!));
+              }
+              if (boundary) boundaryRead = true;
+            }
+          } finally { await handle.stop(); }
+        } };
+      } } });
+      const record = outcome.records[0];
+      expect(boundaryRead).toBe(true);
+      expect(record.processGenerations).toHaveLength(rollback ? 3 : 2);
+      expect(record.observer?.windows).toHaveLength(rollback ? 3 : 2);
+      expect(record.cleanupSucceeded).toBe(true);
+      expect(record.moveClosure).toHaveLength(4);
+      expect(record.privateFootprint?.after).toEqual({ stagingFiles: 0, trashFiles: 0 });
+      expect(() => verifyInstalledMoveObserverSource(record, context)).not.toThrow();
+      expect(() => verifyInstalledMoveObserverSource(record, { ...context, observations: [] })).toThrow(/source context/);
+      expect(() => verifyInstalledMoveObserverSource({ ...record, cleanupSucceeded: false } as never, context)).toThrow(/source context/);
+      const tampered = structuredClone(context);
+      const rawEvents = tampered.observations[0]!.verification.events as { mac: string }[];
+      rawEvents[0]!.mac = "0".repeat(64);
+      expect(() => verifyInstalledMoveObserverSource(record, tampered)).toThrow(/authentication/);
+      expect(() => verifyInstalledMoveObserverSource({ ...record, observer: { ...record.observer!, windows: record.observer!.windows.map((window, index) => index === 0 ? { ...window, transcriptSha256: "0".repeat(64) } : window) } }, context)).toThrow(/authenticated retained source/);
+      expect(fixture.eventLogs[rollback ? 1 : 0]).toContain(`"point":"${point}"`);
+      expect(fixture.eventLogs.at(-1)!.split('"point":"before_prepared"').length - 1).toBe(point === "before_prepared" ? 2 : 1);
+    } catch (error) { throw new Error(`${point}: ${String(error)}\n${fixture.eventLogs.join("\n")}`); }
+    finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+  }
+}, 120_000);
+
+it("uses literal BOM/CRLF/CJK/astral wrapper alias and Markdown title bytes in the fixed installed move closure", async () => {
+  const { crashProfile } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const files = crashProfile("move_note").files;
+  expect(Buffer.from(files[2]!.originalBytes!)).toEqual(Buffer.from('﻿# Derived A\r\n你好 🚀 [[Alpha|保留 alias]] and [标题](Alpha.md "untouched title")\r\n'));
+  expect(Buffer.from(files[2]!.committedBytes!)).toEqual(Buffer.from('﻿# Derived A\r\n你好 🚀 [[Beta|保留 alias]] and [标题](Beta.md "untouched title")\r\n'));
+  expect(Buffer.from(files[3]!.originalBytes!)).toEqual(Buffer.from('# Derived B\n![[Alpha#Alpha|保留 embed 🌍]]\n尾部不改\n'));
+  expect(Buffer.from(files[3]!.committedBytes!)).toEqual(Buffer.from('# Derived B\n![[Beta#Alpha|保留 embed 🌍]]\n尾部不改\n'));
+});
+
+it("registers all reachable installed note move closure boundaries, not the obsolete generic barrier", async () => {
+  const { installedCrashScenarios } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  expect(installedCrashScenarios.filter(scenario => scenario.startsWith("move_note/")).map(scenario => scenario.slice(10)).sort()).toEqual([
+    "before_prepared", "after_prepared", "after_file_mutation:0", "after_file_mutation:1", "after_mutation:0",
+    "after_raw_verification", "during_semantic_evidence", "after_semantic_evidence", "after_snapshot", "before_committed", "after_committed",
+    "before_rollback", "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2",
+    "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back",
+  ].sort());
+});
+
+it("restores the complete note move and referrer closure through fixed Node MCP wire after actual termination", async () => {
+  const root = await mkdtemp(join(tmpdir(), "move-480-wire-"));
+  const fixture = await arrangeNodeCrashWire(root, "move_note", "after_file_mutation:0");
+  const moveObserverContext = { runId: fixture.options.runId, candidateBundleSha256: fixture.options.candidate.identity.bundleSha256, installedMainSha256: fixture.options.candidate.identity.files.find(file => file.path === "main.js")!.sha256, profileName: fixture.options.profile.name, observations: [] };
+  try {
+    const result = await runInstalledCrashRestorationSlice({ ...fixture.options, moveObserverContext });
+    expect(result.records[0].observer?.windows).toHaveLength(2);
+    expect(result.records[0]).toMatchObject({ mutationKind: "move_note", proofState: "intent_not_applied", cleanupSucceeded: true });
+    const { verifyInstalledMoveObserverSource } = await import("../src/installed-runtime/installed-crash-restoration-slice.js");
+    const replayContext = structuredClone(moveObserverContext) as import("../src/installed-runtime/installed-crash-restoration-slice.js").InstalledMoveObserverContext;
+    const finalVerification = replayContext.observations.at(-1)!.verification;
+    delete finalVerification.forbidVaultMutationsAfterSequence;
+    expect(() => verifyInstalledMoveObserverSource(result.records[0], replayContext)).toThrow(/replay boundary missing/);
+    // Consume the actual authenticated recovery callbacks after cleanup, not a fabricated public verdict.
+    finalVerification.forbidVaultMutationsAfterSequence = 3;
+    expect(() => verifyInstalledMoveObserverSource(result.records[0], replayContext)).toThrow(/duplicate closure rewrite/);
+    expect(fixture.eventLogs).toHaveLength(2);
+    expect(fixture.eventLogs[0]).toContain('"point":"after_file_mutation:0"');
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+it.each(["unpaired", "missing_referrer", "stale_closure"] as const)("rejects %s after actual move recovery rather than certifying only rename", async fault => {
+  const root = await mkdtemp(join(tmpdir(), "move-480-counterexample-"));
+  const fixture = await arrangeNodeCrashWire(root, "move_note", "after_snapshot");
+  const start = fixture.options.processControl.start;
+  let generation = 0;
+  try {
+    await expect(runInstalledCrashRestorationSlice({ ...fixture.options, processControl: { start: async request => {
+      const handle = await start(request);
+      if (++generation === 2) {
+        if (fault === "unpaired") await writeFile(join(request.vaultPath, "Corpus/Move/Beta.md"), "# Alpha\r\n\r\nSource note body 你好 🚀.\r\nSecond body line.\r\n");
+        if (fault === "missing_referrer") await rm(join(request.vaultPath, "Corpus/Move/Derived-B.md"));
+        if (fault === "stale_closure") await writeFile(join(request.vaultPath, "Corpus/Move/Derived-A.md"), "# Stale closure\r\n[[Beta]]\r\n");
+      }
+      return handle;
+    } } })).rejects.toThrow("whole-state inventory");
+    expect(fixture.eventLogs).toHaveLength(2);
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);

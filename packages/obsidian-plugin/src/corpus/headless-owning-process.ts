@@ -56,8 +56,10 @@ import {
 import { ManagedVaultBridgeRuntime } from "../managed-vault-runtime.js";
 import { activateInstalledRuntimeAcceptanceDriver } from "../installed-runtime/acceptance-driver.js";
 import { loadInstalledRuntimeAcceptanceDescriptor } from "../installed-runtime/acceptance-driver-protocol.js";
-import { crashInventory, crashOriginalInventory, crashScenarioParts, parkInstalledCrashBoundary, parseCrashRestorationCommand, validateInstalledCrashFixture, validateInstalledCrashRecovery, type CrashRestorationCommand, type CrashInventoryEntry } from "../installed-runtime/crash-restoration-protocol.js";
+import { crashInventory, crashProfile, crashOriginalInventory, crashScenarioParts, parkInstalledCrashBoundary, parseCrashRestorationCommand, validateInstalledCrashFixture, validateInstalledCrashRecovery, type CrashRestorationCommand, type CrashInventoryEntry } from "../installed-runtime/crash-restoration-protocol.js";
 import { createInstalledSemanticEvidenceWire } from "../installed-runtime/installed-semantic-evidence.js";
+import { createRequire } from "node:module";
+import { EVENT_OBSERVER_PLUGIN_SOURCE, awaitPluginEventObserverBeforeStartup } from "../installed-runtime/plugin-event-observer-plugin.js";
 import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
 import {
   enumerateDecodedReferenceTargets,
@@ -197,7 +199,7 @@ function corpusLocationAt(content: string, index: number): HostLocation {
 }
 
 interface ParsedCorpusReference {
-  profile: "wikilink" | "embed";
+  profile: "wikilink" | "embed" | "markdown_inline_link" | "markdown_embed";
   original: string;
   /** Reference target before any alias/fragment, mirroring the registered grammar. */
   linkPath: string;
@@ -220,25 +222,30 @@ function scanCorpusReferences(content: string): ParsedCorpusReference[] {
     const embedded = content.charCodeAt(open - 1) === 0x21; // '!'
     const close = content.indexOf("]]", open + 2);
     if (close < 0) break;
-    // `original` spans `[[...]]` only; for an embed the leading `!` stays
-    // outside the span so a derived rewrite of `original` preserves it.
-    const original = content.slice(open, close + 2);
-    const inner = original.slice(2, -2);
-    const fragment = inner.indexOf("#");
+    // Include the embed wrapper and fragment exactly as registered host evidence.
+    const original = content.slice(embedded ? open - 1 : open, close + 2);
+    const inner = content.slice(open + 2, close);
     const alias = inner.indexOf("|");
-    const separator =
-      fragment < 0 ? alias : alias < 0 ? fragment : Math.min(fragment, alias);
-    const linkPath = separator < 0 ? inner : inner.slice(0, separator);
+    const linkPath = alias < 0 ? inner : inner.slice(0, alias);
     if (linkPath.length > 0) {
       found.push({
         profile: embedded ? "embed" : "wikilink",
         original,
         linkPath,
-        start: open,
+        start: embedded ? open - 1 : open,
         end: close + 2,
       });
     }
     from = close + 2;
+  }
+  // Fixed installed move fixture's ordinary Markdown reference, including its
+  // untouched optional title. This remains a Node corpus parser, not host evidence.
+  for (const match of content.matchAll(/(!?)\[([^\]\n]*)\]\(([^\s)]+)(?:\s+"[^"\n]*")?\)/gu)) {
+    const original = match[0];
+    const start = match.index!;
+    const target = match[3]!;
+    found.push({ profile: match[1] === "!" ? "markdown_embed" : "markdown_inline_link", original,
+      linkPath: target.split("#")[0]!, start, end: start + original.length });
   }
   return found;
 }
@@ -276,7 +283,7 @@ function createCorpusSearchSnapshotDataSource(root: string): SearchSnapshotDataS
         let resolvedPath: string | null = null;
         try {
           const targets = enumerateDecodedReferenceTargets(
-            parsed.linkPath,
+            parsed.linkPath.split("#")[0]!,
             candidates,
             path,
           );
@@ -469,8 +476,41 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
   const installedCrashTest = process.env.CORPUS_INSTALLED_CRASH_TEST === "1";
   let installedArm: { descriptor: Awaited<ReturnType<typeof loadInstalledRuntimeAcceptanceDescriptor>>["descriptor"]; command: CrashRestorationCommand; before: readonly CrashInventoryEntry[] } | undefined;
   let crashExecution: Awaited<ReturnType<typeof createFileSystemChangeSetExecutionAdapter>> | undefined;
+  // Test-only callback adapter runs the unchanged independent observer source in
+  // the owning Node process. It is NOT evidence of actual Obsidian events.
+  const listeners = new Map<string, ((...args: unknown[]) => void)[]>();
+  const emitTestCallback = (kind: string, path: string, oldPath?: string) => {
+    for (const listener of listeners.get(kind) ?? []) listener({ path }, oldPath);
+    for (const listener of listeners.get("changed") ?? []) listener({ path });
+  };
+  let testObserver = false;
+  if (installedCrashTest && await pathExists(join(root, ".obsidian", "plugins", "llm-wiki-event-observer", "main.js"))) {
+    const required = createRequire(join(root, ".obsidian", "plugins", "llm-wiki-event-observer", "main.js"));
+    class TestPlugin { registerEvent() {} register() {} }
+    const module = { exports: undefined as unknown };
+    new Function("require", "module", EVENT_OBSERVER_PLUGIN_SOURCE)((name: string) => name === "obsidian" ? { Plugin: TestPlugin } : required(name), module);
+    const observer = new (module.exports as new () => { app: unknown; manifest: unknown; onload(): Promise<void> })();
+    const on = (kind: string, callback: (...args: unknown[]) => void) => { const group = listeners.get(kind) ?? []; group.push(callback); listeners.set(kind, group); };
+    const publicFiles = await walkMarkdownFiles(root);
+    observer.app = { vault: { configDir: ".obsidian", adapter: { getBasePath: () => root }, on, getFiles: () => publicFiles.map(path => ({ path })) }, metadataCache: { on } };
+    observer.manifest = { id: "llm-wiki-event-observer" };
+    await observer.onload(); testObserver = true;
+  }
   const crashInjector = async (point: string, execution?: import("../change-set.js").ChangeSetCrashContext): Promise<void> => {
     await appendEvent(controlDir, { event: "crash-point", point });
+    if (testObserver && installedArm !== undefined) {
+      if (point.startsWith("after_file_mutation:")) {
+        const files = crashProfile(crashScenarioParts(installedArm.command.scenario).kind).files.filter(file => file.originalBytes !== null && file.committedBytes !== null);
+        const path = files[Number(point.split(":")[1])]!.path;
+        if (process.env.CORPUS_INSTALLED_MOVE_OBSERVER_FAULT === "halfwrite-event") {
+          const absolute = join(root, path); const complete = await readFile(absolute);
+          await writeFile(absolute, complete.subarray(0, 9)); emitTestCallback("modify", path);
+          await writeFile(absolute, complete);
+        }
+        emitTestCallback("modify", path);
+      }
+      if (point.startsWith("recovery_after_file_published:")) emitTestCallback("modify", point.slice("recovery_after_file_published:".length));
+    }
     if (installedArm?.command.scenario.endsWith(`/${point}`)) {
       try { await parkInstalledCrashBoundary({ ...installedArm, frame: await crashExecution!.loadRecoveryFrame(), ...(execution === undefined ? {} : { execution }) }); }
       catch (error) { await appendEvent(controlDir, { event: "installed-marker-failed" }); throw error; }
@@ -516,7 +556,7 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
       // so the node-fs host reports the public renames it performs; the Change
       // Set semantic evidence tracker needs that rename event before the move
       // success barrier may converge (issue #189).
-      recordEvent: (event) => semanticTracker.record(event),
+      recordEvent: (event) => { semanticTracker.record(event); if (testObserver) emitTestCallback(event.kind, event.path, "oldPath" in event ? event.oldPath : undefined); },
       beginSemanticEvidence: async (request) => {
         semanticTracker.begin(request);
       },
@@ -552,7 +592,15 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
           await rename(temporaryPath, recoveryStatePath);
         },
       },
-      createBridge: createBridgeInstance,
+      createBridge: options => createBridgeInstance({ ...options,
+        ...(testObserver && process.env.CORPUS_INSTALLED_MOVE_OBSERVER_FAULT === "replay-second-rewrite" ? { authenticator: { authenticate: async request => {
+          if (request.method === "POST" && request.url === "/mcp" && (await crashExecution!.loadRecoveryFrame())?.phase === "COMMITTED") {
+            const path = "Corpus/Move/Derived-A.md";
+            await writeFile(join(root, path), await readFile(join(root, path))); emitTestCallback("modify", path);
+          }
+          return true;
+        } } } : {}),
+      }),
       searchDataSource,
       changeSetDataSource,
       changeSetExecution,
@@ -572,6 +620,7 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
       }
       await writeJson(join(root, ".obsidian", "plugins", "crash-plugin", "data.json"), { vaultId, port });
     }
+    if (testObserver) await awaitPluginEventObserverBeforeStartup({ vaultPath: root, pluginId: "crash-plugin" });
     await runtime.load();
     if (installedCrashTest) {
       const wire = createInstalledSemanticEvidenceWire();

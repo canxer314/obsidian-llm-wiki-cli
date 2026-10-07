@@ -906,6 +906,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
               }
             } else if (kind !== "create_note") {
               for (const fixture of profile.files) {
+                if (fixture.originalBytes === null) {
+                  if (await adapter.exists(fixture.path) || this.app.vault.getFileByPath(fixture.path) !== null) throw new Error("Installed move destination is occupied");
+                  continue;
+                }
                 const bytes = await readFile(join(basePath, ...fixture.path.split("/")));
                 if (!bytes.equals(fixture.originalBytes!)) throw new Error("Installed crash seed bytes changed");
                 const file = this.app.vault.getFileByPath(fixture.path);
