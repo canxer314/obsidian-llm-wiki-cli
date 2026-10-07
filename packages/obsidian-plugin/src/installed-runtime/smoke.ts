@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 
 import { assembleReleaseBundle } from "../release/assemble-release-bundle.js";
 import { currentSourceTreeTag } from "../release/release-identity.js";
-import { confirmGeneratedVaultTrust } from "./local-gui-supervision.js";
+import { createSupervisedInstalledRuntimeProbe } from "./local-gui-supervision.js";
 import { runInstalledRuntimeHarness } from "./harness.js";
 import { createLinuxObsidianProcessControl, createWindowsObsidianProcessControl } from "./obsidian-process.js";
 import {
@@ -165,15 +165,7 @@ async function main(): Promise<number> {
     workingDirectory: workdir,
     evidencePath,
     runId,
-    probe: {
-      probe: () => probeHost(registration),
-      ...(platform() === "linux" ? {
-        probeRunning: async (request: { vaultPath: string; profileDirectory: string }) => ({
-          ...await probeHost(registration),
-          ...await confirmGeneratedVaultTrust({ ...request, timeoutMs: 30_000 }),
-        }),
-      } : {}),
-    },
+    probe: createSupervisedInstalledRuntimeProbe(() => probeHost(registration)),
     processControl: (platform() === "linux"
       ? createLinuxObsidianProcessControl
       : createWindowsObsidianProcessControl)({

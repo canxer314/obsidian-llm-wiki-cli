@@ -68,13 +68,20 @@ import {
   createInstalledSemanticEvidenceWire,
 } from "./installed-runtime/installed-semantic-evidence.js";
 import { executeInstalledReferenceSingleSpan } from "./installed-runtime/registered-reference-single-span.js";
-import { replaceExactCorpusProfile } from "./corpus/edit-body-corpus.js";
-import { createNoteCorpusProfile } from "./corpus/create-note-corpus.js";
 import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
 import {
   parseCrashRestorationCommand,
-  writeCrashRestorationBoundaryReport,
+  parkInstalledCrashBoundary,
+  crashInventory,
+  crashOriginalInventory,
+  crashProfile,
+  crashScenarioParts,
+  validateInstalledCrashFixture,
+  validateInstalledCrashRecovery,
+  hasBoundInstalledCrashRecoveryPark,
 } from "./installed-runtime/crash-restoration-protocol.js";
+import { loadInstalledRuntimeAcceptanceDescriptor } from "./installed-runtime/acceptance-driver-protocol.js";
+import { readPersistedBridgeIdentity } from "./installed-runtime/obsidian-process.js";
 import {
   ManagedVaultBridgeRuntime,
   VaultPathChangeRequiredError,
@@ -147,6 +154,10 @@ export default class VaultOperationBridgePlugin extends Plugin {
     const recoveryStateTemporaryPath = join(stateDirectory, "bridge-state.next");
     const recoveryJournalPath = join(stateDirectory, "recovery-journal.bin");
     const activateAcceptanceDriver = adapter instanceof FileSystemAdapter;
+    if (activateAcceptanceDriver) {
+      const { awaitPluginEventObserverBeforeStartup } = await import("./installed-runtime/plugin-event-observer-plugin.js");
+      await awaitPluginEventObserverBeforeStartup({ vaultPath: basePath, pluginId: this.manifest.id, configDirectoryName: this.app.vault.configDir });
+    }
     const fifoObserver = activateAcceptanceDriver ? await createInstalledFifoObserver({
       vaultPath: basePath, pluginId: this.manifest.id,
       configDirectoryName: this.app.vault.configDir,
@@ -158,6 +169,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
     let armedCrashBoundary: {
       readonly descriptor: import("./installed-runtime/acceptance-driver-protocol.js").InstalledRuntimeAcceptanceDescriptor;
       readonly command: import("./installed-runtime/crash-restoration-protocol.js").CrashRestorationCommand;
+      readonly before: readonly import("./installed-runtime/crash-restoration-protocol.js").CrashInventoryEntry[];
     } | undefined;
     let incompatibleState = false;
     const semanticVersions = new ObsidianSemanticVersionTracker();
@@ -372,18 +384,11 @@ export default class VaultOperationBridgePlugin extends Plugin {
       changeSetDataSource,
       changeSetExecution,
       ...(fifoObserver === undefined ? {} : { acceptanceObserver: fifoObserver }),
-      crashInjector: async (point) => {
+      crashInjector: async (point, execution) => {
         const armed = armedCrashBoundary;
         if (armed === undefined || !armed.command.scenario.endsWith(`/${point}`)) return;
-        const expectedPhase = point === "after_prepared" ? "PREPARED" : "COMMITTED";
         const frame = await changeSetExecution?.loadRecoveryFrame();
-        if (frame?.phase !== expectedPhase || frame.vaultId !== armed.command.expectedVaultId ||
-            JSON.stringify(frame.input) !== JSON.stringify(armed.command.input)) {
-          throw new Error("Installed crash injector did not observe the armed durable frame");
-        }
-        await writeCrashRestorationBoundaryReport({ descriptor: armed.descriptor,
-          command: armed.command, journalPhase: frame.phase });
-        await new Promise<void>(() => undefined);
+        await parkInstalledCrashBoundary({ ...armed, frame: frame ?? null, configDirectoryName: this.app.vault.configDir, ...(execution === undefined ? {} : { execution }) });
       },
       incompatibleState,
       onSearchSnapshotRefreshScheduled: (observation) => {
@@ -474,6 +479,24 @@ export default class VaultOperationBridgePlugin extends Plugin {
       }),
     );
 
+    // Restart-only acceptance parking is loaded before recovery/listener startup.
+    // It cannot submit input or invoke local authority: the generated descriptor,
+    // installed bytes, fixed program and exact interrupted PREPARED frame must match.
+    if (activateAcceptanceDriver && changeSetExecution !== undefined && basePath.split(/[\\/]/u).at(-1)?.startsWith("installed-runtime-vault-")) {
+      const loaded = await loadInstalledRuntimeAcceptanceDescriptor({ vaultPath: basePath, pluginId: this.manifest.id, configDirectoryName: this.app.vault.configDir }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      const command = loaded === null ? null : parseCrashRestorationCommand(loaded.descriptor.command);
+      if (command?.recovery !== undefined && loaded !== null) {
+        if (!await hasBoundInstalledCrashRecoveryPark(basePath, this.manifest.id, this.app.vault.configDir)) throw new Error("Installed recovery park lost its supervised lead-in");
+        const frame = await changeSetExecution.loadRecoveryFrame();
+        const identity = await readPersistedBridgeIdentity(basePath, this.manifest.id, this.app.vault.configDir);
+        const bound = validateInstalledCrashRecovery(command, frame, identity);
+        const { kind } = crashScenarioParts(bound.scenario);
+        armedCrashBoundary = { descriptor: loaded.descriptor, command: bound, before: crashOriginalInventory(await crashInventory(basePath, this.app.vault.configDir), kind) };
+      }
+    }
     try {
       await runtime.load();
     } catch (error) {
@@ -859,44 +882,52 @@ export default class VaultOperationBridgePlugin extends Plugin {
                 parsed.endpoint !== runtime.bridge?.endpoint.toString()) {
               throw new Error("Installed crash-restoration command targets another runtime");
             }
-            const profile = parsed.scenario.startsWith("edit_body/") ? replaceExactCorpusProfile() : createNoteCorpusProfile();
-            if (!parsed.submissionKey.startsWith("submission-")) {
-              throw new Error("Installed crash-restoration fixture key is invalid");
-            }
-            const expectedInput = profile.buildSubmitInput(parsed.submissionKey.slice("submission-".length));
-            if (JSON.stringify(parsed.input) !== JSON.stringify(expectedInput)) {
-              throw new Error("Installed crash-restoration fixture does not match the selected mutation program");
-            }
+            if (parsed.recovery !== undefined) throw new Error("Recovery parking is restart-only");
+            const { kind, point } = crashScenarioParts(parsed.scenario);
+            if (point.includes("rollback") || point.includes("rolled_back")) throw new Error("Rollback parking requires an interrupted PREPARED restart");
+            const profile = crashProfile(kind);
+            validateInstalledCrashFixture(parsed);
             if (armedCrashBoundary !== undefined) throw new Error("Crash slice is already armed");
             const before = await changeSetExecution.loadRecoveryFrame();
             if (before !== null) throw new Error("Crash slice requires a clean Recovery Journal");
             const input = parseChangeSetSubmitInput(parsed.input);
-            if (parsed.scenario.startsWith("edit_body/")) {
-              const fixture = profile.files[0]!;
-              const bytes = await readFile(join(basePath, ...fixture.path.split("/")));
-              if (!bytes.equals(fixture.originalBytes!)) throw new Error("Installed edit-body seed bytes changed");
-              const file = this.app.vault.getFileByPath(fixture.path);
-              if (file === null) throw new Error("Installed edit-body seed is not visible to Obsidian");
-              // A cold-cache startup may have indexed the pre-seeded note before
-              // this plugin subscribed. Re-publish identical bytes through the
-              // real Vault API; only its metadata callback may satisfy matches.
-              await this.app.vault.modifyBinary(file, Uint8Array.from(bytes).buffer);
-              const deadline = Date.now() + 5_000;
-              while (!semanticVersions.matches(fixture.path, fixture.originalBytes!)) {
-                if (Date.now() >= deadline) throw new Error("Installed edit-body seed metadata is unavailable");
-                await new Promise(resolve => setTimeout(resolve, 10));
+            if (kind === "copy_attachment" || kind === "move_attachment") {
+              // Binary sources have no Markdown metadata callback or Content Version.
+              // Prove both exact bytes and Obsidian path visibility; destination and
+              // derived-directory absence remain part of the locked fixed preflight.
+              for (const fixture of profile.files) {
+                const exists = await adapter.exists(fixture.path);
+                const file = this.app.vault.getFileByPath(fixture.path);
+                if (fixture.originalBytes === null) {
+                  if (exists || file !== null) throw new Error("Installed attachment destination is occupied");
+                } else if (!exists || file === null || !(await readFile(join(basePath, ...fixture.path.split("/")))).equals(fixture.originalBytes)) {
+                  throw new Error("Installed attachment seed bytes or visibility changed");
+                }
+              }
+            } else if (kind !== "create_note") {
+              for (const fixture of profile.files) {
+                const bytes = await readFile(join(basePath, ...fixture.path.split("/")));
+                if (!bytes.equals(fixture.originalBytes!)) throw new Error("Installed crash seed bytes changed");
+                const file = this.app.vault.getFileByPath(fixture.path);
+                if (file === null) throw new Error("Installed crash seed is not visible to Obsidian");
+                // Cold-cache notes may predate the subscription. Only real
+                // metadata callbacks for each exact preimage may satisfy it.
+                await this.app.vault.modifyBinary(file, Uint8Array.from(bytes).buffer);
+                const deadline = Date.now() + 5_000;
+                while (!semanticVersions.matches(fixture.path, fixture.originalBytes!)) {
+                  if (Date.now() >= deadline) throw new Error("Installed crash seed metadata is unavailable");
+                  await new Promise(resolve => setTimeout(resolve, 10));
+                }
               }
               runtime.scheduleSearchSnapshotRefresh();
               await runtime.refreshSearchSnapshot();
             }
-            armedCrashBoundary = { descriptor, command: parsed };
+            armedCrashBoundary = { descriptor, command: parsed, before: await crashInventory(basePath, this.app.vault.configDir) };
             void installedSemanticEvidenceWire.submit({ endpoint: new URL(parsed.endpoint),
               expectedVaultId: parsed.expectedVaultId, input })
               .finally(() => { armedCrashBoundary = undefined; })
               .catch(() => undefined);
-            return parsed.scenario.endsWith("/after_prepared")
-              ? { boundary: "after_prepared", journalPhase: "PREPARED" }
-              : { boundary: "after_committed", journalPhase: "COMMITTED" };
+            return;
           },
         })) ?? undefined;
     }
@@ -1056,7 +1087,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
               if (outcome.outcome === "cancelled") {
                 await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "cancelled" });
               } else if (outcome.outcome === "copied" && generatedBundle !== undefined) {
-                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "copied", bundle: generatedBundle });
+                await this.#installedRuntimeAcceptance.recordContentInclusiveDiagnosticCopy({ ...binding, outcome: "copied", bundle: generatedBundle, copiedTextSha256: outcome.copiedTextSha256 });
               }
             }
             if (outcome.outcome === "copied") {

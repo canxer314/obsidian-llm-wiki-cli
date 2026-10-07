@@ -296,6 +296,10 @@ export {
   type PurgeScenarioStage,
   type PurgeScenarioStageRecord,
 } from "./installed-runtime/purge-scenario.js";
+export { runPluginEventObserverCorpus, runPluginEventObserverScenario, PLUGIN_EVENT_OBSERVER_SCENARIOS,
+  type PluginEventObserverCorpusOptions, type PluginEventObserverScenario } from "./installed-runtime/plugin-event-observer-corpus.js";
+export { verifyPluginEventObserverWindow, EVENT_OBSERVER_ID, type PluginEventObserverBinding } from "./installed-runtime/plugin-event-observer.js";
+export { pluginEventObserverCorpusEvidenceSchema, type PluginEventObserverCorpusEvidence } from "./installed-runtime/plugin-event-observer-evidence.js";
 export {
   AcceptanceMatrixError,
   ACCEPTANCE_CORPUS_IDS,

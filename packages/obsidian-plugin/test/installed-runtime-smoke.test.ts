@@ -142,6 +142,49 @@ describe("installed-runtime authoritative command", () => {
     })).rejects.toThrow();
   });
 
+  it("accepts the fixed edit-body file-mutation observer fixture within the expanded crash protocol", async () => {
+    const { parseCrashRestorationCommand } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+    const command = { sequence: 1, capabilityToken: "a".repeat(64), action: "run-crash-restoration-scenario", scenario: "edit_body/after_file_mutation:0", expectedVaultId: "vault", endpoint: "http://127.0.0.1:27123/mcp", submissionKey: "submission-fixed", input: {} };
+    expect(parseCrashRestorationCommand(command)).not.toBeNull();
+    expect(parseCrashRestorationCommand({ ...command, scenario: "edit_body/after_mutation:0" })).toBeNull();
+    expect(parseCrashRestorationCommand({ ...command, scenario: "edit_body/after_file_mutation:1" })).toBeNull();
+    expect(parseCrashRestorationCommand({ ...command, scenario: "create_note/after_mutation:0" })).not.toBeNull();
+  });
+  it("round-trips the observer recovery file-mutation boundary through the current private crash seam", async () => {
+    // Real descriptor/marker/filesystem seams with a Node fixture, not installed Obsidian acceptance.
+    const { requestInstalledCrashRestorationScenario, parkInstalledCrashBoundary, loadCrashBoundaryReport, crashInventory, crashProfile } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+    const root = await mkdtemp(join(tmpdir(), "observer-current-crash-seam-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const vaultPath = join(root, "installed-runtime-vault-observer-crash");
+    const pluginId = "llm-wiki";
+    const pluginDirectory = join(vaultPath, ".obsidian", "plugins", pluginId);
+    await mkdir(pluginDirectory, { recursive: true });
+    await writeFile(join(pluginDirectory, "main.js"), "candidate fixture");
+    const reportDirectory = join(root, "reports");
+    await mkdir(reportDirectory);
+    const created = await createInstalledRuntimeAcceptanceDescriptor({ runId: "observer-crash", vaultPath, pluginId,
+      candidateBundleSha256: "a".repeat(64), reportDirectory });
+    const profile = crashProfile("edit_body");
+    const fixture = profile.files[0]!;
+    const target = join(vaultPath, fixture.path);
+    await mkdir(join(target, ".."), { recursive: true });
+    await writeFile(target, fixture.originalBytes!);
+    const before = await crashInventory(vaultPath);
+    const input = profile.buildSubmitInput("observer-crash-edit");
+    const endpoint = new URL("http://127.0.0.1:27123/mcp");
+    const sequence = await requestInstalledCrashRestorationScenario({ descriptorPath: created.path, descriptor: created.descriptor,
+      expectedVaultId: "observer-vault", endpoint, input, mutationKind: "edit_body", crashPoint: "after_file_mutation:0" });
+    const updated = await loadInstalledRuntimeAcceptanceDescriptor({ vaultPath, pluginId });
+    expect(updated.command).toMatchObject({ scenario: "edit_body/after_file_mutation:0", sequence });
+    await writeFile(target, fixture.committedBytes!);
+    let parked = false;
+    await parkInstalledCrashBoundary({ descriptor: updated, command: updated.command as never,
+      frame: { phase: "PREPARED", vaultId: "observer-vault", input }, before, park: async () => { parked = true; } });
+    expect(parked).toBe(true);
+    expect(await loadCrashBoundaryReport({ ...updated, vaultId: "observer-vault", endpoint: endpoint.toString(),
+      submissionKey: input.submissionKey as string, mutationKind: "edit_body", crashPoint: "after_file_mutation:0", sequence }))
+      .toMatchObject({ scenario: "edit_body/after_file_mutation:0", journalPhase: "PREPARED", sequence });
+  });
   it("composes every required release-blocking runner in the installed command", () => {
     const runners = createAuthoritativeInstalledRuntimeRunners();
     expect(Object.keys(runners).sort()).toEqual([
@@ -150,6 +193,7 @@ describe("installed-runtime authoritative command", () => {
       "runCrashRestorationRetainedAuthorityCorpus",
       "runGateIsolationCorpus",
       "runPersistentFifoCorpus",
+      "runPluginEventObserverCorpus",
       "runPrivacyRecoveryAuthorityCorpus",
       "runRegisteredReferenceRewriteCorpus",
       "runReleaseLifecycleCorpus",
@@ -206,6 +250,7 @@ describe("installed-runtime authoritative command", () => {
     const provisionAttempt = new Error("privacy provision attempted");
     await expect(runners.runPrivacyRecoveryAuthorityCorpus({
       profileName: "test", profile: { name: "test" }, probe: { probeRunning: async () => { throw new Error("Must not probe"); } },
+      retainDiagnosticObservation: async () => undefined,
       provisionVault: async () => { throw provisionAttempt; }, candidate: {},
     } as never)).rejects.toBe(provisionAttempt);
   });

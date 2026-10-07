@@ -54,6 +54,11 @@ import {
   type FaultedWriteObservation,
 } from "./journal-faults.js";
 import { ManagedVaultBridgeRuntime } from "../managed-vault-runtime.js";
+import { activateInstalledRuntimeAcceptanceDriver } from "../installed-runtime/acceptance-driver.js";
+import { loadInstalledRuntimeAcceptanceDescriptor } from "../installed-runtime/acceptance-driver-protocol.js";
+import { crashInventory, crashOriginalInventory, crashScenarioParts, parkInstalledCrashBoundary, parseCrashRestorationCommand, validateInstalledCrashFixture, validateInstalledCrashRecovery, type CrashRestorationCommand, type CrashInventoryEntry } from "../installed-runtime/crash-restoration-protocol.js";
+import { createInstalledSemanticEvidenceWire } from "../installed-runtime/installed-semantic-evidence.js";
+import { parseChangeSetSubmitInput } from "@llm-wiki/vault-contracts";
 import {
   enumerateDecodedReferenceTargets,
   type CanonicalReferenceCandidate,
@@ -459,8 +464,17 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
   // in the monotonic child event log; when an armed crash point is reached the
   // process writes `parked.json` and then parks until the supervisor terminates
   // it. Unarmed, every hook is a no-op beyond the event-log line.
-  const crashInjector = async (point: string): Promise<void> => {
+  // Test-only adapter exercises the installed fixed protocol, never an installed
+  // runtime substitute. It is unreachable from the production plugin bundle.
+  const installedCrashTest = process.env.CORPUS_INSTALLED_CRASH_TEST === "1";
+  let installedArm: { descriptor: Awaited<ReturnType<typeof loadInstalledRuntimeAcceptanceDescriptor>>["descriptor"]; command: CrashRestorationCommand; before: readonly CrashInventoryEntry[] } | undefined;
+  let crashExecution: Awaited<ReturnType<typeof createFileSystemChangeSetExecutionAdapter>> | undefined;
+  const crashInjector = async (point: string, execution?: import("../change-set.js").ChangeSetCrashContext): Promise<void> => {
     await appendEvent(controlDir, { event: "crash-point", point });
+    if (installedArm?.command.scenario.endsWith(`/${point}`)) {
+      try { await parkInstalledCrashBoundary({ ...installedArm, frame: await crashExecution!.loadRecoveryFrame(), ...(execution === undefined ? {} : { execution }) }); }
+      catch (error) { await appendEvent(controlDir, { event: "installed-marker-failed" }); throw error; }
+    }
     if (point !== armedCrashPoint) return;
     await report("parked.json", { point });
     await appendEvent(controlDir, { event: "parked", point });
@@ -547,7 +561,27 @@ export async function bootHeadlessOwningProcess(): Promise<void> {
       crashInjector,
     });
     await appendEvent(controlDir, { event: "runtime-loading" });
+    if (installedCrashTest) {
+      crashExecution = changeSetExecution;
+      const loaded = await loadInstalledRuntimeAcceptanceDescriptor({ vaultPath: root, pluginId: "crash-plugin" });
+      const command = parseCrashRestorationCommand(loaded.descriptor.command);
+      if (command?.recovery !== undefined) {
+        const frame = await changeSetExecution.loadRecoveryFrame();
+        const bound = validateInstalledCrashRecovery(command, frame, { vaultId, port });
+        installedArm = { descriptor: loaded.descriptor, command: bound, before: crashOriginalInventory(await crashInventory(root), crashScenarioParts(bound.scenario).kind) };
+      }
+      await writeJson(join(root, ".obsidian", "plugins", "crash-plugin", "data.json"), { vaultId, port });
+    }
     await runtime.load();
+    if (installedCrashTest) {
+      const wire = createInstalledSemanticEvidenceWire();
+      await activateInstalledRuntimeAcceptanceDriver({ vaultPath: root, pluginId: "crash-plugin", executeCrashRestorationScenario: async ({ descriptor, command }) => {
+        validateInstalledCrashFixture(command);
+        if (command.recovery !== undefined || command.expectedVaultId !== vaultId || command.endpoint !== runtime.bridge?.endpoint.toString() || installedArm !== undefined) throw new Error("Node fixed crash program is not bound");
+        installedArm = { descriptor, command, before: await crashInventory(root) };
+        void wire.submit({ endpoint: new URL(command.endpoint), expectedVaultId: vaultId, input: parseChangeSetSubmitInput(command.input) }).catch(() => undefined);
+      } });
+    }
     const boundPort = runtime.bridge?.port ?? port;
     await report("ready.json", { port: boundPort });
     await appendEvent(controlDir, { event: "ready", port: boundPort });
