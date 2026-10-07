@@ -59,7 +59,7 @@ export async function observeIsolatedMcpRegistration(options: {
   };
   if (observed.exitCode !== 0 || lines.filter(line => line === `${name}:`).length !== 1 ||
       !uniqueLine("Scope:", "Scope: Local config (private to you in this project)") ||
-      !uniqueLine("Status:", "Status: ✓ Connected") || !uniqueLine("Type:", "Type: http") ||
+      !(uniqueLine("Status:", "Status: ✓ Connected") || uniqueLine("Status:", "Status: ✔ Connected")) || !uniqueLine("Type:", "Type: http") ||
       !uniqueLine("URL:", `URL: ${url}`) || !uniqueLine("X-Expected-Vault-ID:", `X-Expected-Vault-ID: ${options.vaultId}`)) {
     throw new Error("Local Agent registration could not be independently confirmed");
   }
