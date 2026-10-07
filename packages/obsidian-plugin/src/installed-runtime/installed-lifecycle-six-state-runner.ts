@@ -91,7 +91,7 @@ async function realMcpWork(identity: PersistedBridgeIdentity, runId: string) {
   const client = new Client({ name: "installed-lifecycle-475", version: "1.0.0" });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${identity.port}/mcp`), {
-      requestInit: { headers: { "X-Expected-Vault-ID": identity.vaultId } },
+      requestInit: { headers: { "X-Expected-Vault-ID": identity.vaultId, Connection: "close" } },
     }));
     const raw = await client.callTool({ name: "vault_change_set_submit", arguments: { submissionKey: `lifecycle-${runId}`,
       operations: [{ operationId: "lifecycle-mkdir", kind: "create_directory", path: "Lifecycle475", ifExists: "reject" }] } });
@@ -123,7 +123,7 @@ export async function runInstalledLifecycleSixStateSlice(options: InstalledLifec
   const startupMs = options.timeouts?.startupMs ?? 120_000;
   const stopMs = options.timeouts?.stopMs ?? 30_000;
   const operatorMs = options.operatorTimeoutMs ?? 180_000;
-  const client = createLoopbackMcpClient({ timeoutMs: startupMs });
+  const client = createLoopbackMcpClient({ timeoutMs: startupMs, closeConnection: true });
   const events: { sequence: number; name: string; sourceSha256: string }[] = [];
   const states: ManagedVaultLifecycleState[] = [];
   const event = (name: string, source: unknown) => events.push({ sequence: events.length + 1, name, sourceSha256: hash(JSON.stringify(source)) });
@@ -232,7 +232,7 @@ export async function runInstalledLifecycleSixStateSlice(options: InstalledLifec
     stage = "identity_mismatch";
     const foreignId = randomUUID();
     const rejected = await fetch(`http://127.0.0.1:${identity!.port}/mcp`, { method: "POST", signal: AbortSignal.timeout(startupMs), headers: {
-      "content-type": "application/json", "accept": "application/json, text/event-stream", "X-Expected-Vault-ID": foreignId },
+      "content-type": "application/json", "accept": "application/json, text/event-stream", Connection: "close", "X-Expected-Vault-ID": foreignId },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "lifecycle-mismatch", version: "1" } } }) });
     const rejection = await rejected.json() as { error?: { message?: string } };
     if (foreignId === identity!.vaultId || rejected.status !== 403 || rejection.error?.message !== "mismatched_expected_vault_id") throw new Error("Wrong lifecycle identity was not rejected on real MCP wire");

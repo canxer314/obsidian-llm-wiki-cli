@@ -97,6 +97,7 @@ it(`observes six lifecycle facts and fails closed on ${corrupt}`, async () => {
   const runtimes: ManagedVaultBridgeRuntime[] = [];
   const requests: unknown[] = [];
   const records: unknown[] = [];
+  const stopDurationsMs: number[] = [];
   let runningProbes = 0;
   let activeVaultPath = "";
   const result = await runInstalledLifecycleSixStateSlice({ candidate, workingDirectory: root, runId: "six",
@@ -130,7 +131,7 @@ it(`observes six lifecycle facts and fails closed on ${corrupt}`, async () => {
         changeSetExecution: execution, createBridge: options => createBridgeInstance(options),
       });
       runtimes.push(runtime); await runtime.load();
-      return { pid: 2, stop: async () => { await runtime.unload(); } };
+      return { pid: 2, stop: async () => { const began = performance.now(); await runtime.unload(); stopDurationsMs.push(performance.now() - began); } };
     } },
     operatorObservation: async request => {
       requests.push(request.action);
@@ -158,6 +159,7 @@ it(`observes six lifecycle facts and fails closed on ${corrupt}`, async () => {
     await Promise.all(runtimes.map(runtime => runtime.unload()));
     return;
   }
+  expect(Math.max(...stopDurationsMs), JSON.stringify(stopDurationsMs)).toBeLessThan(1000);
   expect(result).toMatchObject({ scope: "installed-six-state-install-repair", verdict: "partial", states: ["not_installed", "installed_not_enabled", "bridge_offline", "mcp_not_registered", "ready", "identity_mismatch"],
     repair: { action: "repaired" }, cleanup: { attempted: true, residualPaths: [] }, statePreserved: true });
   expect(result.before?.directoryCount).toBeGreaterThanOrEqual(9);
