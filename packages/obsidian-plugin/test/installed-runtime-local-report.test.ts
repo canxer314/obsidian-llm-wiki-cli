@@ -159,6 +159,15 @@ it("rejects a rejected resume that clears Journal evidence or rewrites terminal 
   } finally { await fixture.cleanup(); }
 });
 
+it("rejects accepted baseline with a readable FAILED frame alongside a corrupt Journal slot", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    await fixture.writeBaseline({ ...fixture.evidence, journal: { ...fixture.evidence.journal,
+      frames: [fixture.evidence.journal.frames[0], { slot: 1, state: "invalid", checksum: "invalid" }] } });
+    await expect(waitForNextInstalledLocalControlReport(fixture.options)).rejects.toThrow("corrupt Journal");
+  } finally { await fixture.cleanup(); }
+});
+
 it("discovers the operator-generated invocation without requiring a caller-invented baseline ID", async () => {
   const fixture = await controlDiscoveryFixture();
   const invocationId = randomUUID();

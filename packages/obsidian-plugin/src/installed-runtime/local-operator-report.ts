@@ -135,6 +135,9 @@ export async function loadInstalledLocalOperatorReport(options: {
         bundle.changeSetOutcomes.some(entry => entry.executionPhase === "executing" || entry.state === "in_progress" && entry.executionPhase !== "queued"))) {
       throw new Error("Local operator baseline cannot prove absence of in-flight execution");
     }
+    if (before.journal.availability !== "available" || before.journal.frames.length !== 2 || before.journal.frames.some(frame => frame.state === "invalid")) {
+      throw new Error("Local operator baseline transition cannot accept a missing or corrupt Journal");
+    }
     const unproven = before.changeSetOutcomes.filter(entry => entry.state === "result_unproven");
     type ValidFrame = Extract<StandardDiagnosticBundle["journal"]["frames"][number], { state: "valid" }>;
     const frames: ValidFrame[] = [...before.journal.frames].filter((frame): frame is ValidFrame => frame.state === "valid");

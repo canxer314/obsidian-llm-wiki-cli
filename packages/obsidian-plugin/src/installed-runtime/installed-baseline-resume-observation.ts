@@ -190,6 +190,8 @@ export async function observeInstalledBaselinePreconditions(options: InstalledRe
   try {
     const journal = await openRecoveryJournal(handle);
     const frame = await journal.recover();
+    const diagnostic = await journal.diagnosticFacts();
+    if (diagnostic.frames.length !== 2 || diagnostic.frames.some(slot => slot.state === "invalid")) throw new Error("Baseline has a corrupt Journal slot");
     const payload = frame?.payload;
     if (frame?.phase !== "FAILED" || typeof payload !== "object" || payload === null || Array.isArray(payload) ||
         payload.phase !== "FAILED" || payload.vaultId !== options.vaultId || payload.changeSetId !== entry.changeSetId ||
