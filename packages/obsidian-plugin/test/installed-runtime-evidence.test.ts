@@ -7,16 +7,21 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  createInstalledRuntimeAcceptanceMatrix,
+  createInstalledRuntimeAcceptanceMatrix as composeMatrix,
   EvidencePrivacyError,
   EvidenceWriteError,
-  parseEvidence,
-  serializeEvidence,
-  writeEvidenceFile,
+  parseEvidence as parsePublicEvidence,
+  serializeEvidence as serializePublicEvidence,
+  writeEvidenceFile as writePublicEvidence,
   type InstalledRuntimeEvidence,
 } from "../src/index.js";
 
-import { observerReportFixture } from "./helpers/plugin-event-observer-fixture.js";
+import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
+const independentObserverContext = () => observerSourceFixture({ runId: "run-evidence", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "candidate-bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
+const createInstalledRuntimeAcceptanceMatrix = (report: InstalledRuntimeEvidence) => composeMatrix(report, independentObserverContext());
+const serializeEvidence = (report: InstalledRuntimeEvidence, markers: readonly string[] = []) => serializePublicEvidence(report, markers, independentObserverContext());
+const parseEvidence = (text: string) => parsePublicEvidence(text, independentObserverContext());
+const writeEvidenceFile = (path: string, report: InstalledRuntimeEvidence, markers: readonly string[] = []) => writePublicEvidence(path, report, markers, independentObserverContext());
 import { registeredReferenceRewriteCorpusEvidenceSchema } from "../src/installed-runtime/evidence.js";
 import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
 const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -812,7 +817,12 @@ describe("installed-runtime evidence record", () => {
   it("round-trips a passing record through serialization and parsing", () => {
     const evidence = acceptedEvidence();
     evidence.acceptanceMatrix = createInstalledRuntimeAcceptanceMatrix(evidence);
-    expect(parseEvidence(serializeEvidence(evidence))).toEqual(evidence);
+    const serialized = serializeEvidence(evidence);
+    expect(parseEvidence(serialized)).toEqual(evidence);
+    expect(() => parsePublicEvidence(serialized)).toThrow(/independently retained source context/);
+    expect(() => serializePublicEvidence(evidence)).toThrow(/independently retained source context/);
+    expect(serialized).not.toContain("capabilityToken");
+    expect(serialized).not.toContain("rawBytesBase64");
   });
 
   it("refuses a passing record without a canonical acceptance matrix", () => {

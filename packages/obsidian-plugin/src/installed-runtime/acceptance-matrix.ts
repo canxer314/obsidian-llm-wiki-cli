@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { changeSetCorpusEvidenceSchema, type InstalledRuntimeEvidence } from "./evidence.js";
 import { pluginEventObserverCorpusEvidenceSchema, PLUGIN_EVENT_OBSERVER_ASSERTION } from "./plugin-event-observer-evidence.js";
+import { verifyPluginEventObserverWindow } from "./plugin-event-observer.js";
 
 /**
  * The complete #44 acceptance matrix. Each criterion is bound once to concrete
@@ -170,7 +171,7 @@ function requireCorpus<T>(value: T | null | undefined, name: string): T {
   return value;
 }
 
-function childManifests(evidence: InstalledRuntimeEvidence): AcceptanceMatrixChildManifest[] {
+function childManifests(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext): AcceptanceMatrixChildManifest[] {
   const publicWire = requireCorpus(evidence.publicWireCorpus, "public-wire corpus");
   const changeSet = requireCorpus(evidence.changeSetCorpus, "change-set corpus");
   const gate = requireCorpus(evidence.gateIsolationCorpus, "gate-isolation corpus");
@@ -181,7 +182,23 @@ function childManifests(evidence: InstalledRuntimeEvidence): AcceptanceMatrixChi
   const crash = requireCorpus(evidence.crashRestorationRetainedAuthorityCorpus, "crash-restoration corpus");
   const observer = pluginEventObserverCorpusEvidenceSchema.parse(requireCorpus(evidence.pluginEventObserverCorpus, "real enabled plugin event observer corpus"));
   if (observer.runId !== evidence.runId || observer.candidateBundleSha256 !== evidence.candidate?.bundleSha256 || observer.profileName !== evidence.profile.name) throw new AcceptanceMatrixError("Plugin observer candidate/run/profile binding changed");
+  if (observerContext === undefined || observerContext.runId !== evidence.runId || observerContext.candidateBundleSha256 !== evidence.candidate?.bundleSha256 ||
+      observerContext.installedMainSha256 !== evidence.candidate?.files.find(file => file.path === "main.js")?.sha256 || observerContext.profileName !== evidence.profile.name ||
+      observerContext.candidatePluginId !== evidence.candidate?.pluginId || observerContext.observations.length !== 4) throw new AcceptanceMatrixError("Plugin observer requires independently retained source context");
   for (const scenario of observer.scenarios) {
+    for (const window of scenario.windows) {
+      const retained = observerContext.observations.filter(item => item.scenario === scenario.scenario && item.verification.binding.generation === window.generation);
+      if (retained.length !== 1) throw new AcceptanceMatrixError("Plugin observer independent source generation missing");
+      const source = retained[0]!;
+      const binding = source.verification.binding;
+      if (binding.runId !== observerContext.runId || binding.candidateBundleSha256 !== observerContext.candidateBundleSha256 ||
+          binding.installedMainSha256 !== observerContext.installedMainSha256 || binding.profileName !== observerContext.profileName ||
+          source.verification.candidatePluginId !== observerContext.candidatePluginId ||
+          createHash("sha256").update(binding.vaultPath).digest("hex") !== scenario.vaultPathSha256 ||
+          createHash("sha256").update(binding.vaultId ?? "").digest("hex") !== scenario.vaultIdSha256) throw new AcceptanceMatrixError("Plugin observer independent source identity differs");
+      const actual = { ...verifyPluginEventObserverWindow(source.verification), supervisorPid: source.supervisorPid, supervisedProcessTreeVerified: true };
+      if (canonicalJson(actual) !== canonicalJson(window) || canonicalJson(source.source) !== canonicalJson(observer.sourceReports.find(item => item.scenario === scenario.scenario && item.generation === window.generation))) throw new AcceptanceMatrixError("Plugin observer differs from independent authenticated source");
+    }
     const runtime = scenario.runtime;
     if (runtime.platform !== evidence.profile.registered.os.platform || runtime.osBuild !== evidence.profile.registered.os.build || runtime.obsidianVersion !== evidence.profile.registered.versions.obsidian || runtime.electronVersion !== evidence.profile.registered.versions.electron || runtime.nodeVersion !== evidence.profile.registered.versions.node || evidence.profile.registered.capabilities.some(capability => !runtime.capabilities.includes(capability)) || scenario.installedMainSha256 !== evidence.candidate?.files.find(file => file.path === "main.js")?.sha256 || scenario.windows.some(window => !window.enabledPlugins.includes(evidence.candidate!.pluginId))) throw new AcceptanceMatrixError("Plugin observer runtime/candidate/plugin inventory mismatch");
   }
@@ -245,7 +262,7 @@ function canonicalReport(report: Omit<AcceptanceMatrixReport, "canonicalManifest
   };
 }
 
-export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence): AcceptanceMatrixReport {
+export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext): AcceptanceMatrixReport {
   if (evidence.verdict !== "passed" || evidence.failure !== null) throw new AcceptanceMatrixError("Acceptance matrix requires a passing installed-runtime run");
   if (evidence.profile.mismatches.length !== 0 || evidence.profile.observed === null ||
       evidence.profile.observed.obsidianVersion !== evidence.profile.registered.versions.obsidian ||
@@ -270,7 +287,7 @@ export function createAcceptanceMatrixReport(evidence: InstalledRuntimeEvidence)
     // A-15 is a raw-byte observation, never a string assertion alone.
     changeSetCorpusEvidenceSchema.parse(evidence.changeSetCorpus);
   }
-  const children = childManifests(evidence);
+  const children = childManifests(evidence, observerContext);
   const scenarios = ACCEPTANCE_MATRIX_PLAN.map(({ id, corpusId, assertion }) => {
     const childIndex = children.findIndex((child) => child.corpusId === corpusId);
     const child = children[childIndex];

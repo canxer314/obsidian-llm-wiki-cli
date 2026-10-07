@@ -44,6 +44,15 @@ export const pluginEventObserverCorpusEvidenceSchema = z.object({
     if (JSON.stringify(generations) !== JSON.stringify(scenario.scenario === "startup-recovery" ? [1, 2] : [1])) context.addIssue({ code: "custom", message: "Observer lacks complete process generation windows" });
     for (const window of scenario.windows) {
       if (JSON.stringify(window.protocolOrder.map(event => event.kind)) !== JSON.stringify(["ready", "candidate-start", "window-begin", "window-end"]) || window.protocolOrder.some((event, index, all) => index > 0 && (event.sequence <= all[index - 1]!.sequence || event.at < all[index - 1]!.at))) context.addIssue({ code: "custom", message: "Observer lacks ordered active-before-startup protocol facts" });
+      const [ready, start, begin, end] = window.protocolOrder;
+      if (ready!.sequence !== window.observationWindow.firstSequence || end!.sequence !== window.observationWindow.lastSequence ||
+          ready!.at !== window.observationWindow.startedAt || end!.at !== window.observationWindow.endedAt ||
+          window.observations.some(event => event.sequence <= ready!.sequence || event.sequence >= end!.sequence ||
+            window.protocolOrder.some(protocol => protocol.sequence === event.sequence) ||
+            event.kind === "snapshot" && event.sequence <= begin!.sequence ||
+            scenario.scenario === "startup-recovery" && window.generation === 2 && event.sequence <= begin!.sequence) ||
+          start!.sequence >= begin!.sequence) context.addIssue({ code: "custom", message: "Observer callbacks must fall within registered generation readiness/window bounds" });
+      if (window.observations.some((event, index, all) => index > 0 && event.sequence <= all[index - 1]!.sequence)) context.addIssue({ code: "custom", message: "Observer callback sequence must follow actual generation order" });
       const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
       const sources = corpus.sourceReports.filter(source => source.scenario === scenario.scenario && source.generation === window.generation);
       const source = sources[0];

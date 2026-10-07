@@ -54,6 +54,25 @@ export async function readPluginEventObserverSourceReport(options: Omit<Paramete
     generation: binding.generation, observerMainSha256: hash(observerMain), rendererPid, supervisorPid: options.supervisorPid,
     transcriptSha256: sourceWindow.transcriptSha256, projectionSha256: observerProjectionSha256(sourceWindow) };
 }
+export type PluginEventObserverSourceObservation = Omit<Parameters<typeof readPluginEventObserverSourceReport>[0], "window"> & { window: Parameters<typeof readPluginEventObserverSourceReport>[0]["window"] };
+export interface PluginEventObserverConsumptionContext {
+  runId: string; candidateBundleSha256: string; installedMainSha256: string; profileName: string; candidatePluginId: string;
+  observations: { verification: Parameters<typeof verifyPluginEventObserverWindow>[0]; scenario: PluginEventObserverScenario;
+    supervisorPid: number; source: PluginEventObserverCorpusEvidence["sourceReports"][number] }[];
+}
+/** The caller owns this context outside the public report, retaining authenticated source bytes after Vault cleanup. */
+export async function retainPluginEventObserverSource(options: PluginEventObserverSourceObservation) {
+  const source = await readPluginEventObserverSourceReport(options);
+  const events: unknown = (await readFile(join(options.reportDirectory, `observer-generation-${options.binding.generation}.sealed.jsonl`), "utf8"))
+    .trim().split("\n").map(line => JSON.parse(line));
+  const verification = { binding: structuredClone(options.binding), candidatePluginId: options.candidatePluginId, expectedPid: source.rendererPid,
+    files: structuredClone(options.files), maxSilenceMs: options.maxSilenceMs, events,
+    ...(options.requiredVisibleStates === undefined ? {} : { requiredVisibleStates: structuredClone(options.requiredVisibleStates) }),
+    ...(options.requiredTransition === undefined ? {} : { requiredTransition: structuredClone(options.requiredTransition) }) };
+  const retained = verifyPluginEventObserverWindow(verification);
+  if (retained.transcriptSha256 !== source.transcriptSha256) throw new Error("Observer sealed source changed during retention");
+  return { verification, scenario: options.scenario, supervisorPid: options.supervisorPid, source };
+}
 export interface PluginEventObserverCorpusOptions {
   runId: string; workingDirectory: string; reportDirectory: string; candidate: VerifiedCandidateBundle;
   processControl: ObsidianProcessControl; client: LoopbackMcpClient; profile: RegisteredRuntimeProfile;
@@ -61,6 +80,7 @@ export interface PluginEventObserverCorpusOptions {
   prepareAcceptanceDriver(options: { vaultPath: string; pluginId: string; candidateBundleSha256: string; configDirectoryName: string; reportDirectory: string }): Promise<InstalledRuntimeAcceptanceDriverHandle>;
   semanticEvidenceScenarioRunner: InstalledSemanticEvidenceScenarioRunner;
   timeouts: { startupMs: number; stopMs: number; portClosedMs: number };
+  retainObservation(options: PluginEventObserverSourceObservation): Promise<void>;
 }
 
 /** Independently runnable generated correctness scenario. Never a performance measurement. */
@@ -166,6 +186,7 @@ export async function runPluginEventObserverScenario(options: PluginEventObserve
         supervisorPid: handle!.pid!, supervisedProcessTreeVerified: true as const };
       const source = await readPluginEventObserverSourceReport({ ...verification, scenario: options.scenario, reportDirectory, configDirectoryName,
         supervisorPid: handle!.pid!, window });
+      await options.retainObservation({ ...verification, scenario: options.scenario, reportDirectory, configDirectoryName, supervisorPid: handle!.pid!, window });
       sourceReports.push(source);
       windows.push(window);
     };

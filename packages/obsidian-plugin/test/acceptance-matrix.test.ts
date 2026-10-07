@@ -2,12 +2,16 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
-  createAcceptanceMatrixReport,
+  createAcceptanceMatrixReport as composeMatrix,
   validateAcceptanceMatrixReport,
   type InstalledRuntimeEvidence,
 } from "../src/index.js";
 
-import { observerReportFixture } from "./helpers/plugin-event-observer-fixture.js";
+import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
+function createAcceptanceMatrixReport(report: InstalledRuntimeEvidence) {
+  const context = observerSourceFixture({ runId: "acceptance-run", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
+  return composeMatrix(report, context);
+}
 const DIGEST = "a".repeat(64);
 
 function corpus(
@@ -207,6 +211,42 @@ function evidence(): InstalledRuntimeEvidence {
 }
 
 describe("authoritative A-01 through A-44 acceptance matrix", () => {
+  it("requires external source context even for a self-consistent public observer report", () => {
+    expect(() => composeMatrix(evidence())).toThrow(/independently retained source context/);
+  });
+  // Independent consumer regressions. The baseline is only a synthetic Node
+  // report fixture; none of these cases is installed acceptance evidence.
+  it("independently rejects coordinated PID1 and zero-transcript substitution", () => {
+    const report = evidence();
+    expect(createAcceptanceMatrixReport(report).scenarios.find(s => s.id === "A-37")?.verdict).toBe("passed");
+    const corpus = report.pluginEventObserverCorpus!;
+    const window = corpus.scenarios[0]!.windows[0]!;
+    const source = corpus.sourceReports.find(s => s.scenario === "success" && s.generation === 1)!;
+    window.pid = source.rendererPid = 1;
+    window.supervisorPid = source.supervisorPid = 1;
+    window.transcriptSha256 = source.transcriptSha256 = "0".repeat(64);
+    expect(() => createAcceptanceMatrixReport(report)).toThrow(/independent.*source/);
+  });
+  it("independently rejects rollback array order contradicting actual sequence order", () => {
+    const report = evidence();
+    const corpus = report.pluginEventObserverCorpus!;
+    const window = corpus.scenarios[1]!.windows[0]!;
+    // The array says after then before, but event sequence says before then after.
+    window.observations.forEach((observation, index) => { observation.sequence = [6, 7, 4, 5][index]!; });
+    const source = corpus.sourceReports.find(s => s.scenario === "rollback" && s.generation === 1)!;
+    source.projectionSha256 = createHash("sha256").update(JSON.stringify({ observations: window.observations, protocolOrder: window.protocolOrder })).digest("hex");
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
+  it("independently rejects recovery callbacks predating observer ready and recovery window", () => {
+    const report = evidence();
+    const corpus = report.pluginEventObserverCorpus!;
+    const window = corpus.scenarios[2]!.windows[1]!;
+    window.protocolOrder.forEach((event, index) => { event.sequence = 20 + index; });
+    window.observationWindow.lastSequence = 23;
+    const source = corpus.sourceReports.find(s => s.scenario === "startup-recovery" && s.generation === 2)!;
+    source.projectionSha256 = createHash("sha256").update(JSON.stringify({ observations: window.observations, protocolOrder: window.protocolOrder })).digest("hex");
+    expect(() => createAcceptanceMatrixReport(report)).toThrow();
+  });
   it("rejects A37 heartbeat-only summaries despite positive declared coverage counters", () => {
     const report = evidence();
     for (const scenario of report.pluginEventObserverCorpus!.scenarios) for (const window of scenario.windows) {
