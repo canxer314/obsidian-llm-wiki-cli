@@ -1,4 +1,5 @@
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
+import { syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
 import { createHash, createHmac } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -253,6 +254,11 @@ async function arrangeRun(
     }),
     profiles: PROFILES,
     runId,
+    runManualPauseCorpus: async ({ runId, profile, candidate, retainSource }) => {
+      const fixture = syntheticManualPauseSource(runId, profile.name, candidate.identity.bundleSha256, candidate.identity.files.find(file => file.path === "main.js")!.sha256);
+      retainSource?.(fixture.source);
+      return fixture.proof;
+    },
     runPersistentFifoCorpus: async ({ runId, profile, candidate, assertion }) => {
       assertion("concurrency/persistent-fifo:repreflight-and-restart-proven");
       return syntheticFifoProof(runId, profile.name, candidate.identity.bundleSha256);
@@ -1076,6 +1082,14 @@ describe("installed-runtime harness orchestration", () => {
     await expect(result.readEvidence()).rejects.toThrow(/independent.*source/);
     await writeFile(result.evidencePath, publicText);
     expect(await result.readEvidence()).toEqual(result.evidence);
+    const substitutedPause = JSON.parse(publicText) as InstalledRuntimeEvidence;
+    const pause = substitutedPause.gateIsolationCorpus!.manualPause.installedObservation!;
+    pause.toolRows[0]!.requestSha256 = "0".repeat(64);
+    pause.localActions[0].afterSha256 = "0".repeat(64);
+    await writeFile(result.evidencePath, JSON.stringify(substitutedPause));
+    await expect(result.readEvidence()).rejects.toThrow(/independent actual source/);
+    await writeFile(result.evidencePath, publicText);
+    expect(await result.readEvidence()).toEqual(result.evidence);
     expect(evidence.profile.name).toBe(INNER_PROFILE.name);
     expect(evidence.profile.mismatches).toEqual([]);
     expect(evidence.candidate?.pluginId).toBe("candidate-bridge");
@@ -1160,6 +1174,16 @@ describe("installed-runtime harness orchestration", () => {
 });
 
 describe("installed-runtime harness failure projection", () => {
+  it("fails closed when a pause runner returns only a public proof without retained source", async () => {
+    const { options } = await arrangeRun("run-pause-missing-source", {
+      runManualPauseCorpus: async ({ runId, profile, candidate }) => syntheticManualPauseSource(runId, profile.name, candidate.identity.bundleSha256, candidate.identity.files.find(file => file.path === "main.js")!.sha256).proof,
+    });
+    const result = await runInstalledRuntimeHarness(options);
+    expect(result.verdict).toBe("failed");
+    expect(result.failure).toMatchObject({ stage: "gate_isolation_corpus", code: "gate_isolation_corpus_failed" });
+    expect(result.evidence.manualPauseObservation).toBeNull();
+    expect((await result.readEvidence()).verdict).toBe("failed");
+  });
   it("records invalid evidence for an unregistered profile", async () => {
     const { root, options } = await arrangeRun("run-unregistered", {
       profileName: "NOT-REGISTERED",

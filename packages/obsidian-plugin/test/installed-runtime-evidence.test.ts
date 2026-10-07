@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { syntheticFifoProof } from "./helpers/fifo-proof.js";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { syntheticManualPauseSource } from "./helpers/manual-pause-proof.js";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,10 +19,11 @@ import {
 
 import { observerReportFixture, observerSourceFixture } from "./helpers/plugin-event-observer-fixture.js";
 const independentObserverContext = () => observerSourceFixture({ runId: "run-evidence", candidateBundleSha256: DIGEST, installedMainSha256: DIGEST, profileName: "MVP-PERF-REF-1", pluginId: "candidate-bridge", runtime: { platform: "win32", osBuild: "26200", obsidianVersion: "1.13.4", electronVersion: "39.6.0", nodeVersion: "24.14.0", capabilities: ["loopback_http"] } }).context;
-const createInstalledRuntimeAcceptanceMatrix = (report: InstalledRuntimeEvidence) => composeMatrix(report, independentObserverContext());
-const serializeEvidence = (report: InstalledRuntimeEvidence, markers: readonly string[] = []) => serializePublicEvidence(report, markers, independentObserverContext());
-const parseEvidence = (text: string) => parsePublicEvidence(text, independentObserverContext());
-const writeEvidenceFile = (path: string, report: InstalledRuntimeEvidence, markers: readonly string[] = []) => writePublicEvidence(path, report, markers, independentObserverContext());
+let pauseFixture: ReturnType<typeof syntheticManualPauseSource>;
+const createInstalledRuntimeAcceptanceMatrix = (report: InstalledRuntimeEvidence) => composeMatrix(report, independentObserverContext(), pauseFixture.context);
+const serializeEvidence = (report: InstalledRuntimeEvidence, markers: readonly string[] = []) => serializePublicEvidence(report, markers, independentObserverContext(), pauseFixture.context);
+const parseEvidence = (text: string) => parsePublicEvidence(text, independentObserverContext(), pauseFixture.context);
+const writeEvidenceFile = (path: string, report: InstalledRuntimeEvidence, markers: readonly string[] = []) => writePublicEvidence(path, report, markers, independentObserverContext(), pauseFixture.context);
 import { registeredReferenceRewriteCorpusEvidenceSchema } from "../src/installed-runtime/evidence.js";
 import { SINGLE_SPAN_BEFORE, SINGLE_SPAN_AFTER } from "../src/installed-runtime/registered-reference-single-span.js";
 const a26Digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -125,6 +127,7 @@ function semanticEvidenceSearchSnapshotEvidence(): NonNullable<
 }
 
 function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsolationCorpus"]> {
+  pauseFixture = syntheticManualPauseSource("run-evidence", "MVP-PERF-REF-1", DIGEST, DIGEST);
   return {
     corpusId: "per-vault-gate-isolation-proof",
     seedManifestSha256: DIGEST,
@@ -191,6 +194,7 @@ function gateIsolationEvidence(): NonNullable<InstalledRuntimeEvidence["gateIsol
       otherGatesLeftUnbound: 2,
     },
     manualPause: {
+      installedObservation: pauseFixture.proof,
       drainedInFlightToTrustworthyEnd: true,
       fifoRetained: true,
       newUnboundRejected: 1,
@@ -1116,6 +1120,7 @@ describe("installed-runtime evidence record", () => {
       ...acceptedEvidence(),
       candidate: null,
       bridgeIdentity: null,
+      gateIsolationCorpus: null,
       changeSetCorpus: null,
       inputHashes: { candidateBundleSha256: null, vaultSeedManifestSha256: null },
       beforeInventory: null,
@@ -1159,6 +1164,7 @@ describe("installed-runtime evidence record", () => {
         detail: "connect failed for C:\\Obsidian\\ThinkFlywheelVault",
       },
     };
+    const windowsContext = pauseFixture.context;
     expect(() => serializeEvidence(windowsLeak, ["C:\\Obsidian\\ThinkFlywheelVault"])).toThrow(
       EvidencePrivacyError,
     );
@@ -1174,9 +1180,42 @@ describe("installed-runtime evidence record", () => {
     expect(() => serializeEvidence(noteBodyLeak, ["# Installed Runtime Harness"])).toThrow(
       EvidencePrivacyError,
     );
-    expect(() => serializeEvidence(windowsLeak, ["C:/Obsidian/Other"])).not.toThrow();
+    expect(() => serializePublicEvidence(windowsLeak, ["C:/Obsidian/Other"], independentObserverContext(), windowsContext)).not.toThrow();
   });
 
+  it("requires private pause context for serialization and re-consumption and rejects substituted public hashes", () => {
+    const report = acceptedEvidence();
+    const serialized = serializeEvidence(report);
+    expect(() => serializePublicEvidence(report, [], independentObserverContext())).toThrow(/pause.*source/iu);
+    expect(() => parsePublicEvidence(serialized, independentObserverContext())).toThrow(/pause.*source/iu);
+    const tampered = JSON.parse(serialized) as InstalledRuntimeEvidence;
+    const pause = tampered.gateIsolationCorpus!.manualPause.installedObservation!;
+    pause.localActions[0].beforeSha256 = "0".repeat(64);
+    expect(() => parseEvidence(JSON.stringify(tampered))).toThrow(/independent actual source/u);
+    expect(serialized).not.toContain("capabilityToken");
+    expect(serialized).not.toContain('"continuation":');
+  });
+  it("independently rechecks the retained pause pin before matrix, serialize, parse and write", async () => {
+    const report = acceptedEvidence();
+    const observerContext = independentObserverContext();
+    const retained = structuredClone(pauseFixture.context);
+    const text = serializePublicEvidence(report, [], observerContext, retained);
+    expect(parsePublicEvidence(text, observerContext, retained)).toEqual(report);
+    const changed = structuredClone(retained);
+    changed.source!.wire[0]!.arguments = { injected: true };
+    expect(changed.sourceSha256).toBe(retained.sourceSha256);
+    expect(() => composeMatrix(report, observerContext, changed)).toThrow(/pin/u);
+    expect(() => serializePublicEvidence(report, [], observerContext, changed)).toThrow(/pin/u);
+    expect(() => parsePublicEvidence(text, observerContext, changed)).toThrow(/pin/u);
+    const directory = await mkdtemp(join(tmpdir(), "pause-pin-write-"));
+    const path = join(directory, "proof.json");
+    try {
+      await expect(writePublicEvidence(path, report, [], observerContext, changed)).rejects.toThrow(/pin/u);
+      await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+      await writePublicEvidence(path, report, [], observerContext, retained);
+      expect(parsePublicEvidence(await readFile(path, "utf8"), observerContext, retained)).toEqual(report);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("writes atomically, reads back through the schema, and never overwrites", async () => {
     const directory = await mkdtemp(join(tmpdir(), "installed-runtime-evidence-"));
     const evidencePath = join(directory, "nested", "run.json");

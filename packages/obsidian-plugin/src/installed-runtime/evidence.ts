@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { consumeManualPauseProof } from "./manual-pause-source.js";
+import { manualPauseProofSchema } from "./manual-pause-observation.js";
 import { persistentFifoProofSchema } from "./fifo-observation.js";
 import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -551,6 +553,7 @@ export const gateIsolationCorpusEvidenceSchema = z
       .strict(),
     manualPause: z
       .object({
+        installedObservation: manualPauseProofSchema.optional(),
         drainedInFlightToTrustworthyEnd: z.literal(true),
         fifoRetained: z.literal(true),
         newUnboundRejected: z.number().int().positive(),
@@ -1189,7 +1192,7 @@ export const crashRestorationRetainedAuthorityCorpusEvidenceSchema = z
     }
   });
 
-function evidenceSchemaWithContext(observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext) { return z
+function evidenceSchemaWithContext(observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext) { return z
   .object({
     schemaVersion: z.literal(1),
     runId: z.string().min(1),
@@ -1211,6 +1214,7 @@ function evidenceSchemaWithContext(observerContext?: import("./plugin-event-obse
     publicWireCorpus: publicWireCorpusEvidenceSchema.nullable(),
     changeSetCorpus: changeSetCorpusEvidenceSchema.nullable(),
     gateIsolationCorpus: gateIsolationCorpusEvidenceSchema.nullable(),
+    manualPauseObservation: manualPauseProofSchema.nullable().optional(),
     registeredReferenceRewriteCorpus:
       registeredReferenceRewriteCorpusEvidenceSchema.nullable(),
     semanticEvidenceSearchSnapshotCorpus:
@@ -1234,6 +1238,11 @@ function evidenceSchemaWithContext(observerContext?: import("./plugin-event-obse
   })
   .strict()
   .superRefine((evidence, context) => {
+    for (const pause of [evidence.manualPauseObservation, evidence.gateIsolationCorpus?.manualPause.installedObservation]) {
+      if (pause) try { consumeManualPauseProof(pause, pauseContext); } catch (error) { context.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Manual pause independent source invalid" }); }
+      if (pause && (pause.runId !== evidence.runId || pause.profile !== evidence.profile.name || pause.candidateBundleSha256 !== evidence.candidate?.bundleSha256 ||
+          pause.installedMainSha256 !== evidence.candidate?.files.find(file => file.path === "main.js")?.sha256)) context.addIssue({ code: "custom", message: "Manual pause proof must bind this verified candidate, run and registered profile" });
+    }
     for (const rejection of evidence.changeSetCorpus?.admission.rejectionClasses ?? []) {
       if (rejection.binding.runId !== evidence.runId ||
           rejection.binding.runtimeProfileId !== evidence.profile.name ||
@@ -1248,7 +1257,7 @@ function evidenceSchemaWithContext(observerContext?: import("./plugin-event-obse
         const expected = createAcceptanceMatrixReport({
           ...evidence,
           acceptanceMatrix: null,
-        }, observerContext);
+        }, observerContext, pauseContext);
         if (matrix.canonicalManifestSha256 !== expected.canonicalManifestSha256) {
           context.addIssue({ code: "custom", message: "Acceptance matrix does not bind this installed-runtime evidence" });
         }
@@ -1343,16 +1352,18 @@ export class EvidenceWriteError extends Error {
 export function createInstalledRuntimeAcceptanceMatrix(
   evidence: InstalledRuntimeEvidence,
   observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
+  pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext,
 ): AcceptanceMatrixReport {
-  return createAcceptanceMatrixReport({ ...evidence, acceptanceMatrix: null }, observerContext);
+  return createAcceptanceMatrixReport({ ...evidence, acceptanceMatrix: null }, observerContext, pauseContext);
 }
 
 export function serializeEvidence(
   evidence: InstalledRuntimeEvidence,
   privateMarkers: readonly string[] = [],
   observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
+  pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext,
 ): string {
-  const validated = evidenceSchemaWithContext(observerContext).parse(evidence);
+  const validated = evidenceSchemaWithContext(observerContext, pauseContext).parse(evidence);
   const serialized = `${JSON.stringify(validated, null, 2)}\n`;
   for (const marker of privateMarkers) {
     if (marker.length === 0) continue;
@@ -1372,8 +1383,8 @@ export function serializeEvidence(
   return serialized;
 }
 
-export function parseEvidence(serialized: string, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext): InstalledRuntimeEvidence {
-  return evidenceSchemaWithContext(observerContext).parse(JSON.parse(serialized));
+export function parseEvidence(serialized: string, observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext, pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext): InstalledRuntimeEvidence {
+  return evidenceSchemaWithContext(observerContext, pauseContext).parse(JSON.parse(serialized));
 }
 
 /**
@@ -1386,8 +1397,9 @@ export async function writeEvidenceFile(
   evidence: InstalledRuntimeEvidence,
   privateMarkers: readonly string[] = [],
   observerContext?: import("./plugin-event-observer-corpus.js").PluginEventObserverConsumptionContext,
+  pauseContext?: import("./manual-pause-source.js").ManualPauseConsumptionContext,
 ): Promise<void> {
-  const serialized = serializeEvidence(evidence, privateMarkers, observerContext);
+  const serialized = serializeEvidence(evidence, privateMarkers, observerContext, pauseContext);
   await mkdir(dirname(evidencePath), { recursive: true });
   const temporaryPath = join(
     dirname(evidencePath),
@@ -1409,5 +1421,5 @@ export async function writeEvidenceFile(
   }
   await rm(temporaryPath, { force: true });
   const written = await readFile(evidencePath, "utf8");
-  parseEvidence(written, observerContext);
+  parseEvidence(written, observerContext, pauseContext);
 }
