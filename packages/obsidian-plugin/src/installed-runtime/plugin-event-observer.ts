@@ -24,9 +24,15 @@ export function verifyPluginEventObserverWindow(options: {
   binding: PluginEventObserverBinding; events: unknown; candidatePluginId: string; expectedPid: number;
   requiredVisibleStates?: readonly { path: string; bytes: Uint8Array }[];
   requiredTransition?: { path: string; states: readonly Uint8Array[] };
+  /** Fixed crash runner's reached actions; default correctness corpus still requires every changed target. */
+  requiredCallbackPaths?: readonly string[];
+  /** Private replay boundary: no second Vault mutation may occur through authenticated seal. */
+  forbidVaultMutationsAfterSequence?: number;
   files: readonly { path: string; before: Uint8Array | null; after: Uint8Array | null; allowFixtureLifecycleAbsence?: boolean }[]; maxSilenceMs: number;
 }) {
   const events = z.array(eventSchema).min(4).parse(options.events);
+  const replayBoundary = options.forbidVaultMutationsAfterSequence;
+  if (replayBoundary !== undefined && (!Number.isSafeInteger(replayBoundary) || replayBoundary < 3 || replayBoundary >= events.length || !events.slice(0, replayBoundary).some(event => event.payload.kind === "window-begin"))) throw new Error("Observer replay boundary is outside authenticated observation window");
   const files = new Map(options.files.map(file => [file.path, file]));
   let ready = false, started = false, active = false, ended = false, previousAt = 0;
   let eventCount = 0, indexingCount = 0;
@@ -41,6 +47,7 @@ export function verifyPluginEventObserverWindow(options: {
       if (p[key] !== options.binding[key]) throw new Error("Observer report identity binding changed");
     }
     if (p.pid !== options.expectedPid || p.sequence !== index + 1 || p.at < previousAt) throw new Error("Observer process/sequence order changed");
+    if (replayBoundary !== undefined && p.sequence > replayBoundary && ["create", "modify", "rename", "delete"].includes(p.kind)) throw new Error("Installed move replay performed a duplicate closure rewrite");
     if (active && p.at - previousAt > options.maxSilenceMs) throw new Error("Observer failed during observation window");
     previousAt = p.at;
     if (active && p.vaultId !== options.binding.vaultId) throw new Error("Observer event Managed Vault binding changed");
@@ -93,12 +100,16 @@ export function verifyPluginEventObserverWindow(options: {
   for (const required of options.requiredVisibleStates ?? []) {
     if (!observations.some(observation => observation.pathSha256 === hash(required.path) && observation.bytesSha256 === hash(required.bytes) && (EVENT_OBSERVER_LISTENERS as readonly string[]).includes(observation.kind))) throw new Error("Observer required visible state lacks event-time bytes");
   }
-  const changedTargets = options.files.filter(file => file.before === null || file.after === null || !Buffer.from(file.before).equals(file.after));
+  const changedTargets = options.requiredCallbackPaths === undefined ? options.files.filter(file => file.before === null || file.after === null || !Buffer.from(file.before).equals(file.after)) : options.requiredCallbackPaths.map(path => {
+    const file = files.get(path);
+    if (file === undefined) throw new Error("Observer required callback path is undeclared");
+    return file;
+  });
   for (const target of changedTargets) {
     if (!observations.some(observation => observation.pathSha256 === hash(target.path) && ["create", "modify", "rename", "delete"].includes(observation.kind))) throw new Error("Observer target lacks real Vault callback bytes");
     if (!observations.some(observation => observation.pathSha256 === hash(target.path) && (observation.kind === "changed" || observation.kind === "resolved"))) throw new Error("Observer target lacks real indexing callback bytes");
   }
-  if (!ready || !started || !ended || active || eventCount === 0 || indexingCount === 0) throw new Error("Observer window lacks live event/indexing coverage");
+  if (!ready || !started || !ended || active || changedTargets.length > 0 && (eventCount === 0 || indexingCount === 0)) throw new Error("Observer window lacks live event/indexing coverage");
   return { observerId: EVENT_OBSERVER_ID, observerMainSha256: options.binding.observerMainSha256,
     generation: options.binding.generation, pid: options.expectedPid, eventCount, indexingCount, enabledPlugins: plugins,
     readyBeforeCandidateStartup: true as const, callbacksRegisteredInCandidateProcess: true as const,

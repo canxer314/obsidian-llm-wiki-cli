@@ -68,7 +68,9 @@ export async function retainPluginEventObserverSource(options: PluginEventObserv
   const verification = { binding: structuredClone(options.binding), candidatePluginId: options.candidatePluginId, expectedPid: source.rendererPid,
     files: structuredClone(options.files), maxSilenceMs: options.maxSilenceMs, events,
     ...(options.requiredVisibleStates === undefined ? {} : { requiredVisibleStates: structuredClone(options.requiredVisibleStates) }),
-    ...(options.requiredTransition === undefined ? {} : { requiredTransition: structuredClone(options.requiredTransition) }) };
+    ...(options.requiredTransition === undefined ? {} : { requiredTransition: structuredClone(options.requiredTransition) }),
+    ...(options.requiredCallbackPaths === undefined ? {} : { requiredCallbackPaths: structuredClone(options.requiredCallbackPaths) }),
+    ...(options.forbidVaultMutationsAfterSequence === undefined ? {} : { forbidVaultMutationsAfterSequence: options.forbidVaultMutationsAfterSequence }) };
   const retained = verifyPluginEventObserverWindow(verification);
   if (retained.transcriptSha256 !== source.transcriptSha256) throw new Error("Observer sealed source changed during retention");
   return { verification, scenario: options.scenario, supervisorPid: options.supervisorPid, source };

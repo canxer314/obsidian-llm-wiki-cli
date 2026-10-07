@@ -22,6 +22,7 @@ import { createNoteCorpusProfile } from "../corpus/create-note-corpus.js";
 import { replaceExactCorpusProfile, replaceWholeCorpusProfile } from "../corpus/edit-body-corpus.js";
 import { copyAttachmentCorpusProfile, moveAttachmentCorpusProfile } from "../corpus/attachment-corpus.js";
 import { editFrontmatterCorpusProfile } from "../corpus/frontmatter-corpus.js";
+import { moveNoteCorpusProfile } from "../corpus/move-note-corpus.js";
 import { multiMarkdownCorpusProfile, multiFrontmatterOnlyCorpusProfile } from "../corpus/multi-operation-corpus.js";
 export { crashRestorationCommandSchema, installedCrashScenarios };
 export type { InstalledCrashPoint, InstalledCrashKind };
@@ -43,6 +44,16 @@ export function crashProfile(kind: InstalledCrashKind) {
     } };
   }
   switch (kind) {
+    case "move_note": {
+      const base = moveNoteCorpusProfile();
+      const encode = (text: string) => new TextEncoder().encode(text);
+      // Fixed, literal byte oracle; normal reference projection still authors the rewrites.
+      const closure = [
+        { originalBytes: encode('﻿# Derived A\r\n你好 🚀 [[Alpha|保留 alias]] and [标题](Alpha.md "untouched title")\r\n'), committedBytes: encode('﻿# Derived A\r\n你好 🚀 [[Beta|保留 alias]] and [标题](Beta.md "untouched title")\r\n') },
+        { originalBytes: encode('# Derived B\n![[Alpha#Alpha|保留 embed 🌍]]\n尾部不改\n'), committedBytes: encode('# Derived B\n![[Beta#Alpha|保留 embed 🌍]]\n尾部不改\n') },
+      ];
+      return { ...base, files: base.files.map((file, index) => index < 2 ? file : { ...file, ...closure[index - 2]! }) };
+    }
     case "create_note": return createNoteCorpusProfile();
     case "edit_body": return replaceExactCorpusProfile();
     case "edit_body_whole": return replaceWholeCorpusProfile();
@@ -114,6 +125,19 @@ export function crashAttachmentDirectories(kind: InstalledCrashKind): readonly s
 
 export function verifyCrashInventory(before: readonly CrashInventoryEntry[], actual: readonly CrashInventoryEntry[], kind: InstalledCrashKind, state: "original" | "committed", point?: InstalledCrashPoint): void {
   const profile = crashProfile(kind);
+  if (kind === "move_note") {
+    const modeledPoint = point === "before_committed" || point === "after_semantic_evidence" ? "after_snapshot" : point;
+    const boundary = modeledPoint === undefined ? undefined : profile.expectedBoundary({ point: modeledPoint, phase: modeledPoint.includes("rollback") || modeledPoint.includes("rolled_back") ? "rollback" : "apply" });
+    const expected = before.filter(entry => !profile.files.some(file => file.path === entry.path));
+    for (const fixture of profile.files) {
+      const fileState = boundary?.files.find(file => file.path === fixture.path)?.state ?? state;
+      const bytes = fileState === "absent" ? null : fileState === "committed" ? fixture.committedBytes : fixture.originalBytes;
+      if (bytes !== null) expected.push({ path: fixture.path, kind: "file", bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+    }
+    const sorted = (entries: readonly CrashInventoryEntry[]) => [...entries].sort((a, b) => a.path.localeCompare(b.path, "en"));
+    if (!same(sorted(expected), sorted(actual))) throw new Error("Installed crash whole-state inventory mismatch");
+    return;
+  }
   if (kind === "copy_attachment" || kind === "move_attachment") {
     let applied = state === "committed";
     let directories = applied ? [...crashAttachmentDirectories(kind)] : [];
@@ -173,6 +197,17 @@ export function verifyCrashPublicProof(record: unknown, beforeRecord: unknown, k
   const effects = preview?.requestedEffects as { operationId?: string; kind?: string; projectedOutcome?: string }[] | undefined;
   if (input !== undefined && !same(effects?.map(effect => effect.operationId), input.operations.map(operation => operation.operationId))) throw new Error("Installed crash public proof targets another operation");
   const effect = effects?.[0];
+  if (kind === "move_note") {
+    const typed = (bytes: Uint8Array | null) => bytes === null ? { kind: "absent" } : { kind: "markdown", contentVersion: version(bytes) };
+    const paths = profile.files.map(file => ({ path: file.path, preState: typed(file.originalBytes), projectedFinalState: typed(file.committedBytes), projectedOutcome: "changed" })).sort((a, b) => a.path.localeCompare(b.path, "en"));
+    const derived = profile.files.filter(file => file.originalBytes !== null && file.committedBytes !== null).map(file => ({ operationId: `derived/${effect?.operationId}/references/${file.path}`, causedByOperationId: effect?.operationId, kind: "edit_body", projectedOutcome: "changed" }));
+    if (effect?.kind !== "move" || effect.projectedOutcome !== "changed" || typeof effect.operationId !== "string" || preview?.requestedEffects.length !== 1 || !same(preview.paths, paths) || !same(preview.derivedEffects, derived) || actual.changeSetId !== before.changeSetId || actual.state !== state || !same(actual.preview, preview)) throw new Error("Installed crash fixed fixture public proof mismatch");
+    if (state === "intent_applied") {
+      const finalEffects = (items: readonly unknown[]) => items.map(raw => { const { projectedOutcome, ...rest } = raw as Record<string, unknown>; return { ...rest, outcome: projectedOutcome }; });
+      if (!same(actual.requestedEffects, finalEffects(preview.requestedEffects)) || !same(actual.derivedEffects, finalEffects(derived)) || !same(actual.paths, paths.map(({ path, projectedOutcome, projectedFinalState }) => ({ path, outcome: projectedOutcome, finalState: projectedFinalState })))) throw new Error("Installed crash complete public proof mismatch");
+    }
+    return;
+  }
   if (kind === "copy_attachment" || kind === "move_attachment") {
     const typed = (bytes: Uint8Array | null) => bytes === null ? { kind: "absent" } : { kind: "attachment", sha256: createHash("sha256").update(bytes).digest("hex") };
     const directories = crashAttachmentDirectories(kind);
@@ -307,7 +342,7 @@ export async function loadCrashBoundaryReport(options: {
   return report;
 }
 
-export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingFiles: 0; trashFiles: 0 }> {
+export async function inspectCrashPrivateFootprint(vaultPath: string): Promise<{ stagingFiles: number; trashFiles: number }> {
   const count = async (path: string): Promise<number> => {
     const facts = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
     if (facts === null) return 0;
@@ -317,7 +352,11 @@ export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingF
     for (const name of await readdir(path)) total += await count(join(path, name));
     return total;
   };
-  if (await count(join(vaultPath, ".llm-wiki", "staging")) !== 0 || await count(join(vaultPath, ".llm-wiki", "trash")) !== 0) throw new Error("Installed crash terminal private residue remained");
+  return { stagingFiles: await count(join(vaultPath, ".llm-wiki", "staging")), trashFiles: await count(join(vaultPath, ".llm-wiki", "trash")) };
+}
+export async function crashPrivateResidue(vaultPath: string): Promise<{ stagingFiles: 0; trashFiles: 0 }> {
+  const footprint = await inspectCrashPrivateFootprint(vaultPath);
+  if (footprint.stagingFiles !== 0 || footprint.trashFiles !== 0) throw new Error("Installed crash terminal private residue remained");
   return { stagingFiles: 0, trashFiles: 0 };
 }
 
