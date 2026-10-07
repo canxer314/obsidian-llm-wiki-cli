@@ -126,6 +126,10 @@ export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOpt
       const entry = (await registry()).entries.find(e => e.submissionKey === input.submissionKey)!;
       if (entry.changeSet.state !== "in_progress" || entry.execution?.phase === "terminal") throw new Error("FIFO request did not enter persistent queue");
       queued.push({ submissionKey: entry.submissionKey, changeSetId: entry.changeSetId, enqueueSeq: entry.enqueueSeq });
+      await waitForCondition(async () => {
+        try { return (await loadFifoEvents(descriptor)).some(e => e.kind === "enqueued" && e.submissionKey === input.submissionKey && e.enqueueSeq === entry.enqueueSeq && e.changeSetId === entry.changeSetId); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+      }, { timeoutMs: options.timeouts.startupMs, intervalMs: 25 });
       if (input === inputs[0]) {
         await waitForCondition(async () => {
           try {
@@ -137,9 +141,15 @@ export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOpt
       }
     }
     const before = await snapshotInventory(vault.vaultPath);
+    for (const [path, original] of [[targetPath, originalTarget], [dependencyPath, originalDependency]] as const) {
+      if (await readFile(join(vault.vaultPath, path), "utf8") !== original) throw new Error("FIFO fixture pre-drift state changed unexpectedly");
+    }
     await writeFile(join(vault.vaultPath, targetPath), changedTarget);
     await writeFile(join(vault.vaultPath, dependencyPath), changedDependency);
-    await appendFifoEvent(descriptor, { kind: "fixtures-changed", targetBefore: fifoDigest(originalTarget), targetAfter: fifoDigest(changedTarget), dependencyBefore: fifoDigest(originalDependency), dependencyAfter: fifoDigest(changedDependency) });
+    const targetDrift = await readFile(join(vault.vaultPath, targetPath));
+    const dependencyDrift = await readFile(join(vault.vaultPath, dependencyPath));
+    if (fifoDigest(targetDrift) !== fifoDigest(changedTarget) || fifoDigest(dependencyDrift) !== fifoDigest(changedDependency)) throw new Error("FIFO fixture drift bytes not observed");
+    await appendFifoEvent(descriptor, { kind: "fixtures-changed", targetBefore: fifoDigest(originalTarget), targetAfter: fifoDigest(targetDrift), dependencyBefore: fifoDigest(originalDependency), dependencyAfter: fifoDigest(dependencyDrift) });
     await stop();
     await appendFifoEvent(descriptor, { kind: "restart", stopped: true });
     await Promise.all(pending);
