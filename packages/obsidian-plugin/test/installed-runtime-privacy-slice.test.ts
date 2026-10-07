@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { runInstalledDiagnosticPrivacyAcceptance } from "../src/installed-runtime/privacy-recovery-installed-runner.js";
 import { validateInstalledDiagnosticPrivacyProof } from "../src/installed-runtime/installed-diagnostic-privacy.js";
 import { userInfo } from "node:os";
@@ -152,7 +153,7 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
       events.push(name);
       if (mutateRejectedWirePrivateState && name === "vault-a-rejected-vault_diagnostic_bundle") {
         const affected = [...bridges.keys()].find(path => path.includes("vault-a"))!;
-        writes.push(writeFile(join(affected, ".llm-wiki", "wire-side-effect.bin"), "side effect"));
+        writeFileSync(join(affected, ".llm-wiki", "wire-side-effect.bin"), "side effect");
       }
       if (earlyContentConfirmation && name === "vault-a-standard-local-report-observed") {
         const [vaultPath, created] = [...descriptors.entries()].find(([path]) => path.includes("vault-a"))!;
