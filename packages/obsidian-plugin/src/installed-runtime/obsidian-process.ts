@@ -49,6 +49,27 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void
   });
 }
 
+async function registerDedicatedObsidianProfile(request: ObsidianLaunchRequest): Promise<void> {
+  await mkdir(request.profileDirectory, { recursive: true });
+  const registrationPath = join(request.profileDirectory, "obsidian.json");
+  const existing = await readFile(registrationPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (existing !== null) {
+    const registration = JSON.parse(existing) as { vaults?: Record<string, { path?: string }> };
+    const vaults = Object.values(registration.vaults ?? {});
+    if (vaults.length !== 1 || vaults[0]?.path !== request.vaultPath) {
+      throw new ObsidianProcessError("Obsidian profile is already registered to another Vault", "obsidian_start_failed");
+    }
+  } else {
+    await writeFile(registrationPath, JSON.stringify({
+      vaults: { acceptance: { path: request.vaultPath, ts: Date.now(), open: true } },
+      cli: true,
+    }), { flag: "wx" });
+  }
+}
+
 /**
  * Real process control for the registered Windows runtime. The dedicated
  * profile directory is passed through Electron's `--user-data-dir` switch so
@@ -56,6 +77,7 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void
  * the Vault path argument opens exactly the generated test Vault. Stop uses
  * `taskkill /T` on Windows so the whole Electron process tree exits.
  */
+
 export function createWindowsObsidianProcessControl(options: {
   executablePath: string;
   stopTimeoutMs?: number;
@@ -65,11 +87,14 @@ export function createWindowsObsidianProcessControl(options: {
   const stopTimeoutMs = options.stopTimeoutMs ?? 30_000;
   return {
     async start(request) {
+      await registerDedicatedObsidianProfile(request);
       let child: ChildProcess;
       try {
         child = spawnImpl(
           options.executablePath,
           [
+            "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
             `--user-data-dir=${request.profileDirectory}`,
             `obsidian://open?path=${encodeURIComponent(request.vaultPath)}`,
           ],
@@ -143,26 +168,7 @@ export function createLinuxObsidianProcessControl(options: {
 }): ObsidianProcessControl {
   return {
     async start(request) {
-      await mkdir(request.profileDirectory, { recursive: true });
-      const registrationPath = join(request.profileDirectory, "obsidian.json");
-      let existing: string | undefined;
-      try {
-        existing = await readFile(registrationPath, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      if (existing !== undefined) {
-        const registration = JSON.parse(existing) as { vaults?: Record<string, { path?: string }> };
-        const vaults = Object.values(registration.vaults ?? {});
-        if (vaults.length !== 1 || vaults[0]?.path !== request.vaultPath) {
-          throw new ObsidianProcessError("Obsidian profile is already registered to another Vault", "obsidian_start_failed");
-        }
-      } else {
-        await writeFile(registrationPath, JSON.stringify({
-          vaults: { acceptance: { path: request.vaultPath, ts: Date.now(), open: true } },
-          cli: true,
-        }), { flag: "wx" });
-      }
+      await registerDedicatedObsidianProfile(request);
       const child = spawn(options.executablePath, [
         ...(options.launchArguments ?? [
           "--remote-debugging-port=0",

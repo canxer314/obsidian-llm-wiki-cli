@@ -51,7 +51,7 @@ export interface InstalledRuntimeAcceptanceDriverOptions {
   readonly executeCrashRestorationScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly command: import("./crash-restoration-protocol.js").CrashRestorationCommand;
-  }) => Promise<{ readonly boundary: "after_prepared" | "after_committed"; readonly journalPhase: "PREPARED" | "COMMITTED" }>;
+  }) => Promise<unknown>;
   readonly executeReferenceSingleSpanScenario?: (options: {
     readonly descriptor: InstalledRuntimeAcceptanceDescriptor;
     readonly expectedVaultId: string;
@@ -165,9 +165,11 @@ export async function activateInstalledRuntimeAcceptanceDriver(
       }
       const crashCommand = parseCrashRestorationCommand(command);
       if (crashCommand !== null) {
-        if (executeCrashRestorationScenario === undefined) return;
+        if (executeCrashRestorationScenario === undefined || crashCommand.recovery !== undefined) return;
         lastSequence = command.sequence;
         try {
+          const current = await loadInstalledRuntimeAcceptanceDescriptor(options);
+          if (current.descriptor.installedMainSha256 !== parsed.installedMainSha256) throw new Error("Installed crash entry point changed");
           // Reject before entering the installed handler: rejection must not arm
           // a future Change Set's crash injector.
           const handle = await open(join(parsed.vaultPath, ".llm-wiki", "recovery-journal.bin"), "r")
