@@ -11,15 +11,30 @@ export const INSTALLED_RUNTIME_VAULT_DIRECTORY_PREFIX =
   "installed-runtime-vault-";
 
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const crashRestorationCommandSchema = z.object({
+export const installedCrashKinds = ["create_note", "edit_body", "edit_body_whole"] as const;
+export type InstalledCrashKind = typeof installedCrashKinds[number];
+export const installedCrashPoints = [
+  "before_prepared", "after_prepared", "after_mutation:0", "after_mutation:1",
+  "after_file_mutation:0", "after_raw_verification", "during_success_barrier",
+  "after_snapshot", "before_committed", "after_committed", "before_rollback",
+  "after_rollback_mutation:0", "after_rollback_mutation:1", "after_rollback_mutation:2",
+  "after_rollback_verification", "after_rollback_evidence", "before_rolled_back", "after_rolled_back",
+] as const;
+export type InstalledCrashPoint = typeof installedCrashPoints[number];
+export const installedCrashScenarios = installedCrashKinds.flatMap(kind => installedCrashPoints
+  .filter(point => kind === "create_note" || !["after_mutation:0", "after_mutation:1", "after_rollback_mutation:1", "after_rollback_mutation:2"].includes(point))
+  .map(point => `${kind}/${point}` as const));
+export const installedCrashScenarioSchema = z.enum([installedCrashScenarios[0]!, ...installedCrashScenarios.slice(1)]);
+export const crashRestorationCommandSchema = z.object({
   sequence: z.number().int().positive(),
   capabilityToken: digestSchema,
   action: z.literal("run-crash-restoration-scenario"),
-  scenario: z.enum(["create_note/after_prepared", "create_note/after_committed", "edit_body/after_prepared", "edit_body/after_committed"]),
+  scenario: installedCrashScenarioSchema,
   expectedVaultId: z.string().min(1),
   endpoint: z.string().url(),
   submissionKey: z.string().min(1),
   input: z.unknown(),
+  recovery: z.object({ changeSetId: z.string().min(1), frameSha256: digestSchema }).strict().optional(),
 }).strict();
 
 export const installedRuntimeAcceptanceCommandSchema = z.discriminatedUnion(

@@ -34,6 +34,7 @@ import { runInstalledRegisteredReferenceRewriteCorpus } from "./registered-refer
 import { runInstalledGateIsolationCorpus } from "./gate-installed-runner.js";
 import { runInstalledPrivacyRecoveryAuthorityCorpus } from "./privacy-recovery-installed-runner.js";
 import { runInstalledCrashRestorationSlice } from "./installed-crash-restoration-slice.js";
+import { installedCrashScenarios, crashScenarioParts } from "./crash-restoration-protocol.js";
 import { runInstalledReleaseLifecycleSlice, runInstalledReleaseUninstallSlice } from "./installed-release-lifecycle-runner.js";
 import { MVP_PERF_REF_1 } from "./runtime-profile.js";
 
@@ -415,17 +416,12 @@ export function createAuthoritativeInstalledRuntimeRunners(
       if (request.installed === undefined) {
         throw new Error("Crash acceptance requires installed candidate, profile, process and descriptor inputs for the installed Obsidian acceptance driver");
       }
-      for (const mutationKind of ["create_note", "edit_body"] as const) {
-        for (const crashPoint of ["after_prepared", "after_committed"] as const) {
-          const partial = await runInstalledCrashRestorationSlice({
-            ...request.installed,
-            crashPoint, mutationKind,
-            reportDirectory: options.reportDirectory ?? request.installed.reportDirectory,
-          });
-          request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
-        }
+      for (const scenario of installedCrashScenarios) {
+        const { kind: mutationKind, point: crashPoint } = crashScenarioParts(scenario);
+        const partial = await runInstalledCrashRestorationSlice({ ...request.installed, crashPoint, mutationKind, reportDirectory: options.reportDirectory ?? request.installed.reportDirectory });
+        request.record("assertion", `installed-crash-${mutationKind}-${crashPoint}-partial`, partial);
       }
-      throw new Error("Installed create-note/edit-body PREPARED rollback and COMMITTED replay slices are partial; full crash and retained-authority acceptance are still required");
+      throw new Error("Installed create/exact/whole complete crash boundaries are partial; other operation families and retained-authority acceptance are still required");
     },
     isolateSemanticEvidenceScenarios: true,
     semanticEvidenceScenarioRunner:

@@ -86,7 +86,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
       dataSource: ChangeSetPreflightDataSource;
       execution?: ChangeSetExecutionAdapter;
       vaultId?: string;
-      crashInjector?: (point: string) => void | Promise<void>;
+      crashInjector?: (point: string, context?: import("./change-set.js").ChangeSetCrashContext) => void | Promise<void>;
     };
     incompatibleState?: boolean;
   }): BridgeInstance;
@@ -129,7 +129,7 @@ export interface ManagedVaultBridgeRuntimeOptions {
     };
     readonly matched: boolean;
   }): void;
-  crashInjector?: (point: string) => void | Promise<void>;
+  crashInjector?: (point: string, context?: import("./change-set.js").ChangeSetCrashContext) => void | Promise<void>;
 }
 
 function emptyChangeSetState(): ChangeSetRegistryState {

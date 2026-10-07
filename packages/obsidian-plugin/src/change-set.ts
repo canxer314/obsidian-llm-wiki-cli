@@ -307,13 +307,20 @@ export class InjectedChangeSetCrash extends Error {
   }
 }
 
+export interface ChangeSetCrashContext {
+  readonly vaultId: string;
+  readonly changeSetId: string;
+  readonly input: ChangeSetSubmitInput;
+}
+export type ChangeSetCrashInjector = (point: string, context?: ChangeSetCrashContext) => void | Promise<void>;
+
 export interface ChangeSetServiceOptions {
   store: ChangeSetRegistryStore;
   dataSource: ChangeSetPreflightDataSource;
   execution?: ChangeSetExecutionAdapter;
   runtimeState?: ChangeSetRuntimeStatePort;
   vaultId?: string;
-  crashInjector?: (point: string) => void | Promise<void>;
+  crashInjector?: ChangeSetCrashInjector;
   now?: () => number;
   createChangeSetId?: () => string;
 }
@@ -1722,7 +1729,8 @@ export class ChangeSetService {
   }
 
   async #crash(point: string): Promise<void> {
-    await this.#options.crashInjector?.(point);
+    const entry = this.#state.entries.find(candidate => candidate.changeSetId === this.#currentExecutionId);
+    await this.#options.crashInjector?.(point, entry?.execution === undefined ? undefined : { vaultId: this.#options.vaultId ?? "vault", changeSetId: entry.changeSetId, input: entry.execution.input });
   }
 
   #mutationPlan(entry: ChangeSetRegistryEntry): {
@@ -2810,6 +2818,7 @@ export class ChangeSetService {
           finalState: projectedFinalState,
         }));
       await this.#crash("after_snapshot");
+      await this.#crash("before_committed");
       await execution.persistRecoveryFrame({
         ...frame,
         phase: "COMMITTED",
@@ -3194,6 +3203,7 @@ export class ChangeSetService {
         });
       }
       await this.#crash("after_snapshot");
+      await this.#crash("before_committed");
       await execution.persistRecoveryFrame({
         ...frame,
         phase: "COMMITTED",
