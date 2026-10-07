@@ -379,6 +379,7 @@ export interface InstalledRuntimeHarnessOptions {
     readonly record: (kind: "transport" | "tool" | "assertion" | "cleanup", name: string, detail: unknown) => void;
     readonly assertion: (name: string) => void;
   }) => Promise<ReleaseLifecycleCorpusOutcome>;
+  readonly runPersistentFifoCorpus?: typeof import("./fifo-installed-runner.js").runInstalledPersistentFifoCorpus;
   readonly runCrashRestorationRetainedAuthorityCorpus?: (options: {
     readonly installed?: import("./installed-crash-restoration-slice.js").InstalledCrashRestorationSliceOptions;
     readonly workingDirectory: string;
@@ -936,6 +937,8 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  let persistentFifo: import("./fifo-observation.js").PersistentFifoProof | undefined;
+
   // Shared event/assertion collectors for both change-set corpus phases so the
   // closed evidence block spans the initial admission and the post-restart
   // replay with monotonic event sequences.
@@ -1399,6 +1402,25 @@ export async function runInstalledRuntimeHarness(
       );
     }
   }
+  if (state.failure === null && options.runPersistentFifoCorpus !== undefined) {
+    try {
+      const candidate = state.candidate;
+      if (candidate === null || profile === null || options.probe.probeRunning === undefined || options.prepareInstalledRuntimeAcceptanceDriver === undefined) {
+        throw new Error("Installed persistent FIFO requires verified candidate, profile and private observation descriptor");
+      }
+      persistentFifo = await options.runPersistentFifoCorpus({
+        runId, workingDirectory: options.workingDirectory, reportDirectory: dirname(options.evidencePath),
+        candidate, profile, client, processControl: options.processControl, configDirectoryName, timeouts,
+        probe: { ...options.probe, probeRunning: options.probe.probeRunning },
+        prepareAcceptanceDriver: async request => {
+          const prepared = await options.prepareInstalledRuntimeAcceptanceDriver!(request);
+          if (!("path" in prepared) || !("descriptor" in prepared)) throw new Error("Installed FIFO descriptor binding unavailable");
+          return prepared as Awaited<ReturnType<import("./fifo-installed-runner.js").InstalledFifoOptions["prepareAcceptanceDriver"]>>;
+        },
+        record: recordChangeSetEvent, assertion: recordChangeSetAssertion,
+      });
+    } catch (error) { fail("change_set_corpus", "change_set_corpus_failed", sanitize(error instanceof Error ? error.message : String(error))); }
+  }
   if (state.failure === null) {
     await startAndObserve("obsidian_restart", "health_restart", "after_restart", {
       stage: "change_set_replay",
@@ -1502,6 +1524,7 @@ export async function runInstalledRuntimeHarness(
           assertions: changeSetAssertions,
         })
       : null;
+  if (changeSetCorpus !== null && persistentFifo !== undefined) changeSetCorpus.admission.fifo.persistentObservation = persistentFifo;
   const gateIsolationCorpus: GateIsolationCorpusEvidence | null =
     state.gateIsolation !== null
       ? composeGateIsolationCorpusEvidence({
