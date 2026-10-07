@@ -80,7 +80,8 @@ export async function observeInstalledDiagnosticPrivacySources(options: {
   if (options.username === undefined || options.username.length === 0) throw new Error("Installed diagnostic process username source was not observed");
   return [...options.fixture.markers,
     { category: "request", value: JSON.stringify(payload.input) },
-    ...beforeImages.map(value => ({ category: "before-image" as const, value })),
+    ...beforeImages.flatMap(value => [{ category: "before-image" as const, value },
+      ...[...value.matchAll(/privacy_before_image_[a-f0-9]{20}/gu)].map(([token]) => ({ category: "before-image" as const, value: token }))]),
     { category: "raw-key", value: payload.input.submissionKey },
     { category: "raw-id", value: payload.changeSetId }, { category: "raw-id", value: options.vaultId },
     { category: "username", value: options.username }, { category: "real-path", value: options.vault.vaultPath },
@@ -123,8 +124,29 @@ export function validateInstalledDiagnosticPrivacyProof(value: unknown, binding:
   if (cancelled!.outcome !== "cancelled" || copied!.outcome !== "copied" || cancelled!.confirmationIdSha256 === copied!.confirmationIdSha256 ||
       cancelled!.selectionSha256 !== copied!.selectionSha256 || cancelled!.copiedTextSha256 !== undefined || cancelled!.bundleChecksum !== undefined ||
       copied!.copiedTextSha256 === undefined || copied!.bundleChecksum === undefined) throw new Error("Installed diagnostic fresh confirmation composition is incomplete");
-  if (proof.eventLog.some((event, index) => event.sequence !== index + 1) ||
-      !["vault-a", "vault-b"].every(label => proof.eventLog.some(event => event.name === `${label}-generated-vault`))) throw new Error("Installed diagnostic cleanup event composition is incomplete");
+  const requiredEvents = [
+    "vault-a-installed-runtime-ready", "vault-b-installed-runtime-ready", "vault-a-six-tool-inventory", "vault-b-six-tool-inventory",
+    "vault-a-closed-health-input-modes-rejected", "vault-b-closed-health-input-modes-rejected",
+    "agent-authority-attempts-observations-unchanged", "vault-a-standard-local-report-observed", "vault-b-standard-local-report-observed",
+    "vault-a-cancelled-local-content-report-observed", "vault-a-copied-local-content-report-observed",
+    "vault-a-generated-vault", "vault-b-generated-vault",
+  ];
+  const eventSequence = (name: string): number => proof.eventLog.find(event => event.name === name)?.sequence ?? 0;
+  if (proof.eventLog.some((event, index) => event.sequence !== index + 1) || requiredEvents.some(name => eventSequence(name) === 0) ||
+      eventSequence("vault-a-cancelled-local-content-report-observed") >= eventSequence("vault-a-copied-local-content-report-observed") ||
+      ["vault-a-generated-vault", "vault-b-generated-vault"].some(name => eventSequence(name) <= eventSequence("vault-a-copied-local-content-report-observed"))) {
+    throw new Error("Installed diagnostic observation/cleanup event composition is incomplete");
+  }
+  for (const vault of proof.vaults) {
+    if (proof.eventLog.find(event => event.name === `${vault.label}-standard-local-report-observed`)?.detailSha256 !== diagnosticSha256(diagnosticCanonicalJson(vault))) {
+      throw new Error("Installed diagnostic bundle checksum/provenance does not match its observed event");
+    }
+  }
+  for (const confirmation of proof.confirmations) {
+    if (proof.eventLog.find(event => event.name === `vault-a-${confirmation.outcome}-local-content-report-observed`)?.detailSha256 !== diagnosticSha256(diagnosticCanonicalJson(confirmation))) {
+      throw new Error("Installed diagnostic copied checksum does not match its observed confirmation event");
+    }
+  }
   return proof;
 }
 

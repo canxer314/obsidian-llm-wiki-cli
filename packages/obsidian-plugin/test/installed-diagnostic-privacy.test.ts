@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { createLinuxObsidianProcessControl } from "../src/installed-runtime/obsidian-process.js";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { provisionTestVault } from "../src/installed-runtime/test-vault.js";
@@ -27,6 +28,19 @@ function resign(bundle: any) {
 }
 
 describe("installed diagnostic privacy bundle seam", () => {
+  it("delivers only the generated marker environment through the real process-control seam", async () => {
+    const root = await mkdtemp(join(tmpdir(), "privacy-process-source-"));
+    let processHandle: Awaited<ReturnType<ReturnType<typeof createLinuxObsidianProcessControl>["start"]>> | undefined;
+    try {
+      const vault = await provisionTestVault({ workingDirectory: root, runId: "sources" });
+      const fixture = await prepareInstalledDiagnosticPrivacyFixture(vault, "sources", "vault-a");
+      const observed = join(root, "observed.json");
+      processHandle = await createLinuxObsidianProcessControl({ executablePath: process.execPath,
+        launchArguments: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(observed)},JSON.stringify({marker:process.env.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER,credential:process.env.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_CREDENTIAL}));setInterval(()=>{},1000)`, "--"], stopTimeoutMs: 2000,
+      }).start({ vaultPath: vault.vaultPath, profileDirectory: vault.profileDirectory, diagnosticPrivacyEnvironment: fixture.environment });
+      await expect.poll(async () => JSON.parse(await readFile(observed, "utf8"))).toEqual({ marker: fixture.environment.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER, credential: fixture.environment.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_CREDENTIAL });
+    } finally { await processHandle?.stop(); await rm(root, { recursive: true, force: true }); }
+  });
   it("refuses a fixed passed boolean without complete provenance, coverage and cleanup composition", () => {
     expect(() => validateInstalledDiagnosticPrivacyProof({ verdict: "passed", cleanup: { verified: true } }, { runId: "run", candidateBundleSha256: "a".repeat(64), profileName: "profile", installedMainSha256: "b".repeat(64) })).toThrow();
   });
@@ -43,6 +57,20 @@ describe("installed diagnostic privacy bundle seam", () => {
       await expect(observeInstalledDiagnosticPrivacySources({ fixture, vault, journalPayload: {}, vaultId: "id", capabilityToken: "token", environment: fixture.environment })).rejects.toThrow("journal");
       await expect(observeInstalledDiagnosticPrivacySources({ fixture, vault, journalPayload: { vaultId: "id", changeSetId: "change", input: { submissionKey: "key" }, footprint: [{ before: { bytesBase64: Buffer.from("unmarked before image").toString("base64") } }] }, vaultId: "id", capabilityToken: "token", environment: fixture.environment, username: "operator" })).rejects.toThrow("deterministic");
       await expect(prepareInstalledDiagnosticPrivacyFixture(vault, "sources", "vault-a")).rejects.toMatchObject({ code: "EEXIST" });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it("rejects a before-image token leaked without the rest of the private before-image bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "privacy-before-token-"));
+    try {
+      const vault = await provisionTestVault({ workingDirectory: root, runId: "sources" });
+      const fixture = await prepareInstalledDiagnosticPrivacyFixture(vault, "sources", "vault-a");
+      const suffix = fixture.environment.LLM_WIKI_ACCEPTANCE_DIAGNOSTIC_MARKER.slice("privacy_environment_".length);
+      const token = `privacy_before_image_${suffix}`;
+      const privateMarkers = await observeInstalledDiagnosticPrivacySources({ fixture, vault,
+        journalPayload: { vaultId: "private_observed_vault", changeSetId: "private_observed_change", input: { submissionKey: `installed-semantic-privacy_request_${suffix}` }, footprint: [{ before: { bytesBase64: Buffer.from(`# before\n${token}\n`).toString("base64") } }] },
+        vaultId: "private_observed_vault", capabilityToken: "private_observed_capability", environment: fixture.environment, username: "private_observed_username" });
+      const bundle = resign({ ...createStandardDiagnosticBundle(evidence), machineEvents: [{ sequence: 1, code: "recovery_blocked", stackSymbols: [token] }] });
+      expect(() => verifyInstalledDiagnosticPrivacyBundle(bundle, privateMarkers)).toThrow("private marker");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it.each(["checksum", "unknown-field"])("rejects %s even when other diagnostic observations exist", corruption => {

@@ -449,6 +449,9 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         statusBefore.some((item, index) => item !== statusAfter[index])) {
       throw new Error("Rejected Agent authority attempts changed health or Change Set status observations");
     }
+    if (options.diagnosticPrivacy === true && (await Promise.all(runtimes.map(privateStateInventorySha256))).some((value, index) => value !== privateInventories[index])) {
+      throw new Error("Rejected wire authority attempts changed private state");
+    }
     options.record("assertion", "agent-authority-attempts-observations-unchanged", { attempts: authorityNames.length * 2, statusObservations: 2 });
     options.assertion("authority:agent-attempts-rejected-without-observed-health-or-status-change");
     let terminalProof: { readonly submissionKey: string; readonly statusSha256: string } | undefined;
@@ -560,7 +563,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         bundleVersion: report.bundle.bundleVersion, checksumVerified: true as const, redactionVerified: true as const,
         listenerPort: runtime.identity.port };
       standardDiagnostics.push(facts);
-      options.record("assertion", `${runtime.label}-standard-local-report-observed`, facts);
+      options.record("assertion", `${runtime.label}-standard-local-report-observed`, options.diagnosticPrivacy === true ? diagnosticVaults.at(-1)! : facts);
     }
     const contentConfirmationObservations: InstalledPrivacyAuthorityBoundarySliceResult["contentConfirmationObservations"][number][] = [];
     const expectedSelectionSha256 = options.diagnosticPrivacy === true ? runtimes[0]!.privacyFixture!.expectedSelectionSha256 : options.contentConfirmation?.expectedSelectionSha256;
@@ -569,6 +572,11 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
       const unaffected = runtimes[1]!;
       const consumedConfirmationIds: string[] = [];
       for (const outcome of ["cancelled", "copied"] as const) {
+        if (options.diagnosticPrivacy === true) {
+          const existing = (await readdir(affected.descriptor.reportDirectory)).filter(filename => filename.startsWith("local-content-inclusive-diagnostic-copy-") && filename.endsWith(".json")).sort();
+          const expected = consumedConfirmationIds.map(id => `local-content-inclusive-diagnostic-copy-${diagnosticSha256(id)}.json`).sort();
+          if (JSON.stringify(existing) !== JSON.stringify(expected)) throw new Error("Installed diagnostic fresh confirmation window contains unconsumed prior evidence");
+        }
         options.record("transport", `vault-a-${outcome}-local-content-report-required`, { label: "vault-a", action: "content-inclusive-diagnostic-copy", expectedSelectionSha256 });
         const report = await waitForNextInstalledLocalContentReport({ descriptor: affected.descriptor, vaultId: affected.identity.vaultId,
           endpoint: affected.endpoint, configDirectoryName: options.configDirectoryName, consumedConfirmationIds,
@@ -586,7 +594,7 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         const facts = { confirmationIdSha256: digest(report.confirmationId), outcome: report.outcome,
           ...(outcome === "copied" ? { bundleChecksum: report.bundleChecksum!, bundleVersion: report.bundleVersion!, checksumVerified: true as const } : {}) };
         contentConfirmationObservations.push(facts);
-        options.record("assertion", `vault-a-${outcome}-local-content-report-observed`, facts);
+        options.record("assertion", `vault-a-${outcome}-local-content-report-observed`, options.diagnosticPrivacy === true ? diagnosticConfirmations.at(-1)! : facts);
       }
     }
     if (options.recoveryControls === true) {

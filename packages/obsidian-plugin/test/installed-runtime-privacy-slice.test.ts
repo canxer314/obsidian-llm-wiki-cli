@@ -51,7 +51,7 @@ it("rejects a foreign privacy descriptor before starting the generated runtime",
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" = "missing", blockedSnapshotUnavailable = false, content: "missing" | "real" | "cancel-only" = "missing", diagnosticSources = false, mutateSecondVaultPrivateState = false) {
+async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" = "missing", blockedSnapshotUnavailable = false, content: "missing" | "real" | "cancel-only" = "missing", diagnosticSources = false, mutateSecondVaultPrivateState = false, earlyContentConfirmation = false, mutateRejectedWirePrivateState = false) {
   const root = await mkdtemp(join(tmpdir(), "privacy-report-"));
   const candidateDirectory = join(root, "candidate");
   await mkdir(candidateDirectory);
@@ -150,6 +150,20 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
       return { ...created, cleanup: async () => { events.push("clean-descriptor"); } };
     }, record: (_kind: string, name: string) => {
       events.push(name);
+      if (mutateRejectedWirePrivateState && name === "vault-a-rejected-vault_diagnostic_bundle") {
+        const affected = [...bridges.keys()].find(path => path.includes("vault-a"))!;
+        writes.push(writeFile(join(affected, ".llm-wiki", "wire-side-effect.bin"), "side effect"));
+      }
+      if (earlyContentConfirmation && name === "vault-a-standard-local-report-observed") {
+        const [vaultPath, created] = [...descriptors.entries()].find(([path]) => path.includes("vault-a"))!;
+        const bridge = bridges.get(vaultPath)!;
+        const selection = (readFile(join(vaultPath, "diagnostic-privacy", "selection.md"), "utf8"));
+        writes.push(selection.then(async text => {
+          const activation = await activateInstalledRuntimeAcceptanceDriver({ vaultPath, pluginId: "privacy-plugin" });
+          try { await activation!.recordContentInclusiveDiagnosticCopy({ vaultId: vaultPath, endpoint: bridge.endpoint,
+            confirmationId: "pre-request-cancel", outcome: "cancelled", selection: text.split("\n").at(-2)! }); } finally { activation?.dispose(); }
+        }));
+      }
       if (controls === "real" && name.endsWith("local-control-report-required")) {
         const [vaultPath] = [...descriptors.entries()].find(([path]) => path.includes(name.startsWith("vault-a") ? "vault-a" : "vault-b"))!;
         const bridge = bridges.get(vaultPath)!;
@@ -243,6 +257,20 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
   return { root, options, events, cleanup: async () => { for (const timer of scenarioTimers) clearInterval(timer); await Promise.all(writes); for (const bridge of bridges.values()) await bridge.stop(); for (const execution of executions.values()) await execution.close?.(); await rm(root, { recursive: true, force: true }); } };
 }
 
+it("rejects private durable mutation after explicit wire rejection even with unchanged health/status", async () => {
+  const fixture = await reportFixture("blocked", "missing", false, "real", true, false, false, true);
+  try {
+    await expect(runInstalledDiagnosticPrivacyAcceptance(fixture.options)).rejects.toThrow("wire authority attempts changed private state");
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects a current-run confirmation produced before its requested fresh observation window", async () => {
+  const fixture = await reportFixture("blocked", "missing", false, "real", true, false, true);
+  try {
+    await expect(runInstalledDiagnosticPrivacyAcceptance(fixture.options)).rejects.toThrow("fresh confirmation");
+  } finally { await fixture.cleanup(); }
+});
+
 it("runs standalone A33 without invoking or requesting recovery baseline/resume (inner seam only)", async () => {
   const fixture = await reportFixture("blocked", "missing", false, "real", true);
   try {
@@ -276,6 +304,9 @@ it("composes a redacted A33 proof only after all live report observations and cl
       { ...result.diagnosticProof, coverage: [] },
       { ...result.diagnosticProof, vaults: [result.diagnosticProof!.vaults[0], result.diagnosticProof!.vaults[0]] },
       { ...result.diagnosticProof, capabilityToken: "private" },
+      { ...result.diagnosticProof, vaults: result.diagnosticProof!.vaults.map(vault => ({ ...vault, checksum: `sha256:${"0".repeat(64)}` })) },
+      { ...result.diagnosticProof, confirmations: result.diagnosticProof!.confirmations.map(confirmation => confirmation.outcome === "copied" ? { ...confirmation, copiedTextSha256: "0".repeat(64) } : confirmation) },
+      { ...result.diagnosticProof, eventLog: result.diagnosticProof!.eventLog.filter(event => event.name.endsWith("generated-vault")).map((event, index) => ({ ...event, sequence: index + 1 })) },
       { ...result.diagnosticProof, confirmations: [result.diagnosticProof!.confirmations[0], { ...result.diagnosticProof!.confirmations[1], selectionSha256: "0".repeat(64) }] },
     ]) expect(() => validateInstalledDiagnosticPrivacyProof(invalid, binding)).toThrow();
     expect(result.diagnosticProof!.vaults).toHaveLength(2);
