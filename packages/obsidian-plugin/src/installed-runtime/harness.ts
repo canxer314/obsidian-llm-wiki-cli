@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
-import { loadVersionContractPackage, runContractFixtureWireCorpus, completeContractPackageCorpus, contractDigest, type ContractFixtureWireEvidence, type VersionContractPackage } from "./contract-package-corpus.js";
+import { createHash, randomUUID } from "node:crypto";
+import { defaultContractPackageRoot, loadVersionContractPackage, runContractFixtureWireCorpus, completeContractPackageCorpus, contractDigest, type ContractFixtureWireEvidence, type VersionContractPackage } from "./contract-package-corpus.js";
 import { runContractCrossCallScenario, type ContractCrossCallEvidence } from "./contract-cross-call.js";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { connect } from "node:net";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   CandidateBundleError,
@@ -264,6 +264,9 @@ export interface InstalledRuntimeHarnessOptions {
   readonly client?: LoopbackMcpClient;
   readonly runPublicWireCorpus?: typeof runPublicWireCorpus;
   readonly contractPackageRoot?: string;
+  readonly runContractPackageWire?: typeof runContractFixtureWireCorpus;
+  readonly runContractCrossCall?: typeof runContractCrossCallScenario;
+  readonly completeContractPackage?: typeof completeContractPackageCorpus;
   readonly contractContinuationTiming?: "full-real-time" | "binding-only";
   /**
    * Write-side corpus seams (issue #175). The admission phase runs in the
@@ -761,6 +764,25 @@ export async function runInstalledRuntimeHarness(
         runId,
         configDirectoryName,
       });
+      // Generated acceptance Vault only. Exclusive writes cannot overwrite an
+      // existing fixture or a Primary Operator note.
+      const contractFiles: readonly [string, string | Uint8Array][] = [
+        ["ContractFixtures/InvalidUtf8.md", Uint8Array.from([0xc3, 0x28])],
+        ["ContractFixtures/QuotaMetadata.md", `---\nquota: ${"q".repeat(4_718_592)}\n---\n# Quota\n`],
+        ["Projects/Bridge.md", "---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n"],
+        ["Root.md", "# Root\n[[Projects/Bridge]]\n"],
+        ["Target Note.md", "# Target Note\n"],
+      ];
+      for (const [path, bytes] of contractFiles) {
+        const target = join(state.vault.vaultPath, path); await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, bytes, { flag: "wx" });
+      }
+      const fullSeed = [
+        ...state.vault.seedNotes.map(note => ({ path: note.path, bytes: Buffer.from(note.content, "utf8") })),
+        ...contractFiles.map(([path, content]) => ({ path, bytes: typeof content === "string" ? Buffer.from(content, "utf8") : content })),
+      ];
+      const seedManifest = fullSeed.map(({ path, bytes }) => `${createHash("sha256").update(bytes).digest("hex")}  ${path}`).sort().join("\n") + "\n";
+      state.vault = { ...state.vault, seedManifestSha256: createHash("sha256").update(seedManifest).digest("hex") };
     } catch (error) {
       failFromError("provision", error);
     }
@@ -1085,11 +1107,29 @@ export async function runInstalledRuntimeHarness(
         }
         if (state.failure === null && state.publicWireCorpus !== null) {
           try {
-            contractAuthority = await loadVersionContractPackage(options.contractPackageRoot ?? fileURLToPath(new URL("../../../contracts/", import.meta.url)));
+            contractAuthority = await loadVersionContractPackage(options.contractPackageRoot ?? defaultContractPackageRoot());
             const endpoint = new URL(`http://127.0.0.1:${identity.port}/mcp`);
-            contractWire = await runContractFixtureWireCorpus({ authority: contractAuthority, endpoint, expectedVaultId: identity.vaultId });
+            contractWire = await (options.runContractPackageWire ?? runContractFixtureWireCorpus)({ authority: contractAuthority, endpoint, expectedVaultId: identity.vaultId });
             for (const scenario of contractAuthority.scenarios) {
-              contractCrossCalls.push(await runContractCrossCallScenario({ authority: contractAuthority, scenarioId: scenario.id, endpoint, expectedVaultId: identity.vaultId, seedNotes: vault.seedNotes, continuationTiming: options.contractContinuationTiming }));
+              contractCrossCalls.push(await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId: scenario.id, endpoint, expectedVaultId: identity.vaultId, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate!.identity.bundleSha256, vaultIdSha256: contractDigest(identity.vaultId), seedManifestSha256: vault.seedManifestSha256 }, quotaMetadataPath: "ContractFixtures/QuotaMetadata.md", seedNotes: vault.seedNotes, invalidUtf8Path: "ContractFixtures/InvalidUtf8.md", readFixtureBytes: async path => {
+                if (!["Projects/Bridge.md", "ContractFixtures/InvalidUtf8.md"].includes(path)) throw new Error("Contract fixture byte observation escaped generated scope");
+                return new Uint8Array(await readFile(join(vault.vaultPath, path)));
+              }, continuationTiming: options.contractContinuationTiming, restart: async () => {
+                await stopObsidian();
+                handle = await options.processControl.start({ vaultPath: vault.vaultPath, profileDirectory: vault.profileDirectory });
+                if (profile === null || options.probe.probeRunning === undefined) throw new Error("Contract restart requires a registered installed runtime probe");
+                const observed = await options.probe.probeRunning(vault);
+                if (preflightRuntimeProfile(profile, observed).length !== 0) throw new Error("Contract restart profile mismatch");
+                let restartedIdentity: PersistedBridgeIdentity | null = null;
+                await waitForCondition(async () => {
+                  restartedIdentity = await readPersistedBridgeIdentity(vault.vaultPath, state.candidate!.identity.pluginId, configDirectoryName);
+                  return restartedIdentity !== null && await isLoopbackPortOpen(restartedIdentity.port);
+                }, { timeoutMs: timeouts.startupMs });
+                const found = restartedIdentity as PersistedBridgeIdentity | null;
+                if (found === null || found.vaultId !== identity.vaultId || found.port !== identity.port) throw new Error("Contract restart changed Bridge identity");
+                await client.observeHealth(endpoint, found.vaultId);
+                return { endpoint, expectedVaultId: found.vaultId };
+              } }));
             }
           } catch (error) {
             fail("public_wire_corpus", "public_wire_corpus_failed", sanitize(error instanceof Error ? error.message : String(error)));
@@ -1663,7 +1703,14 @@ export async function runInstalledRuntimeHarness(
   if (evidence.verdict === "passed") {
     try {
       if (contractAuthority === null || contractWire === null || state.vault === null || state.candidate === null || firstIdentity === null || state.beforeInventory === null || state.afterInventory === null || state.cleanup === null) throw new Error("Version contract package execution evidence is absent");
-      evidence.contractPackageCorpus = completeContractPackageCorpus({ authority: contractAuthority, wire: contractWire, crossCalls: contractCrossCalls, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, beforeInventorySha256: contractDigest(state.beforeInventory), afterInventorySha256: contractDigest(state.afterInventory), cleanup: state.cleanup });
+      const binding = { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 };
+      for (const [scenarioId, report] of [["registered-reference-byte-verification", registeredReferenceRewriteCorpus], ["successor-search-snapshot-graph-evidence", semanticEvidenceSearchSnapshotCorpus]] as const) {
+        if (report === null) continue;
+        const index = contractCrossCalls.findIndex(proof => proof.scenarioId === scenarioId);
+        const proof = await (options.runContractCrossCall ?? runContractCrossCallScenario)({ authority: contractAuthority, scenarioId, endpoint: new URL(`http://127.0.0.1:${firstIdentity.port}/mcp`), expectedVaultId: firstIdentity.vaultId, binding, dependency: { binding, reportSha256: contractDigest(report), report } });
+        if (index >= 0) contractCrossCalls[index] = proof; else contractCrossCalls.push(proof);
+      }
+      evidence.contractPackageCorpus = (options.completeContractPackage ?? completeContractPackageCorpus)({ authority: contractAuthority, wire: contractWire, crossCalls: contractCrossCalls, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, beforeInventorySha256: contractDigest(state.beforeInventory), afterInventorySha256: contractDigest(state.afterInventory), cleanup: state.cleanup });
       state.acceptanceMatrix = createAcceptanceMatrixReport(evidence);
       (evidence as InstalledRuntimeEvidence & { acceptanceMatrix: AcceptanceMatrixReport }).acceptanceMatrix =
         state.acceptanceMatrix;
@@ -1684,7 +1731,11 @@ export async function runInstalledRuntimeHarness(
     }
   }
 
+  const partialAuthority = contractAuthority as VersionContractPackage | null;
+  if (partialAuthority !== null && state.candidate !== null && state.vault !== null && firstIdentity !== null) evidence.contractPackageExecution = { authoritySha256: partialAuthority.manifestSha256, binding: { runId, profileName: options.profileName, candidateBundleSha256: state.candidate.identity.bundleSha256, vaultIdSha256: contractDigest(firstIdentity.vaultId), seedManifestSha256: state.vault.seedManifestSha256 }, wire: contractWire, crossCalls: contractCrossCalls.map(proof => ({ ...proof, observations: [...proof.observations] })), complete: evidence.contractPackageCorpus !== null && evidence.contractPackageCorpus !== undefined, cleanup: state.cleanup === null ? null : { attempted: state.cleanup.attempted, residualPaths: [...state.cleanup.residualPaths] } };
   const privateMarkers = [
+    "---\nstatus: active\ntags: [architecture]\n---\n# Design\n[[Target Note|target]] [[Missing Note]]\n",
+    "q".repeat(4_718_592),
     ...(state.vault?.seedNotes.map((note) => note.content) ?? []),
     state.vault?.vaultPath ?? "",
     state.vault?.profileDirectory ?? "",

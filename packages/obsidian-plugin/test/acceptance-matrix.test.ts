@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { unitContractReport } from "./helpers/contract-report.js";
 import { CONTRACT_PACKAGE_ASSERTION, contractDigest } from "../src/installed-runtime/contract-package-corpus.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -172,15 +172,7 @@ function evidence(): InstalledRuntimeEvidence {
       { phase: "initial", overall: "healthy", readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recoveryState: "none", write: { gate: "open", state: "writable", pauseSource: null }, effectiveGate: null, reasonCodes: [], operatorAction: "none", healthSha256: DIGEST, vaultPathSha256: DIGEST },
       { phase: "after_restart", overall: "healthy", readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recoveryState: "none", write: { gate: "open", state: "writable", pauseSource: null }, effectiveGate: null, reasonCodes: [], operatorAction: "none", healthSha256: DIGEST, vaultPathSha256: DIGEST },
     ],
-    contractPackageCorpus: {
-      corpusId: "version-contract-package", contractVersion: "1.0.0", authoritySha256: DIGEST,
-      binding: { runId: "acceptance-run", profileName: "MVP-PERF-REF-1", candidateBundleSha256: DIGEST, vaultIdSha256: contractDigest("vault"), seedManifestSha256: DIGEST },
-      roots: JSON.parse(readFileSync("packages/contracts/fixtures/v1/acceptance-manifest.json", "utf8")).roots.map((root: { path: string; sha256: string }) => ({ id: root.path, sha256: root.sha256, evidencePointer: "wire/outputs/0" })),
-      sharedDefinitions: JSON.parse(readFileSync("packages/contracts/fixtures/v1/acceptance-manifest.json", "utf8")).sharedDefinitions.map((def: { root: string; pointer: string }) => ({ id: def.root + def.pointer, rootEvidencePointer: "roots/0" })),
-      fixtures: JSON.parse(readFileSync("packages/contracts/fixtures/v1/acceptance-manifest.json", "utf8")).fixtures.flatMap((fixture: { path: string; valid: boolean; fields: { pointer: string; direction: "input" | "output" }[] }) => fixture.fields.map(field => ({ id: fixture.path + "#" + field.pointer, valid: fixture.valid, direction: field.direction, mode: field.direction === "input" ? "executed" : "validator-only", evidencePointer: "wire/inputs/0" }))),
-      crossCalls: JSON.parse(readFileSync("packages/contracts/fixtures/v1/acceptance-manifest.json", "utf8")).scenarios.map((scenario: { id: string }, index: number) => ({ id: scenario.id, evidenceSha256: DIGEST, evidencePointer: `crossCalls/${index}/observations`, source: "real-loopback", observations: [{ sequence: 1, name: "unit-report-shape-only", requestSha256: DIGEST, responseSha256: DIGEST, facts: { unitFixture: true } }] })),
-      beforeInventorySha256: DIGEST, afterInventorySha256: DIGEST, cleanup: { attempted: true, residualPaths: [], sessionClosed: true }, eventLog: [{ sequence: 1, kind: "cleanup", name: "unit-report-shape-only", detailSha256: DIGEST }], assertions: [CONTRACT_PACKAGE_ASSERTION], verdict: "passed",
-    },
+    contractPackageCorpus: unitContractReport({ runId: "acceptance-run", profileName: "MVP-PERF-REF-1", candidateBundleSha256: DIGEST, vaultIdSha256: contractDigest("vault"), seedManifestSha256: DIGEST }),
     publicWireCorpus: publicWire as NonNullable<InstalledRuntimeEvidence["publicWireCorpus"]>,
     changeSetCorpus: changeSet as NonNullable<InstalledRuntimeEvidence["changeSetCorpus"]>,
     gateIsolationCorpus: gate as NonNullable<InstalledRuntimeEvidence["gateIsolationCorpus"]>,
@@ -200,6 +192,29 @@ describe("authoritative A-01 through A-44 acceptance matrix", () => {
   it("does not treat six handwritten tool calls as the A-39 version contract proof", () => {
     const missing = evidence(); missing.contractPackageCorpus = null;
     expect(() => createAcceptanceMatrixReport(missing)).toThrow(/version-contract-package.*absent/i);
+  });
+  it("rejects dependent sources reduced to assertion strings even after rehashing", () => {
+    const forged = evidence();
+    const row = forged.contractPackageCorpus!.crossCalls.find(row => row.id === "registered-reference-byte-verification")!;
+    row.proof.dependency!.report = { assertions: ["span/bom-crlf-cjk-astral:single-verified-span"], verdict: "passed" };
+    row.proof.dependency!.reportSha256 = contractDigest(row.proof.dependency!.report);
+    row.evidenceSha256 = contractDigest(row.proof);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow();
+  });
+  it("rejects a changed package authority digest even when coverage is complete", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.authoritySha256 = "b".repeat(64);
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/authority.*digest/i);
+  });
+  it("rejects a static cross-call assertion presented as behavior proof", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.crossCalls[0]!.observations = [{ sequence: 1, name: "fixture-loaded", requestSha256: DIGEST, responseSha256: DIGEST, facts: { fixtureLoaded: true } }];
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/cross-call.*(behavior|digest)/i);
+  });
+  it("rejects contract fixture pointers detached from their executed request", () => {
+    const forged = evidence();
+    forged.contractPackageCorpus!.fixtures[0]!.evidencePointer = "wire/inputs/999";
+    expect(() => createAcceptanceMatrixReport(forged)).toThrow(/fixture.*pointer/i);
   });
   it("maps A-26 to the independent second verified span, not rename-all", () => {
     expect(createAcceptanceMatrixReport(evidence()).scenarios.find(({ id }) => id === "A-26")?.assertion)

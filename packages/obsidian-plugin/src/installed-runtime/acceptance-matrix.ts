@@ -129,7 +129,7 @@ const matrixPlan = [
   ["A-36", "gate-isolation", "incompatible/registry-never-inspected:no-key-bound"],
   ["A-37", "registered-reference-rewrite", "observer:no-half-written-markdown"],
   ["A-38", "semantic-evidence-search-snapshot", "scenario:trash_note/delayed_probes_converge:closed"],
-  ["A-39", "version-contract-package", CONTRACT_PACKAGE_ASSERTION],
+  ["A-39", "version-contract-package", "contract:complete-authority-fixtures-wire-and-cross-call-evidence"],
   ["A-40", "gate-isolation", "gates/recovery-blocked-precedence:single-effective-gate"],
   ["A-41", "change-set-submission", "submission/valid-create:no-validate-apply-handshake"],
   ["A-42", "public-wire", "content-version:canonical-markdown-sha256-and-attachment-distinction"],

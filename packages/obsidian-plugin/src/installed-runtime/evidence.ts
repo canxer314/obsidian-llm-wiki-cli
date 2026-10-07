@@ -3,7 +3,7 @@ import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { z } from "zod";
-import { contractPackageCorpusEvidenceSchema } from "./contract-package-corpus.js";
+import { contractPackageCorpusEvidenceSchema, contractCorpusBindingSchema, contractCrossCallProofSchema } from "./contract-package-corpus.js";
 import { referenceSingleSpanProofSchema } from "./registered-reference-single-span.js";
 
 import {
@@ -1206,7 +1206,8 @@ export const installedRuntimeEvidenceSchema = z
     afterInventory: z.array(inventoryEntrySchema).nullable(),
     inventoryComparison: inventoryComparisonSchema.nullable(),
     observations: z.array(healthObservationEvidenceSchema),
-    contractPackageCorpus: contractPackageCorpusEvidenceSchema.nullable().optional(),
+    contractPackageExecution: z.object({ authoritySha256: sha256Schema, binding: z.lazy(() => contractCorpusBindingSchema), wire: z.unknown(), crossCalls: z.array(z.lazy(() => contractCrossCallProofSchema)), complete: z.boolean(), cleanup: z.object({ attempted: z.boolean(), residualPaths: z.array(z.string()) }).strict().nullable() }).strict().nullable().optional(),
+    contractPackageCorpus: z.lazy(() => contractPackageCorpusEvidenceSchema).nullable().optional(),
     publicWireCorpus: publicWireCorpusEvidenceSchema.nullable(),
     changeSetCorpus: changeSetCorpusEvidenceSchema.nullable(),
     gateIsolationCorpus: gateIsolationCorpusEvidenceSchema.nullable(),

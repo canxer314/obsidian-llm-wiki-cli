@@ -1,3 +1,4 @@
+import { unitContractReport, contractDigest } from "./helpers/contract-report.js";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -550,6 +551,7 @@ function passingEvidence(): InstalledRuntimeEvidence {
         vaultPathSha256: DIGEST,
       },
     ],
+    contractPackageCorpus: unitContractReport({ runId: "run-evidence", profileName: "MVP-PERF-REF-1", candidateBundleSha256: DIGEST, vaultIdSha256: contractDigest("vault-evidence"), seedManifestSha256: DIGEST }),
     publicWireCorpus: {
       fixtureSeed: DIGEST,
       canonicalManifestSha256: DIGEST,

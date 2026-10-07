@@ -1,3 +1,4 @@
+import { unitContractReport, contractDigest } from "./helpers/contract-report.js";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -244,6 +245,10 @@ async function arrangeRun(
     }),
     profiles: PROFILES,
     runId,
+    // Public runner-seam unit shapes only, never installed proof.
+    runContractPackageWire: async ({ authority }) => ({ authoritySha256: authority.manifestSha256, inputs: [], outputs: [], outputFixtures: [], unknownFieldRejections: [], eventLog: [], cleanup: { sessionClosed: true }, verdict: "passed" }),
+    runContractCrossCall: async ({ authority, scenarioId }) => ({ scenarioId, authoritySha256: authority.manifestSha256, observations: [], cleanup: { sessionsClosed: true }, verdict: "blocked", requiredCorpus: "unit-boundary" }),
+    completeContractPackage: ({ binding }) => unitContractReport(binding),
     runPublicWireCorpus: async ({ fixtureSeed }) => ({
       evidence: {
         fixtureSeed: createHash("sha256").update(fixtureSeed, "utf8").digest("hex"),

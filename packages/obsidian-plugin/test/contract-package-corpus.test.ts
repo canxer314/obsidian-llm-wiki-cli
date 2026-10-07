@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { loadVersionContractPackage, runContractFixtureWireCorpus, completeContractPackageCorpus } from "../src/installed-runtime/contract-package-corpus.js";
 import { runContractCrossCallScenario } from "../src/installed-runtime/contract-cross-call.js";
-import { createBridgeInstance, provisionTestVault, cleanupTestVault, SearchSnapshotManager, VaultDiscoverService, type BridgeInstance, type ChangeSetRegistryState } from "../src/index.js";
+import { createNodeFileSystemChangeSetHost, createFileSystemChangeSetExecutionAdapter, createBridgeInstance, provisionTestVault, cleanupTestVault, SearchSnapshotManager, VaultDiscoverService, type BridgeInstance, type ChangeSetRegistryState } from "../src/index.js";
 
 const packageRoot = resolve("packages/contracts");
 const directories: string[] = [];
@@ -66,17 +66,19 @@ describe("version contract package authority", () => {
     const directory = await mkdtemp(join(tmpdir(), "contract-frozen-")); directories.push(directory);
     const vault = await provisionTestVault({ workingDirectory: directory, runId: "frozen" });
     const readBytes = async (path: string) => { try { return new Uint8Array(await readFile(join(vault.vaultPath, path))); } catch { return null; } };
+    const execution = await createFileSystemChangeSetExecutionAdapter({ journalPath: join(vault.vaultPath, ".obsidian/contract-state/recovery-journal.bin"), slotCapacity: 8 * 1024 * 1024, host: await createNodeFileSystemChangeSetHost({ basePath: vault.vaultPath, stateDirectory: join(vault.vaultPath, ".obsidian/contract-state"), referenced: async () => false, awaitSemanticEvidence: async () => undefined, publishSearchSnapshot: async () => undefined }) });
     let registry: ChangeSetRegistryState | undefined;
     const bridge = createBridgeInstance({ port: 0,
       health: { vault: { id: "frozen-vault", name: "Generated", path: vault.vaultPath }, readiness: { searchSnapshot: "ready", cache: "ready", index: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "writable", pauseSource: null }, queue: { currentExecutionId: null, length: 0, headChangeSetId: null }, lifecycle: { startup: "ready", upgrade: "not_run", migration: "not_run", recovery: "not_run" }, effectiveGate: null, overall: "healthy", reasonCodes: [], operatorAction: "none" },
-      readDataSource: { readBinary: readBytes, parseFrontmatter: () => null, headings: () => null },
-      changeSets: { vaultId: "frozen-vault", store: { load: async () => registry, save: async state => { registry = state; } }, dataSource: { readBinary: readBytes, pathKind: async path => await readBytes(path) === null ? null : "file", isContained: async () => true } },
+      readDataSource: { readBinary: readBytes, parseFrontmatter: content => content.startsWith("---\nquota: ") ? { quota: content.slice(11, content.indexOf("\n---", 11)) } : null, headings: () => null },
+      changeSets: { execution, vaultId: "frozen-vault", store: { load: async () => registry, save: async state => { registry = state; } }, dataSource: { readBinary: readBytes, pathKind: async path => { try { return (await stat(join(vault.vaultPath, path))).isDirectory() ? "directory" : "file"; } catch { return null; } }, isContained: async () => true } },
     });
     bridges.push(bridge); await bridge.start();
     // Without an installed mutation executor the wire cannot fake this proof.
     const outcome = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "frozen-byte-exact-continuation", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", seedNotes: vault.seedNotes });
-    expect(outcome.verdict).toBe("blocked");
-    expect(outcome.requiredCorpus).toBe("mutation-executor");
+    expect(outcome.verdict).toBe("passed");
+    expect(outcome.observations.some(row => row.name === "frozen-after-source-change")).toBe(true);
+    expect(await readFile(join(vault.vaultPath, "Notes/Transport.md"), "utf8")).toBe(vault.seedNotes.find(note => note.path === "Notes/Transport.md")!.content);
     const clientBound = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "single-use-client-bound-sliding-continuation", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", seedNotes: vault.seedNotes, continuationTiming: "binding-only" });
     expect(clientBound.verdict).toBe("blocked");
     expect(clientBound.requiredCorpus).toBe("continuation-expiry-sliding-time");
@@ -87,19 +89,35 @@ describe("version contract package authority", () => {
     expect(mixed.observations.some(row => row.name === "ordered-duplicate-exact-bytes")).toBe(true);
     const limits = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "exact-read-limit-and-grouping", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", seedNotes: vault.seedNotes });
     expect(limits.verdict).toBe("passed");
-    const quota = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "continuation-quota-and-lifecycle-cleanup", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", seedNotes: vault.seedNotes });
+    const quotaMetadataPath = "Notes/QuotaMetadata.md";
+    const quotaValue = "q".repeat(4_718_592);
+    await writeFile(join(vault.vaultPath, quotaMetadataPath), `---\nquota: ${quotaValue}\n---\n# Quota\n`);
+    const quota = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "continuation-quota-and-lifecycle-cleanup", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", seedNotes: vault.seedNotes, quotaMetadataPath, continuationTiming: "binding-only" });
     expect(quota.verdict).toBe("blocked");
     expect(quota.requiredCorpus).toBe("continuation-full-lifecycle-cleanup");
     expect(quota.observations.some(row => row.name === "quota-preserved-and-session-capacity-released")).toBe(true);
+    expect(quota.observations.some(row => row.name === "retained-byte-quota-no-eviction" && row.facts.retainedBytesBeforeRefusal > 0)).toBe(true);
     const invalidPath = "Notes/ContractInvalidUtf8.md";
     await writeFile(join(vault.vaultPath, invalidPath), Buffer.from([0xc3, 0x28]));
     const utf8 = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "invalid-utf8-no-trusted-result", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault", invalidUtf8Path: invalidPath, readFixtureBytes: readBytes });
     expect(utf8.verdict).toBe("passed");
     expect(utf8.observations.some(row => row.name === "invalid-utf8-untrusted-rejection")).toBe(true);
+    const uncertain = await runContractCrossCallScenario({ authority: await loadVersionContractPackage(packageRoot), scenarioId: "change-set-uncertain-response-recovery", endpoint: bridge.endpoint, expectedVaultId: "frozen-vault" });
+    expect(uncertain.verdict).toBe("blocked");
+    expect(uncertain.requiredCorpus).toBe("controlled-installed-restart");
+    expect(uncertain.observations.some(row => row.name === "submit-wire-response-discarded")).toBe(true);
     await cleanupTestVault(vault);
   });
   it("closes coverage over the actual package, refusing missing, duplicate and unknown entries", async () => {
     const authority = await loadVersionContractPackage(packageRoot);
+    const faulty = await copyPackage();
+    const fixturePath = join(faulty, "fixtures/v1/invalid/unknown-root-field.json");
+    await writeFile(fixturePath, JSON.stringify({ outcome: "incompatible", gate: { code: "incompatible_protocol" }, compatibility: { local: { protocol: "1.0", supported: { major: 1, minimumMinor: 0, maximumMinor: 0 } }, peer: { protocol: "1.0", supported: { major: 1, minimumMinor: 0, maximumMinor: 0 } } } }));
+    const faultyManifestPath = join(faulty, "fixtures/v1/acceptance-manifest.json");
+    const faultyManifest = JSON.parse(await readFile(faultyManifestPath, "utf8"));
+    faultyManifest.fixtures.find((f: { path: string }) => f.path.endsWith("invalid/unknown-root-field.json")).sha256 = (await import("node:crypto")).createHash("sha256").update(await readFile(fixturePath)).digest("hex");
+    await writeFile(faultyManifestPath, JSON.stringify(faultyManifest));
+    await expect(loadVersionContractPackage(faulty)).rejects.toThrow(/validator accepted invalid/i);
     expect(authority.roots).toHaveLength(12);
     expect(authority.sharedDefinitions.length).toBeGreaterThan(0);
     expect(authority.fixtures.length).toBeGreaterThan(30);
