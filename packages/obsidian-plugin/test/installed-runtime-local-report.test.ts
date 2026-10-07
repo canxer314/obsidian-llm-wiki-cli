@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
-import { loadInstalledLocalOperatorReport, waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport } from "../src/installed-runtime/local-operator-report.js";
-import { createStandardDiagnosticBundle } from "../src/diagnostic-bundle.js";
+import { loadInstalledLocalOperatorReport, waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport, verifyInstalledLocalControlSources } from "../src/installed-runtime/local-operator-report.js";
+import { createStandardDiagnosticBundle, type StandardDiagnosticEvidence } from "../src/diagnostic-bundle.js";
 
 async function controlDiscoveryFixture() {
   const root = await mkdtemp(join(tmpdir(), "local-control-discovery-"));
@@ -89,6 +89,36 @@ async function acceptedBaselineFixture() {
     before: createStandardDiagnosticBundle(beforeEvidence), after: createStandardDiagnosticBundle(afterEvidence) });
   return { ...fixture, evidence, writeBaseline: write };
 }
+
+it("matches each opaque control bundle against independently supplied source identities and state", async () => {
+  const fixture = await acceptedBaselineFixture();
+  try {
+    const actual = fixture.evidence as StandardDiagnosticEvidence;
+    const beforeSalt = randomBytes(32);
+    const afterSalt = randomBytes(32);
+    const report = { before: createStandardDiagnosticBundle(actual, beforeSalt), after: createStandardDiagnosticBundle(actual, afterSalt),
+      diagnosticCorrelationSalts: { before: beforeSalt.toString("hex"), after: afterSalt.toString("hex") } };
+    expect(report.before.vault.alias).not.toBe(report.after.vault.alias);
+    expect(() => verifyInstalledLocalControlSources(report, { before: actual, after: actual })).not.toThrow();
+    expect(() => verifyInstalledLocalControlSources({ before: report.before, after: report.after }, { before: actual, after: actual })).toThrow("correlation is missing");
+    for (const phase of ["before", "after"] as const) {
+      for (const field of ["vault", "change-set", "key", "terminal", "journal", "health"] as const) {
+        const foreign = structuredClone(actual);
+        if (field === "vault") (foreign as any).vaultId = "foreign-vault";
+        if (field === "change-set") {
+          (foreign.changeSets[0] as any).changeSetId = "foreign-change-set";
+          (foreign.journal.frames[0] as any).changeSetId = "foreign-change-set";
+        }
+        if (field === "key") (foreign.changeSets[0] as any).submissionKey = "foreign-key";
+        if (field === "terminal") (foreign.changeSets[0] as any).state = "intent_not_applied";
+        if (field === "journal") (foreign.journal.frames[0] as any).sequence = 2;
+        if (field === "health") (foreign.health as any).overall = "degraded";
+        const changed = { ...report, [phase]: createStandardDiagnosticBundle(foreign, phase === "before" ? beforeSalt : afterSalt) };
+        expect(() => verifyInstalledLocalControlSources(changed, { before: actual, after: actual })).toThrow(`${phase} diagnostic does not match`);
+      }
+    }
+  } finally { await fixture.cleanup(); }
+});
 
 it("rejects accepted baseline evidence with execution still in flight", async () => {
   const fixture = await acceptedBaselineFixture();

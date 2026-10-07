@@ -9,7 +9,7 @@ import { createBridgeInstance } from "../src/bridge-instance.js";
 import { createChangeSetSemanticEvidenceTracker, createFileSystemChangeSetExecutionAdapter, createNodeFileSystemChangeSetHost } from "../src/file-system-change-set-execution.js";
 import { contentVersion } from "../src/content-version.js";
 import { parseChangeSetSubmitResult } from "@llm-wiki/vault-contracts";
-import { observeInstalledBaselinePreconditions, bindInstalledBlockedRecoveryIntent, observeInstalledRecoveryHistory, observeInstalledRecoveryTransition, observeInstalledRecoveryContinuation } from "../src/installed-runtime/installed-baseline-resume-observation.js";
+import { observeInstalledBaselinePreconditions, bindInstalledBlockedRecoveryIntent, observeInstalledRecoveryHistory, observeInstalledRecoveryTransition, observeInstalledRecoveryContinuation, observeInstalledRecoveryDiagnosticSources } from "../src/installed-runtime/installed-baseline-resume-observation.js";
 
 // Actual loopback MCP and disk FAILED Journal; no local baseline/resume invocation.
 async function failedFixture() {
@@ -52,6 +52,21 @@ async function failedFixture() {
   return { root, stateDirectory, options, input,
     cleanup: async () => { await client.close(); await bridge.stop(); await execution.close?.(); await rm(root, { recursive: true, force: true }); } };
 }
+
+it("samples diagnostic source identities from actual wire and disk and rejects a durable key substitution", async () => {
+  const fixture = await failedFixture();
+  try {
+    const actual = await observeInstalledRecoveryDiagnosticSources(fixture.options);
+    expect(actual.vaultId).toBe(fixture.options.vaultId);
+    expect(actual.changeSets[0]).toMatchObject({ submissionKey: fixture.input.submissionKey, state: "result_unproven", executionPhase: "terminal" });
+    expect(actual.journal.frames.some(frame => frame.state === "valid" && frame.phase === "FAILED" && frame.changeSetId === actual.changeSets[0]!.changeSetId)).toBe(true);
+    const path = join(fixture.stateDirectory, "bridge-state.json");
+    const registry = JSON.parse(await readFile(path, "utf8"));
+    registry.changeSets.entries[0].submissionKey = "foreign-durable-key";
+    await writeFile(path, JSON.stringify(registry));
+    await expect(observeInstalledRecoveryDiagnosticSources(fixture.options)).rejects.toThrow("actual wire terminal or durable key association differs");
+  } finally { await fixture.cleanup(); }
+});
 
 it("binds a recovery-blocked key and refuses a rewritten historical disposition or replayed execution", async () => {
   const fixture = await failedFixture();

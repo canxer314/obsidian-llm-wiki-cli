@@ -12,10 +12,10 @@ import { EXPECTED_VAULT_ID_HEADER } from "../request-policy.js";
 import { HealthObservationError } from "./loopback-client.js";
 import { observeInstalledBlockedGate } from "./installed-blocked-gate-observation.js";
 import { observeInstalledBaselinePreconditions, bindInstalledBlockedRecoveryIntent, observeInstalledRecoveryHistory,
-  observeInstalledRecoveryTransition, observeInstalledRecoveryContinuation, observeInstalledRecoveryRegistry, recoveryObservationDigest,
+  observeInstalledRecoveryTransition, observeInstalledRecoveryContinuation, observeInstalledRecoveryRegistry, observeInstalledRecoveryDiagnosticSources, recoveryObservationDigest,
   type InstalledBaselinePreconditions, type InstalledBlockedRecoveryIntent } from "./installed-baseline-resume-observation.js";
 import { PUBLIC_WIRE_TOOL_NAMES } from "./public-wire-corpus.js";
-import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport } from "./local-operator-report.js";
+import { waitForInstalledLocalOperatorReport, waitForNextInstalledLocalControlReport, waitForNextInstalledLocalContentReport, verifyInstalledLocalControlSources } from "./local-operator-report.js";
 import { requestInstalledSemanticEvidenceScenario } from "./smoke-command.js";
 import { readInstalledCrashJournal } from "./installed-crash-restoration-slice.js";
 import { preflightRuntimeProfile } from "./runtime-profile.js";
@@ -688,10 +688,16 @@ export const runInstalledPrivacyRecoveryAuthorityCorpus = async (rawOptions: Run
         }
       };
       const consume = async (runtime: LiveVault, action: "accept-recovery-baseline" | "resume-writes") => {
+        const actualBefore = await observeInstalledRecoveryDiagnosticSources(recoveryObservation(runtime));
+        const pending = (await readdir(runtime.descriptor.reportDirectory)).filter(filename => filename.startsWith("local-write-control-") && filename.endsWith(".json"));
+        const consumedFiles = new Set(consumedInvocationIds.map(id => `local-write-control-${createHash("sha256").update(id).digest("hex")}.json`));
+        if (pending.some(filename => !consumedFiles.has(filename))) throw new Error("Local control report predates independent before source observation");
         options.record("transport", `${runtime.label}-${action}-local-control-report-required`, { label: runtime.label, action });
         const report = await waitForNextInstalledLocalControlReport({ descriptor: runtime.descriptor, vaultId: runtime.identity.vaultId,
           endpoint: runtime.endpoint, configDirectoryName: options.configDirectoryName,
           action, consumedInvocationIds, timeoutMs: options.operatorReportTimeoutMs, observeWhileWaiting: assertSecondVault });
+        const actualAfter = await observeInstalledRecoveryDiagnosticSources(recoveryObservation(runtime));
+        verifyInstalledLocalControlSources(report, { before: actualBefore, after: actualAfter });
         consumedInvocationIds.push(report.invocationId);
         await assertSecondVault();
         await assertHistory();

@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { verifyContentInclusiveDiagnosticBundle, type ContentInclusiveDiagnosticBundle } from "../content-inclusive-diagnostic-bundle.js";
 import { diagnosticCanonicalJson, diagnosticSha256 } from "./installed-diagnostic-privacy.js";
-import { verifyStandardDiagnosticBundle, type StandardDiagnosticBundle } from "../diagnostic-bundle.js";
+import { createStandardDiagnosticBundle, canonicalizeDiagnosticPayload, verifyStandardDiagnosticBundle, type StandardDiagnosticBundle, type StandardDiagnosticEvidence } from "../diagnostic-bundle.js";
 import { isPathInside, loadInstalledRuntimeAcceptanceDescriptor, type InstalledRuntimeAcceptanceDescriptor } from "./acceptance-driver-protocol.js";
 import { BRIDGE_VERSION, PLUGIN_VERSION, PROTOCOL_VERSION } from "../version.js";
 import { PERSISTENT_STATE_SCHEMA_VERSION } from "../managed-vault-runtime.js";
@@ -37,6 +37,7 @@ const controlReportSchema = standardReportSchema.omit({ action: true, checksumVe
   action: z.enum(["pause-writes", "accept-recovery-baseline", "resume-writes"]),
   invocationId: z.string().min(1), outcome: z.enum(["accepted", "rejected"]),
   before: z.unknown(), after: z.unknown(),
+  diagnosticCorrelationSalts: z.object({ before: z.string().regex(/^[a-f0-9]{64}$/u), after: z.string().regex(/^[a-f0-9]{64}$/u) }).strict().optional(),
 }).strict();
 
 export async function loadInstalledLocalOperatorReport(options: {
@@ -204,6 +205,24 @@ export async function loadInstalledLocalOperatorReport(options: {
     throw new Error("Local operator resume transition did not prove recovery-safe writable state");
   }
   return { ...report, before, after };
+}
+
+/** Correlation salts are not authority: only independently sampled wire/disk sources supply expected identities/state. */
+export function verifyInstalledLocalControlSources(report: {
+  readonly before: StandardDiagnosticBundle; readonly after: StandardDiagnosticBundle;
+  readonly diagnosticCorrelationSalts?: { readonly before: string; readonly after: string };
+}, actual: { readonly before: StandardDiagnosticEvidence; readonly after: StandardDiagnosticEvidence }): void {
+  if (report.diagnosticCorrelationSalts === undefined) throw new Error("Local control diagnostic source correlation is missing");
+  for (const phase of ["before", "after"] as const) {
+    const salt = report.diagnosticCorrelationSalts[phase];
+    if (!/^[a-f0-9]{64}$/u.test(salt)) throw new Error("Local control diagnostic source correlation is invalid");
+    const expected = createStandardDiagnosticBundle(actual[phase], Buffer.from(salt, "hex"));
+    const { checksum: _reportedChecksum, ...reportedPayload } = report[phase];
+    const { checksum: _expectedChecksum, ...expectedPayload } = expected;
+    if (!verifyStandardDiagnosticBundle(report[phase]) || canonicalizeDiagnosticPayload(reportedPayload) !== canonicalizeDiagnosticPayload(expectedPayload)) {
+      throw new Error(`Local control ${phase} diagnostic does not match independently observed sources`);
+    }
+  }
 }
 
 async function validateLocalReportBinding(options: {

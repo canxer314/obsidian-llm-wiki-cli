@@ -8,7 +8,8 @@ import {
   type ChangeSetRecord,
 } from "@llm-wiki/vault-contracts";
 import { fingerprintChangeSetRequest, parseChangeSetRegistryState } from "../change-set.js";
-import { openRecoveryJournal } from "../recovery-journal.js";
+import { openRecoveryJournal, type RecoveryJournalDiagnosticFacts } from "../recovery-journal.js";
+import type { StandardDiagnosticEvidence } from "../diagnostic-bundle.js";
 import { snapshotInventory, compareInventories } from "./test-vault.js";
 import { waitForCondition } from "./obsidian-process.js";
 import type { PrivacyRecoveryAuthorityMcpSession } from "./privacy-recovery-authority-corpus.js";
@@ -47,6 +48,40 @@ export async function observeInstalledRecoveryRegistry(options: Pick<InstalledRe
 
 export async function observeInstalledRecoveryStatus(options: InstalledRecoveryObservationOptions, submissionKey: string) {
   return call(options, "vault_change_set_status", { submissionKey }, parseChangeSetStatusResult, serializeChangeSetStatusCompatibilityText);
+}
+
+/** Samples actual wire/disk sources before the request window or after its report; no report-supplied projection. */
+export async function observeInstalledRecoveryDiagnosticSources(options: InstalledRecoveryObservationOptions): Promise<StandardDiagnosticEvidence> {
+  const health = await observeInstalledRecoveryHealth(options);
+  const registry = await observeInstalledRecoveryRegistry(options);
+  const path = join(options.vaultPath, ".llm-wiki", "recovery-journal.bin");
+  const handle = await open(path, "r").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  let journal: RecoveryJournalDiagnosticFacts = { availability: "unavailable", frames: [] };
+  if (handle !== undefined) {
+    try { journal = await (await openRecoveryJournal(handle)).diagnosticFacts(); }
+    finally { await handle.close(); }
+  }
+  for (const entry of registry.entries) {
+    const status = await observeInstalledRecoveryStatus(options, entry.submissionKey);
+    if (status.lookup !== "found" || recoveryObservationDigest(status.changeSet) !== recoveryObservationDigest(entry.changeSet) ||
+        status.vault.writeGate !== health.write.gate || status.vault.writeState !== health.write.state) {
+      throw new Error("Control diagnostic actual wire terminal or durable key association differs");
+    }
+  }
+  if (recoveryObservationDigest(health) !== recoveryObservationDigest(await observeInstalledRecoveryHealth(options)) ||
+      recoveryObservationDigest(registry) !== recoveryObservationDigest(await observeInstalledRecoveryRegistry(options))) {
+    throw new Error("Control diagnostic actual sources changed while sampling");
+  }
+  return { vaultId: options.vaultId, versions: health.versions,
+    health: { readiness: health.readiness, recovery: health.recovery.state, write: health.write,
+      effectiveGate: health.effectiveGate?.code ?? null, overall: health.overall,
+      reasonCodes: health.reasonCodes as StandardDiagnosticEvidence["health"]["reasonCodes"], operatorAction: health.operatorAction },
+    listener: { address: "127.0.0.1", port: health.listener.port }, queue: health.queue, lifecycle: health.lifecycle, journal,
+    changeSets: registry.entries.map(entry => ({ changeSetId: entry.changeSetId, submissionKey: entry.submissionKey,
+      enqueueSeq: entry.enqueueSeq, state: entry.changeSet.state, executionPhase: entry.execution?.phase ?? null })), machineEvents: [] };
 }
 
 export interface InstalledBlockedRecoveryIntent {

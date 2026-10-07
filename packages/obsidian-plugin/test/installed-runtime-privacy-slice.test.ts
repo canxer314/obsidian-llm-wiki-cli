@@ -11,7 +11,7 @@ import { createServer } from "node:net";
 import { expect, it } from "vitest";
 import { brandVerifiedCandidateBundle, inspectCandidateBundle } from "../src/installed-runtime/candidate-bundle.js";
 import { activateInstalledRuntimeAcceptanceDriver, createInstalledRuntimeAcceptanceDescriptor } from "../src/installed-runtime/smoke-command.js";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createContentInclusiveDiagnosticBundle } from "../src/content-inclusive-diagnostic-bundle.js";
 import { runInstalledPrivacyRecoveryAuthorityCorpus, type InstalledPrivacyBoundaryOptions } from "../src/installed-runtime/privacy-recovery-installed-runner.js";
 import { parseChangeSetRegistryState } from "../src/change-set.js";
@@ -53,7 +53,7 @@ it("rejects a foreign privacy descriptor before starting the generated runtime",
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" | "cross-vault" | "early-cross-vault" = "missing", blockedSnapshotUnavailable = false, content: "missing" | "real" | "cancel-only" = "missing", diagnosticSources = false, mutateSecondVaultPrivateState = false, earlyContentConfirmation = false, mutateRejectedWirePrivateState = false) {
+async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared" | "blocked", controls: "missing" | "real" | "foreign-inner" | "foreign-after" | "cross-vault" | "early-cross-vault" = "missing", blockedSnapshotUnavailable = false, content: "missing" | "real" | "cancel-only" = "missing", diagnosticSources = false, mutateSecondVaultPrivateState = false, earlyContentConfirmation = false, mutateRejectedWirePrivateState = false) {
   const root = await mkdtemp(join(tmpdir(), "privacy-report-"));
   const candidateDirectory = join(root, "candidate");
   await mkdir(candidateDirectory);
@@ -185,30 +185,36 @@ async function reportFixture(mode: "missing" | "foreign" | "standard" | "shared"
             confirmationId: "pre-request-cancel", outcome: "cancelled", selection: text.split("\n").at(-2)! }); } finally { activation?.dispose(); }
         }));
       }
-      if (controls === "real" && name.endsWith("local-control-report-required")) {
+      if ((controls === "real" || controls === "foreign-inner" || controls === "foreign-after") && name.endsWith("local-control-report-required")) {
         const [vaultPath] = [...descriptors.entries()].find(([path]) => path.includes(name.startsWith("vault-a") ? "vault-a" : "vault-b"))!;
         const bridge = bridges.get(vaultPath)!;
         const action = name.includes("resume-writes") ? "resume-writes" : "accept-recovery-baseline";
         writes.push((async () => {
-          const capture = async () => {
+          const capture = async (salt: Uint8Array, phase: "before" | "after") => {
             const observed = (await createLoopbackMcpClient().observeHealth(bridge.endpoint, vaultPath)).health;
             if (observed.outcome !== "observed") throw new Error("Missing fixture health");
-            return createStandardDiagnosticBundle({ vaultId: vaultPath, versions: observed.versions,
+            const journal = executions.has(vaultPath) ? await executions.get(vaultPath)!.diagnosticJournalFacts() : { availability: "unavailable", frames: [] };
+            const foreign = controls === "foreign-inner" || controls === "foreign-after" && phase === "after";
+            const sourceId = (value: string) => foreign ? `foreign-474-${value}` : value;
+            return createStandardDiagnosticBundle({ vaultId: foreign ? "foreign-474-vault" : vaultPath, versions: observed.versions,
               health: { readiness: observed.readiness, recovery: observed.recovery.state, write: observed.write,
                 effectiveGate: observed.effectiveGate?.code ?? null, overall: observed.overall, reasonCodes: observed.reasonCodes, operatorAction: observed.operatorAction },
               listener: observed.listener, queue: observed.queue, lifecycle: observed.lifecycle,
-              journal: executions.has(vaultPath) ? await executions.get(vaultPath)!.diagnosticJournalFacts() : { availability: "unavailable", frames: [] },
-              changeSets: (registries.get(vaultPath)?.entries ?? []).map(entry => ({ changeSetId: entry.changeSetId,
-                submissionKey: entry.submissionKey, enqueueSeq: entry.enqueueSeq, state: entry.changeSet.state, executionPhase: entry.execution?.phase ?? null })), machineEvents: [] });
+              journal: { ...journal, frames: journal.frames.map(frame => frame.state === "valid" ? { ...frame, changeSetId: sourceId(frame.changeSetId!) } : frame) },
+              changeSets: (registries.get(vaultPath)?.entries ?? []).map(entry => ({ changeSetId: sourceId(entry.changeSetId),
+                submissionKey: sourceId(entry.submissionKey), enqueueSeq: entry.enqueueSeq, state: entry.changeSet.state, executionPhase: entry.execution?.phase ?? null })), machineEvents: [] }, salt);
           };
-          const before = await capture();
+          const beforeSalt = randomBytes(32);
+          const afterSalt = randomBytes(32);
+          const before = await capture(beforeSalt, "before");
           let outcome: "accepted" | "rejected" = "accepted";
           try { if (action === "resume-writes") await bridge.resumeWrites(); else await bridge.acceptTrustedRecoveryBaseline(async () => undefined); }
           catch { outcome = "rejected"; }
           expect(outcome).toBe(vaultPath.includes("vault-b") || action === "resume-writes" && before.health.recovery === "blocked" ? "rejected" : "accepted");
-          const after = await capture();
+          const after = await capture(afterSalt, "after");
           const activation = await activateInstalledRuntimeAcceptanceDriver({ vaultPath, pluginId: "privacy-plugin" });
-          try { await activation!.recordLocalWriteControl({ vaultId: vaultPath, endpoint: bridge.endpoint, invocationId: randomUUID(), action, outcome, before, after }); }
+          try { await activation!.recordLocalWriteControl({ vaultId: vaultPath, endpoint: bridge.endpoint, invocationId: randomUUID(), action, outcome, before, after,
+            diagnosticCorrelationSalts: { before: beforeSalt.toString("hex"), after: afterSalt.toString("hex") } }); }
           finally { activation?.dispose(); }
           events.push(`${name}-published-${outcome}`);
         })());
@@ -398,6 +404,20 @@ it("composes a redacted A33 proof only after all live report observations and cl
   } finally { await fixture.cleanup(); }
 });
 
+it("rejects coherently foreign inner Vault Change Set and key sources under a real control envelope", async () => {
+  const fixture = await reportFixture("blocked", "foreign-inner");
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, recoveryControls: true })).rejects.toThrow("before diagnostic does not match independently observed sources");
+  } finally { await fixture.cleanup(); }
+});
+
+it("rejects coherently foreign after sources even with real before diagnostics and successful product actions", async () => {
+  const fixture = await reportFixture("blocked", "foreign-after");
+  try {
+    await expect(runInstalledPrivacyRecoveryAuthorityCorpus({ ...fixture.options, recoveryControls: true })).rejects.toThrow("after diagnostic does not match independently observed sources");
+  } finally { await fixture.cleanup(); }
+});
+
 it("requires installed process source evidence instead of upgrading a standard report to A33 passed", async () => {
   const fixture = await reportFixture("blocked");
   try {
@@ -531,6 +551,9 @@ it("consumes rejected B then accepted A baseline reports while preserving termin
     expect(result.baselineResumeEvidence).toMatchObject({ runId: "privacy-report", cleanup: { confirmed: true, residualCount: 0 },
       verdict: "observed", seedManifestSha256s: { "vault-a": expect.stringMatching(/^[a-f0-9]{64}$/u), "vault-b": expect.stringMatching(/^[a-f0-9]{64}$/u) } });
     expect(JSON.stringify(result.baselineResumeEvidence)).not.toContain(fixture.root);
+    expect(JSON.stringify(result)).not.toContain("diagnosticCorrelationSalts");
+    expect(fixture.events.filter(event => event === "stop")).toHaveLength(2);
+    expect((await readdir(fixture.root)).filter(name => name.startsWith("installed-runtime-vault-") || name.startsWith("reports-"))).toEqual([]);
   } finally { await fixture.cleanup(); }
 });
 
