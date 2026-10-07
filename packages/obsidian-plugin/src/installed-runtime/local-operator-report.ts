@@ -142,7 +142,7 @@ export async function loadInstalledLocalOperatorReport(options: {
       result === undefined || frame.sequence > result.sequence ? frame : result, undefined);
     if (unproven.length !== 1 || unproven[0]!.executionPhase !== "terminal" ||
         latest === undefined || latest.phase !== "FAILED" || latest.changeSetAlias !== unproven[0]!.changeSetAlias) {
-      throw new Error("Local operator baseline requires a unique associated terminal result_unproven and FAILED Journal");
+      throw new Error("Local operator baseline transition requires a unique associated terminal result_unproven and FAILED Journal");
     }
   }
   if (report.action === "accept-recovery-baseline" && report.outcome === "accepted" &&
