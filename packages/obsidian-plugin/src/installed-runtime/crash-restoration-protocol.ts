@@ -50,7 +50,7 @@ export function crashProfile(kind: InstalledCrashKind) {
       // Fixed, literal byte oracle; normal reference projection still authors the rewrites.
       const closure = [
         { originalBytes: encode('﻿# Derived A\r\n你好 🚀 [[Alpha|保留 alias]] and [标题](Alpha.md "untouched title")\r\n'), committedBytes: encode('﻿# Derived A\r\n你好 🚀 [[Beta|保留 alias]] and [标题](Beta.md "untouched title")\r\n') },
-        { originalBytes: encode('# Derived B\n![[Alpha#Heading|保留 embed 🌍]]\n尾部不改\n'), committedBytes: encode('# Derived B\n![[Beta#Heading|保留 embed 🌍]]\n尾部不改\n') },
+        { originalBytes: encode('# Derived B\n![[Alpha#Alpha|保留 embed 🌍]]\n尾部不改\n'), committedBytes: encode('# Derived B\n![[Beta#Alpha|保留 embed 🌍]]\n尾部不改\n') },
       ];
       return { ...base, files: base.files.map((file, index) => index < 2 ? file : { ...file, ...closure[index - 2]! }) };
     }

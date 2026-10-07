@@ -305,7 +305,7 @@ it("reconstructs every interrupted preimage and gives each fixed family a distin
     for (const file of profile.files) await writeFile(join(root, file.path), file.committedBytes!);
     expect(crashOriginalInventory(await crashInventory(root), "edit_multi_frontmatter")).toEqual(before);
     const paths = installedCrashScenarios.map(scenario => { const { kind, point } = crashScenarioParts(scenario); return crashRestorationBoundaryPath(root, point, kind, "same-submission"); });
-    expect(new Set(paths).size).toBe(131);
+    expect(new Set(paths).size).toBe(150);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -1374,6 +1374,33 @@ it("orchestrates edit_body COMMITTED with exact intended bytes and full retained
 });
 
 
+it("rejects invalid installed move fragments and binds the fixed embed to the unique literal source heading through host reference evidence", async () => {
+  const { createObsidianSearchDataSource, isRegisteredSubpathResult } = await import("../src/obsidian-search-data-source.js");
+  const { SearchSnapshotManager } = await import("../src/search-snapshot.js");
+  const { crashProfile } = await import("../src/installed-runtime/crash-restoration-protocol.js");
+  const files = crashProfile("move_note").files.filter(file => file.originalBytes !== null);
+  const target = files.find(file => file.path === "Corpus/Move/Alpha.md")!;
+  const referrer = files.find(file => file.path === "Corpus/Move/Derived-B.md")!;
+  const text = Buffer.from(referrer.originalBytes!).toString("utf8");
+  const original = text.split("\n")[1]!;
+  const fragment = original.slice(original.indexOf("#"), original.indexOf("|"));
+  expect(fragment).toBe("#Alpha");
+  const sourceHeadings = Buffer.from(target.originalBytes!).toString("utf8").split(/\r?\n/u).filter(line => line.startsWith("# ")).map(line => line.slice(2));
+  expect(isRegisteredSubpathResult(fragment, { type: "heading", heading: fragment.slice(1) }, sourceHeadings)).toBe(true);
+  const snapshots = (heading: string) => new SearchSnapshotManager(createObsidianSearchDataSource({
+    markdownFiles: () => [target, referrer].map(file => ({ path: file.path })),
+    readBinary: async path => files.find(file => file.path === path)!.originalBytes!,
+    fileCache: path => path === target.path ? { headings: [{ heading: "Alpha", level: 1 }] } : { embeds: [{ original, link: `Alpha${fragment}`, position: { start: { line: 1, col: 0, offset: text.indexOf(original) }, end: { line: 1, col: original.length, offset: text.indexOf(original) + original.length } } }] },
+    semanticContentMatches: () => true,
+    resolveLink: () => target.path, candidatePaths: () => [target.path],
+    validSubpath: () => isRegisteredSubpathResult(fragment, { type: "heading", heading }, sourceHeadings),
+    resolvedLinks: () => ({ [referrer.path]: { [target.path]: 1 } }), unresolvedLinks: () => ({}), parseFrontmatter: () => null, allTags: () => [],
+  }));
+  await expect(snapshots("missing").rebuild()).rejects.toThrow(/fragment/);
+  const valid = snapshots("Alpha"); await valid.rebuild();
+  expect(valid.current()!.notes.find(note => note.path === referrer.path)!.references).toMatchObject([{ profile: "embed", original: "![[Alpha#Alpha|保留 embed 🌍]]", resolvedPath: target.path }]);
+});
+
 it.each(["halfwrite-event", "replay-second-rewrite"] as const)("rejects %s from the live owning process observer even with identical terminal inventory", async fault => {
   const root = await mkdtemp(join(tmpdir(), "move-480-event-fault-"));
   const fixture = await arrangeNodeCrashWire(root, "move_note", fault === "halfwrite-event" ? "after_file_mutation:0" : "after_committed", fault);
@@ -1391,8 +1418,8 @@ it("closes every reachable move apply/rollback boundary through real termination
   const source = "# Alpha\r\n\r\nSource note body 你好 🚀.\r\nSecond body line.\r\n";
   const a = '﻿# Derived A\r\n你好 🚀 [[Alpha|保留 alias]] and [标题](Alpha.md "untouched title")\r\n';
   const aAfter = '﻿# Derived A\r\n你好 🚀 [[Beta|保留 alias]] and [标题](Beta.md "untouched title")\r\n';
-  const b = '# Derived B\n![[Alpha#Heading|保留 embed 🌍]]\n尾部不改\n';
-  const bAfter = '# Derived B\n![[Beta#Heading|保留 embed 🌍]]\n尾部不改\n';
+  const b = '# Derived B\n![[Alpha#Alpha|保留 embed 🌍]]\n尾部不改\n';
+  const bAfter = '# Derived B\n![[Beta#Alpha|保留 embed 🌍]]\n尾部不改\n';
   for (const point of points) {
     const root = await mkdtemp(join(tmpdir(), "move-480-all-boundaries-"));
     const fixture = await arrangeNodeCrashWire(root, "move_note", point);
@@ -1452,8 +1479,8 @@ it("uses literal BOM/CRLF/CJK/astral wrapper alias and Markdown title bytes in t
   const files = crashProfile("move_note").files;
   expect(Buffer.from(files[2]!.originalBytes!)).toEqual(Buffer.from('﻿# Derived A\r\n你好 🚀 [[Alpha|保留 alias]] and [标题](Alpha.md "untouched title")\r\n'));
   expect(Buffer.from(files[2]!.committedBytes!)).toEqual(Buffer.from('﻿# Derived A\r\n你好 🚀 [[Beta|保留 alias]] and [标题](Beta.md "untouched title")\r\n'));
-  expect(Buffer.from(files[3]!.originalBytes!)).toEqual(Buffer.from('# Derived B\n![[Alpha#Heading|保留 embed 🌍]]\n尾部不改\n'));
-  expect(Buffer.from(files[3]!.committedBytes!)).toEqual(Buffer.from('# Derived B\n![[Beta#Heading|保留 embed 🌍]]\n尾部不改\n'));
+  expect(Buffer.from(files[3]!.originalBytes!)).toEqual(Buffer.from('# Derived B\n![[Alpha#Alpha|保留 embed 🌍]]\n尾部不改\n'));
+  expect(Buffer.from(files[3]!.committedBytes!)).toEqual(Buffer.from('# Derived B\n![[Beta#Alpha|保留 embed 🌍]]\n尾部不改\n'));
 });
 
 it("registers all reachable installed note move closure boundaries, not the obsolete generic barrier", async () => {
