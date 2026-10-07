@@ -204,6 +204,8 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     await start();
     await ready();
     eventOrder.push("whole-recovery-completed-before-write-admission");
+    const terminalHealth = await options.client.observeHealth(endpoint, identity.vaultId);
+    if (terminalHealth.health.recovery.state !== "none" || terminalHealth.health.write.gate !== "open" || terminalHealth.health.write.state !== "writable") throw new Error("Installed recovery requires local authority before any new write");
     let recovered = await status();
     if (crashPoint === "before_prepared") {
       // No durable intent exists. The retained queued intent may execute on restart;
@@ -214,7 +216,7 @@ export async function runInstalledCrashRestorationSlice(options: InstalledCrashR
     await crashPrivateResidue(vault.vaultPath);
     verifyCrashInventory(before, after, mutationKind, committed ? "committed" : "original");
     if (recovered.lookup !== "found") throw new Error("Installed recovered status missing");
-    verifyCrashPublicProof(recovered.changeSet, beforeRecord, mutationKind, terminalState);
+    verifyCrashPublicProof(recovered.changeSet, beforeRecord, mutationKind, terminalState, input);
     const recoveredFrame = await readInstalledCrashJournal(journalPath);
     const payload = recoveredFrame.payload as { vaultId?: string; changeSetId?: string; input?: unknown };
     if (recoveredFrame.phase !== terminalPhase || payload.vaultId !== identity.vaultId || payload.changeSetId !== beforeRecord.changeSetId || JSON.stringify(payload.input) !== JSON.stringify(input)) throw new Error("Installed restart did not recover the bound durable terminal intent");

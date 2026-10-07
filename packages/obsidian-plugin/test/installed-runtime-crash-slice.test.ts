@@ -582,7 +582,7 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
       }
       return { pid: 123, stop: async () => { await publish; stopped = true; if (fault === "dirty_stop") throw new ObsidianProcessError("process still alive", "obsidian_stop_failed"); if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
     } },
-    client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" } } }) },
+    client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "writable" } } }) },
     timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 5_000 },
     prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = request.vaultPath.includes("edit_body_whole-") ? "edit_body_whole" : request.vaultPath.includes("edit_body-") ? "edit_body" : "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
   } as InstalledCrashRestorationSliceOptions;
@@ -607,6 +607,14 @@ it("fails closed on missing trigger, wrong marker, disguised phase, early listen
     finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
   }
 }, 30_000);
+
+it("reports missing local recovery authority as blocked before submitting a sentinel", async () => {
+  const root = await mkdtemp(join(tmpdir(), "installed-crash-local-authority-"));
+  const fixture = await arrangeCrashOrchestration(root, "bound-change-set");
+  try {
+    await expect(runInstalledCrashRestorationSlice({ ...fixture.options, client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" }, write: { gate: "open", state: "paused" } } }) } as never })).rejects.toThrow("requires local authority");
+  } finally { await fixture.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
 
 it("orchestrates all independently bound apply/rollback points including whole-body and repeated recovery crashes", async () => {
   const { installedCrashScenarios, crashScenarioParts } = await import("../src/installed-runtime/crash-restoration-protocol.js");

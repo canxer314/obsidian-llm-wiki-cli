@@ -109,7 +109,7 @@ export function verifyCrashInventory(before: readonly CrashInventoryEntry[], act
   const sorted = (entries: readonly CrashInventoryEntry[]) => [...entries].sort((a, b) => a.path.localeCompare(b.path, "en"));
   if (!same(sorted(expected), sorted(actual))) throw new Error("Installed crash whole-state inventory mismatch");
 }
-export function verifyCrashPublicProof(record: unknown, beforeRecord: unknown, kind: InstalledCrashKind, state: "intent_applied" | "intent_not_applied"): void {
+export function verifyCrashPublicProof(record: unknown, beforeRecord: unknown, kind: InstalledCrashKind, state: "intent_applied" | "intent_not_applied", input?: { operations: readonly { operationId: string }[] }): void {
   const before = beforeRecord as { changeSetId?: string; preview?: { requestedEffects: unknown[]; derivedEffects: unknown[]; paths: unknown[] } };
   const actual = record as { changeSetId?: string; state?: string; preview?: unknown; requestedEffects?: unknown[]; derivedEffects?: unknown[]; paths?: unknown[] };
   const preview = before.preview;
@@ -117,6 +117,7 @@ export function verifyCrashPublicProof(record: unknown, beforeRecord: unknown, k
   const fixture = profile.files[0]!;
   const version = (bytes: Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   const effect = preview?.requestedEffects[0] as { operationId?: string; kind?: string; projectedOutcome?: string } | undefined;
+  if (input !== undefined && effect?.operationId !== input.operations[0]?.operationId) throw new Error("Installed crash public proof targets another operation");
   const paths = [...(kind === "create_note" ? ["Corpus", "Corpus/Notes"].map(path => ({ path, preState: { kind: "absent" }, projectedFinalState: { kind: "directory" }, projectedOutcome: "changed" })) : []), { path: fixture.path, preState: fixture.originalBytes === null ? { kind: "absent" } : { kind: "markdown", contentVersion: version(fixture.originalBytes) }, projectedFinalState: { kind: "markdown", contentVersion: version(fixture.committedBytes!) }, projectedOutcome: "changed" }];
   const derived = kind === "create_note" ? ["Corpus", "Corpus/Notes"].map(path => ({ operationId: `derived/${effect?.operationId}/directory/${path}`, causedByOperationId: effect?.operationId, kind: "create_directory", projectedOutcome: "changed" })) : [];
   if (effect?.kind !== (kind === "create_note" ? "create_note" : "edit_body") || effect.projectedOutcome !== "changed" || typeof effect.operationId !== "string" || !same(preview?.paths, paths) || !same(preview?.derivedEffects, derived)) throw new Error("Installed crash fixed fixture public proof mismatch");
