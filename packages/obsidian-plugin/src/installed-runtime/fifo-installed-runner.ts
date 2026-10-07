@@ -9,7 +9,7 @@ import { parseChangeSetRegistryState } from "../change-set.js";
 import { installedRuntimeAcceptanceDescriptorSchema } from "./acceptance-driver-protocol.js";
 import { installCandidateBundle } from "./candidate-bundle.js";
 import { HealthObservationError } from "./loopback-client.js";
-import { preflightRuntimeProfile } from "./runtime-profile.js";
+import { lookupRegisteredRuntimeProfile, preflightRuntimeProfile } from "./runtime-profile.js";
 import { provisionTestVault, cleanupTestVault, snapshotInventory, compareInventories } from "./test-vault.js";
 import { readPersistedBridgeIdentity, waitForCondition, type ObsidianProcessHandle } from "./obsidian-process.js";
 import { appendFifoEvent, loadFifoEvents, fifoDigest, fifoReportSchema } from "./installed-fifo-observer.js";
@@ -34,6 +34,8 @@ const portOpen = (port: number): Promise<boolean> => new Promise(resolvePromise 
 
 export async function runInstalledPersistentFifoCorpus(options: InstalledFifoOptions) {
   if (options.probe.probeRunning === undefined) throw new Error("FIFO requires a registered running-runtime probe");
+  const registered = lookupRegisteredRuntimeProfile(options.profile.name);
+  if (registered === null || JSON.stringify(registered) !== JSON.stringify(options.profile)) throw new Error("FIFO requires an unchanged registered runtime profile");
   const vault = await provisionTestVault({ workingDirectory: options.workingDirectory, runId: `${options.runId}-fifo`, configDirectoryName: options.configDirectoryName });
   let handle: ObsidianProcessHandle | null = null;
   let observedPort: number | undefined;
