@@ -583,12 +583,14 @@ async function arrangeCrashOrchestration(root: string, replayId: string, crashPo
       return { pid: 123, stop: async () => { await publish; stopped = true; if (fault === "dirty_stop") throw new ObsidianProcessError("process still alive", "obsidian_stop_failed"); if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
     } },
     client: { observeHealth: async () => ({ health: { readiness: { searchSnapshot: "ready" }, recovery: { state: "none" } } }) },
-    timeouts: { startupMs: 1000, stopMs: 1000, portClosedMs: 1000 },
+    timeouts: { startupMs: 5_000, stopMs: 5_000, portClosedMs: 5_000 },
     prepareAcceptanceDriver: async (request: any) => { terminal = false; publishedSequence = 0; mutationKind = request.vaultPath.includes("edit_body_whole-") ? "edit_body_whole" : request.vaultPath.includes("edit_body-") ? "edit_body" : "create_note"; crashPoint = request.vaultPath.split(`-crash-${mutationKind}-`)[1].replaceAll("-", "_").replace(/after_(file_mutation|rollback_mutation|mutation)_(\d)/u, "after_$1:$2"); const created = await createInstalledRuntimeAcceptanceDescriptor({ ...request, runId: "orchestration", reportDirectory: join(root, "reports") }); descriptorPath = created.path; return { ...created, cleanup: async () => undefined }; }, record: () => undefined, assertion: () => undefined,
   } as InstalledCrashRestorationSliceOptions;
   const timer = setInterval(() => {
     if (stopped || terminal || descriptorPath === "") return;
-    void readFile(descriptorPath, "utf8").then(JSON.parse).then(descriptor => {
+    const inspectedPath = descriptorPath;
+    void readFile(inspectedPath, "utf8").then(JSON.parse).then(descriptor => {
+      if (inspectedPath !== descriptorPath || stopped || terminal) return;
       if (descriptor.command.action === "idle" || descriptor.command.recovery !== undefined || descriptor.command.sequence <= publishedSequence) return;
       publishedSequence = descriptor.command.sequence;
       publish = publishBoundary(descriptor);

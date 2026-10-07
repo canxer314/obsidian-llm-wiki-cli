@@ -70,6 +70,8 @@ export function createWindowsObsidianProcessControl(options: {
         child = spawnImpl(
           options.executablePath,
           [
+            "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
             `--user-data-dir=${request.profileDirectory}`,
             `obsidian://open?path=${encodeURIComponent(request.vaultPath)}`,
           ],

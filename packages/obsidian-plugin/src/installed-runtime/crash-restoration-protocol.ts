@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { link, lstat, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { open } from "node:fs/promises";
+import { openRecoveryJournal } from "../recovery-journal.js";
 
 import { z } from "zod";
 
@@ -12,6 +14,7 @@ import {
   installedCrashScenarios,
   installedCrashScenarioSchema,
   installedCrashPoints,
+  loadInstalledRuntimeAcceptanceDescriptor,
   type InstalledCrashPoint,
   type InstalledCrashKind,
 } from "./acceptance-driver-protocol.js";
@@ -275,6 +278,33 @@ export async function parkInstalledCrashBoundary(options: {
   verifyCrashInventory(options.before, inventory, kind, original ? "original" : "committed", point);
   await writeCrashRestorationBoundaryReport({ descriptor: options.descriptor, command: options.command, journalPhase: phase, frameSha256: frame === null ? null : crashDigest(frame), inventorySha256: crashDigest(inventory) });
   await (options.park?.() ?? new Promise<void>(() => undefined));
+}
+
+/** Read-only launch classification; no caller-provided skip-ready or trust bypass. */
+export async function hasBoundInstalledCrashRecoveryPark(vaultPath: string, pluginId: string, configDirectoryName = ".obsidian"): Promise<boolean> {
+  const loaded = await loadInstalledRuntimeAcceptanceDescriptor({ vaultPath, pluginId, configDirectoryName }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+  const command = loaded === null ? null : parseCrashRestorationCommand(loaded.descriptor.command);
+  if (loaded === null || command?.recovery === undefined) return false;
+  const identity = JSON.parse(await readFile(join(vaultPath, configDirectoryName, "plugins", pluginId, "data.json"), "utf8")) as { vaultId: string; port: number };
+  const handle = await open(join(vaultPath, ".llm-wiki", "recovery-journal.bin"), "r");
+  let record;
+  try { record = await (await openRecoveryJournal(handle)).recover(); } finally { await handle.close(); }
+  const { kind, point } = crashScenarioParts(command.scenario);
+  const marker = await loadCrashBoundaryReport({ ...loaded.descriptor, vaultId: identity.vaultId, endpoint: command.endpoint, submissionKey: command.submissionKey, mutationKind: kind, crashPoint: "after_snapshot", sequence: command.sequence - 1 });
+  if (marker.frameSha256 !== command.recovery.frameSha256) throw new Error("Recovery-only launch lacks the previously supervised lead-in marker");
+  const payload = record?.payload as { vaultId?: string; changeSetId?: string; input?: unknown } | undefined;
+  if (record?.phase === "PREPARED" && payload?.vaultId === identity.vaultId && payload.changeSetId === command.recovery.changeSetId && same(payload.input, command.input) && command.endpoint === `http://127.0.0.1:${identity.port}/mcp`) {
+    validateInstalledCrashFixture(command);
+    // Recovery may already have progressed past its initial durable frame.
+    // The immutable lead-in marker binds that initial frame; the runner still
+    // requires the current selected marker + raw Journal before termination.
+    return point.includes("rollback") || point.includes("rolled_back");
+  }
+  if (record?.phase === "ROLLED_BACK" && point === "after_rolled_back" && payload?.vaultId === identity.vaultId && payload.changeSetId === command.recovery.changeSetId && same(payload.input, command.input)) {
+    const parked = await loadCrashBoundaryReport({ ...loaded.descriptor, vaultId: identity.vaultId, endpoint: command.endpoint, submissionKey: command.submissionKey, mutationKind: kind, crashPoint: point, sequence: command.sequence });
+    if (parked.frameSha256 === crashDigest(record.payload)) return true;
+  }
+  throw new Error("Recovery-only launch no longer matches its bound recovery marker");
 }
 
 export function validateInstalledCrashRecovery(value: unknown, frame: unknown, identity: { vaultId: string; port: number } | null): CrashRestorationCommand {

@@ -78,6 +78,7 @@ import {
   crashScenarioParts,
   validateInstalledCrashFixture,
   validateInstalledCrashRecovery,
+  hasBoundInstalledCrashRecoveryPark,
 } from "./installed-runtime/crash-restoration-protocol.js";
 import { loadInstalledRuntimeAcceptanceDescriptor } from "./installed-runtime/acceptance-driver-protocol.js";
 import { readPersistedBridgeIdentity } from "./installed-runtime/obsidian-process.js";
@@ -484,6 +485,7 @@ export default class VaultOperationBridgePlugin extends Plugin {
       });
       const command = loaded === null ? null : parseCrashRestorationCommand(loaded.descriptor.command);
       if (command?.recovery !== undefined && loaded !== null) {
+        if (!await hasBoundInstalledCrashRecoveryPark(basePath, this.manifest.id, this.app.vault.configDir)) throw new Error("Installed recovery park lost its supervised lead-in");
         const frame = await changeSetExecution.loadRecoveryFrame();
         const identity = await readPersistedBridgeIdentity(basePath, this.manifest.id, this.app.vault.configDir);
         const bound = validateInstalledCrashRecovery(command, frame, identity);
