@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Local Primary Operator copy flow for content-inclusive diagnostics
  * (spec §9.4; Spec #41 / #167).
@@ -21,7 +23,7 @@ export function hasContentInclusiveSelection(selection: string): boolean {
 export type ContentInclusiveDiagnosticCopyOutcome =
   | { readonly outcome: "not_available" }
   | { readonly outcome: "cancelled" }
-  | { readonly outcome: "copied" };
+  | { readonly outcome: "copied"; readonly copiedTextSha256: string };
 
 export interface ContentInclusiveDiagnosticCopyTargets {
   /** The active editor's current selection; must be non-empty to proceed. */
@@ -43,6 +45,7 @@ export async function performContentInclusiveDiagnosticCopy(
   const confirmed = await targets.confirm();
   if (!confirmed) return { outcome: "cancelled" };
   const bundle = await targets.generate(targets.selection);
-  await targets.write(JSON.stringify(bundle));
-  return { outcome: "copied" };
+  const text = JSON.stringify(bundle);
+  await targets.write(text);
+  return { outcome: "copied", copiedTextSha256: createHash("sha256").update(text).digest("hex") };
 }
