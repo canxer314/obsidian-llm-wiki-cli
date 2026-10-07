@@ -119,6 +119,10 @@ export async function runPluginEventObserverScenario(options: PluginEventObserve
         return payload.path === EXACT_FIXTURE.path && (payload.kind === "changed" || payload.kind === "resolved");
       }), { timeoutMs: options.timeouts.startupMs, intervalMs: 25 });
       await command("end", vaultId); await waitMarker("window-end");
+      await waitForCondition(async () => {
+        try { await loadEvents(true); return true; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+      }, { timeoutMs: options.timeouts.startupMs, intervalMs: 25 });
       const requiredBytes = options.scenario === "rollback" ? [EXACT_ORIGINAL_BYTES, EXACT_COMMITTED_BYTES] :
         options.scenario === "startup-recovery" && binding.generation === 2 ? [EXACT_ORIGINAL_BYTES] : [EXACT_COMMITTED_BYTES];
       const sealedEvents = await loadEvents(true);

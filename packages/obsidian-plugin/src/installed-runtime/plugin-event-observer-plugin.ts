@@ -62,7 +62,7 @@ module.exports = class EventObserver extends Plugin {
     const state = { pid: process.pid, generation: c.binding.generation, runId: c.binding.runId, vaultPath: base, candidateBundleSha256: c.binding.candidateBundleSha256, installedMainSha256: c.binding.installedMainSha256, observerMainSha256: c.binding.observerMainSha256, capabilityToken: c.binding.capabilityToken,
       candidateStart: () => { if (candidateStarted) throw Error("Candidate already started"); candidateStarted = true; emit({kind: "candidate-start"}); },
       begin: vaultId => { if (!candidateStarted || begun) throw Error("Observer begin sequence invalid"); begun = true; boundVaultId = vaultId; emit({kind: "window-begin"}); for (const file of this.app.vault.getFiles()) capture("snapshot", file); },
-      end: () => { if (!begun || sealed) throw Error("Observer window end sequence invalid"); emit({kind: "window-end"}); fs.copyFileSync(output, sealedOutput, fs.constants.COPYFILE_EXCL); sealed = true; } };
+      end: () => { if (!begun || sealed) throw Error("Observer window end sequence invalid"); emit({kind: "window-end"}); fs.copyFileSync(output, sealedOutput + ".next", fs.constants.COPYFILE_EXCL); fs.renameSync(sealedOutput + ".next", sealedOutput); sealed = true; } };
     const registry = globalThis[Symbol.for("llm-wiki.correctness-event-observer.v1")] ||= new Map();
     if (registry.has(base)) throw Error("Duplicate observer instance");
     registry.set(base, state);
